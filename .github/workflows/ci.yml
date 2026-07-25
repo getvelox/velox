@@ -237,7 +237,7 @@ jobs:
           node-version: '22'
 
       - name: Install web-v2 deps
-        run: cd web-v2 && npm ci
+        run: cd web-v2 && npm ci --legacy-peer-deps
 
       - name: Regenerate from api/openapi.yaml
         run: make gen
@@ -264,7 +264,7 @@ jobs:
         # `npx tsc --noEmit` used the looser root config and `vite build`
         # strips types without checking, so production type errors (incl.
         # genuine bugs) accumulated invisibly. The production build is the gate.
-        run: cd web-v2 && npm ci && npm run build
+        run: cd web-v2 && npm ci --legacy-peer-deps && npm run build
 
       # The web-v2 unit suite (effectiveNow drift-guard, csv, vocabulary) ran
       # NOWHERE in CI until 2026-07-19 — a green pipeline said nothing about
