@@ -56,7 +56,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
     "openapi-typescript": "7.13.0",
-    "orval": "8.9.0",
+    "orval": "8.23.0",
     "shadcn": "^4.3.0",
     "tailwindcss": "^4.2.2",
     "typescript": "~6.0.2",
