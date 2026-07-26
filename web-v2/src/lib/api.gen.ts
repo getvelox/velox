@@ -3040,6 +3040,115 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/recipes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List recipes
+         * @description Every recipe in the embedded registry, tagged with this tenant's
+         *     installation state in the session's livemode. `instantiated` present
+         *     means installed (the dashboard renders an "Installed" badge instead
+         *     of the Install CTA); re-apply is an idempotent no-op and there is no
+         *     uninstall (ADR-085).
+         */
+        get: operations["listRecipes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/recipes/instances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List installed recipe instances */
+        get: operations["listRecipeInstances"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/recipes/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get recipe
+         * @description Registry only — no DB read, no install state.
+         */
+        get: operations["getRecipe"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/recipes/{key}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview recipe
+         * @description Renders the recipe with caller-supplied overrides and returns the
+         *     would-be-created object graph. Pure in-memory — no DB writes, no
+         *     audit row.
+         */
+        post: operations["previewRecipe"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/recipes/{key}/instantiate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Instantiate recipe (idempotent apply)
+         * @description Applies the recipe for the tenant under one transaction: rating
+         *     rules and meters are adopted-or-created, pricing rules bound, a
+         *     fresh born-unique plan generated, optional dunning policy and
+         *     (inactive) webhook endpoint created, then the install badge written.
+         *     Idempotent per (tenant, livemode): re-posting an installed recipe
+         *     returns the EXISTING instance — 201 both times, never a 409, never
+         *     a duplicate plan (ADR-085; badge livemode-scoped per m0157).
+         */
+        post: operations["instantiateRecipe"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3578,6 +3687,150 @@ export interface components {
             /** Format: int64 */
             total_used?: number;
         };
+        /** @description One override key declared in a recipe's `overridable` list. Drives validation at instantiate time and the override form in the dashboard's preview dialog. */
+        RecipeOverride: {
+            key: string;
+            /** @enum {string} */
+            type: "string" | "int";
+            /** @description Default value applied when the override is not supplied. */
+            default: unknown;
+            enum?: string[];
+            max_length?: number;
+            pattern?: string;
+        };
+        RecipeMeter: {
+            key: string;
+            name: string;
+            unit: string;
+            aggregation: string;
+        };
+        RecipeRatingRule: {
+            key: string;
+            name?: string;
+            /** @enum {string} */
+            mode: "flat" | "graduated" | "package";
+            currency: string;
+            /** @description Per-unit rate in cents, as a decimal string (see RatingRule.flat_amount_cents). */
+            flat_amount_cents: string;
+            graduated_tiers?: {
+                up_to?: number;
+                /** @description Per-unit rate in cents, as a decimal string. */
+                unit_amount_cents?: string;
+            }[];
+            /** Format: int64 */
+            package_size?: number;
+            /** Format: int64 */
+            package_amount_cents?: number;
+            /** @description Per-unit overage rate in cents, as a decimal string. */
+            overage_unit_amount_cents: string;
+        };
+        RecipePricingRule: {
+            meter_key: string;
+            rating_rule_key: string;
+            dimension_match: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            aggregation_mode: "sum" | "count" | "last_during_period" | "last_ever" | "max";
+            priority: number;
+        };
+        RecipePlan: {
+            code: string;
+            name: string;
+            currency: string;
+            /** @enum {string} */
+            billing_interval: "monthly" | "yearly";
+            /** Format: int64 */
+            base_amount_cents: number;
+            /**
+             * @description Optional; empty defaults to in_arrears at plan creation (ADR-031).
+             * @enum {string}
+             */
+            base_bill_timing?: "in_advance" | "in_arrears";
+            meter_keys: string[];
+        };
+        RecipeDunningPolicy: {
+            name: string;
+            max_retries: number;
+            intervals_hours: number[];
+            final_action: string;
+        };
+        RecipeWebhook: {
+            events: string[];
+            url_placeholder: string;
+        };
+        /** @description Per-role count of objects a recipe will produce when instantiated. Recipes create no product entity — there is no `products` count. */
+        RecipeCreates: {
+            meters: number;
+            rating_rules: number;
+            pricing_rules: number;
+            plans: number;
+            dunning_policies: number;
+            webhook_endpoints: number;
+        };
+        /** @description Per-role map of entity IDs a recipe apply produced (including ADOPTED catalog objects — apply reconnects to an existing meter/rule graph rather than duplicating it, ADR-085). Every field is omitted when empty; clients must guard reads. */
+        RecipeCreatedObjects: {
+            meter_ids?: string[];
+            rating_rule_ids?: string[];
+            pricing_rule_ids?: string[];
+            plan_ids?: string[];
+            dunning_policy_id?: string;
+            webhook_endpoint_id?: string;
+        };
+        /** @description The install badge: the record of a recipe being applied for a tenant (scoped per livemode since m0157). Field names are `recipe_key` / `recipe_version` — NOT `key`/`version`, which the recipe template itself uses. */
+        RecipeInstance: {
+            id: string;
+            /** @description Omitted when empty. */
+            tenant_id?: string;
+            recipe_key: string;
+            recipe_version: string;
+            overrides: {
+                [key: string]: unknown;
+            };
+            created_objects: components["schemas"]["RecipeCreatedObjects"];
+            /** Format: date-time */
+            created_at: string;
+            /** @description Operator email or API key ID. Omitted when empty. */
+            created_by?: string;
+        };
+        /** @description A recipe template as served by list/detail: the full parsed YAML (meters, rating rules, pricing rules, plans, optional dunning policy and webhook), not just display metadata. */
+        Recipe: {
+            key: string;
+            version: string;
+            name: string;
+            summary: string;
+            description?: string;
+            overridable: components["schemas"]["RecipeOverride"][];
+            meters: components["schemas"]["RecipeMeter"][];
+            rating_rules: components["schemas"]["RecipeRatingRule"][];
+            pricing_rules: components["schemas"]["RecipePricingRule"][];
+            plans: components["schemas"]["RecipePlan"][];
+            dunning_policy?: components["schemas"]["RecipeDunningPolicy"];
+            webhook?: components["schemas"]["RecipeWebhook"];
+        };
+        RecipeListItem: components["schemas"]["Recipe"] & {
+            creates: components["schemas"]["RecipeCreates"];
+            /** @description Present when this tenant (in the session's livemode) has installed the recipe; absent otherwise. Drives the "Installed" badge — re-apply is an idempotent no-op and there is no uninstall (ADR-085). */
+            instantiated?: components["schemas"]["RecipeInstance"];
+        };
+        RecipeDetail: components["schemas"]["Recipe"] & {
+            creates: components["schemas"]["RecipeCreates"];
+        };
+        /** @description Would-be-created object graph, grouped by role. All arrays are always present (possibly empty); optional singletons (dunning, webhook) are emitted as 0-or-1-length arrays so clients iterate without null guards. */
+        RecipePreviewObjects: {
+            meters: components["schemas"]["RecipeMeter"][];
+            rating_rules: components["schemas"]["RecipeRatingRule"][];
+            pricing_rules: components["schemas"]["RecipePricingRule"][];
+            plans: components["schemas"]["RecipePlan"][];
+            dunning_policies: components["schemas"]["RecipeDunningPolicy"][];
+            webhook_endpoints: components["schemas"]["RecipeWebhook"][];
+        };
+        RecipePreviewResult: {
+            key: string;
+            version: string;
+            objects: components["schemas"]["RecipePreviewObjects"];
+            warnings: string[];
+        };
     };
     responses: never;
     parameters: never;
@@ -3615,6 +3868,174 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"];
                 };
+            };
+        };
+    };
+    listRecipes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recipe catalog with per-tenant install state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["RecipeListItem"][];
+                    };
+                };
+            };
+        };
+    };
+    listRecipeInstances: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Install badges for this tenant (session's livemode) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["RecipeInstance"][];
+                    };
+                };
+            };
+        };
+    };
+    getRecipe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recipe template with creates summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecipeDetail"];
+                };
+            };
+            /** @description Unknown recipe key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    previewRecipe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    overrides?: {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description Rendered object graph */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecipePreviewResult"];
+                };
+            };
+            /** @description Unknown recipe key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Overrides failed the recipe's overridable schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    instantiateRecipe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    overrides?: {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description Install badge (fresh, or existing on idempotent re-apply) */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecipeInstance"];
+                };
+            };
+            /** @description Unknown recipe key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description An existing meter with the same key diverges from the recipe (aggregation mismatch) — reconcile the meter before instantiating. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Overrides failed the recipe's overridable schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -455,6 +455,108 @@ func (e RatingRuleMode) Valid() bool {
 	}
 }
 
+// Defines values for RecipeOverrideType.
+const (
+	Int    RecipeOverrideType = "int"
+	String RecipeOverrideType = "string"
+)
+
+// Valid indicates whether the value is a known member of the RecipeOverrideType enum.
+func (e RecipeOverrideType) Valid() bool {
+	switch e {
+	case Int:
+		return true
+	case String:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RecipePlanBaseBillTiming.
+const (
+	RecipePlanBaseBillTimingInAdvance RecipePlanBaseBillTiming = "in_advance"
+	RecipePlanBaseBillTimingInArrears RecipePlanBaseBillTiming = "in_arrears"
+)
+
+// Valid indicates whether the value is a known member of the RecipePlanBaseBillTiming enum.
+func (e RecipePlanBaseBillTiming) Valid() bool {
+	switch e {
+	case RecipePlanBaseBillTimingInAdvance:
+		return true
+	case RecipePlanBaseBillTimingInArrears:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RecipePlanBillingInterval.
+const (
+	RecipePlanBillingIntervalMonthly RecipePlanBillingInterval = "monthly"
+	RecipePlanBillingIntervalYearly  RecipePlanBillingInterval = "yearly"
+)
+
+// Valid indicates whether the value is a known member of the RecipePlanBillingInterval enum.
+func (e RecipePlanBillingInterval) Valid() bool {
+	switch e {
+	case RecipePlanBillingIntervalMonthly:
+		return true
+	case RecipePlanBillingIntervalYearly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RecipePricingRuleAggregationMode.
+const (
+	RecipePricingRuleAggregationModeCount            RecipePricingRuleAggregationMode = "count"
+	RecipePricingRuleAggregationModeLastDuringPeriod RecipePricingRuleAggregationMode = "last_during_period"
+	RecipePricingRuleAggregationModeLastEver         RecipePricingRuleAggregationMode = "last_ever"
+	RecipePricingRuleAggregationModeMax              RecipePricingRuleAggregationMode = "max"
+	RecipePricingRuleAggregationModeSum              RecipePricingRuleAggregationMode = "sum"
+)
+
+// Valid indicates whether the value is a known member of the RecipePricingRuleAggregationMode enum.
+func (e RecipePricingRuleAggregationMode) Valid() bool {
+	switch e {
+	case RecipePricingRuleAggregationModeCount:
+		return true
+	case RecipePricingRuleAggregationModeLastDuringPeriod:
+		return true
+	case RecipePricingRuleAggregationModeLastEver:
+		return true
+	case RecipePricingRuleAggregationModeMax:
+		return true
+	case RecipePricingRuleAggregationModeSum:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RecipeRatingRuleMode.
+const (
+	RecipeRatingRuleModeFlat      RecipeRatingRuleMode = "flat"
+	RecipeRatingRuleModeGraduated RecipeRatingRuleMode = "graduated"
+	RecipeRatingRuleModePackage   RecipeRatingRuleMode = "package"
+)
+
+// Valid indicates whether the value is a known member of the RecipeRatingRuleMode enum.
+func (e RecipeRatingRuleMode) Valid() bool {
+	switch e {
+	case RecipeRatingRuleModeFlat:
+		return true
+	case RecipeRatingRuleModeGraduated:
+		return true
+	case RecipeRatingRuleModePackage:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SubscriptionBillingTime.
 const (
 	SubscriptionBillingTimeAnniversary SubscriptionBillingTime = "anniversary"
@@ -595,22 +697,22 @@ func (e PostV1MetersJSONBodyAggregation) Valid() bool {
 
 // Defines values for PatchV1MetersIdJSONBodyAggregation.
 const (
-	Count PatchV1MetersIdJSONBodyAggregation = "count"
-	Last  PatchV1MetersIdJSONBodyAggregation = "last"
-	Max   PatchV1MetersIdJSONBodyAggregation = "max"
-	Sum   PatchV1MetersIdJSONBodyAggregation = "sum"
+	PatchV1MetersIdJSONBodyAggregationCount PatchV1MetersIdJSONBodyAggregation = "count"
+	PatchV1MetersIdJSONBodyAggregationLast  PatchV1MetersIdJSONBodyAggregation = "last"
+	PatchV1MetersIdJSONBodyAggregationMax   PatchV1MetersIdJSONBodyAggregation = "max"
+	PatchV1MetersIdJSONBodyAggregationSum   PatchV1MetersIdJSONBodyAggregation = "sum"
 )
 
 // Valid indicates whether the value is a known member of the PatchV1MetersIdJSONBodyAggregation enum.
 func (e PatchV1MetersIdJSONBodyAggregation) Valid() bool {
 	switch e {
-	case Count:
+	case PatchV1MetersIdJSONBodyAggregationCount:
 		return true
-	case Last:
+	case PatchV1MetersIdJSONBodyAggregationLast:
 		return true
-	case Max:
+	case PatchV1MetersIdJSONBodyAggregationMax:
 		return true
-	case Sum:
+	case PatchV1MetersIdJSONBodyAggregationSum:
 		return true
 	default:
 		return false
@@ -619,16 +721,16 @@ func (e PatchV1MetersIdJSONBodyAggregation) Valid() bool {
 
 // Defines values for PostV1PlansJSONBodyBaseBillTiming.
 const (
-	PostV1PlansJSONBodyBaseBillTimingInAdvance PostV1PlansJSONBodyBaseBillTiming = "in_advance"
-	PostV1PlansJSONBodyBaseBillTimingInArrears PostV1PlansJSONBodyBaseBillTiming = "in_arrears"
+	InAdvance PostV1PlansJSONBodyBaseBillTiming = "in_advance"
+	InArrears PostV1PlansJSONBodyBaseBillTiming = "in_arrears"
 )
 
 // Valid indicates whether the value is a known member of the PostV1PlansJSONBodyBaseBillTiming enum.
 func (e PostV1PlansJSONBodyBaseBillTiming) Valid() bool {
 	switch e {
-	case PostV1PlansJSONBodyBaseBillTimingInAdvance:
+	case InAdvance:
 		return true
-	case PostV1PlansJSONBodyBaseBillTimingInArrears:
+	case InArrears:
 		return true
 	default:
 		return false
@@ -637,16 +739,16 @@ func (e PostV1PlansJSONBodyBaseBillTiming) Valid() bool {
 
 // Defines values for PostV1PlansJSONBodyBillingInterval.
 const (
-	PostV1PlansJSONBodyBillingIntervalMonthly PostV1PlansJSONBodyBillingInterval = "monthly"
-	PostV1PlansJSONBodyBillingIntervalYearly  PostV1PlansJSONBodyBillingInterval = "yearly"
+	Monthly PostV1PlansJSONBodyBillingInterval = "monthly"
+	Yearly  PostV1PlansJSONBodyBillingInterval = "yearly"
 )
 
 // Valid indicates whether the value is a known member of the PostV1PlansJSONBodyBillingInterval enum.
 func (e PostV1PlansJSONBodyBillingInterval) Valid() bool {
 	switch e {
-	case PostV1PlansJSONBodyBillingIntervalMonthly:
+	case Monthly:
 		return true
-	case PostV1PlansJSONBodyBillingIntervalYearly:
+	case Yearly:
 		return true
 	default:
 		return false
@@ -655,19 +757,19 @@ func (e PostV1PlansJSONBodyBillingInterval) Valid() bool {
 
 // Defines values for PostV1RatingRulesJSONBodyMode.
 const (
-	PostV1RatingRulesJSONBodyModeFlat      PostV1RatingRulesJSONBodyMode = "flat"
-	PostV1RatingRulesJSONBodyModeGraduated PostV1RatingRulesJSONBodyMode = "graduated"
-	PostV1RatingRulesJSONBodyModePackage   PostV1RatingRulesJSONBodyMode = "package"
+	Flat      PostV1RatingRulesJSONBodyMode = "flat"
+	Graduated PostV1RatingRulesJSONBodyMode = "graduated"
+	Package   PostV1RatingRulesJSONBodyMode = "package"
 )
 
 // Valid indicates whether the value is a known member of the PostV1RatingRulesJSONBodyMode enum.
 func (e PostV1RatingRulesJSONBodyMode) Valid() bool {
 	switch e {
-	case PostV1RatingRulesJSONBodyModeFlat:
+	case Flat:
 		return true
-	case PostV1RatingRulesJSONBodyModeGraduated:
+	case Graduated:
 		return true
-	case PostV1RatingRulesJSONBodyModePackage:
+	case Package:
 		return true
 	default:
 		return false
@@ -1234,6 +1336,210 @@ type RatingRule struct {
 // RatingRuleMode defines model for RatingRule.Mode.
 type RatingRuleMode string
 
+// Recipe A recipe template as served by list/detail: the full parsed YAML (meters, rating rules, pricing rules, plans, optional dunning policy and webhook), not just display metadata.
+type Recipe struct {
+	Description   string              `json:"description,omitempty"`
+	DunningPolicy RecipeDunningPolicy `json:"dunning_policy,omitempty"`
+	Key           string              `json:"key"`
+	Meters        []RecipeMeter       `json:"meters"`
+	Name          string              `json:"name"`
+	Overridable   []RecipeOverride    `json:"overridable"`
+	Plans         []RecipePlan        `json:"plans"`
+	PricingRules  []RecipePricingRule `json:"pricing_rules"`
+	RatingRules   []RecipeRatingRule  `json:"rating_rules"`
+	Summary       string              `json:"summary"`
+	Version       string              `json:"version"`
+	Webhook       RecipeWebhook       `json:"webhook,omitempty"`
+}
+
+// RecipeCreatedObjects Per-role map of entity IDs a recipe apply produced (including ADOPTED catalog objects — apply reconnects to an existing meter/rule graph rather than duplicating it, ADR-085). Every field is omitted when empty; clients must guard reads.
+type RecipeCreatedObjects struct {
+	DunningPolicyId   string   `json:"dunning_policy_id,omitempty"`
+	MeterIds          []string `json:"meter_ids,omitempty"`
+	PlanIds           []string `json:"plan_ids,omitempty"`
+	PricingRuleIds    []string `json:"pricing_rule_ids,omitempty"`
+	RatingRuleIds     []string `json:"rating_rule_ids,omitempty"`
+	WebhookEndpointId string   `json:"webhook_endpoint_id,omitempty"`
+}
+
+// RecipeCreates Per-role count of objects a recipe will produce when instantiated. Recipes create no product entity — there is no `products` count.
+type RecipeCreates struct {
+	DunningPolicies  int `json:"dunning_policies"`
+	Meters           int `json:"meters"`
+	Plans            int `json:"plans"`
+	PricingRules     int `json:"pricing_rules"`
+	RatingRules      int `json:"rating_rules"`
+	WebhookEndpoints int `json:"webhook_endpoints"`
+}
+
+// RecipeDetail defines model for RecipeDetail.
+type RecipeDetail struct {
+	// Creates Per-role count of objects a recipe will produce when instantiated. Recipes create no product entity — there is no `products` count.
+	Creates       RecipeCreates       `json:"creates"`
+	Description   string              `json:"description,omitempty"`
+	DunningPolicy RecipeDunningPolicy `json:"dunning_policy,omitempty"`
+	Key           string              `json:"key"`
+	Meters        []RecipeMeter       `json:"meters"`
+	Name          string              `json:"name"`
+	Overridable   []RecipeOverride    `json:"overridable"`
+	Plans         []RecipePlan        `json:"plans"`
+	PricingRules  []RecipePricingRule `json:"pricing_rules"`
+	RatingRules   []RecipeRatingRule  `json:"rating_rules"`
+	Summary       string              `json:"summary"`
+	Version       string              `json:"version"`
+	Webhook       RecipeWebhook       `json:"webhook,omitempty"`
+}
+
+// RecipeDunningPolicy defines model for RecipeDunningPolicy.
+type RecipeDunningPolicy struct {
+	FinalAction    string `json:"final_action"`
+	IntervalsHours []int  `json:"intervals_hours"`
+	MaxRetries     int    `json:"max_retries"`
+	Name           string `json:"name"`
+}
+
+// RecipeInstance The install badge: the record of a recipe being applied for a tenant (scoped per livemode since m0157). Field names are `recipe_key` / `recipe_version` — NOT `key`/`version`, which the recipe template itself uses.
+type RecipeInstance struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// CreatedBy Operator email or API key ID. Omitted when empty.
+	CreatedBy string `json:"created_by,omitempty"`
+
+	// CreatedObjects Per-role map of entity IDs a recipe apply produced (including ADOPTED catalog objects — apply reconnects to an existing meter/rule graph rather than duplicating it, ADR-085). Every field is omitted when empty; clients must guard reads.
+	CreatedObjects RecipeCreatedObjects   `json:"created_objects"`
+	Id             string                 `json:"id"`
+	Overrides      map[string]interface{} `json:"overrides"`
+	RecipeKey      string                 `json:"recipe_key"`
+	RecipeVersion  string                 `json:"recipe_version"`
+
+	// TenantId Omitted when empty.
+	TenantId string `json:"tenant_id,omitempty"`
+}
+
+// RecipeListItem defines model for RecipeListItem.
+type RecipeListItem struct {
+	// Creates Per-role count of objects a recipe will produce when instantiated. Recipes create no product entity — there is no `products` count.
+	Creates       RecipeCreates       `json:"creates"`
+	Description   string              `json:"description,omitempty"`
+	DunningPolicy RecipeDunningPolicy `json:"dunning_policy,omitempty"`
+
+	// Instantiated The install badge: the record of a recipe being applied for a tenant (scoped per livemode since m0157). Field names are `recipe_key` / `recipe_version` — NOT `key`/`version`, which the recipe template itself uses.
+	Instantiated RecipeInstance      `json:"instantiated,omitempty"`
+	Key          string              `json:"key"`
+	Meters       []RecipeMeter       `json:"meters"`
+	Name         string              `json:"name"`
+	Overridable  []RecipeOverride    `json:"overridable"`
+	Plans        []RecipePlan        `json:"plans"`
+	PricingRules []RecipePricingRule `json:"pricing_rules"`
+	RatingRules  []RecipeRatingRule  `json:"rating_rules"`
+	Summary      string              `json:"summary"`
+	Version      string              `json:"version"`
+	Webhook      RecipeWebhook       `json:"webhook,omitempty"`
+}
+
+// RecipeMeter defines model for RecipeMeter.
+type RecipeMeter struct {
+	Aggregation string `json:"aggregation"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Unit        string `json:"unit"`
+}
+
+// RecipeOverride One override key declared in a recipe's `overridable` list. Drives validation at instantiate time and the override form in the dashboard's preview dialog.
+type RecipeOverride struct {
+	// Default Default value applied when the override is not supplied.
+	Default   interface{}        `json:"default"`
+	Enum      []string           `json:"enum,omitempty"`
+	Key       string             `json:"key"`
+	MaxLength int                `json:"max_length,omitempty"`
+	Pattern   string             `json:"pattern,omitempty"`
+	Type      RecipeOverrideType `json:"type"`
+}
+
+// RecipeOverrideType defines model for RecipeOverride.Type.
+type RecipeOverrideType string
+
+// RecipePlan defines model for RecipePlan.
+type RecipePlan struct {
+	BaseAmountCents int64 `json:"base_amount_cents"`
+
+	// BaseBillTiming Optional; empty defaults to in_arrears at plan creation (ADR-031).
+	BaseBillTiming  RecipePlanBaseBillTiming  `json:"base_bill_timing,omitempty"`
+	BillingInterval RecipePlanBillingInterval `json:"billing_interval"`
+	Code            string                    `json:"code"`
+	Currency        string                    `json:"currency"`
+	MeterKeys       []string                  `json:"meter_keys"`
+	Name            string                    `json:"name"`
+}
+
+// RecipePlanBaseBillTiming Optional; empty defaults to in_arrears at plan creation (ADR-031).
+type RecipePlanBaseBillTiming string
+
+// RecipePlanBillingInterval defines model for RecipePlan.BillingInterval.
+type RecipePlanBillingInterval string
+
+// RecipePreviewObjects Would-be-created object graph, grouped by role. All arrays are always present (possibly empty); optional singletons (dunning, webhook) are emitted as 0-or-1-length arrays so clients iterate without null guards.
+type RecipePreviewObjects struct {
+	DunningPolicies  []RecipeDunningPolicy `json:"dunning_policies"`
+	Meters           []RecipeMeter         `json:"meters"`
+	Plans            []RecipePlan          `json:"plans"`
+	PricingRules     []RecipePricingRule   `json:"pricing_rules"`
+	RatingRules      []RecipeRatingRule    `json:"rating_rules"`
+	WebhookEndpoints []RecipeWebhook       `json:"webhook_endpoints"`
+}
+
+// RecipePreviewResult defines model for RecipePreviewResult.
+type RecipePreviewResult struct {
+	Key string `json:"key"`
+
+	// Objects Would-be-created object graph, grouped by role. All arrays are always present (possibly empty); optional singletons (dunning, webhook) are emitted as 0-or-1-length arrays so clients iterate without null guards.
+	Objects  RecipePreviewObjects `json:"objects"`
+	Version  string               `json:"version"`
+	Warnings []string             `json:"warnings"`
+}
+
+// RecipePricingRule defines model for RecipePricingRule.
+type RecipePricingRule struct {
+	AggregationMode RecipePricingRuleAggregationMode `json:"aggregation_mode"`
+	DimensionMatch  map[string]interface{}           `json:"dimension_match"`
+	MeterKey        string                           `json:"meter_key"`
+	Priority        int                              `json:"priority"`
+	RatingRuleKey   string                           `json:"rating_rule_key"`
+}
+
+// RecipePricingRuleAggregationMode defines model for RecipePricingRule.AggregationMode.
+type RecipePricingRuleAggregationMode string
+
+// RecipeRatingRule defines model for RecipeRatingRule.
+type RecipeRatingRule struct {
+	Currency string `json:"currency"`
+
+	// FlatAmountCents Per-unit rate in cents, as a decimal string (see RatingRule.flat_amount_cents).
+	FlatAmountCents string `json:"flat_amount_cents"`
+	GraduatedTiers  []struct {
+		// UnitAmountCents Per-unit rate in cents, as a decimal string.
+		UnitAmountCents string `json:"unit_amount_cents,omitempty"`
+		UpTo            int    `json:"up_to,omitempty"`
+	} `json:"graduated_tiers,omitempty"`
+	Key  string               `json:"key"`
+	Mode RecipeRatingRuleMode `json:"mode"`
+	Name string               `json:"name,omitempty"`
+
+	// OverageUnitAmountCents Per-unit overage rate in cents, as a decimal string.
+	OverageUnitAmountCents string `json:"overage_unit_amount_cents"`
+	PackageAmountCents     int64  `json:"package_amount_cents,omitempty"`
+	PackageSize            int64  `json:"package_size,omitempty"`
+}
+
+// RecipeRatingRuleMode defines model for RecipeRatingRule.Mode.
+type RecipeRatingRuleMode string
+
+// RecipeWebhook defines model for RecipeWebhook.
+type RecipeWebhook struct {
+	Events         []string `json:"events"`
+	UrlPlaceholder string   `json:"url_placeholder"`
+}
+
 // Subscription defines model for Subscription.
 type Subscription struct {
 	BillingTime  SubscriptionBillingTime `json:"billing_time,omitempty"`
@@ -1552,6 +1858,16 @@ type PostV1RatingRulesJSONBody struct {
 // PostV1RatingRulesJSONBodyMode defines parameters for PostV1RatingRules.
 type PostV1RatingRulesJSONBodyMode string
 
+// InstantiateRecipeJSONBody defines parameters for InstantiateRecipe.
+type InstantiateRecipeJSONBody struct {
+	Overrides map[string]interface{} `json:"overrides,omitempty"`
+}
+
+// PreviewRecipeJSONBody defines parameters for PreviewRecipe.
+type PreviewRecipeJSONBody struct {
+	Overrides map[string]interface{} `json:"overrides,omitempty"`
+}
+
 // GetV1SubscriptionsParams defines parameters for GetV1Subscriptions.
 type GetV1SubscriptionsParams struct {
 	CustomerId string `form:"customer_id,omitempty" json:"customer_id,omitempty"`
@@ -1741,6 +2057,12 @@ type PutV1ProviderCostsJSONRequestBody PutV1ProviderCostsJSONBody
 
 // PostV1RatingRulesJSONRequestBody defines body for PostV1RatingRules for application/json ContentType.
 type PostV1RatingRulesJSONRequestBody PostV1RatingRulesJSONBody
+
+// InstantiateRecipeJSONRequestBody defines body for InstantiateRecipe for application/json ContentType.
+type InstantiateRecipeJSONRequestBody InstantiateRecipeJSONBody
+
+// PreviewRecipeJSONRequestBody defines body for PreviewRecipe for application/json ContentType.
+type PreviewRecipeJSONRequestBody PreviewRecipeJSONBody
 
 // PostV1SubscriptionsJSONRequestBody defines body for PostV1Subscriptions for application/json ContentType.
 type PostV1SubscriptionsJSONRequestBody PostV1SubscriptionsJSONBody
@@ -2012,6 +2334,21 @@ type ServerInterface interface {
 	// Create rating rule
 	// (POST /v1/rating-rules)
 	PostV1RatingRules(w http.ResponseWriter, r *http.Request)
+	// List recipes
+	// (GET /v1/recipes)
+	ListRecipes(w http.ResponseWriter, r *http.Request)
+	// List installed recipe instances
+	// (GET /v1/recipes/instances)
+	ListRecipeInstances(w http.ResponseWriter, r *http.Request)
+	// Get recipe
+	// (GET /v1/recipes/{key})
+	GetRecipe(w http.ResponseWriter, r *http.Request, key string)
+	// Instantiate recipe (idempotent apply)
+	// (POST /v1/recipes/{key}/instantiate)
+	InstantiateRecipe(w http.ResponseWriter, r *http.Request, key string)
+	// Preview recipe
+	// (POST /v1/recipes/{key}/preview)
+	PreviewRecipe(w http.ResponseWriter, r *http.Request, key string)
 	// List subscriptions
 	// (GET /v1/subscriptions)
 	GetV1Subscriptions(w http.ResponseWriter, r *http.Request, params GetV1SubscriptionsParams)
@@ -2321,6 +2658,36 @@ func (_ Unimplemented) GetV1RatingRules(w http.ResponseWriter, r *http.Request) 
 // Create rating rule
 // (POST /v1/rating-rules)
 func (_ Unimplemented) PostV1RatingRules(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List recipes
+// (GET /v1/recipes)
+func (_ Unimplemented) ListRecipes(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List installed recipe instances
+// (GET /v1/recipes/instances)
+func (_ Unimplemented) ListRecipeInstances(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Get recipe
+// (GET /v1/recipes/{key})
+func (_ Unimplemented) GetRecipe(w http.ResponseWriter, r *http.Request, key string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Instantiate recipe (idempotent apply)
+// (POST /v1/recipes/{key}/instantiate)
+func (_ Unimplemented) InstantiateRecipe(w http.ResponseWriter, r *http.Request, key string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Preview recipe
+// (POST /v1/recipes/{key}/preview)
+func (_ Unimplemented) PreviewRecipe(w http.ResponseWriter, r *http.Request, key string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -3814,6 +4181,142 @@ func (siw *ServerInterfaceWrapper) PostV1RatingRules(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// ListRecipes operation middleware
+func (siw *ServerInterfaceWrapper) ListRecipes(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListRecipes(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListRecipeInstances operation middleware
+func (siw *ServerInterfaceWrapper) ListRecipeInstances(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListRecipeInstances(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetRecipe operation middleware
+func (siw *ServerInterfaceWrapper) GetRecipe(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "key" -------------
+	var key string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "key", chi.URLParam(r, "key"), &key, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetRecipe(w, r, key)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// InstantiateRecipe operation middleware
+func (siw *ServerInterfaceWrapper) InstantiateRecipe(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "key" -------------
+	var key string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "key", chi.URLParam(r, "key"), &key, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.InstantiateRecipe(w, r, key)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PreviewRecipe operation middleware
+func (siw *ServerInterfaceWrapper) PreviewRecipe(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "key" -------------
+	var key string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "key", chi.URLParam(r, "key"), &key, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PreviewRecipe(w, r, key)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetV1Subscriptions operation middleware
 func (siw *ServerInterfaceWrapper) GetV1Subscriptions(w http.ResponseWriter, r *http.Request) {
 
@@ -4712,6 +5215,21 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/v1/rating-rules", wrapper.PostV1RatingRules)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v1/recipes", wrapper.ListRecipes)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v1/recipes/instances", wrapper.ListRecipeInstances)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v1/recipes/{key}", wrapper.GetRecipe)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v1/recipes/{key}/instantiate", wrapper.InstantiateRecipe)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/v1/recipes/{key}/preview", wrapper.PreviewRecipe)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v1/subscriptions", wrapper.GetV1Subscriptions)

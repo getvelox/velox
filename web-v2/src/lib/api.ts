@@ -1,4 +1,13 @@
 import { setLastRequestId } from './lastRequestId'
+// Recipe wire types are GENERATED from api/openapi.yaml (single source of
+// truth) — the hand-written versions drifted from the server (`key` vs
+// `recipe_key`, a phantom `products` role) until the 2026-07-26 recipe
+// review. Type-only imports, so no runtime cycle with gen/ (whose client
+// delegates back to apiRequest here).
+import type { ListRecipes200 } from './gen/schemas/listRecipes200'
+import type { RecipeDetail } from './gen/schemas/recipeDetail'
+import type { RecipePreviewResult } from './gen/schemas/recipePreviewResult'
+import type { RecipeInstance } from './gen/schemas/recipeInstance'
 
 const API_BASE = '/v1'
 
@@ -459,13 +468,13 @@ export const api = {
   retryCreditNoteRefund: (id: string) => apiRequest<CreditNote>('POST', `/credit-notes/${id}/retry-refund`),
 
   // Recipes (pricing templates) — see docs/design-recipes.md
-  listRecipes: () => apiRequest<{ data: Recipe[] }>('GET', '/recipes'),
+  listRecipes: () => apiRequest<ListRecipes200>('GET', '/recipes'),
   getRecipe: (key: string) => apiRequest<RecipeDetail>('GET', `/recipes/${key}`),
-  previewRecipe: (key: string, overrides: Record<string, string | number | boolean>) =>
-    apiRequest<RecipePreview>('POST', `/recipes/${key}/preview`, { overrides }),
+  previewRecipe: (key: string, overrides: Record<string, string | number>) =>
+    apiRequest<RecipePreviewResult>('POST', `/recipes/${key}/preview`, { overrides }),
   instantiateRecipe: (data: {
     key: string
-    overrides?: Record<string, string | number | boolean>
+    overrides?: Record<string, string | number>
   }) => apiRequest<RecipeInstance>('POST', `/recipes/${data.key}/instantiate`, { overrides: data.overrides }),
 
   // Audit Log
@@ -1274,78 +1283,6 @@ export interface CustomerUsageRule {
   // default binding): billed nothing by the engine. Rendered as a warning row
   // — usually a mislabeled dimension value on a matrix-priced meter.
   unmatched?: boolean
-}
-
-export interface RecipeCreatesSummary {
-  meters: number
-  pricing_rules: number
-  plans: number
-  products: number
-  rating_rules: number
-  dunning_policies: number
-  webhook_endpoints: number
-}
-
-export interface RecipeOverrideSchema {
-  key: string
-  type: 'string' | 'number' | 'boolean'
-  default?: string | number | boolean
-  description?: string
-  enum?: (string | number)[]
-  max_length?: number
-  pattern?: string
-}
-
-export interface Recipe {
-  key: string
-  version: string
-  name: string
-  summary: string
-  creates: RecipeCreatesSummary
-  overridable: RecipeOverrideSchema[]
-  instantiated?: { id: string; created_at: string } | null
-}
-
-export interface RecipeDetail extends Recipe {
-  description: string
-}
-
-export interface RecipePreview {
-  key: string
-  version: string
-  objects: {
-    products?: { code: string; name: string; description?: string }[]
-    meters?: { key: string; name: string; unit: string; aggregation: string }[]
-    rating_rules?: { key: string; name?: string; mode: string; currency: string; flat_amount_cents?: string }[]
-    pricing_rules?: {
-      meter_key: string
-      rating_rule_key: string
-      dimension_match: Record<string, string | number | boolean>
-      aggregation_mode: MeterAggregationMode
-      priority: number
-    }[]
-    plans?: { code: string; name: string; currency: string; billing_interval: string; base_amount_cents: number; meter_keys: string[] }[]
-    dunning_policies?: { name: string; max_retries: number; intervals_hours: number[] }[]
-    webhook_endpoints?: { url_placeholder: string; events: string[] }[]
-  }
-  warnings: string[]
-}
-
-export interface RecipeInstance {
-  id: string
-  key: string
-  version: string
-  tenant_id: string
-  created_at: string
-  created_objects: {
-    product_ids: string[]
-    meter_ids: string[]
-    rating_rule_ids: string[]
-    pricing_rule_ids: string[]
-    plan_ids: string[]
-    dunning_policy_id: string
-    webhook_endpoint_id: string
-  }
 }
 
 export interface UsageSummary {
