@@ -599,12 +599,29 @@ func classifyTaxAttention(inv Invoice, atc AttentionContext, severity AttentionS
 	return att
 }
 
+// attentionSince anchors a banner's "since" instant. UpdatedAt is a
+// wall-clock bookkeeping stamp (DB now()); on a SIMULATED invoice the
+// attention state is born on the sim axis (finalize and charge
+// outcomes happen at clock-advance), so rendering the wall stamp
+// against the page's sim-time anchor produced cross-domain deltas —
+// "since 70d ago" on an invoice finalized at sim-today (found live,
+// FLOW I12 fixture NIM-000258). Simulated invoices anchor to IssuedAt
+// (sim-domain, the birth of every finalize-derived attention state);
+// wall-clock invoices keep UpdatedAt, which is fresher for
+// failed-charge states.
+func attentionSince(inv Invoice) time.Time {
+	if inv.IsSimulated && inv.IssuedAt != nil {
+		return *inv.IssuedAt
+	}
+	return inv.UpdatedAt
+}
+
 func classifyPaymentFailure(inv Invoice) *Attention {
 	headline := truncate(inv.LastPaymentError, 200)
 	if headline == "" {
 		headline = "Payment attempt failed."
 	}
-	since := inv.UpdatedAt
+	since := attentionSince(inv)
 	// Update Payment Method is the primary action: the card on file
 	// is broken, retrying with the same card will decline again.
 	// Retry Payment is offered as secondary for transient declines
@@ -632,7 +649,7 @@ func classifyPaymentFailure(inv Invoice) *Attention {
 }
 
 func classifyPaymentUnconfirmed(inv Invoice) *Attention {
-	since := inv.UpdatedAt
+	since := attentionSince(inv)
 	// No operator action: the reconciler re-queries the provider on the next
 	// tick and now settles the outcome COMPLETELY — mark + dunning + email +
 	// event, identical to the webhook (ADR-049 Phase 2). The prior disabled
@@ -668,7 +685,7 @@ func classifyPaymentUnconfirmed(inv Invoice) *Attention {
 // duration, so a wall-clock age check would false-positive (atc.Now is
 // wall-clock). Zero atc.Now also keeps it Info (callers that don't set it).
 func classifyPaymentProcessing(inv Invoice, atc AttentionContext) *Attention {
-	since := inv.UpdatedAt
+	since := attentionSince(inv)
 
 	stale := !inv.IsSimulated && !atc.Now.IsZero() && atc.Now.Sub(inv.UpdatedAt) > processingStaleAfter
 	if stale {
@@ -697,7 +714,7 @@ func classifyPaymentProcessing(inv Invoice, atc AttentionContext) *Attention {
 // operator can short-circuit with "Charge now" if they don't want to
 // wait the scheduler interval.
 func classifyPaymentScheduled(inv Invoice) *Attention {
-	since := inv.UpdatedAt
+	since := attentionSince(inv)
 	// payment_scheduled fires when auto_charge_pending=true: a charge
 	// has been attempted, failed retryably, and the scheduler will
 	// pick it up on its next sweep. The sweep cadence is short
@@ -734,7 +751,7 @@ func classifyPaymentScheduled(inv Invoice) *Attention {
 // or a pre-first-charge window. Operators get two paths: trigger the
 // charge themselves, or send the customer a reminder email.
 func classifyAwaitingPayment(inv Invoice) *Attention {
-	since := inv.UpdatedAt
+	since := attentionSince(inv)
 	// Has-PM race window: PaymentSetup is ready but the engine hasn't
 	// run yet (sub-second to engine-tick window) OR the engine ran but
 	// charge_immediately_at_finalize was disabled. Operator-actionable
@@ -765,7 +782,7 @@ func classifyAwaitingPayment(inv Invoice) *Attention {
 // broken). Promoting to critical would make a perfectly normal "send-
 // invoice" collection mode look alarming.
 func classifyNoPaymentMethod(inv Invoice, atc AttentionContext) *Attention {
-	since := inv.UpdatedAt
+	since := attentionSince(inv)
 	hasEmail := atc.CustomerHasEmail
 	// Auto-collect framing: post-ADR-013 b18d2d3 the engine queues
 	// no-PM invoices via auto_charge_pending and the scheduler picks
