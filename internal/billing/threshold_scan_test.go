@@ -343,6 +343,56 @@ func TestEvaluateThresholds_ResetProration_StubPeriodDenominator(t *testing.T) {
 	}
 }
 
+// TestEvaluateThresholds_ResetProration_SwapMutatedAnchorIgnored locks the
+// #581 anchor convention onto the threshold mirror: the denominator's anchor
+// derives from THE PERIOD BEING BILLED (domain.AnchorDayFor(periodStart)),
+// never the sub's live billing_anchor_day. A cross-interval swap rewrites
+// the sub anchor before the old window closes; #581 fixed the four
+// emitBaseSegmentLine billers but this fifth copy of the math still read
+// the mutated anchor and stretched (or collapsed) the fire invoice's
+// denominator — the same "prorated 15/46 days" leak class.
+func TestEvaluateThresholds_ResetProration_SwapMutatedAnchorIgnored(t *testing.T) {
+	thresholds := &domain.BillingThresholds{
+		AmountGTE:         100000,
+		ResetBillingCycle: true,
+	}
+	engine, subs, _ := setupThresholdEngine(thresholds, 1000)
+
+	// Mimic the post-swap state: the sub-level anchor now points at day
+	// 15 while the period being billed still runs [Apr 1, May 1).
+	sub := subs.subs["sub_1"]
+	sub.BillingAnchorDay = 15
+	subs.subs["sub_1"] = sub
+
+	periodStart := *sub.CurrentBillingPeriodStart
+	now := periodStart.AddDate(0, 0, 9) // 9 days elapsed
+
+	eval, err := engine.evaluateThresholds(context.Background(), sub, periodStart, now)
+	if err != nil {
+		t.Fatalf("evaluateThresholds: %v", err)
+	}
+	var base *domain.InvoiceLineItem
+	for i := range eval.LineItems {
+		if eval.LineItems[i].LineType == domain.LineTypeBaseFee {
+			base = &eval.LineItems[i]
+		}
+	}
+	if base == nil {
+		t.Fatal("expected a base_fee line")
+	}
+	// The period's own anchor (calendar, Apr 1) gives a 30-day cycle:
+	// RoundHalfToEven(4900×9, 30) = 1470 — identical to the unmutated
+	// case. Reading sub.BillingAnchorDay=15 instead stretches the
+	// denominator to Apr 1 → May 15 = 44 days (1002, an under-bill).
+	want := int64(1470)
+	if base.AmountCents != want {
+		t.Errorf("prorated base = %d, want %d (anchor must derive from the period, not the swap-mutated sub anchor)", base.AmountCents, want)
+	}
+	if !strings.Contains(base.Description, "prorated 9/30 days") {
+		t.Errorf("base description = %q, want 'prorated 9/30 days'", base.Description)
+	}
+}
+
 // TestEvaluateThresholds_ResetProration_CrossIntervalDenominator: a
 // yearly-interval item riding a monthly-period sub (cross-interval swaps are
 // allowed) must prorate its base against ITS OWN 365-day cycle, exactly as
