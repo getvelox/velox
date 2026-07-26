@@ -1600,7 +1600,7 @@ func (s *PostgresStore) UpdateTaxAtomic(
 			tax_deferred_at = $12,
 			tax_pending_reason = $13,
 			tax_error_code = $14,
-			tax_retry_count = tax_retry_count + 1,
+			tax_retry_count = tax_retry_count + CASE WHEN $20 THEN 0 ELSE 1 END,
 			tax_next_retry_at = $15,
 			total_amount_cents = $16,
 			subtotal_cents = $18,
@@ -1627,6 +1627,7 @@ func (s *PostgresStore) UpdateTaxAtomic(
 		// gross in tax-inclusive mode, pass-through (== stored header) in
 		// exclusive mode. Keeps subtotal − discount + tax == gross.
 		update.SubtotalCents, update.DiscountCents,
+		update.InitialAttempt,
 	).Scan(s.scanInvDest(&inv)...)
 	if err != nil {
 		return domain.Invoice{}, err
