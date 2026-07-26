@@ -2098,15 +2098,32 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					if evt.AttemptCount > maxAttemptCount {
 						maxAttemptCount = evt.AttemptCount
 					}
-					// Suppress dunning 'resolved' when the lifecycle
-					// invoice.paid row will already say it. Distinct
-					// resolution paths (manually_resolved without
-					// payment) keep the dunning row — only the
-					// payment-recovered case is redundant with paid.
-					if string(evt.EventType) == "resolved" &&
-						evt.Reason == "payment_recovered" &&
-						inv.PaidAt != nil {
-						continue
+					// Suppress dunning 'resolved' when a lifecycle row from
+					// the SAME operator action already says it (ADR-020
+					// fold): paid owns payment_recovered, the "Marked
+					// uncollectible" row owns the write-off, "Invoice
+					// voided" owns the void-flavored resolutions. Each
+					// suppression is gated on the cause row's own field so
+					// a failed propagation (run resolved but the invoice
+					// never transitioned) keeps the dunning row as the
+					// only surviving record. Found live on FLOW I13: a
+					// write-off rendered its cause row PLUS a bare
+					// "Dunning resolved" twin at the same instant.
+					if string(evt.EventType) == "resolved" {
+						switch evt.Reason {
+						case "payment_recovered":
+							if inv.PaidAt != nil {
+								continue
+							}
+						case "invoice_not_collectible", "invoice_uncollectible":
+							if inv.UncollectibleAt != nil {
+								continue
+							}
+						case "manually_resolved", "invoice_voided":
+							if inv.VoidedAt != nil {
+								continue
+							}
+						}
 					}
 					desc, status := describeDunningEvent(string(evt.EventType), evt.Reason, evt.AttemptCount)
 					events = append(events, timelineEvent{
