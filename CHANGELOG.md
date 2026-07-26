@@ -29,6 +29,8 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Fixed
 
+- **The dunning-resolved timeline fold now gates on the invoice's transition fields alone (2026-07-26 follow-up).** The first fold matched the event's reason string, and each resolver spells it differently — the invoice-void path writes "invoice manually_resolved" (with a space), so its twin row survived. Any `resolved` row now folds once the invoice actually transitioned (paid / voided / uncollectible); a resolution whose propagation failed still keeps its row.
+
 - **One-off invoices denominate in the customer's currency by default, not a hardcoded USD (2026-07-26, found live by the FLOW I8 walkthrough).** `POST /v1/invoices` with no explicit currency fell straight to "USD" — ignoring both the customer's `billing_profile.currency` (a GBP-pinned customer got a USD invoice) and the tenant default, the one divergence the ADR-100 guard ring didn't close. The dashboard composer masked the gap by always sending its picker value. The server now resolves explicit input → billing-profile currency → tenant default → USD; explicit input keeps its ad-hoc freedom.
 
 - **A dunning resolution no longer renders beside its own cause row on the invoice timeline (2026-07-26, found live by the FLOW I13 walkthrough).** A write-off showed "Marked uncollectible — written off as bad debt" plus a bare "Dunning resolved" twin at the same instant (voids had the same twin) — the ADR-020 fold existed only for the payment-recovered case. All three operator resolutions now fold into their cause row, gated on the invoice's own transition field so a resolution whose invoice never actually transitioned keeps the dunning row as the only surviving record. Mutation-verified.
