@@ -294,6 +294,28 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Currency resolve for one-off invoices (FLOW I8, fixed 2026-07-26):
+	// explicit input → customer billing-profile currency → tenant default
+	// → the service's USD fallback. Pre-fix an empty currency hardcoded
+	// USD, so a bare API create for a GBP-profile customer silently
+	// minted a USD invoice — the composer masked it by always sending
+	// its picker value (which itself defaults to the profile currency).
+	// Only this endpoint can see an empty currency: every internal
+	// caller (cycle engine, prorations, threshold, BillOnCreate) stamps
+	// the plan currency explicitly.
+	if strings.TrimSpace(input.Currency) == "" && input.CustomerID != "" {
+		if h.customers != nil {
+			if bp, err := h.customers.GetBillingProfile(r.Context(), tenantID, input.CustomerID); err == nil && bp.Currency != "" {
+				input.Currency = bp.Currency
+			}
+		}
+		if input.Currency == "" && h.settings != nil {
+			if ts, err := h.settings.Get(r.Context(), tenantID); err == nil && ts.DefaultCurrency != "" {
+				input.Currency = ts.DefaultCurrency
+			}
+		}
+	}
+
 	inv, err := h.svc.Create(r.Context(), tenantID, input)
 	if err != nil {
 		respond.FromError(w, r, err, "invoice")
