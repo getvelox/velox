@@ -6,7 +6,6 @@ import { toast } from 'sonner'
 import {
   api,
   formatCents,
-  formatRate,
   formatDate,
   dollarsToRateCents,
   getCurrencySymbol,
@@ -15,6 +14,7 @@ import {
   type RatingRule,
 } from '@/lib/api'
 import { Layout } from '@/components/Layout'
+import { priceRate } from '@/lib/priceDisplay'
 import { showApiError } from '@/lib/formErrors'
 import { statusBadgeVariant } from '@/lib/status'
 
@@ -117,6 +117,21 @@ export default function PricingPage() {
   const plans = plansData?.data ?? []
   const meters = metersData?.data ?? []
   const rules = rulesData?.data ?? []
+
+  // unitForRule resolves the unit a rule's rate is quoted in, through BOTH
+  // binding edges (a meter's default binding and dimension-matched rows) so
+  // recipe-installed token rules display per 1M. Unbound rules fall back to
+  // "per unit".
+  const { data: bindingsData } = useQuery({
+    queryKey: ['meter-pricing-rules'],
+    queryFn: () => api.listAllMeterPricingRules(),
+  })
+  const unitForRule = (ruleID: string): string => {
+    const direct = meters.find(m => m.rating_rule_version_id === ruleID)
+    if (direct) return direct.unit
+    const binding = bindingsData?.data.find(b => b.rating_rule_version_id === ruleID)
+    return meters.find(m => m.id === binding?.meter_id)?.unit ?? ''
+  }
   const loading = plansLoading || metersLoading || rulesLoading
   const error = plansError || metersError || rulesError
 
@@ -205,7 +220,7 @@ export default function PricingPage() {
                             <TableCell className="font-mono text-muted-foreground">{p.code}</TableCell>
                             <TableCell><Badge variant={badgeVariant(p.billing_interval)}>{p.billing_interval}</Badge></TableCell>
                             <TableCell><Badge variant={statusBadgeVariant(p.status)}>{p.status}</Badge></TableCell>
-                            <TableCell className="text-right font-medium">{formatCents(p.base_amount_cents)}</TableCell>
+                            <TableCell className="text-right font-medium">{formatCents(p.base_amount_cents, p.currency)}</TableCell>
                             <TableCell className="text-right text-muted-foreground">{p.meter_ids?.length || 0}</TableCell>
                           </TableRow>
                         ))}
@@ -295,11 +310,7 @@ export default function PricingPage() {
                             <TableCell><Badge variant={badgeVariant(r.mode)}>{r.mode}</Badge></TableCell>
                             <TableCell className="text-muted-foreground">v{r.version}</TableCell>
                             <TableCell className="text-right font-medium">
-                              {r.mode === 'flat'
-                                ? formatRate(r.flat_amount_cents)
-                                : r.mode === 'graduated'
-                                  ? `${r.graduated_tiers?.length || 0} tiers`
-                                  : `${r.package_size}/pkg`}
+                              {priceRate(r, unitForRule(r.id))}
                             </TableCell>
                           </TableRow>
                         ))}
@@ -625,7 +636,7 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
             <div>
               <Label>Rating Rule</Label>
               <Select
-                items={rules.map(r => ({ value: r.id, label: `${r.name} (${r.mode})` }))}
+                items={rules.map(r => ({ value: r.id, label: `${r.name} — ${priceRate(r, form.unit)}` }))}
                 value={form.rating_rule_version_id}
                 onValueChange={v => setForm(f => ({ ...f, rating_rule_version_id: v ?? '' }))}
               >
@@ -634,7 +645,7 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
                 </SelectTrigger>
                 <SelectContent>
                   {rules.map(r => (
-                    <SelectItem key={r.id} value={r.id}>{r.name} ({r.mode})</SelectItem>
+                    <SelectItem key={r.id} value={r.id}>{r.name} — {priceRate(r, form.unit)}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

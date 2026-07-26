@@ -779,6 +779,11 @@ func (s *Service) GetMeterPricingRule(ctx context.Context, tenantID, id string) 
 
 // ListMeterPricingRulesByMeter returns rules in priority-DESC order; the
 // store already enforces the ordering so callers can iterate top-down.
+// ListMeterPricingRules returns every binding for the tenant.
+func (s *Service) ListMeterPricingRules(ctx context.Context, tenantID string) ([]domain.MeterPricingRule, error) {
+	return s.store.ListMeterPricingRules(ctx, tenantID)
+}
+
 func (s *Service) ListMeterPricingRulesByMeter(ctx context.Context, tenantID, meterID string) ([]domain.MeterPricingRule, error) {
 	if strings.TrimSpace(meterID) == "" {
 		return nil, errs.Required("meter_id")

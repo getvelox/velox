@@ -164,6 +164,8 @@ export const api = {
   // "" clears the default binding; unmatched-dimension usage goes unbilled again.
   updateMeter: (id: string, data: { rating_rule_version_id: string }) =>
     apiRequest<Meter>('PATCH', `/meters/${id}`, data),
+  listAllMeterPricingRules: () =>
+    apiRequest<{ data: MeterPricingRule[] }>('GET', '/meter-pricing-rules'),
   listMeterPricingRules: (meterId: string) =>
     apiRequest<{ data: MeterPricingRule[] }>('GET', `/meters/${meterId}/pricing-rules`),
   createMeterPricingRule: (
@@ -1171,6 +1173,11 @@ export interface RatingRule {
   graduated_tiers?: { up_to: number; unit_amount_cents: string }[]
   package_size: number
   package_amount_cents: number
+  // Per-unit rate charged for units beyond full packages (decimal-string
+  // cents) — the billing engine charges it; omitting it from display
+  // implies beyond-package usage is free.
+  overage_unit_amount_cents: string
+  lifecycle_state: string
   created_at: string
 }
 

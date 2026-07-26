@@ -8,7 +8,7 @@ import type { RecipeListItem } from '@/lib/gen/schemas/recipeListItem'
 import type { RecipeDetail } from '@/lib/gen/schemas/recipeDetail'
 import type { RecipeOverride } from '@/lib/gen/schemas/recipeOverride'
 import type { RecipePreviewResult } from '@/lib/gen/schemas/recipePreviewResult'
-import type { RecipeRatingRule } from '@/lib/gen/schemas/recipeRatingRule'
+import { money, priceRate } from '@/lib/priceDisplay'
 import { showApiError } from '@/lib/formErrors'
 import { Layout } from '@/components/Layout'
 
@@ -369,73 +369,6 @@ function OverrideField({
   )
 }
 
-// shiftDecimal moves a decimal string's point right by `places` without
-// float math, so exact catalog rates stay exact on screen ("0.0000275" ×10⁴
-// → "0.275", never 0.27500000000000002).
-function shiftDecimal(s: string, places: number): string {
-  const neg = s.startsWith('-')
-  const [rawInt, rawFrac = ''] = (neg ? s.slice(1) : s).split('.')
-  const digits = rawInt + rawFrac
-  const point = rawInt.length + places
-  let out: string
-  if (point <= 0) {
-    out = '0.' + '0'.repeat(-point) + digits
-  } else if (point >= digits.length) {
-    out = digits + '0'.repeat(point - digits.length)
-  } else {
-    out = digits.slice(0, point) + '.' + digits.slice(point)
-  }
-  out = out.replace(/^0+(?=\d)/, '')
-  if (out.includes('.')) out = out.replace(/\.?0+$/, '')
-  return (neg ? '-' : '') + (out === '' ? '0' : out)
-}
-
-// dollars renders a cents-decimal-string scaled by 10^shift as "$X.XX" —
-// padded to money-standard two decimals ($5.00, $0.50) but NEVER rounded:
-// a sub-cent rate keeps its full precision ($0.125, $0.0014).
-function dollars(cents: string, shift: number): string {
-  let v = shiftDecimal(cents, shift - 2)
-  const frac = v.split('.')[1] ?? ''
-  if (frac.length < 2) v = (frac.length === 0 ? v + '.' : v) + '0'.repeat(2 - frac.length)
-  return '$' + v
-}
-
-// singular trims a plural unit for "per <unit>" copy (seconds → second).
-function singular(unit: string): string {
-  return unit.length > 1 && unit.endsWith('s') ? unit.slice(0, -1) : unit
-}
-
-// priceRate renders one rating rule's money in the units an operator quotes
-// in: token meters per 1M tokens (how every AI provider lists rates), any
-// other meter per single unit. Handles all three pricing modes — a preview
-// that names a price without showing its number can't do the one job this
-// panel exists for (reviewing rates before a one-way install).
-function priceRate(r: RecipeRatingRule, unit: string): string {
-  const perMillion = unit === 'tokens'
-  const scale = perMillion ? 6 : 0 // 10^6 units, or 1 unit
-  const per = perMillion ? '1M tokens' : singular(unit || 'unit')
-  switch (r.mode) {
-    case 'graduated': {
-      const tiers = r.graduated_tiers ?? []
-      const parts = tiers.map(t =>
-        t.up_to && t.up_to > 0
-          ? `up to ${t.up_to.toLocaleString()} @ ${dollars(t.unit_amount_cents ?? '0', scale)}`
-          : `beyond @ ${dollars(t.unit_amount_cents ?? '0', scale)}`,
-      )
-      return `tiered / ${per}: ${parts.join(', ')}`
-    }
-    case 'package': {
-      const pkg = `${dollars(String(r.package_amount_cents ?? 0), 0)} per ${(r.package_size ?? 0).toLocaleString()} ${unit || 'units'}`
-      const overage = r.overage_unit_amount_cents && r.overage_unit_amount_cents !== '0'
-        ? `, then ${dollars(r.overage_unit_amount_cents, scale)} / ${per}`
-        : ''
-      return pkg + overage
-    }
-    default:
-      return `${dollars(r.flat_amount_cents, scale)} / ${per}`
-  }
-}
-
 function ObjectsList({ preview }: { preview: RecipePreviewResult }) {
   // Rules don't carry their meter; the bindings do. rule key → meter unit so
   // each price renders in that meter's units (tokens vs seconds vs calls).
@@ -453,7 +386,7 @@ function ObjectsList({ preview }: { preview: RecipePreviewResult }) {
   if (preview.objects.plans?.length) sections.push({
     label: 'Plan',
     items: preview.objects.plans.map(p =>
-      `${p.name} — ${p.billing_interval}, ${p.currency}` + (p.base_amount_cents > 0 ? `, ${dollars(String(p.base_amount_cents), 0)} base` : ''),
+      `${p.name} — ${p.billing_interval}, ${p.currency}` + (p.base_amount_cents > 0 ? `, ${money(String(p.base_amount_cents), 0, p.currency)} base` : ''),
     ),
   })
   if (preview.objects.dunning_policies?.length) sections.push({ label: 'Payment retries', items: preview.objects.dunning_policies.map(d => `${d.name} — up to ${d.max_retries} retries`) })

@@ -1399,3 +1399,11 @@ func (m *memStore) RuleKeyResolvedCurrency(_ context.Context, _ string, ruleVers
 	}
 	return m.resolvedKey(k), nil
 }
+
+func (m *memStore) ListMeterPricingRules(_ context.Context, _ string) ([]domain.MeterPricingRule, error) {
+	out := make([]domain.MeterPricingRule, 0, len(m.meterRules))
+	for _, r := range m.meterRules {
+		out = append(out, r)
+	}
+	return out, nil
+}
