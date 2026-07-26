@@ -15,27 +15,20 @@ import (
 	"github.com/sagarsuperuser/velox/internal/errs"
 )
 
-// fakeInvoiceUpdater is the dunning handler's InvoiceUpdater (only the
-// PaymentRecovered branch reads it now, via MarkPaid; the manual-resolve void
-// branch routes entirely through the InvoiceVoider).
-type fakeInvoiceUpdater struct{ inv domain.Invoice }
-
-func (f *fakeInvoiceUpdater) Get(_ context.Context, _, _ string) (domain.Invoice, error) {
-	return f.inv, nil
-}
-func (f *fakeInvoiceUpdater) UpdateStatus(_ context.Context, _, _ string, _ domain.InvoiceStatus) (domain.Invoice, error) {
-	return f.inv, nil
-}
-func (f *fakeInvoiceUpdater) UpdatePayment(_ context.Context, _, _ string, _ domain.InvoicePaymentStatus, _, _ string, _ *time.Time) (domain.Invoice, error) {
-	return f.inv, nil
-}
-func (f *fakeInvoiceUpdater) MarkPaid(_ context.Context, _, _, _ string, _ time.Time) (domain.Invoice, error) {
-	return f.inv, nil
-}
-
 type recordingVoider struct {
-	calls int
-	err   error
+	calls       int
+	recordCalls int
+	recordNotes []string
+	err         error
+}
+
+func (v *recordingVoider) RecordOfflinePayment(_ context.Context, tenantID, id, note string) (domain.Invoice, error) {
+	v.recordCalls++
+	v.recordNotes = append(v.recordNotes, note)
+	if v.err != nil {
+		return domain.Invoice{}, v.err
+	}
+	return domain.Invoice{ID: id, TenantID: tenantID, CustomerID: "cus_1", Status: domain.InvoicePaid, StripePaymentIntentID: "out_of_band:2026-07-26T00:00:00Z"}, nil
 }
 
 func (v *recordingVoider) Void(_ context.Context, tenantID, id string) (domain.Invoice, error) {
@@ -84,9 +77,6 @@ func TestResolveRun_ManualVoid_RoutesThroughServiceAndGatesSideEffects(t *testin
 		}
 		canceler := &recordingCanceler{}
 		h := NewHandler(svc, HandlerDeps{
-			Invoices: &fakeInvoiceUpdater{inv: domain.Invoice{
-				ID: "inv_1", TenantID: "t1", CustomerID: "cus_1", StripePaymentIntentID: "pi_1",
-			}},
 			PaymentCancel: canceler,
 		})
 		h.SetInvoiceVoider(voider)
@@ -116,4 +106,84 @@ func TestResolveRun_ManualVoid_RoutesThroughServiceAndGatesSideEffects(t *testin
 			t.Errorf("PI cancel MUST NOT run when the void was refused — would cancel a live in-flight charge; calls=%d, want 0", canceler.calls)
 		}
 	})
+}
+
+// TestResolveRun_RejectsUnknownResolution pins the operator-input contract
+// (2026-07-26, found live on FLOW I5): the endpoint stored ANY string
+// verbatim — a typo'd "payment_received" landed in
+// invoice_dunning_runs.resolution, silently skipped the mark-paid
+// propagation (the switch matched nothing), and rendered as a raw slug in
+// the dashboard. Only the three operator-choosable outcomes are legal;
+// engine-written states (retries_exhausted, action_failed) and free text
+// are 422s.
+func TestResolveRun_RejectsUnknownResolution(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(newMemStore(), &noopRetrier{}, nil)
+	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+	if err != nil {
+		t.Fatalf("StartDunning: %v", err)
+	}
+	h := NewHandler(svc, HandlerDeps{})
+
+	for _, bad := range []string{"payment_received", "retries_exhausted", "action_failed", "", "whatever"} {
+		body, _ := json.Marshal(resolveInput{Resolution: bad})
+		r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", run.ID)
+		r = r.WithContext(context.WithValue(auth.WithTenantID(r.Context(), "t1"), chi.RouteCtxKey, rctx))
+		rec := httptest.NewRecorder()
+		h.resolveRun(rec, r)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("resolution %q: got %d, want 422", bad, rec.Code)
+		}
+	}
+
+	// The run must be untouched by the rejected attempts.
+	got, err := svc.store.GetRun(ctx, "t1", run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.State != domain.DunningActive || got.Resolution != "" {
+		t.Errorf("run mutated by rejected resolution: state=%s resolution=%q", got.State, got.Resolution)
+	}
+}
+
+// TestResolveRun_PaymentRecovered_RoutesThroughOfflinePaymentWriter pins the
+// single-offline-payment-writer contract (2026-07-26): payment_recovered
+// resolves through invoice.Service.RecordOfflinePayment — the same path as
+// the invoice page's Record-offline-payment dialog — so the recovery carries
+// the out_of_band: PaymentIntent marker, the in-flight guard, and the
+// invoice.payment_recorded webhook. Pre-fix it called a raw MarkPaid("")
+// with none of those.
+func TestResolveRun_PaymentRecovered_RoutesThroughOfflinePaymentWriter(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(newMemStore(), &noopRetrier{}, nil)
+	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+	if err != nil {
+		t.Fatalf("StartDunning: %v", err)
+	}
+	voider := &recordingVoider{}
+	h := NewHandler(svc, HandlerDeps{})
+	h.SetInvoiceVoider(voider)
+
+	body, _ := json.Marshal(resolveInput{Resolution: string(domain.ResolutionPaymentRecovered)})
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", run.ID)
+	r = r.WithContext(context.WithValue(auth.WithTenantID(r.Context(), "t1"), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+	h.resolveRun(rec, r)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve: got %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if voider.recordCalls != 1 {
+		t.Fatalf("RecordOfflinePayment calls = %d, want 1 (raw MarkPaid is the dual-writer hole)", voider.recordCalls)
+	}
+	if len(voider.recordNotes) != 1 || voider.recordNotes[0] != "Recovered via dunning resolution" {
+		t.Errorf("note = %v, want the dunning-resolution memo", voider.recordNotes)
+	}
+	if voider.calls != 0 {
+		t.Errorf("Void must not run on payment_recovered; calls=%d", voider.calls)
+	}
 }

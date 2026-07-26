@@ -335,7 +335,6 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	dunningStore := dunning.NewPostgresStore(db)
 	dunningSvc := dunning.NewService(dunningStore, nil, clk) // retrier set below after stripeAdapter created
 	dunningH := dunning.NewHandler(dunningSvc, dunning.HandlerDeps{
-		Invoices:      invoiceStore,
 		PaymentCancel: payment.NewLiveStripeClient(stripeClients),
 	})
 

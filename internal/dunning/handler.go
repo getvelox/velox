@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -19,32 +18,29 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 )
 
-// InvoiceUpdater updates invoice status when dunning is resolved.
-type InvoiceUpdater interface {
-	UpdateStatus(ctx context.Context, tenantID, id string, status domain.InvoiceStatus) (domain.Invoice, error)
-	UpdatePayment(ctx context.Context, tenantID, id string, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error)
-	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
-	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
-}
-
 // PaymentCanceler cancels Stripe PaymentIntent when invoice is voided via dunning.
 type PaymentCanceler interface {
 	CancelPaymentIntent(ctx context.Context, paymentIntentID string) error
 }
 
-// InvoiceVoider routes a dunning manually-resolved void through the invoice
-// SERVICE (not the raw store), so it inherits the service's status guards,
+// InvoiceVoider routes dunning resolution outcomes through the invoice
+// SERVICE (not the raw store), so they inherit the service's status guards,
 // the in-flight payment guard, the tax reversal, and the single-writer
-// invoice.voided webhook event. Before this, resolveRun called the raw
-// store's UpdateStatus(Voided) directly — a second, less-guarded void writer
-// that reversed no tax and emitted no event (an overlapping-flow hole).
+// webhook events. Before this, resolveRun called the raw store's
+// UpdateStatus(Voided) directly — a second, less-guarded void writer that
+// reversed no tax and emitted no event (an overlapping-flow hole). The
+// payment_recovered leg had the same hole until 2026-07-26: a raw
+// MarkPaid("") skipped the out_of_band: marker, the in-flight guard, and
+// the invoice.payment_recorded webhook that the Record-offline-payment
+// dialog's path emits — two offline-payment writers with different
+// evidence trails for the same operator action.
 type InvoiceVoider interface {
 	Void(ctx context.Context, tenantID, id string) (domain.Invoice, error)
+	RecordOfflinePayment(ctx context.Context, tenantID, id, note string) (domain.Invoice, error)
 }
 
 type Handler struct {
 	svc           *Service
-	invoices      InvoiceUpdater
 	invoiceVoider InvoiceVoider
 	paymentCancel PaymentCanceler
 	auditLogger   AuditWriter
@@ -82,14 +78,12 @@ func (h *Handler) SetResolver(r clock.Resolver) { h.resolver = r }
 func (h *Handler) SetInvoiceVoider(v InvoiceVoider) { h.invoiceVoider = v }
 
 type HandlerDeps struct {
-	Invoices      InvoiceUpdater
 	PaymentCancel PaymentCanceler
 }
 
 func NewHandler(svc *Service, deps ...HandlerDeps) *Handler {
 	h := &Handler{svc: svc}
 	if len(deps) > 0 {
-		h.invoices = deps[0].Invoices
 		h.paymentCancel = deps[0].PaymentCancel
 	}
 	return h
@@ -324,6 +318,20 @@ func (h *Handler) resolveRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only the three operator-choosable outcomes are legal here.
+	// retries_exhausted / action_failed are engine-written states —
+	// accepting them (or any free-text string) from the API fabricates
+	// engine outcomes and used to store the bogus value verbatim
+	// (resolution has a CHECK constraint since migration 0158, but the
+	// column is written by multiple flows, so the operator endpoint
+	// rejects early with a teaching message).
+	switch domain.DunningResolution(input.Resolution) {
+	case domain.ResolutionPaymentRecovered, domain.ResolutionManuallyResolved, domain.ResolutionInvoiceNotCollectible:
+	default:
+		respond.ValidationField(w, r, "resolution", "resolution must be one of payment_recovered, manually_resolved, invoice_not_collectible")
+		return
+	}
+
 	run, err := h.svc.ResolveRun(r.Context(), tenantID, id, domain.DunningResolution(input.Resolution))
 	if err != nil {
 		respond.FromError(w, r, err, "dunning_run")
@@ -353,23 +361,24 @@ func (h *Handler) resolveRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Propagate resolution to invoice
-	if h.invoices != nil && run.InvoiceID != "" {
+	if run.InvoiceID != "" {
 		switch domain.DunningResolution(input.Resolution) {
 		case domain.ResolutionPaymentRecovered:
-			// MarkPaid stamps invoice.paid_at — bind ctx from the
-			// invoice's pin so clock-pinned invoices land in sim-time
-			// (ADR-030). Wall-clock invoices fall through unchanged via
-			// resolver returning wall-clock. Without this bind, paid_at
-			// was always wall-clock regardless of pin — the dunning
-			// resolution was the last unbound seam in the operator
-			// invoice path.
-			markCtx := r.Context()
-			if h.resolver != nil {
-				markCtx, _ = clock.BindEffectiveNow(markCtx, h.resolver, clock.Pin{TenantID: tenantID, InvoiceID: run.InvoiceID})
+			// Route through the invoice service's offline-payment writer —
+			// the same path the invoice page's Record-offline-payment dialog
+			// uses — so the recovery gets the out_of_band: PaymentIntent
+			// marker, the in-flight-charge guard, the payment_recorded audit
+			// row, and the invoice.payment_recorded webhook. A raw MarkPaid
+			// here was a second offline-payment writer with a thinner
+			// evidence trail for the same operator action. The service binds
+			// the invoice's clock itself (ADR-030), so sim-pinned invoices
+			// land paid_at on the sim axis without a bind here.
+			if h.invoiceVoider == nil {
+				slog.WarnContext(r.Context(), "invoice service unwired; skipping dunning payment-recovered mark-paid", "invoice_id", run.InvoiceID)
+				break
 			}
-			now := clock.Now(markCtx)
-			if _, err := h.invoices.MarkPaid(markCtx, tenantID, run.InvoiceID, "", now); err != nil {
-				slog.WarnContext(r.Context(), "failed to mark invoice as paid after dunning resolution", "invoice_id", run.InvoiceID, "error", err)
+			if _, err := h.invoiceVoider.RecordOfflinePayment(r.Context(), tenantID, run.InvoiceID, "Recovered via dunning resolution"); err != nil {
+				slog.WarnContext(r.Context(), "failed to record recovered payment after dunning resolution", "invoice_id", run.InvoiceID, "error", err)
 			}
 		case domain.ResolutionManuallyResolved:
 			// Void through the invoice SERVICE (single void writer): status flip
