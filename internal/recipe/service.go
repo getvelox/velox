@@ -36,6 +36,13 @@ type PricingWriter interface {
 	GetRuleByKeyAsOf(ctx context.Context, tenantID, ruleKey string, asOf time.Time) (domain.RatingRuleVersion, error)
 	GetMeterByKey(ctx context.Context, tenantID, key string) (domain.Meter, error)
 	ListPlans(ctx context.Context, tenantID string) ([]domain.Plan, error)
+
+	// AdoptedMeterCurrencyConflict is the ADR-100 probe run when adopting an
+	// existing meter: "" when the meter's already-bound prices share the
+	// recipe's currency, else a description of the conflict. Committed-state
+	// read (pool, not tx) — correct here because adoption by definition
+	// concerns pre-existing objects.
+	AdoptedMeterCurrencyConflict(ctx context.Context, tenantID, meterID, wantCurrency string) (string, error)
 }
 
 // DunningWriter is the narrow tx-aware surface recipe.Service needs from
@@ -416,6 +423,20 @@ func (s *Service) Instantiate(
 			if diffs := meterConformanceDiff(existing, m); len(diffs) > 0 {
 				return domain.RecipeInstance{}, errs.AlreadyExists("meter",
 					fmt.Sprintf("meter %q already exists with settings that don't match recipe %q (%s) — reconcile the existing meter before instantiating", m.Key, recipeKey, formatDiffs(diffs)))
+			}
+			// ADR-100: adopting a shared meter must not stack this recipe's
+			// rules (in ruleCurrency) onto a meter whose EXISTING rules bill
+			// another currency — disjoint keys pass conformance, but the
+			// resulting plan graph would mix denominations on one meter.
+			if ruleCurrency != "" {
+				conflict, err := s.pricing.AdoptedMeterCurrencyConflict(ctx, tenantID, existing.ID, ruleCurrency)
+				if err != nil {
+					return domain.RecipeInstance{}, fmt.Errorf("meter %q: currency probe: %w", m.Key, err)
+				}
+				if conflict != "" {
+					return domain.RecipeInstance{}, errs.AlreadyExists("meter",
+						fmt.Sprintf("meter %q already bills a different currency than recipe %q (%s — this install is %s): a meter's prices share one currency; install with the matching currency or use a separate meter", m.Key, recipeKey, conflict, ruleCurrency))
+				}
 			}
 			meterIDByKey[m.Key] = existing.ID
 			objs.MeterIDs = append(objs.MeterIDs, existing.ID)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -564,5 +565,49 @@ func TestService_Instantiate_AdoptsMatchingRatingRule(t *testing.T) {
 	}
 	if versions != 1 {
 		t.Errorf("opus45_input has %d versions after adoption, want 1 (never republished)", versions)
+	}
+}
+
+func (f *failingPricingWriter) AdoptedMeterCurrencyConflict(ctx context.Context, tenantID, meterID, wantCurrency string) (string, error) {
+	return f.inner.AdoptedMeterCurrencyConflict(ctx, tenantID, meterID, wantCurrency)
+}
+
+// TestService_Instantiate_RefusesCrossCurrencyMeterAdoption closes the
+// second-recipe hole from the ADR-100 design panel: two recipes' rule KEYS
+// are disjoint, so same-key conformance never fires — but stacking an EUR
+// install's rules onto a meter whose existing rules bill USD would mix
+// denominations on one meter. The adopted-meter currency probe refuses.
+func TestService_Instantiate_RefusesCrossCurrencyMeterAdoption(t *testing.T) {
+	f := newRecipeFixture(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, f.db, "cross-currency adoption")
+
+	// Operator already bills the shared `tokens` meter in USD via a custom
+	// key (disjoint from every recipe key).
+	rule, err := f.pricingSvc.CreateRatingRule(ctx, tenantID, pricing.CreateRatingRuleInput{
+		RuleKey: "custom_tokens_usd", Name: "custom", Mode: domain.PricingFlat,
+		Currency: "USD", FlatAmountCents: decimal.RequireFromString("0.0004"),
+	})
+	if err != nil {
+		t.Fatalf("pre-create rule: %v", err)
+	}
+	if _, err := f.pricingSvc.CreateMeter(ctx, tenantID, pricing.CreateMeterInput{
+		Key: "tokens", Name: "Tokens", Unit: "tokens", Aggregation: "sum",
+		RatingRuleVersionID: rule.ID,
+	}); err != nil {
+		t.Fatalf("pre-create meter: %v", err)
+	}
+
+	// EUR install must refuse at the meter-adoption probe (aggregation
+	// matches, keys are disjoint — only the currency conflicts).
+	_, err = f.svc.Instantiate(ctx, tenantID, "openai_style",
+		map[string]any{"currency": "EUR"}, InstantiateOptions{})
+	if !errors.Is(err, errs.ErrAlreadyExists) || !strings.Contains(err.Error(), "custom_tokens_usd") {
+		t.Fatalf("want cross-currency adoption refusal naming the key, got %v", err)
+	}
+
+	// Coherent twin: the USD install adopts the meter fine.
+	if _, err := f.svc.Instantiate(ctx, tenantID, "openai_style", nil, InstantiateOptions{}); err != nil {
+		t.Fatalf("USD install over USD meter must pass: %v", err)
 	}
 }

@@ -16,7 +16,7 @@ type fakeSubChecker struct {
 	err  error
 }
 
-func (f *fakeSubChecker) NonTerminalForCustomer(_ context.Context, _, _ string) ([]NonTerminalSubscription, error) {
+func (f *fakeSubChecker) NonTerminalForCustomer(_ context.Context, _, _ string, _ bool) ([]NonTerminalSubscription, error) {
 	return f.subs, f.err
 }
 

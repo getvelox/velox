@@ -72,6 +72,16 @@ type Store interface {
 	// deleting a nonexistent rule returns ErrNotFound and emits nothing.
 	// nil emit = unaudited delete.
 	DeleteMeterPricingRuleAudited(ctx context.Context, tenantID, id string, emit func(tx *sql.Tx, deleted domain.MeterPricingRule) error) error
+
+	// Currency-coherence reads (ADR-100). "In-scope plans" = non-archived
+	// plans plus archived plans still carrying non-terminal subscriptions;
+	// key currency = latest ACTIVE version (engine resolution), Mixed when
+	// a key's active versions span currencies.
+	PlanCurrenciesBoundToRuleKey(ctx context.Context, tenantID, ruleKey string) ([]planCurrency, error)
+	PlanCurrenciesWiringMeters(ctx context.Context, tenantID string, meterIDs []string) ([]planCurrency, error)
+	MeterBoundKeyCurrencies(ctx context.Context, tenantID string, meterIDs []string) ([]keyCurrency, error)
+	RuleKeyResolvedCurrency(ctx context.Context, tenantID, ruleVersionID string) (keyCurrency, error)
+
 }
 
 type RatingRuleFilter struct {

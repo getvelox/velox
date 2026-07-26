@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -1082,6 +1083,18 @@ func (s *Stripe) handlePaymentSucceeded(ctx context.Context, tenantID string, ev
 	}
 	if a, ok := anchorFromEventPayload(event); ok {
 		ctx = withSettleAnchor(ctx, a)
+	}
+	// Currency truth-check (ADR-100): the webhook is the ONE settle entry
+	// point carrying Stripe's independently-reported charge currency, so
+	// compare it against the invoice header here — case-folded (Stripe
+	// reports lowercase). Velox creates the PaymentIntent FROM the header,
+	// so a mismatch means the charge was made under a different currency
+	// than the invoice now claims — report-only tripwire via the standard
+	// anomaly channel; the settle itself proceeds (the money already moved,
+	// absorbing silently is the one wrong option).
+	if event.Currency != "" && !strings.EqualFold(event.Currency, inv.Currency) {
+		s.escalatePaymentAnomaly(ctx, tenantID, inv, domain.EventPaymentCurrencyMismatch, event.PaymentIntentID, captured,
+			fmt.Sprintf("charge settled in %s but the invoice is labeled %s", strings.ToUpper(event.Currency), strings.ToUpper(inv.Currency)))
 	}
 	return s.SettleSucceeded(ctx, tenantID, inv, event.PaymentIntentID, captured, SourceWebhook)
 }

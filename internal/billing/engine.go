@@ -2206,11 +2206,15 @@ func (e *Engine) resolveBillingInputs(ctx context.Context, sub domain.Subscripti
 		plans[it.PlanID] = pl
 	}
 
-	// Invoice currency: customer billing profile > tenant settings > first
-	// item's plan currency > "usd". The tie-breaker in multi-item mode is the
-	// plan of the first item (created_at ordering) — items on a single
-	// subscription are expected to share a currency; mismatches are a pricing
-	// misconfiguration, not a billing problem to solve here.
+	// Invoice currency — ACTUAL precedence (the old comment here claimed
+	// settings outranked plans; born false): customer billing profile >
+	// first item's plan > tenant settings (dead branch in practice — plans
+	// always carry a currency) > "USD". The first-item tie-breaker in
+	// multi-item mode is unreachable-by-construction since ADR-100: the
+	// subscription-side currency pin refuses mixed-currency item sets, a
+	// divergent profile, and cross-currency swaps at every write, so by the
+	// time this code runs all sources agree. Kept as a fallback order, not
+	// a reconciliation policy.
 	firstPlanCurrency := plans[sub.Items[0].PlanID].Currency
 	invoiceCurrency := firstPlanCurrency
 	if e.profiles != nil {
@@ -2224,7 +2228,7 @@ func (e *Engine) resolveBillingInputs(ctx context.Context, sub domain.Subscripti
 		}
 	}
 	if invoiceCurrency == "" {
-		invoiceCurrency = "usd"
+		invoiceCurrency = "USD"
 	}
 
 	// Collect the union of meter_ids across every item's plan. Usage is
@@ -3644,8 +3648,9 @@ func (e *Engine) buildOnCreateInvoice(ctx context.Context, sub domain.Subscripti
 		return domain.Invoice{}, nil, false, nil
 	}
 
-	// Invoice currency: customer billing profile > tenant settings >
-	// first in_advance item's plan currency > "usd". Same precedence
+	// Invoice currency — actual precedence (see billOnePeriod's note;
+	// ADR-100): profile > first in_advance item's plan > settings (dead
+	// branch) > "USD". Same order
 	// as the cycle path.
 	invoiceCurrency := plans[advanceItems[0].PlanID].Currency
 	if e.profiles != nil {
@@ -3659,7 +3664,7 @@ func (e *Engine) buildOnCreateInvoice(ctx context.Context, sub domain.Subscripti
 		}
 	}
 	if invoiceCurrency == "" {
-		invoiceCurrency = "usd"
+		invoiceCurrency = "USD"
 	}
 
 	// Build base-fee line items for in_advance items, with mid-period
@@ -4381,9 +4386,9 @@ func (e *Engine) billFinalOnImmediateCancelImpl(ctx context.Context, tx *sql.Tx,
 		return domain.Invoice{}, nil
 	}
 
-	// Invoice currency: billing profile > tenant settings > first
-	// item's plan currency > "usd". Same precedence as billOnePeriod
-	// and BillOnCreate.
+	// Invoice currency — actual precedence (see billOnePeriod's note;
+	// ADR-100): profile > first item's plan > settings (dead branch) >
+	// "USD". Same order as billOnePeriod and BillOnCreate.
 	invoiceCurrency := plans[sub.Items[0].PlanID].Currency
 	if e.profiles != nil {
 		if bp, err := e.profiles.GetBillingProfile(ctx, sub.TenantID, sub.CustomerID); err == nil && bp.Currency != "" {
@@ -4396,7 +4401,7 @@ func (e *Engine) billFinalOnImmediateCancelImpl(ctx context.Context, tx *sql.Tx,
 		}
 	}
 	if invoiceCurrency == "" {
-		invoiceCurrency = "usd"
+		invoiceCurrency = "USD"
 	}
 
 	// Compute the final invoice's line items over the partial cancel

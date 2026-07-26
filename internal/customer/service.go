@@ -96,7 +96,12 @@ type NonTerminalSubscription struct {
 // package keeps the zero-peer-import rule; implemented by an adapter over
 // the subscription store in api/router.go.
 type SubscriptionChecker interface {
-	NonTerminalForCustomer(ctx context.Context, tenantID, customerID string) ([]NonTerminalSubscription, error)
+	// includeDraft widens the status set for the currency guard (ADR-100):
+	// a draft doesn't bill yet, but it WILL at activate, so the profile
+	// currency must already agree with it. The archive guard keeps drafts
+	// excluded — "still bill" copy stays true and an abandoned draft never
+	// blocks an archive.
+	NonTerminalForCustomer(ctx context.Context, tenantID, customerID string, includeDraft bool) ([]NonTerminalSubscription, error)
 }
 
 // AuditEmitter is the narrow in-tx audit seam (ADR-090). The service builds
@@ -469,7 +474,7 @@ func (s *Service) Update(ctx context.Context, tenantID, id string, input UpdateI
 				// HIGH this guard exists to prevent.
 				return domain.Customer{}, fmt.Errorf("subscription checker not wired: cannot verify archive safety")
 			}
-			blocking, err := s.subChecker.NonTerminalForCustomer(ctx, tenantID, id)
+			blocking, err := s.subChecker.NonTerminalForCustomer(ctx, tenantID, id, false)
 			if err != nil {
 				return domain.Customer{}, fmt.Errorf("check subscriptions before archive: %w", err)
 			}
@@ -595,8 +600,16 @@ func (s *Service) UpsertBillingProfile(ctx context.Context, tenantID string, bp 
 		if !currencyPattern.MatchString(bp.Currency) {
 			return domain.CustomerBillingProfile{}, errs.Invalid("currency", "must be an ISO-4217 alpha-3 currency code (e.g. 'USD', 'EUR')")
 		}
+		// Allowlist too (ADR-100): the profile currency is the HIGHEST-
+		// precedence invoice-header source, so a well-formed-but-unsupported
+		// code here (JPY, or a fictional "QQQ") would relabel every invoice.
+		// Format check stays first for its friendlier message on malformed
+		// input.
+		if err := domain.ValidateCurrency(bp.Currency); err != nil {
+			return domain.CustomerBillingProfile{}, err
+		}
 		if s.subChecker != nil {
-			subs, err := s.subChecker.NonTerminalForCustomer(ctx, tenantID, bp.CustomerID)
+			subs, err := s.subChecker.NonTerminalForCustomer(ctx, tenantID, bp.CustomerID, true)
 			if err != nil {
 				return domain.CustomerBillingProfile{}, fmt.Errorf("check subscriptions for currency guard: %w", err)
 			}

@@ -897,6 +897,9 @@ func classifyPaymentAnomaly(inv Invoice) *Attention {
 	case EventPaymentReceivedOnVoidedInvoice:
 		msg = fmt.Sprintf("Payment %s succeeded against this voided invoice. The customer paid money that is not owed — refund it in Stripe.",
 			inv.PaymentAnomalyPaymentIntentID)
+	case EventPaymentCurrencyMismatch:
+		msg = fmt.Sprintf("Payment %s was charged in a different currency than this invoice shows. The amounts were not converted — review the charge in Stripe and correct the invoice or refund.",
+			inv.PaymentAnomalyPaymentIntentID)
 	default:
 		msg = fmt.Sprintf("A payment anomaly (%s) was detected on this invoice — review payment %s in Stripe.",
 			inv.PaymentAnomalyKind, inv.PaymentAnomalyPaymentIntentID)

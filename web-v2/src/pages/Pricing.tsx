@@ -315,6 +315,7 @@ export default function PricingPage() {
 
       {createFor === 'rules' && (
         <CreateRuleDialog
+          rules={rules}
           onClose={() => setCreateFor(null)}
           onCreated={() => {
             setCreateFor(null)
@@ -337,6 +338,7 @@ export default function PricingPage() {
       {createFor === 'plans' && (
         <CreatePlanDialog
           meters={meters}
+          rules={rules}
           onClose={() => setCreateFor(null)}
           onCreated={() => {
             setCreateFor(null)
@@ -351,7 +353,7 @@ export default function PricingPage() {
 
 /* ─── Create Rule Dialog ─── */
 
-function CreateRuleDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; onClose: () => void; onCreated: () => void }) {
   // Publishing under the same rule_key reprices from each customer's next
   // period on real time — but for test-clock customers the change lands in
   // the current simulated period (catalog stamps are wall-clock, ADR-070
@@ -386,7 +388,15 @@ function CreateRuleDialog({ onClose, onCreated }: { onClose: () => void; onCreat
     setSaving(true)
     setTierError('')
     try {
-      const payload: Record<string, unknown> = { rule_key: ruleKey, name, mode, currency: getActiveCurrency() }
+      // Publishing under an EXISTING key keeps that key's currency — this
+      // form has no currency field, and stamping the tenant's current
+      // default would turn a rate edit into a currency-changing republish
+      // (refused by the ADR-100 guard) after a Settings currency switch.
+      const keyVersions = rules.filter(r => r.rule_key === ruleKey.trim())
+      const currency = keyVersions.length > 0
+        ? keyVersions.reduce((a, b) => (b.version > a.version ? b : a)).currency
+        : getActiveCurrency()
+      const payload: Record<string, unknown> = { rule_key: ruleKey, name, mode, currency }
       if (mode === 'flat') {
         payload.flat_amount_cents = dollarsToRateCents(flatAmount)
       }
@@ -645,7 +655,7 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
 
 /* ─── Create Plan Dialog ─── */
 
-function CreatePlanDialog({ onClose, onCreated, meters }: { onClose: () => void; onCreated: () => void; meters: Meter[] }) {
+function CreatePlanDialog({ onClose, onCreated, meters, rules }: { onClose: () => void; onCreated: () => void; meters: Meter[]; rules: RatingRule[] }) {
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
   const [interval, setInterval] = useState('monthly')
@@ -658,10 +668,17 @@ function CreatePlanDialog({ onClose, onCreated, meters }: { onClose: () => void;
     e.preventDefault()
     setSaving(true)
     try {
+      // Inherit currency from the wired meters' prices when resolvable
+      // (ADR-100: plan and its meters' prices must agree — the backend
+      // refuses a mismatch, so don't stamp the tenant default blindly).
+      const inherited = meterIds
+        .map(id => meters.find(m => m.id === id)?.rating_rule_version_id)
+        .map(rid => rules.find(r => r.id === rid)?.currency)
+        .find(c => !!c)
       await api.createPlan({
         name,
         code,
-        currency: getActiveCurrency(),
+        currency: inherited ?? getActiveCurrency(),
         billing_interval: interval,
         base_amount_cents: Math.round(parseFloat(basePrice || '0') * 100),
         base_bill_timing: billTiming,
