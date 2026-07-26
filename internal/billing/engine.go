@@ -41,7 +41,6 @@ func roundDays(d time.Duration) int {
 	return int(math.Round(d.Hours() / 24))
 }
 
-
 // Engine orchestrates the billing cycle: finds subscriptions due for billing,
 // aggregates usage, computes charges, and generates invoices with line items.
 //
