@@ -16,10 +16,13 @@ ALTER TABLE recipe_instances
     ADD CONSTRAINT recipe_instances_tenant_id_recipe_key_key
     UNIQUE (tenant_id, recipe_key);
 
+-- The mode-aware policy's USING clause references livemode, so the column
+-- drop is dependency-blocked until the policy goes — policy BEFORE column.
+DROP POLICY IF EXISTS tenant_isolation ON recipe_instances;
+
 ALTER TABLE recipe_instances
     DROP COLUMN livemode;
 
-DROP POLICY IF EXISTS tenant_isolation ON recipe_instances;
 CREATE POLICY tenant_isolation ON recipe_instances FOR ALL USING (
     current_setting('app.bypass_rls', true) = 'on'
     OR tenant_id = current_setting('app.tenant_id', true)
