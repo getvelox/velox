@@ -476,7 +476,14 @@ func (e *Engine) evaluateThresholds(ctx context.Context, sub domain.Subscription
 				}
 				qty := pl.Quantity.IntPart()
 				loc := e.tenantLocation(ctx, sub.TenantID)
-				fullCycleDays := roundDays(advanceBillingPeriod(periodStart, plan.BillingInterval, loc, sub.BillingAnchorDay).Sub(periodStart))
+				// Anchor derived from THE PERIOD BEING BILLED, never the
+				// sub's live billing_anchor_day — a cross-interval swap
+				// rewrites the sub anchor before this window closes and
+				// the mutated anchor stretches the denominator (the #581
+				// "15/46 days" leak; that fix covered emitBaseSegmentLine's
+				// four billers but missed this fifth copy of the math).
+				anchorDay := domain.AnchorDayFor(periodStart, sub.BillingTime, plan.BillingInterval, loc)
+				fullCycleDays := roundDays(advanceBillingPeriod(periodStart, plan.BillingInterval, loc, anchorDay).Sub(periodStart))
 				segDays := roundDays(now.Sub(periodStart))
 				if fullCycleDays > 0 && segDays < fullCycleDays {
 					prorated := money.RoundHalfToEven(plan.BaseAmountCents*qty*int64(segDays), int64(fullCycleDays))
