@@ -441,7 +441,9 @@ func (m *memStore) UpdateTaxAtomic(_ context.Context, tenantID, invoiceID string
 	inv.TaxPendingReason = update.TaxPendingReason
 	inv.TaxErrorCode = update.TaxErrorCode
 	inv.TaxNextRetryAt = update.TaxNextRetryAt
-	inv.TaxRetryCount++
+	if !update.InitialAttempt {
+		inv.TaxRetryCount++
+	}
 	inv.TotalAmountCents = update.TotalAmountCents
 	due := inv.TotalAmountCents - inv.AmountPaidCents - inv.CreditsAppliedCents
 	if due < 0 {

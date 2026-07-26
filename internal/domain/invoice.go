@@ -340,6 +340,17 @@ type InvoiceTaxRetryUpdate struct {
 	// public-token + tax-commit side-effects as manual Finalize),
 	// not inside this atomic update.
 	TaxNextRetryAt *time.Time
+	// InitialAttempt marks the finalize-time FIRST computation of an
+	// operator-composed invoice's tax — which is not a retry, so it
+	// must not bump tax_retry_count. Before this flag every manual
+	// invoice's first successful computation booked itself as
+	// "retry #1" (through the shared UpdateTaxAtomic writer), making
+	// tax_retry_count mean different things per invoice type: cycle
+	// invoices' build-time computation never counted. With it, the
+	// counter uniformly means "attempts AFTER the initial
+	// computation" — the operator Retry-tax button and the ADR-017
+	// reconciler still count every attempt they make.
+	InitialAttempt bool
 }
 
 type InvoiceLineItem struct {

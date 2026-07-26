@@ -1079,6 +1079,7 @@ Server-derived from invoice fields. Suppressed for healthy / paid / voided / dra
 - [ ] Healthy/paid/voided/draft → no banner.
 
 ### Retry tax
+- [x] **A healthy one-off invoice shows no "Tax retries" diagnostic (fixed 2026-07-26):** finalize a manual invoice with manual-provider tax → `tax_retry_count` stays **0** (the finalize-time first computation is not a retry) and the invoice page renders **no** "Diagnostic detail · Tax retries" card. Retries still count uniformly: the Retry-tax button, the background worker, and a re-finalize of a STUCK draft each bump the counter — for cycle and manual invoices alike. *(operator-reported on NIM-000258; automated + mutation-verified: `TestUpdateTaxAtomic_InitialAttemptDoesNotCountAsRetry`.)*
 - [ ] Banner showing → click **Retry tax** → button "Retrying…" → audit log row `action='retry_tax'` with before/after attention codes.
 - [ ] Issue fixed → invoice has `tax_status='ok'`, banner disappears, toast "Tax recalculated successfully".
 - [ ] Still failing → banner refreshes with new reason. Each click bumps `tax_retry_count`.
