@@ -243,6 +243,28 @@ func parseRecipe(data []byte) (domain.Recipe, error) {
 		if pr.AggregationMode == "" {
 			mode = domain.AggSum
 		}
+		// dimension_match keys/values must be non-empty scalars: a rule
+		// carrying an empty key or a nested value can never match an event's
+		// flat dimension map, so it would install as a dead binding that
+		// silently prices its usage at $0. Dimension VOCABULARY is an open
+		// set (operators send arbitrary dimensions), so specific key names
+		// are not validated here — the embedded catalogs' coherence with the
+		// LiteLLM mapper's emitted keys is CI-locked separately.
+		for k, v := range pr.DimensionMatch {
+			if strings.TrimSpace(k) == "" {
+				return domain.Recipe{}, fmt.Errorf("recipe %q: pricing_rules[%d] dimension_match has an empty key", raw.Key, i)
+			}
+			switch val := v.(type) {
+			case string:
+				if strings.TrimSpace(val) == "" {
+					return domain.Recipe{}, fmt.Errorf("recipe %q: pricing_rules[%d] dimension_match[%q] is empty", raw.Key, i, k)
+				}
+			case bool, int, int64, float64:
+				// scalar — fine
+			default:
+				return domain.Recipe{}, fmt.Errorf("recipe %q: pricing_rules[%d] dimension_match[%q] must be a scalar, got %T", raw.Key, i, k, v)
+			}
+		}
 		out.PricingRules = append(out.PricingRules, domain.RecipePricingRule{
 			MeterKey: pr.Meter, RatingRuleKey: pr.RatingRule,
 			DimensionMatch: pr.DimensionMatch, AggregationMode: mode, Priority: pr.Priority,
