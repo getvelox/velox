@@ -405,3 +405,75 @@ func TestService_Instantiate_RefusesDivergentMeter(t *testing.T) {
 		t.Errorf("meters after refusal: got %d, want 1 (operator's meter only)", n)
 	}
 }
+
+// countRowsMode is countRows with an explicit mode — RLS scopes the count to
+// that mode's rows (post-0157 recipe_instances included).
+func countRowsMode(t *testing.T, db *postgres.DB, tenantID, table string, live bool) int {
+	t.Helper()
+	tx, err := db.BeginTx(postgres.WithLivemode(context.Background(), live), postgres.TxTenant, tenantID)
+	if err != nil {
+		t.Fatalf("begin count tx (live=%v): %v", live, err)
+	}
+	defer postgres.Rollback(tx)
+	var n int
+	q := fmt.Sprintf("SELECT count(*) FROM %s", table)
+	if err := tx.QueryRowContext(context.Background(), q).Scan(&n); err != nil {
+		t.Fatalf("count %s (live=%v): %v", table, live, err)
+	}
+	return n
+}
+
+// TestService_Instantiate_LivemodePartitioned is the regression test for the
+// livemode-blind badge (migration 0157). Before the fix recipe_instances had
+// no livemode column, so a test-mode install's badge gated the live-mode
+// install of the same recipe: the live apply returned the TEST instance as a
+// "no-op" and Live showed "Installed" with zero live pricing objects. Each
+// mode must install independently and stay idempotent within itself.
+func TestService_Instantiate_LivemodePartitioned(t *testing.T) {
+	f := newRecipeFixture(t)
+	tenantID := testutil.CreateTestTenant(t, f.db, "livemode partitioned install")
+	testCtx := postgres.WithLivemode(context.Background(), false)
+	liveCtx := postgres.WithLivemode(context.Background(), true)
+
+	testInst, err := f.svc.Instantiate(testCtx, tenantID, "anthropic_style", nil, InstantiateOptions{})
+	if err != nil {
+		t.Fatalf("test-mode apply: %v", err)
+	}
+
+	// The live-mode apply must be a REAL install, not a no-op against the
+	// test badge: fresh instance, fresh live objects.
+	liveInst, err := f.svc.Instantiate(liveCtx, tenantID, "anthropic_style", nil, InstantiateOptions{})
+	if err != nil {
+		t.Fatalf("live-mode apply after test-mode apply: %v", err)
+	}
+	if liveInst.ID == testInst.ID {
+		t.Fatalf("live-mode apply no-op'd against the test-mode badge (returned instance %s) — the livemode-blind bug is back", testInst.ID)
+	}
+	for _, tbl := range []string{"recipe_instances", "plans", "meters", "rating_rule_versions"} {
+		if n := countRowsMode(t, f.db, tenantID, tbl, true); n == 0 {
+			t.Errorf("%s: live mode has 0 rows after live apply — install landed in the wrong mode", tbl)
+		}
+	}
+
+	// Badges are mode-scoped in both directions.
+	got, err := f.store.GetByKey(testCtx, tenantID, "anthropic_style")
+	if err != nil || got.ID != testInst.ID {
+		t.Errorf("test-mode badge: got (%v, %v), want instance %s", got.ID, err, testInst.ID)
+	}
+	got, err = f.store.GetByKey(liveCtx, tenantID, "anthropic_style")
+	if err != nil || got.ID != liveInst.ID {
+		t.Errorf("live-mode badge: got (%v, %v), want instance %s", got.ID, err, liveInst.ID)
+	}
+
+	// Idempotency still holds WITHIN each mode: re-apply is a no-op.
+	again, err := f.svc.Instantiate(liveCtx, tenantID, "anthropic_style", nil, InstantiateOptions{})
+	if err != nil {
+		t.Fatalf("live re-apply: %v", err)
+	}
+	if again.ID != liveInst.ID {
+		t.Errorf("live re-apply minted a new instance %s, want existing %s", again.ID, liveInst.ID)
+	}
+	if n := countRowsMode(t, f.db, tenantID, "plans", true); n != 1 {
+		t.Errorf("live plans after re-apply: got %d, want 1 (no duplicate)", n)
+	}
+}

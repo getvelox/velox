@@ -23,7 +23,7 @@ A recipe is an **idempotent, additive provisioning EVENT**, not an owned resourc
 
 `recipe.Service.Instantiate` (`internal/recipe/service.go`) runs, in one `db.BeginTx(ctx, postgres.TxTenant, tenantID)`:
 
-1. **Idempotency gate first.** `store.GetByKeyTx` checks the badge (`recipe_instances`, keyed `UNIQUE(tenant_id, recipe_key)`, schema unchanged since migration `0055_recipe_instances`). If it exists, return it — no further work, no writes attempted.
+1. **Idempotency gate first.** `store.GetByKeyTx` checks the badge (`recipe_instances`, keyed `UNIQUE(tenant_id, livemode, recipe_key)` since migration `0157`; `0055` shipped it mode-blind — see the 2026-07-26 amendment below). If it exists, return it — no further work, no writes attempted.
 2. **Adopt-or-create the shared catalog.** Rating rules adopt an existing `rule_key` at its current version, never republish (see Money safety #2). Meters adopt an existing `key` only if `aggregation` matches, else refuse loud (see Money safety #3).
 3. **Generate one fresh, born-unique plan.** `freePlanCode` (`internal/recipe/service.go`) takes the recipe's desired code and, if it's taken, walks `<code>_2`, `<code>_3`, … until it finds a free one — the *incumbent* is never touched, renamed, or read for comparison. Wired to the adopted/created meter; base fee amount and `base_bill_timing` come from the operator's instantiate-time params (`RecipePlan.BaseBillTiming`, verbatim, no second-guessing); currency is inherited from the adopted rating rules, not from the plan's own override.
 4. **Existence-checked create** for the (optional) dunning policy and webhook endpoint — `UpsertPolicyTx` / `CreateEndpointTx`, no adoption question because these aren't natural-keyed shared state the way a plan code is.
@@ -32,6 +32,8 @@ A recipe is an **idempotent, additive provisioning EVENT**, not an owned resourc
 ### Idempotency
 
 The badge is the gate, checked before any write. Re-applying an already-installed recipe is a **no-op that returns the existing instance** — same `id`, same `created_objects`, same HTTP `201`. Never a 409, never a duplicate plan.
+
+**Amendment (2026-07-26, m0157): the badge is scoped per livemode.** `0055` shipped the badge mode-blind while everything a recipe provisions is mode-partitioned (0020) — so a test-mode install's badge gated the live-mode install of the same recipe, which "no-op'd" into a Live dashboard showing *Installed* with zero live pricing objects. The badge now carries `livemode` (0020 treatment: mode-scoped unique, RLS predicate, session-stamped insert trigger), so "applied once" means *once per mode*, matching the objects the badge records. The class lesson: a mode-blind tenant table is only safe when its lookups ride FK-scoped mode-aware parents; the badge is addressed by a **natural key** (`recipe_key`), the one shape that argument doesn't cover — `TestRLSIsolation_AllModeAwareTablesHaveLivemodePredicate` now derives the mode-aware set from the schema so the next such table can't ship silently.
 
 ### No uninstall, no dismiss
 
