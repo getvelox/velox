@@ -136,3 +136,59 @@ Keeping it timestamp-precise matches Stripe behaviour.
   to match Stripe's three-mode knob.
 - Half-day inclusive at end (operator-confirmed credit on cancel
   mid-day).
+
+## Amendment (2026-07-26): the segment-aware regression and the day-grade 'add' clamp
+
+Segment-aware billing (2026-05-19, `itemBaseSegments`) silently
+regressed this ADR's core guarantee. The `subscription_item_changes`
+trigger (migrations 0029/0129) stamps every item INSERT with an `add`
+row at the RAW creation instant, and because this ADR snaps the first
+period start BACKWARD to the signup day's midnight, that row lands
+strictly inside the cycle-close window (`changed_at > period_start`).
+The segment walk read it as a mid-period add and re-prorated a full
+first period — "prorated 30/31 days" on a full month, the exact
+symptom in this ADR's Context. Found live on FLOW I1 (invoice
+NIM-000247, $28.06 instead of $29). The in_advance day-1 path
+(`buildOnCreateInvoice`) reads only the snapped period bounds and was
+never affected — so the two cadences disagreed about the same period.
+
+**Fix**: `itemBaseSegments` clamps a first-in-window `add` whose
+`changed_at` falls on the period-start **calendar day (tenant TZ)** to
+`period_start` itself. The predicate is day-grade policy, not
+creation-row identification — no exact creation-vs-AddItem marker
+exists in the schema, and none is needed: an add on the period's first
+day owes the whole period regardless of which flow inserted it. The
+clamp targets `period_start` itself (never `beginningOfDay`) so
+threshold-reset and org-TZ-seam (ADR-091) periods that legitimately
+start mid-day stay safe. The AddItem handler's in_advance immediate
+proration clamps the same way (`remainingDays = totalDays` on a
+period-start-day add) so both cadences charge the full period.
+
+**Deliberate consequences**:
+
+- A first-period immediate cancel bills from `period_start` (signup
+  day counts whole) — a same-day create-then-cancel now bills 1
+  day-grade day where it previously billed $0 for a consumed day.
+  This also makes the in_arrears cancel amount agree with the
+  in_advance cancel-credit twin (both net 1 elapsed day).
+- First-invoice usage windows start at `period_start`, so signup-day
+  events ingested before the creation instant (explicit past
+  timestamps / backfill) now bill; base and usage line periods equal
+  the invoice period on every surface.
+- An operator AddItem landing on a RENEWAL period's first tenant-TZ
+  day bills the full period. **Asymmetry, on purpose**: only `add`
+  rows clamp — plan/quantity/remove changes keep timestamp-precise
+  numerators per this ADR's "Plan-change proration" consequence.
+  Mid-period adds (day 2+) keep instant boundaries (FLOW B20 pin).
+
+**Accepted edges** (documented, not coded around):
+
+- Same-day cancel→recreate on the same meter double-counts the
+  morning's usage (and ≤1 day of base when the cancel was post-noon):
+  the predecessor's final invoice billed through the cancel instant
+  and the successor's day-grade window re-covers the day. Bounded to
+  one day; revisit if the wedge makes same-day migration common.
+- An org-TZ change between signup and first close can shift the
+  calendar-day comparison so the clamp misses and that one sub still
+  bills 30/31 (under-bill, ~1/31) — ADR-091 seam class, picked up by
+  the deferred billing/display TZ decouple (ADR-092).

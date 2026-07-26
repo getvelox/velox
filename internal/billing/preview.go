@@ -237,7 +237,10 @@ func (e *Engine) previewWithWindow(ctx context.Context, sub domain.Subscription,
 	// swaps, quantity changes, and item removals qualify — the 'add' rows
 	// include every item's INITIAL creation (emitted by the subscription_items
 	// insert trigger, migration 0029), which is not a mid-period change and
-	// would false-positive the warning on every sub in its first period. Same
+	// would false-positive the warning on every sub in its first period. Since
+	// the ADR-012 amendment (2026-07-26) the cycle's segment walk agrees:
+	// itemBaseSegments clamps a period-start-day 'add' to periodStart, so a
+	// first period bills the full base and this filter matches the money. Same
 	// [periodStart, periodEnd] window the cycle's segment-aware billing keys
 	// off. e.subs is always wired in production and the create_preview path;
 	// the nil-guard only spares narrow subs-less unit tests (the warning is

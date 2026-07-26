@@ -906,6 +906,19 @@ func (h *Handler) addItem(w http.ResponseWriter, r *http.Request) {
 			subBefore = sub
 			if sub.Status == domain.SubscriptionActive {
 				prorationRemainingDays, prorationTotalDays = remainingPeriodRatio(sub, clock.Now(ctx))
+				// Day-grade clamp (ADR-012 amendment 2026-07-26): an item
+				// added ON the period-start calendar day (tenant TZ) owes
+				// the whole period — the add day counts whole, matching
+				// the cycle-close segment clamp in billing.itemBaseSegments.
+				// Without this a post-noon day-1 add pays 30/31 in_advance
+				// while its in_arrears twin bills the full period at close.
+				// Adds only: plan/quantity/remove changes stay instant-
+				// precise per ADR-012's Consequences, so their handlers
+				// don't clamp.
+				if prorationRemainingDays > 0 && sub.CurrentBillingPeriodStart != nil &&
+					domain.SameCalendarDayIn(clock.Now(ctx), *sub.CurrentBillingPeriodStart, h.tenantLoc(ctx, tenantID)) {
+					prorationRemainingDays = prorationTotalDays
+				}
 			}
 		}
 	}
