@@ -975,6 +975,7 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 
 - [x] `GET /v1/recipes` → 3 entries (anthropic_style, openai_style, replicate_style) — all AI-native after the Phase 2 wedge-alignment trim. *(walked 2026-07-26 UI: 3 cards live.)*
 - [x] `POST /v1/recipes/{key}/preview` → projected meters/rating rules/pricing rules/plans/dunning/webhooks (no DB writes). No `audit_log` row is written (read-only preview, not a "Created recipe"). *(walked 2026-07-26 UI: openai Preview rendered GPT-5.1 prices + "OpenAI-style API — monthly, USD"; recipe audit rows stayed 0.)*
+- [x] Preview's Prices section shows every price WITH its rate in the meter's own units — token rules per 1M tokens ("Claude Opus 4.5 input — $5.00 / 1M tokens"), per-second rules per second ("A100 — $0.0014 / second") — full list scrollable, nothing truncated. *(walked 2026-07-26 across all 3 recipes; was names-only truncated at 5 — user catch: a review screen must show the numbers it exists to review.)*
 - [x] Unknown key → 404. *(walked 2026-07-26.)*
 
 ## FLOW R2: Instantiate
