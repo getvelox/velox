@@ -148,7 +148,7 @@ export default function MeterDetailPage() {
   if (loading) {
     return (
       <Layout>
-        <DetailSkeleton to="/pricing" parentLabel="Pricing" />
+        <DetailSkeleton to="/pricing?tab=meters" parentLabel="Meters" />
       </Layout>
     )
   }
@@ -174,7 +174,7 @@ export default function MeterDetailPage() {
 
   return (
     <Layout>
-      <DetailBreadcrumb to="/pricing" parentLabel="Pricing" currentLabel={meter.name} />
+      <DetailBreadcrumb to="/pricing?tab=meters" parentLabel="Meters" currentLabel={meter.name} />
 
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
