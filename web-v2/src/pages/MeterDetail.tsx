@@ -297,7 +297,14 @@ export default function MeterDetailPage() {
               )}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground text-center py-4">No pricing rule linked</p>
+            <div className="text-center py-4">
+              <p className="text-sm text-muted-foreground">
+                No default pricing rule — usage not matched by a rule below <span className="text-amber-500">will not be billed</span>.
+              </p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => setDefaultRuleOpen(true)}>
+                Link a price
+              </Button>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -475,8 +482,10 @@ export default function MeterDetailPage() {
           title="Delete pricing rule?"
           description={
             <>
-              This rule stops applying to new events at finalize time. Invoices
-              already finalized are unaffected. Type <span className="font-mono">delete</span> to confirm.
+              Deletes the rule matching <span className="font-mono">{Object.entries(deleteTarget?.dimension_match ?? {}).map(([k, v]) => `${k}=${v}`).join(', ') || 'every event'}</span>
+              {' '}(priced by {ratingRules?.data.find(r => r.id === deleteTarget?.rating_rule_version_id)?.name ?? 'its price'}).
+              Its usage stops billing from each customer's next invoice; invoices already finalized are unaffected.
+              Type <span className="font-mono">delete</span> to confirm.
             </>
           }
           confirmWord="delete"
@@ -637,7 +646,7 @@ function CreatePricingRuleDialog({
         <DialogHeader>
           <DialogTitle>Add dimension-matched pricing rule</DialogTitle>
           <DialogDescription>
-            Match events whose dimensions are a superset of the keys below. Leave empty to match every event.
+            Applies to events that include all of the values below. Leave empty to match every event.
           </DialogDescription>
         </DialogHeader>
 
@@ -676,7 +685,7 @@ function CreatePricingRuleDialog({
                           <Trash2 size={14} />
                         </Button>
                       </TooltipTrigger>
-                      <TooltipContent>A meter requires at least one dimension.</TooltipContent>
+                      <TooltipContent>The last row can't be removed — leave it blank to match every event.</TooltipContent>
                     </Tooltip>
                   ) : (
                     <Button
@@ -696,7 +705,7 @@ function CreatePricingRuleDialog({
               <Plus size={14} className="mr-1.5" /> Add dimension
             </Button>
             <p className="text-xs text-muted-foreground mt-2">
-              Values <span className="font-mono">true</span>, <span className="font-mono">false</span>, and numeric strings are coerced; everything else is treated as a string.
+              Values that look like numbers or <span className="font-mono">true</span>/<span className="font-mono">false</span> are matched as such; anything else matches as text.
             </p>
           </div>
 
