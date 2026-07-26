@@ -4,7 +4,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useNavigate } from 'react-router-dom'
 import { api, formatDateTime } from '@/lib/api'
-import type { Recipe, RecipeDetail, RecipeOverrideSchema, RecipePreview } from '@/lib/api'
+import type { RecipeListItem } from '@/lib/gen/schemas/recipeListItem'
+import type { RecipeDetail } from '@/lib/gen/schemas/recipeDetail'
+import type { RecipeOverride } from '@/lib/gen/schemas/recipeOverride'
+import type { RecipePreviewResult } from '@/lib/gen/schemas/recipePreviewResult'
 import { showApiError } from '@/lib/formErrors'
 import { Layout } from '@/components/Layout'
 
@@ -13,7 +16,6 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -29,7 +31,7 @@ import { Box, Loader2, Eye, Sparkles, AlertTriangle, CheckCircle2 } from 'lucide
 
 export default function RecipesPage() {
   usePageTitle('Recipes')
-  const [selected, setSelected] = useState<Recipe | null>(null)
+  const [selected, setSelected] = useState<RecipeListItem | null>(null)
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['recipes'],
@@ -97,7 +99,7 @@ export default function RecipesPage() {
   )
 }
 
-function RecipeCard({ recipe, onConfigure }: { recipe: Recipe; onConfigure: () => void }) {
+function RecipeCard({ recipe, onConfigure }: { recipe: RecipeListItem; onConfigure: () => void }) {
   const c = recipe.creates
   const installed = !!recipe.instantiated
 
@@ -157,11 +159,11 @@ function Chip({ n, label }: { n: number; label: string }) {
   )
 }
 
-function RecipeDialog({ recipe, onClose }: { recipe: Recipe; onClose: () => void }) {
+function RecipeDialog({ recipe, onClose }: { recipe: RecipeListItem; onClose: () => void }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const [overrides, setOverrides] = useState<Record<string, string | number | boolean>>({})
-  const [preview, setPreview] = useState<RecipePreview | null>(null)
+  const [overrides, setOverrides] = useState<Record<string, string | number>>({})
+  const [preview, setPreview] = useState<RecipePreviewResult | null>(null)
 
   const detailQuery = useQuery({
     queryKey: ['recipe', recipe.key],
@@ -192,9 +194,11 @@ function RecipeDialog({ recipe, onClose }: { recipe: Recipe; onClose: () => void
       queryClient.invalidateQueries({ queryKey: ['recipes'] })
       onClose()
       // Send the operator straight to the catalog — the new plan is the
-      // most likely next thing they want to look at.
-      if (res.created_objects.plan_ids.length > 0) {
-        navigate(`/plans/${res.created_objects.plan_ids[0]}`)
+      // most likely next thing they want to look at. plan_ids is omitted
+      // when empty (server-side omitempty), so guard the read.
+      const planId = res.created_objects.plan_ids?.[0]
+      if (planId) {
+        navigate(`/plans/${planId}`)
       } else {
         navigate('/pricing')
       }
@@ -202,7 +206,7 @@ function RecipeDialog({ recipe, onClose }: { recipe: Recipe; onClose: () => void
     onError: (err) => showApiError(err, 'Install failed'),
   })
 
-  const setOverride = (k: string, v: string | number | boolean) => {
+  const setOverride = (k: string, v: string | number) => {
     setOverrides(prev => ({ ...prev, [k]: v }))
   }
 
@@ -232,7 +236,7 @@ function RecipeDialog({ recipe, onClose }: { recipe: Recipe; onClose: () => void
                 <OverrideField
                   key={schema.key}
                   schema={schema}
-                  value={overrides[schema.key] ?? schema.default ?? ''}
+                  value={overrides[schema.key] ?? String(schema.default ?? '')}
                   onChange={(v) => setOverride(schema.key, v)}
                 />
               ))}
@@ -309,21 +313,13 @@ function OverrideField({
   value,
   onChange,
 }: {
-  schema: RecipeOverrideSchema
-  value: string | number | boolean
-  onChange: (v: string | number | boolean) => void
+  schema: RecipeOverride
+  value: string | number
+  onChange: (v: string | number) => void
 }) {
   const id = `override-${schema.key}`
   const label = overrideLabel(schema.key)
-  const hint = OVERRIDE_LABELS[schema.key]?.hint ?? schema.description
-  if (schema.type === 'boolean') {
-    return (
-      <div className="flex items-center justify-between">
-        <Label htmlFor={id} className="text-sm">{label}</Label>
-        <Switch id={id} checked={!!value} onCheckedChange={onChange} />
-      </div>
-    )
-  }
+  const hint = OVERRIDE_LABELS[schema.key]?.hint
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
@@ -332,11 +328,11 @@ function OverrideField({
       </div>
       <Input
         id={id}
-        type={schema.type === 'number' ? 'number' : 'text'}
+        type={schema.type === 'int' ? 'number' : 'text'}
         value={String(value)}
         onChange={(e) => {
           const raw = e.target.value
-          onChange(schema.type === 'number' ? Number(raw) : raw)
+          onChange(schema.type === 'int' ? Number(raw) : raw)
         }}
         className="mt-1.5"
         maxLength={schema.max_length}
@@ -346,9 +342,8 @@ function OverrideField({
   )
 }
 
-function ObjectsList({ preview }: { preview: RecipePreview }) {
+function ObjectsList({ preview }: { preview: RecipePreviewResult }) {
   const sections: { label: string; items: string[] }[] = []
-  if (preview.objects.products?.length) sections.push({ label: 'Products', items: preview.objects.products.map(p => p.name) })
   if (preview.objects.meters?.length) sections.push({ label: 'What gets counted', items: preview.objects.meters.map(m => m.name) })
   if (preview.objects.rating_rules?.length) sections.push({ label: 'Prices', items: preview.objects.rating_rules.map(r => r.name || r.key) })
   if (preview.objects.plans?.length) sections.push({ label: 'Plan', items: preview.objects.plans.map(p => `${p.name} — ${p.billing_interval}, ${p.currency}`) })

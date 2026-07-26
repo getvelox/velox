@@ -854,6 +854,343 @@ components:
           type: integer
           format: int64
 
+    RecipeOverride:
+      type: object
+      description: >-
+        One override key declared in a recipe's `overridable` list. Drives
+        validation at instantiate time and the override form in the
+        dashboard's preview dialog.
+      required: [key, type, default]
+      properties:
+        key:
+          type: string
+        type:
+          type: string
+          enum: [string, int]
+        default:
+          description: Default value applied when the override is not supplied.
+        enum:
+          type: array
+          items:
+            type: string
+        max_length:
+          type: integer
+        pattern:
+          type: string
+
+    RecipeMeter:
+      type: object
+      required: [key, name, unit, aggregation]
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        unit:
+          type: string
+        aggregation:
+          type: string
+
+    RecipeRatingRule:
+      type: object
+      required: [key, mode, currency, flat_amount_cents, overage_unit_amount_cents]
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [flat, graduated, package]
+        currency:
+          type: string
+        flat_amount_cents:
+          type: string
+          description: Per-unit rate in cents, as a decimal string (see RatingRule.flat_amount_cents).
+        graduated_tiers:
+          type: array
+          items:
+            type: object
+            properties:
+              up_to:
+                type: integer
+              unit_amount_cents:
+                type: string
+                description: Per-unit rate in cents, as a decimal string.
+        package_size:
+          type: integer
+          format: int64
+        package_amount_cents:
+          type: integer
+          format: int64
+        overage_unit_amount_cents:
+          type: string
+          description: Per-unit overage rate in cents, as a decimal string.
+
+    RecipePricingRule:
+      type: object
+      required: [meter_key, rating_rule_key, dimension_match, aggregation_mode, priority]
+      properties:
+        meter_key:
+          type: string
+        rating_rule_key:
+          type: string
+        dimension_match:
+          type: object
+          additionalProperties: true
+        aggregation_mode:
+          type: string
+          enum: [sum, count, last_during_period, last_ever, max]
+        priority:
+          type: integer
+
+    RecipePlan:
+      type: object
+      required: [code, name, currency, billing_interval, base_amount_cents, meter_keys]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        currency:
+          type: string
+        billing_interval:
+          type: string
+          enum: [monthly, yearly]
+        base_amount_cents:
+          type: integer
+          format: int64
+        base_bill_timing:
+          type: string
+          enum: [in_advance, in_arrears]
+          description: Optional; empty defaults to in_arrears at plan creation (ADR-031).
+        meter_keys:
+          type: array
+          items:
+            type: string
+
+    RecipeDunningPolicy:
+      type: object
+      required: [name, max_retries, intervals_hours, final_action]
+      properties:
+        name:
+          type: string
+        max_retries:
+          type: integer
+        intervals_hours:
+          type: array
+          items:
+            type: integer
+        final_action:
+          type: string
+
+    RecipeWebhook:
+      type: object
+      required: [events, url_placeholder]
+      properties:
+        events:
+          type: array
+          items:
+            type: string
+        url_placeholder:
+          type: string
+
+    RecipeCreates:
+      type: object
+      description: >-
+        Per-role count of objects a recipe will produce when instantiated.
+        Recipes create no product entity — there is no `products` count.
+      required: [meters, rating_rules, pricing_rules, plans, dunning_policies, webhook_endpoints]
+      properties:
+        meters:
+          type: integer
+        rating_rules:
+          type: integer
+        pricing_rules:
+          type: integer
+        plans:
+          type: integer
+        dunning_policies:
+          type: integer
+        webhook_endpoints:
+          type: integer
+
+    RecipeCreatedObjects:
+      type: object
+      description: >-
+        Per-role map of entity IDs a recipe apply produced (including ADOPTED
+        catalog objects — apply reconnects to an existing meter/rule graph
+        rather than duplicating it, ADR-085). Every field is omitted when
+        empty; clients must guard reads.
+      properties:
+        meter_ids:
+          type: array
+          items:
+            type: string
+        rating_rule_ids:
+          type: array
+          items:
+            type: string
+        pricing_rule_ids:
+          type: array
+          items:
+            type: string
+        plan_ids:
+          type: array
+          items:
+            type: string
+        dunning_policy_id:
+          type: string
+        webhook_endpoint_id:
+          type: string
+
+    RecipeInstance:
+      type: object
+      description: >-
+        The install badge: the record of a recipe being applied for a tenant
+        (scoped per livemode since m0157). Field names are `recipe_key` /
+        `recipe_version` — NOT `key`/`version`, which the recipe template
+        itself uses.
+      required: [id, recipe_key, recipe_version, overrides, created_objects, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+          description: Omitted when empty.
+        recipe_key:
+          type: string
+        recipe_version:
+          type: string
+        overrides:
+          type: object
+          additionalProperties: true
+        created_objects:
+          $ref: "#/components/schemas/RecipeCreatedObjects"
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          description: Operator email or API key ID. Omitted when empty.
+
+    Recipe:
+      type: object
+      description: >-
+        A recipe template as served by list/detail: the full parsed YAML
+        (meters, rating rules, pricing rules, plans, optional dunning policy
+        and webhook), not just display metadata.
+      required: [key, version, name, summary, overridable, meters, rating_rules, pricing_rules, plans]
+      properties:
+        key:
+          type: string
+        version:
+          type: string
+        name:
+          type: string
+        summary:
+          type: string
+        description:
+          type: string
+        overridable:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeOverride"
+        meters:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeMeter"
+        rating_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeRatingRule"
+        pricing_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipePricingRule"
+        plans:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipePlan"
+        dunning_policy:
+          $ref: "#/components/schemas/RecipeDunningPolicy"
+        webhook:
+          $ref: "#/components/schemas/RecipeWebhook"
+
+    RecipeListItem:
+      allOf:
+        - $ref: "#/components/schemas/Recipe"
+        - type: object
+          required: [creates]
+          properties:
+            creates:
+              $ref: "#/components/schemas/RecipeCreates"
+            instantiated:
+              $ref: "#/components/schemas/RecipeInstance"
+              description: >-
+                Present when this tenant (in the session's livemode) has
+                installed the recipe; absent otherwise. Drives the
+                "Installed" badge — re-apply is an idempotent no-op and
+                there is no uninstall (ADR-085).
+
+    RecipeDetail:
+      allOf:
+        - $ref: "#/components/schemas/Recipe"
+        - type: object
+          required: [creates]
+          properties:
+            creates:
+              $ref: "#/components/schemas/RecipeCreates"
+
+    RecipePreviewObjects:
+      type: object
+      description: >-
+        Would-be-created object graph, grouped by role. All arrays are
+        always present (possibly empty); optional singletons (dunning,
+        webhook) are emitted as 0-or-1-length arrays so clients iterate
+        without null guards.
+      required: [meters, rating_rules, pricing_rules, plans, dunning_policies, webhook_endpoints]
+      properties:
+        meters:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeMeter"
+        rating_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeRatingRule"
+        pricing_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipePricingRule"
+        plans:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipePlan"
+        dunning_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeDunningPolicy"
+        webhook_endpoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeWebhook"
+
+    RecipePreviewResult:
+      type: object
+      required: [key, version, objects, warnings]
+      properties:
+        key:
+          type: string
+        version:
+          type: string
+        objects:
+          $ref: "#/components/schemas/RecipePreviewObjects"
+        warnings:
+          type: array
+          items:
+            type: string
+
 paths:
   /health:
     get:
@@ -2769,3 +3106,147 @@ paths:
           description: Clock not found
         "409":
           description: Clock is not in `internal_failure` state
+
+  /v1/recipes:
+    get:
+      tags: [Recipes]
+      summary: List recipes
+      description: |
+        Every recipe in the embedded registry, tagged with this tenant's
+        installation state in the session's livemode. `instantiated` present
+        means installed (the dashboard renders an "Installed" badge instead
+        of the Install CTA); re-apply is an idempotent no-op and there is no
+        uninstall (ADR-085).
+      operationId: listRecipes
+      responses:
+        "200":
+          description: Recipe catalog with per-tenant install state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RecipeListItem"
+
+  /v1/recipes/instances:
+    get:
+      tags: [Recipes]
+      summary: List installed recipe instances
+      operationId: listRecipeInstances
+      responses:
+        "200":
+          description: Install badges for this tenant (session's livemode)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RecipeInstance"
+
+  /v1/recipes/{key}:
+    get:
+      tags: [Recipes]
+      summary: Get recipe
+      description: Registry only — no DB read, no install state.
+      operationId: getRecipe
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Recipe template with creates summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipeDetail"
+        "404":
+          description: Unknown recipe key
+
+  /v1/recipes/{key}/preview:
+    post:
+      tags: [Recipes]
+      summary: Preview recipe
+      description: |
+        Renders the recipe with caller-supplied overrides and returns the
+        would-be-created object graph. Pure in-memory — no DB writes, no
+        audit row.
+      operationId: previewRecipe
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                overrides:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Rendered object graph
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipePreviewResult"
+        "404":
+          description: Unknown recipe key
+        "422":
+          description: Overrides failed the recipe's overridable schema
+
+  /v1/recipes/{key}/instantiate:
+    post:
+      tags: [Recipes]
+      summary: Instantiate recipe (idempotent apply)
+      description: |
+        Applies the recipe for the tenant under one transaction: rating
+        rules and meters are adopted-or-created, pricing rules bound, a
+        fresh born-unique plan generated, optional dunning policy and
+        (inactive) webhook endpoint created, then the install badge written.
+        Idempotent per (tenant, livemode): re-posting an installed recipe
+        returns the EXISTING instance — 201 both times, never a 409, never
+        a duplicate plan (ADR-085; badge livemode-scoped per m0157).
+      operationId: instantiateRecipe
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                overrides:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "201":
+          description: Install badge (fresh, or existing on idempotent re-apply)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipeInstance"
+        "404":
+          description: Unknown recipe key
+        "409":
+          description: >-
+            An existing meter with the same key diverges from the recipe
+            (aggregation mismatch) — reconcile the meter before
+            instantiating.
+        "422":
+          description: Overrides failed the recipe's overridable schema

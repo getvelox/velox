@@ -43,8 +43,11 @@ import type {
   GetV1TestClocksIdSubscriptions200,
   GetV1UsageEventsParams,
   GetV1Whoami200,
+  InstantiateRecipeBody,
   Invoice,
   InvoiceWithLineItems,
+  ListRecipeInstances200,
+  ListRecipes200,
   MarginReport,
   MemberInvitation,
   PatchV1MetersIdBody,
@@ -80,8 +83,12 @@ import type {
   PostV1UsageEventsBatchBodyItem,
   PostV1UsageEventsBody,
   PostV1WebhookEndpointsEndpointsBody,
+  PreviewRecipeBody,
   ProviderCostRate,
-  PutV1ProviderCostsBody
+  PutV1ProviderCostsBody,
+  RecipeDetail,
+  RecipeInstance,
+  RecipePreviewResult
 } from './schemas';
 
 import { orvalClient } from '../orvalClient';
@@ -5398,4 +5405,470 @@ export const usePostV1TestClocksIdRetryAdvance = <TError = void,
         TContext
       > => {
       return useMutation(getPostV1TestClocksIdRetryAdvanceMutationOptions(options), queryClient);
+    }
+
+/**
+ * Every recipe in the embedded registry, tagged with this tenant's
+installation state in the session's livemode. `instantiated` present
+means installed (the dashboard renders an "Installed" badge instead
+of the Install CTA); re-apply is an idempotent no-op and there is no
+uninstall (ADR-085).
+
+ * @summary List recipes
+ */
+export const getListRecipesUrl = () => {
+
+
+
+
+  return `/v1/recipes`
+}
+
+export const listRecipes = async ( options?: RequestInit): Promise<ListRecipes200> => {
+
+  return orvalClient<ListRecipes200>(getListRecipesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListRecipesQueryKey = () => {
+    return [
+    `/v1/recipes`
+    ] as const;
+    }
+
+
+export const getListRecipesQueryOptions = <TData = Awaited<ReturnType<typeof listRecipes>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipes>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListRecipesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listRecipes>>> = () => listRecipes(requestOptions);
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listRecipes>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListRecipesQueryResult = NonNullable<Awaited<ReturnType<typeof listRecipes>>>
+export type ListRecipesQueryError = unknown
+
+
+export function useListRecipes<TData = Awaited<ReturnType<typeof listRecipes>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipes>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listRecipes>>,
+          TError,
+          Awaited<ReturnType<typeof listRecipes>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListRecipes<TData = Awaited<ReturnType<typeof listRecipes>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipes>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listRecipes>>,
+          TError,
+          Awaited<ReturnType<typeof listRecipes>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListRecipes<TData = Awaited<ReturnType<typeof listRecipes>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipes>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List recipes
+ */
+
+export function useListRecipes<TData = Awaited<ReturnType<typeof listRecipes>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipes>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListRecipesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+/**
+ * @summary List installed recipe instances
+ */
+export const getListRecipeInstancesUrl = () => {
+
+
+
+
+  return `/v1/recipes/instances`
+}
+
+export const listRecipeInstances = async ( options?: RequestInit): Promise<ListRecipeInstances200> => {
+
+  return orvalClient<ListRecipeInstances200>(getListRecipeInstancesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListRecipeInstancesQueryKey = () => {
+    return [
+    `/v1/recipes/instances`
+    ] as const;
+    }
+
+
+export const getListRecipeInstancesQueryOptions = <TData = Awaited<ReturnType<typeof listRecipeInstances>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipeInstances>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListRecipeInstancesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listRecipeInstances>>> = () => listRecipeInstances(requestOptions);
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listRecipeInstances>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListRecipeInstancesQueryResult = NonNullable<Awaited<ReturnType<typeof listRecipeInstances>>>
+export type ListRecipeInstancesQueryError = unknown
+
+
+export function useListRecipeInstances<TData = Awaited<ReturnType<typeof listRecipeInstances>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipeInstances>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listRecipeInstances>>,
+          TError,
+          Awaited<ReturnType<typeof listRecipeInstances>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListRecipeInstances<TData = Awaited<ReturnType<typeof listRecipeInstances>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipeInstances>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listRecipeInstances>>,
+          TError,
+          Awaited<ReturnType<typeof listRecipeInstances>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListRecipeInstances<TData = Awaited<ReturnType<typeof listRecipeInstances>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipeInstances>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List installed recipe instances
+ */
+
+export function useListRecipeInstances<TData = Awaited<ReturnType<typeof listRecipeInstances>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRecipeInstances>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListRecipeInstancesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+/**
+ * Registry only — no DB read, no install state.
+ * @summary Get recipe
+ */
+export const getGetRecipeUrl = (key: string,) => {
+
+
+
+
+  return `/v1/recipes/${key}`
+}
+
+export const getRecipe = async (key: string, options?: RequestInit): Promise<RecipeDetail> => {
+
+  return orvalClient<RecipeDetail>(getGetRecipeUrl(key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRecipeQueryKey = (key: string,) => {
+    return [
+    `/v1/recipes/${key}`
+    ] as const;
+    }
+
+
+export const getGetRecipeQueryOptions = <TData = Awaited<ReturnType<typeof getRecipe>>, TError = void>(key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRecipe>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRecipeQueryKey(key);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRecipe>>> = () => getRecipe(key, requestOptions);
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(key), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRecipe>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetRecipeQueryResult = NonNullable<Awaited<ReturnType<typeof getRecipe>>>
+export type GetRecipeQueryError = void
+
+
+export function useGetRecipe<TData = Awaited<ReturnType<typeof getRecipe>>, TError = void>(
+ key: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRecipe>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRecipe>>,
+          TError,
+          Awaited<ReturnType<typeof getRecipe>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRecipe<TData = Awaited<ReturnType<typeof getRecipe>>, TError = void>(
+ key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRecipe>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRecipe>>,
+          TError,
+          Awaited<ReturnType<typeof getRecipe>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRecipe<TData = Awaited<ReturnType<typeof getRecipe>>, TError = void>(
+ key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRecipe>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get recipe
+ */
+
+export function useGetRecipe<TData = Awaited<ReturnType<typeof getRecipe>>, TError = void>(
+ key: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRecipe>>, TError, TData>>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetRecipeQueryOptions(key,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+/**
+ * Renders the recipe with caller-supplied overrides and returns the
+would-be-created object graph. Pure in-memory — no DB writes, no
+audit row.
+
+ * @summary Preview recipe
+ */
+export const getPreviewRecipeUrl = (key: string,) => {
+
+
+
+
+  return `/v1/recipes/${key}/preview`
+}
+
+export const previewRecipe = async (key: string,
+    previewRecipeBody?: PreviewRecipeBody, options?: RequestInit): Promise<RecipePreviewResult> => {
+
+  return orvalClient<RecipePreviewResult>(getPreviewRecipeUrl(key),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      previewRecipeBody,)
+  }
+);}
+
+
+
+
+export const getPreviewRecipeMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewRecipe>>, TError,{key: string;data?: PreviewRecipeBody}, TContext>, request?: SecondParameter<typeof orvalClient>}
+): UseMutationOptions<Awaited<ReturnType<typeof previewRecipe>>, TError,{key: string;data?: PreviewRecipeBody}, TContext> => {
+
+const mutationKey = ['previewRecipe'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof previewRecipe>>, {key: string;data?: PreviewRecipeBody}> = (props) => {
+          const {key,data} = props ?? {};
+
+          return  previewRecipe(key,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PreviewRecipeMutationResult = NonNullable<Awaited<ReturnType<typeof previewRecipe>>>
+    export type PreviewRecipeMutationBody = PreviewRecipeBody | undefined
+    export type PreviewRecipeMutationError = void
+
+    /**
+ * @summary Preview recipe
+ */
+export const usePreviewRecipe = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewRecipe>>, TError,{key: string;data?: PreviewRecipeBody}, TContext>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof previewRecipe>>,
+        TError,
+        {key: string;data?: PreviewRecipeBody},
+        TContext
+      > => {
+      return useMutation(getPreviewRecipeMutationOptions(options), queryClient);
+    }
+
+/**
+ * Applies the recipe for the tenant under one transaction: rating
+rules and meters are adopted-or-created, pricing rules bound, a
+fresh born-unique plan generated, optional dunning policy and
+(inactive) webhook endpoint created, then the install badge written.
+Idempotent per (tenant, livemode): re-posting an installed recipe
+returns the EXISTING instance — 201 both times, never a 409, never
+a duplicate plan (ADR-085; badge livemode-scoped per m0157).
+
+ * @summary Instantiate recipe (idempotent apply)
+ */
+export const getInstantiateRecipeUrl = (key: string,) => {
+
+
+
+
+  return `/v1/recipes/${key}/instantiate`
+}
+
+export const instantiateRecipe = async (key: string,
+    instantiateRecipeBody?: InstantiateRecipeBody, options?: RequestInit): Promise<RecipeInstance> => {
+
+  return orvalClient<RecipeInstance>(getInstantiateRecipeUrl(key),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      instantiateRecipeBody,)
+  }
+);}
+
+
+
+
+export const getInstantiateRecipeMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof instantiateRecipe>>, TError,{key: string;data?: InstantiateRecipeBody}, TContext>, request?: SecondParameter<typeof orvalClient>}
+): UseMutationOptions<Awaited<ReturnType<typeof instantiateRecipe>>, TError,{key: string;data?: InstantiateRecipeBody}, TContext> => {
+
+const mutationKey = ['instantiateRecipe'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof instantiateRecipe>>, {key: string;data?: InstantiateRecipeBody}> = (props) => {
+          const {key,data} = props ?? {};
+
+          return  instantiateRecipe(key,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type InstantiateRecipeMutationResult = NonNullable<Awaited<ReturnType<typeof instantiateRecipe>>>
+    export type InstantiateRecipeMutationBody = InstantiateRecipeBody | undefined
+    export type InstantiateRecipeMutationError = void
+
+    /**
+ * @summary Instantiate recipe (idempotent apply)
+ */
+export const useInstantiateRecipe = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof instantiateRecipe>>, TError,{key: string;data?: InstantiateRecipeBody}, TContext>, request?: SecondParameter<typeof orvalClient>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof instantiateRecipe>>,
+        TError,
+        {key: string;data?: InstantiateRecipeBody},
+        TContext
+      > => {
+      return useMutation(getInstantiateRecipeMutationOptions(options), queryClient);
     }
