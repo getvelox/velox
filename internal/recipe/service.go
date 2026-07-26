@@ -146,14 +146,20 @@ func countCreates(r domain.Recipe) RecipeCreates {
 	return c
 }
 
-// ListRecipes returns every recipe in the registry tagged with this
-// tenant's installation state. One indexed read per recipe — fine at the
-// v1 catalog size (5 recipes); revisit if the catalog grows past ~50.
+// ListRecipes returns every recipe in the registry — rendered with its
+// declared defaults so no raw template syntax ("{{ .currency }}") leaks
+// into the response — tagged with this tenant's installation state. One
+// indexed read per recipe — fine at the v1 catalog size (3 recipes);
+// revisit if the catalog grows past ~50.
 func (s *Service) ListRecipes(ctx context.Context, tenantID string) ([]RecipeListItem, error) {
 	recipes := s.registry.List()
 	out := make([]RecipeListItem, 0, len(recipes))
 	for _, r := range recipes {
-		item := RecipeListItem{Recipe: r, Creates: countCreates(r)}
+		display, err := displayRecipe(r)
+		if err != nil {
+			return nil, fmt.Errorf("recipe %q: render defaults: %w", r.Key, err)
+		}
+		item := RecipeListItem{Recipe: display, Creates: countCreates(r)}
 		inst, err := s.store.GetByKey(ctx, tenantID, r.Key)
 		switch {
 		case err == nil:
@@ -181,12 +187,33 @@ type RecipeDetail struct {
 
 // GetRecipe returns the rendered-with-defaults form of a recipe so the
 // dashboard can populate the override form. No DB I/O; pure registry.
+// (This comment was true before the code was: until 2026-07-26 the RAW
+// registry recipe was returned, leaking "{{ .currency }}" template syntax
+// into the detail response.)
 func (s *Service) GetRecipe(key string) (RecipeDetail, error) {
 	r, ok := s.registry.Get(key)
 	if !ok {
 		return RecipeDetail{}, errs.ErrNotFound
 	}
-	return RecipeDetail{Recipe: r, Creates: countCreates(r)}, nil
+	display, err := displayRecipe(r)
+	if err != nil {
+		return RecipeDetail{}, fmt.Errorf("recipe %q: render defaults: %w", key, err)
+	}
+	return RecipeDetail{Recipe: display, Creates: countCreates(r)}, nil
+}
+
+// displayRecipe renders a recipe with its declared defaults for read-only
+// display surfaces (list/detail), keeping the overridable schema — which
+// renderRecipe strips because overrides are an input — so the dashboard's
+// override form still has it. Instantiate/Preview never use this: they
+// render with the caller's actual overrides.
+func displayRecipe(r domain.Recipe) (domain.Recipe, error) {
+	rendered, err := renderRecipe(r, nil)
+	if err != nil {
+		return domain.Recipe{}, err
+	}
+	rendered.Overridable = r.Overridable
+	return rendered, nil
 }
 
 // ListInstances returns the recipe_instances rows for the tenant.
@@ -342,13 +369,20 @@ func (s *Service) Instantiate(
 	// bills the latest active version of a key as-of period start (engine
 	// resolveRatedRule → GetRuleByKeyAsOf), so publishing a new version would
 	// reprice every live sub on that key. Adopt-not-republish is the
-	// load-bearing no-reprice invariant (ADR-085/ADR-070). The plan below
-	// inherits its currency from these rules so it can't be minted in a
-	// currency that mismatches the rates it bills against.
+	// load-bearing no-reprice invariant (ADR-085/ADR-070) — and adoption is
+	// gated on the money fields matching (ruleConformanceDiff): binding the
+	// plan to a same-key rule with DIFFERENT rates would make the preview lie
+	// about what the install bills, so a divergent match refuses loud instead.
+	// The plan below inherits its currency from these rules so it can't be
+	// minted in a currency that mismatches the rates it bills against.
 	ratingRuleIDByKey := make(map[string]string, len(rendered.RatingRules))
 	ruleCurrency := ""
 	for _, rr := range rendered.RatingRules {
 		if existing, err := s.pricing.GetRuleByKeyAsOf(ctx, tenantID, rr.Key, clock.Now(ctx)); err == nil {
+			if diffs := ruleConformanceDiff(existing, rr); len(diffs) > 0 {
+				return domain.RecipeInstance{}, errs.AlreadyExists("rating_rule",
+					fmt.Sprintf("price %q already exists with rates that don't match recipe %q (%s) — the install would bill the existing rates, not the recipe's; reconcile the existing price before instantiating", rr.Key, recipeKey, formatDiffs(diffs)))
+			}
 			ratingRuleIDByKey[rr.Key] = existing.ID
 			objs.RatingRuleIDs = append(objs.RatingRuleIDs, existing.ID)
 			if ruleCurrency == "" {

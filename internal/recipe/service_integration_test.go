@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/dunning"
 	"github.com/sagarsuperuser/velox/internal/errs"
@@ -475,5 +477,90 @@ func TestService_Instantiate_LivemodePartitioned(t *testing.T) {
 	}
 	if n := countRowsMode(t, f.db, tenantID, "plans", true); n != 1 {
 		t.Errorf("live plans after re-apply: got %d, want 1 (no duplicate)", n)
+	}
+}
+
+// TestService_Instantiate_RefusesDivergentRatingRule is the rule-side twin of
+// the divergent-meter refusal (2026-07-26 recipe e2e review). Adoption binds
+// the plan to the existing rule's CURRENT version — so if its money fields
+// diverge from what the recipe declares, the preview would show one price and
+// the install would bill another. That divergent adoption must refuse loud.
+func TestService_Instantiate_RefusesDivergentRatingRule(t *testing.T) {
+	f := newRecipeFixture(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, f.db, "divergent rule refuse")
+
+	// Operator already has an opus45_input price — at double the recipe's
+	// declared per-token rate.
+	if _, err := f.pricingSvc.CreateRatingRule(ctx, tenantID, pricing.CreateRatingRuleInput{
+		RuleKey: "opus45_input", Name: "Opus input (negotiated)",
+		Mode: domain.PricingFlat, Currency: "USD",
+		FlatAmountCents: decimal.RequireFromString("0.001"),
+	}); err != nil {
+		t.Fatalf("pre-create rule: %v", err)
+	}
+
+	_, err := f.svc.Instantiate(ctx, tenantID, "anthropic_style", nil, InstantiateOptions{})
+	if !errors.Is(err, errs.ErrAlreadyExists) {
+		t.Fatalf("expected refusal (ErrAlreadyExists) adopting a divergent-rate rule, got %v", err)
+	}
+
+	// Mutation-verify: nothing the recipe would have created persisted, and
+	// the operator's rule is still the only version of its key.
+	for _, tbl := range []string{"recipe_instances", "meters", "plans", "meter_pricing_rules", "dunning_policies", "webhook_endpoints"} {
+		if n := countRows(t, f.db, tenantID, tbl); n != 0 {
+			t.Errorf("%s after refusal: got %d, want 0 (tx must roll back)", tbl, n)
+		}
+	}
+	if n := countRows(t, f.db, tenantID, "rating_rule_versions"); n != 1 {
+		t.Errorf("rating_rule_versions after refusal: got %d, want 1 (operator's rule only)", n)
+	}
+}
+
+// TestService_Instantiate_AdoptsMatchingRatingRule proves the gate does not
+// over-refuse: a pre-existing rule whose money fields exactly match the
+// recipe's declaration is ADOPTED (no republish, no second version) and the
+// install completes.
+func TestService_Instantiate_AdoptsMatchingRatingRule(t *testing.T) {
+	f := newRecipeFixture(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, f.db, "matching rule adopt")
+
+	pre, err := f.pricingSvc.CreateRatingRule(ctx, tenantID, pricing.CreateRatingRuleInput{
+		RuleKey: "opus45_input", Name: "Opus input (pre-created)",
+		Mode: domain.PricingFlat, Currency: "USD",
+		FlatAmountCents: decimal.RequireFromString("0.0005"),
+	})
+	if err != nil {
+		t.Fatalf("pre-create rule: %v", err)
+	}
+
+	inst, err := f.svc.Instantiate(ctx, tenantID, "anthropic_style", nil, InstantiateOptions{})
+	if err != nil {
+		t.Fatalf("Instantiate with matching pre-existing rule: %v", err)
+	}
+	adopted := false
+	for _, id := range inst.CreatedObjects.RatingRuleIDs {
+		if id == pre.ID {
+			adopted = true
+		}
+	}
+	if !adopted {
+		t.Errorf("pre-existing matching rule %s was not adopted into created_objects", pre.ID)
+	}
+	// Adoption never republishes: the key still has exactly one version.
+	tx, err := f.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer postgres.Rollback(tx)
+	var versions int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM rating_rule_versions WHERE rule_key = 'opus45_input'`,
+	).Scan(&versions); err != nil {
+		t.Fatalf("count versions: %v", err)
+	}
+	if versions != 1 {
+		t.Errorf("opus45_input has %d versions after adoption, want 1 (never republished)", versions)
 	}
 }
