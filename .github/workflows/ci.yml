@@ -6,6 +6,23 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  # Manual/API escape hatch (2026-07-27): during the GitHub Actions
+  # event-delivery degradation, pull_request events were silently
+  # dropped for hours and no run was ever created — leaving green,
+  # protection-blocked PRs with "no checks" and nothing to retry.
+  # workflow_dispatch lets `gh workflow run ci.yml --ref <branch>`
+  # mint the run directly through the API (no webhook pipeline);
+  # its check runs attach to the head SHA, satisfying the same
+  # required checks.
+  workflow_dispatch:
+
+# One live run per ref: repeated pushes to a PR cancel the obsolete
+# run instead of queueing behind it — less event pressure, faster
+# feedback, no duplicate spend. Main pushes never cancel (history
+# builds stay complete).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
