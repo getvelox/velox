@@ -81,7 +81,6 @@ type Store interface {
 	PlanCurrenciesWiringMeters(ctx context.Context, tenantID string, meterIDs []string) ([]planCurrency, error)
 	MeterBoundKeyCurrencies(ctx context.Context, tenantID string, meterIDs []string) ([]keyCurrency, error)
 	RuleKeyResolvedCurrency(ctx context.Context, tenantID, ruleVersionID string) (keyCurrency, error)
-
 }
 
 type RatingRuleFilter struct {
