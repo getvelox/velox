@@ -170,7 +170,7 @@ export default function PlanDetailPage() {
   if (loading) {
     return (
       <Layout>
-        <DetailSkeleton to="/pricing" parentLabel="Pricing" />
+        <DetailSkeleton to="/pricing" parentLabel="Plans" />
       </Layout>
     )
   }
@@ -196,7 +196,7 @@ export default function PlanDetailPage() {
 
   return (
     <Layout>
-      <DetailBreadcrumb to="/pricing" parentLabel="Pricing" currentLabel={plan.name} />
+      <DetailBreadcrumb to="/pricing" parentLabel="Plans" currentLabel={plan.name} />
 
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
