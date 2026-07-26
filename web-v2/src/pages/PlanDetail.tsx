@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { toast } from 'sonner'
 import { api, formatCents, formatDate, formatDateTime, type Plan, type Meter, type RatingRule, type Customer } from '@/lib/api'
 import { applyApiError, showApiError } from '@/lib/formErrors'
+import { priceRate } from '@/lib/priceDisplay'
 import { Layout } from '@/components/Layout'
 import { TestClockBadge } from '@/components/TestClockBadge'
 import { statusBadgeVariant } from '@/lib/status'
@@ -121,6 +122,17 @@ export default function PlanDetailPage() {
       .filter((m): m is Meter => !!m)
   }, [plan, allMeters])
 
+  // Bindings power the meter-row pills: a meter with no DEFAULT rule can
+  // still be fully priced through dimension-matched rows (recipe installs
+  // are) — warning only when NEITHER edge prices it (the real revenue-leak
+  // state, FLOW B2b class).
+  const { data: bindingsData } = useQuery({
+    queryKey: ['meter-pricing-rules'],
+    queryFn: () => api.listAllMeterPricingRules(),
+  })
+  const dimensionRuleCount = (meterID: string): number =>
+    bindingsData?.data.filter(b => b.meter_id === meterID).length ?? 0
+
   const ruleMap = useMemo(() => {
     const map: Record<string, RatingRule> = {}
     allRules.forEach(r => { map[r.id] = r })
@@ -223,7 +235,7 @@ export default function PlanDetailPage() {
           <div className="flex divide-x divide-border">
             <div className="flex-1 px-6 py-4">
               <p className="text-sm text-muted-foreground">Base Price</p>
-              <p className="text-lg font-semibold text-foreground mt-1">{formatCents(plan.base_amount_cents)}</p>
+              <p className="text-lg font-semibold text-foreground mt-1">{formatCents(plan.base_amount_cents, plan.currency)}</p>
             </div>
             <div className="flex-1 px-6 py-4">
               <p className="text-sm text-muted-foreground">Interval</p>
@@ -312,8 +324,12 @@ export default function PlanDetailPage() {
                     <div className="flex items-center gap-2">
                       <Badge variant="secondary">{meter.aggregation}</Badge>
                       <span className="text-xs text-muted-foreground">{meter.unit}</span>
-                      {rule && (
-                        <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{rule.name}</span>
+                      {rule ? (
+                        <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{rule.name} — {priceRate(rule, meter.unit)}</span>
+                      ) : dimensionRuleCount(meter.id) > 0 ? (
+                        <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{dimensionRuleCount(meter.id)} dimension price{dimensionRuleCount(meter.id) !== 1 ? 's' : ''}</span>
+                      ) : (
+                        <span className="text-xs text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-full">No pricing rule — usage won't be billed</span>
                       )}
                       <Button
                         variant="destructive"

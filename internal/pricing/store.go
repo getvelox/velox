@@ -73,6 +73,10 @@ type Store interface {
 	// nil emit = unaudited delete.
 	DeleteMeterPricingRuleAudited(ctx context.Context, tenantID, id string, emit func(tx *sql.Tx, deleted domain.MeterPricingRule) error) error
 
+	// ListMeterPricingRules lists every binding for the tenant (dashboard
+	// rule→meter resolution; read-only).
+	ListMeterPricingRules(ctx context.Context, tenantID string) ([]domain.MeterPricingRule, error)
+
 	// Currency-coherence reads (ADR-100). "In-scope plans" = non-archived
 	// plans plus archived plans still carrying non-terminal subscriptions;
 	// key currency = latest ACTIVE version (engine resolution), Mixed when

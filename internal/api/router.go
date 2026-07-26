@@ -1584,6 +1584,7 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 			auth.Require(auth.PermPricingRead),
 			auth.Require(auth.PermPricingWrite),
 		))
+		r.With(auth.Require(auth.PermPricingRead)).Mount("/meter-pricing-rules", pricingH.AllMeterPricingRuleRoutes())
 		r.With(auth.RequireMethod(auth.PermPricingRead, auth.PermPricingWrite)).Mount("/plans", pricingH.PlanRoutes())
 		r.With(auth.RequireMethod(auth.PermPricingRead, auth.PermPricingWrite)).Mount("/rating-rules", pricingH.RatingRuleRoutes())
 		r.With(auth.Require(auth.PermPricingWrite)).Mount("/recipes", recipeH.Routes())

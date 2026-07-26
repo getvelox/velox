@@ -3,9 +3,10 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { api, formatCents, formatRate, formatDateTime } from '@/lib/api'
+import { api, formatCents, formatDateTime } from '@/lib/api'
 import type { MeterPricingRule, MeterAggregationMode, RatingRule } from '@/lib/api'
 import { showApiError } from '@/lib/formErrors'
+import { money, priceRate, unitScale } from '@/lib/priceDisplay'
 import { Layout } from '@/components/Layout'
 import { statusBadgeVariant } from '@/lib/status'
 
@@ -257,8 +258,8 @@ export default function MeterDetailPage() {
 
               {ratingRule.mode === 'flat' && (
                 <div>
-                  <span className="text-3xl font-semibold text-foreground">{formatRate(ratingRule.flat_amount_cents)}</span>
-                  <span className="text-sm text-muted-foreground ml-2">per unit</span>
+                  <span className="text-3xl font-semibold text-foreground">{money(ratingRule.flat_amount_cents, unitScale(meter.unit).scale, ratingRule.currency)}</span>
+                  <span className="text-sm text-muted-foreground ml-2">per {unitScale(meter.unit).per}</span>
                 </div>
               )}
 
@@ -267,14 +268,14 @@ export default function MeterDetailPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Tier</TableHead>
-                      <TableHead className="text-right">Price / unit</TableHead>
+                      <TableHead className="text-right">Price / {unitScale(meter.unit).per}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {ratingRule.graduated_tiers.map((tier, i) => (
                       <TableRow key={i}>
                         <TableCell>{graduatedTierLabel(tier, i, ratingRule.graduated_tiers!)}</TableCell>
-                        <TableCell className="text-right">{formatRate(tier.unit_amount_cents)}</TableCell>
+                        <TableCell className="text-right">{money(tier.unit_amount_cents, unitScale(meter.unit).scale, ratingRule.currency)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -284,8 +285,13 @@ export default function MeterDetailPage() {
               {ratingRule.mode === 'package' && (
                 <div>
                   <span className="text-3xl font-semibold text-foreground">{ratingRule.package_size.toLocaleString()}</span>
-                  <span className="text-sm text-muted-foreground ml-2">units per package at</span>
-                  <span className="text-lg font-semibold text-foreground ml-1">{formatCents(ratingRule.package_amount_cents)}</span>
+                  <span className="text-sm text-muted-foreground ml-2">{meter.unit || 'units'} per package at</span>
+                  <span className="text-lg font-semibold text-foreground ml-1">{formatCents(ratingRule.package_amount_cents, ratingRule.currency)}</span>
+                  {ratingRule.overage_unit_amount_cents && ratingRule.overage_unit_amount_cents !== '0' && (
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Beyond full packages: {money(ratingRule.overage_unit_amount_cents, unitScale(meter.unit).scale, ratingRule.currency)} per {unitScale(meter.unit).per}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -324,7 +330,8 @@ export default function MeterDetailPage() {
               </TableHeader>
               <TableBody>
                 {rules.map(rule => {
-                  const ratingRuleName = ratingRules?.data.find(r => r.id === rule.rating_rule_version_id)?.name
+                  const ratingRuleObj = ratingRules?.data.find(r => r.id === rule.rating_rule_version_id)
+                  const ratingRuleName = ratingRuleObj?.name
                   return (
                     <TableRow key={rule.id}>
                       <TableCell className="text-sm font-mono tabular-nums">{rule.priority}</TableCell>
@@ -346,7 +353,10 @@ export default function MeterDetailPage() {
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
                         {ratingRuleName ? (
-                          <span title={rule.rating_rule_version_id}>{ratingRuleName}</span>
+                          <span title={rule.rating_rule_version_id}>
+                            {ratingRuleName}
+                            {ratingRuleObj && <span className="text-foreground"> — {priceRate(ratingRuleObj, meter.unit)}</span>}
+                          </span>
                         ) : (
                           <span className="font-mono text-xs">{rule.rating_rule_version_id.slice(0, 16)}…</span>
                         )}
@@ -431,6 +441,7 @@ export default function MeterDetailPage() {
 
       {createOpen && (
         <CreatePricingRuleDialog
+          meterUnit={meter.unit}
           meterId={meter.id}
           ratingRules={ratingRules?.data ?? []}
           onClose={() => setCreateOpen(false)}
@@ -443,6 +454,7 @@ export default function MeterDetailPage() {
 
       {defaultRuleOpen && (
         <SetDefaultRuleDialog
+          meterUnit={meter.unit}
           meterId={meter.id}
           currentRuleId={meter.rating_rule_version_id ?? ''}
           ratingRules={ratingRules?.data ?? []}
@@ -478,12 +490,14 @@ export default function MeterDetailPage() {
 
 function SetDefaultRuleDialog({
   meterId,
+  meterUnit,
   currentRuleId,
   ratingRules,
   onClose,
   onSaved,
 }: {
   meterId: string
+  meterUnit: string
   currentRuleId: string
   ratingRules: RatingRule[]
   onClose: () => void
@@ -514,7 +528,7 @@ function SetDefaultRuleDialog({
         <div>
           <Label className="text-xs uppercase tracking-wide text-muted-foreground">Rating rule</Label>
           <Select
-            items={ratingRules.map(rr => ({ value: rr.id, label: `${rr.name} — ${rr.mode} · v${rr.version}` }))}
+            items={ratingRules.map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
             value={ratingRuleId}
             onValueChange={(v) => setRatingRuleId(v ?? '')}
           >
@@ -570,11 +584,13 @@ interface DimensionRow {
 
 function CreatePricingRuleDialog({
   meterId,
+  meterUnit,
   ratingRules,
   onClose,
   onCreated,
 }: {
   meterId: string
+  meterUnit: string
   ratingRules: RatingRule[]
   onClose: () => void
   onCreated: () => void
@@ -721,7 +737,7 @@ function CreatePricingRuleDialog({
           <div>
             <Label className="text-xs uppercase tracking-wide text-muted-foreground">Rating rule</Label>
             <Select
-              items={ratingRules.map(rr => ({ value: rr.id, label: `${rr.name} — ${rr.mode} · v${rr.version}` }))}
+              items={ratingRules.map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
               value={ratingRuleId}
               onValueChange={(v) => setRatingRuleId(v ?? '')}
             >

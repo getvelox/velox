@@ -388,6 +388,28 @@ func (h *Handler) updatePlan(w http.ResponseWriter, r *http.Request) {
 // Meter Pricing Rules — N-rules-per-meter dispatch.
 // ---------------------------------------------------------------------------
 
+// AllMeterPricingRuleRoutes is the sub-router for GET /v1/meter-pricing-rules
+// — the tenant-wide bindings list the dashboard uses to resolve rule→meter
+// units and priced-ness in one request. Read-only.
+func (h *Handler) AllMeterPricingRuleRoutes() chi.Router {
+	r := chi.NewRouter()
+	r.Get("/", h.listAllMeterPricingRules)
+	return r
+}
+
+func (h *Handler) listAllMeterPricingRules(w http.ResponseWriter, r *http.Request) {
+	tenantID := auth.TenantID(r.Context())
+	rules, err := h.svc.ListMeterPricingRules(r.Context(), tenantID)
+	if err != nil {
+		respond.FromError(w, r, err, "meter_pricing_rule")
+		return
+	}
+	if rules == nil {
+		rules = []domain.MeterPricingRule{}
+	}
+	respond.JSON(w, r, http.StatusOK, map[string]any{"data": rules})
+}
+
 // listMeterPricingRules returns every pricing rule attached to a meter,
 // sorted by priority-DESC / created-at-ASC (the store enforces the order).
 func (h *Handler) listMeterPricingRules(w http.ResponseWriter, r *http.Request) {
