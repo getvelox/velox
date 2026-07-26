@@ -1019,37 +1019,37 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 
 ## FLOW I2: Negative usage
 
-- [ ] Ingest 1000 then -200 (correction) → meter shows net 800, billed for 800.
+- [x] Ingest 1000 then -200 (correction) → meter shows net 800, billed for 800. *(walked 2026-07-26 on the I1 fixture, period 2: usage API total_quantity 800, upcoming-invoice card $8.00, cycle invoice NIM-000249 usage line qty 800 = $8.00 — ingest, preview, and invoice all agree on the net; a 0-usage meter emits no line.)*
 
 ## FLOW I3: Manual line items
 
-- [ ] POST /v1/invoices → draft. Add Line Item "Setup fee" $250, "Consulting" 2×$150 → total $550.
-- [ ] Finalize → auto-charges via Stripe.
+- [x] POST /v1/invoices → draft. Add Line Item "Setup fee" $250, "Consulting" 2×$150 → total $550. *(walked 2026-07-26: NIM-000250, add_on lines, draft total 55000c.)*
+- [x] Finalize → auto-charges via Stripe. *(walked 2026-07-26: manual 10% tax applied at finalize ($605 total), synchronous charge on the saved 4242 → paid/succeeded same request, real PI pi_3TxVMQ….)*
 
 ## FLOW I4: Void
 
-- [ ] Void invoice with credits applied → credits reversed, balance restored, Stripe PI canceled, active dunning resolved, audit log entry.
+- [~] Void invoice with credits applied → credits reversed, balance restored, Stripe PI canceled, active dunning resolved, audit log entry. *(walked 2026-07-26 BY LEGS: credits reversed + balance restored ✓ (NIM-000252), active dunning resolved `manually_resolved` on void ✓ + audit `void` row ✓ (NIM-000233); PI-cancel leg code-read only (invoice/handler.go void → CancelPaymentIntent, deliberately best-effort) — a live pending-PI fixture needs `stripe login` (CLI key expired).)*
 - [ ] **Uncollectible → Void reverses the committed tax exactly once (product-audit G1):** on a `stripe_tax` invoice with a committed `tax_transaction_id`, Mark Uncollectible (files one tax reversal), then Void it. The Void files **no second reversal** — both transitions use the same invoice-stable reversal reference (`inv_taxrev_<id>`), so Stripe dedups to one reversal (verify: one reversal on the Stripe Tax transaction, not two). Pre-fix the two used distinct references (`inv_uncoll_` vs `inv_void_`) and reversed the tax twice → the tenant under-remitted. (Manual/none tax providers have no `tax_transaction_id`, so no reversal either way.)
-- [ ] **Void hands back applied customer credits:** grant a customer credit, apply it to a finalized invoice (`amount_due` drops by the applied amount), then Void the invoice. The customer's credit balance **increases back** by the applied amount — a `grant` ledger entry `Reversed — invoice <num> voided` appears on the Credits tab. Voiding a **second** time (or via the dunning write-off path) does NOT double-credit.
-- [ ] **A failed credit reversal rolls the void back — never voided-with-credits-consumed (atomic):** on that same applied-credit invoice, `REVOKE INSERT ON customer_credit_ledger FROM velox_app`, then Void → the action **fails** (500) and the invoice stays **NOT voided** (status unchanged, `voided_at` NULL) and **no** tax reversal fires; `GRANT INSERT ON customer_credit_ledger TO velox_app` and retry → the void succeeds and the credit is handed back. Pre-fix the void committed first and the reversal ran as a best-effort post-step, so this failure left the invoice voided with the customer's credits silently stranded (no reconciler).
+- [x] **Void hands back applied customer credits:** *(walked 2026-07-26: NIM-000252, $12 applied of $88 → void → balance +1200, ledger `grant 1200 | Reversed — invoice NIM-000252 voided`; second void 409 "invoice is already voided", no double-credit. NOTE: a FULLY-credit-paid invoice lands `paid` and void is refused — "issue a credit note instead" — so this box's shape is the partial-application one.)* grant a customer credit, apply it to a finalized invoice (`amount_due` drops by the applied amount), then Void the invoice. The customer's credit balance **increases back** by the applied amount — a `grant` ledger entry `Reversed — invoice <num> voided` appears on the Credits tab. Voiding a **second** time (or via the dunning write-off path) does NOT double-credit.
+- [~] **A failed credit reversal rolls the void back — never voided-with-credits-consumed (atomic):** *(2026-07-26: REVOKE-INSERT live variant blocked by session permissions; the contract is CI-locked by `TestVoid_CreditReversalAtomic` — reversal failure rolls the void back AND short-circuits the tax reversal; success path verified live above.)* on that same applied-credit invoice, `REVOKE INSERT ON customer_credit_ledger FROM velox_app`, then Void → the action **fails** (500) and the invoice stays **NOT voided** (status unchanged, `voided_at` NULL) and **no** tax reversal fires; `GRANT INSERT ON customer_credit_ledger TO velox_app` and retry → the void succeeds and the credit is handed back. Pre-fix the void committed first and the reversal ran as a best-effort post-step, so this failure left the invoice voided with the customer's credits silently stranded (no reconciler).
 
 ## FLOW I4b: Uncollectible invoice lifecycle
 
 Mark-uncollectible (terminal bad-debt) + its page UX + offline recovery back to paid.
 
-- [ ] **Operator-driven uncollectible from the dunning resolve dialog** — on an active dunning run, click Resolve → pick **Write off invoice** → confirm. The dunning run flips to `resolved` with `resolution=invoice_not_collectible` AND the underlying invoice flips to `status=uncollectible` (cross-flow per ADR-036). Invoice detail page reflects the change: status banner reads "Marked uncollectible — recorded as bad debt", Collect Payment / Mark Uncollectible buttons disappear, Record Payment + Void + Issue Credit remain.
-- [ ] **Uncollectible page UX (Stripe parity — verified across Stripe + Chargebee + Recurly 2026-05-20)** — on an `uncollectible` invoice: InvoiceAttention banner is hidden, OperatorContext/Diagnosis card is hidden, status banner explains the bad-debt classification + that the subscription stays active + recovery options. Buttons present: Void, Email, Issue Credit, Record Payment, Copy Link, Preview/Download PDF. Buttons absent: Collect Payment, Mark Uncollectible, Finalize, Add Line Item.
-- [ ] **Stripe-parity offline recovery: uncollectible → paid** — click Record Payment on an uncollectible invoice, optionally enter a reference (e.g. "Cheque #1234"), confirm. Invoice flips to `status=paid`, `payment_status=succeeded`, `paid_at` set, `stripe_payment_intent_id` prefixed `out_of_band:` so reports can distinguish operator-recorded payments from engine charges. Audit row carries `recovered_from_status=uncollectible`. Webhooks `invoice.payment_recorded` AND `invoice.paid` both fire (the latter from MarkPaid on every paid transition — card, credits, offline, dunning recovery). Active dunning run (if any) resolves to `payment_recovered`.
+- [x] **Operator-driven uncollectible from the dunning resolve dialog** *(walked 2026-07-26 on NIM-000244: run → resolved/invoice_not_collectible AND invoice → uncollectible; banner + button changes verified.)* — on an active dunning run, click Resolve → pick **Write off invoice** → confirm. The dunning run flips to `resolved` with `resolution=invoice_not_collectible` AND the underlying invoice flips to `status=uncollectible` (cross-flow per ADR-036). Invoice detail page reflects the change: status banner reads "Marked uncollectible — recorded as bad debt", Collect Payment / Mark Uncollectible buttons disappear, Record Payment + Void + Issue Credit remain.
+- [x] **Uncollectible page UX (Stripe parity — verified across Stripe + Chargebee + Recurly 2026-05-20)** *(walked 2026-07-26: banner copy exact, menu = Record-offline/Email/Copy/Rotate/Preview-PDF/Download-PDF/Issue-CN/Void; Collect/Mark-Uncollectible/Finalize/Add-Line absent; attention banner hidden.)* — on an `uncollectible` invoice: InvoiceAttention banner is hidden, OperatorContext/Diagnosis card is hidden, status banner explains the bad-debt classification + that the subscription stays active + recovery options. Buttons present: Void, Email, Issue Credit, Record Payment, Copy Link, Preview/Download PDF. Buttons absent: Collect Payment, Mark Uncollectible, Finalize, Add Line Item.
+- [x] **Stripe-parity offline recovery: uncollectible → paid** *(walked 2026-07-26 on NIM-000244 with "Cheque #1234": paid/succeeded/paid_at, `out_of_band:` PI prefix, audit `recovered_from_status=uncollectible`, webhooks `invoice.payment_recorded` + `invoice.paid` both fired.)* — click Record Payment on an uncollectible invoice, optionally enter a reference (e.g. "Cheque #1234"), confirm. Invoice flips to `status=paid`, `payment_status=succeeded`, `paid_at` set, `stripe_payment_intent_id` prefixed `out_of_band:` so reports can distinguish operator-recorded payments from engine charges. Audit row carries `recovered_from_status=uncollectible`. Webhooks `invoice.payment_recorded` AND `invoice.paid` both fire (the latter from MarkPaid on every paid transition — card, credits, offline, dunning recovery). Active dunning run (if any) resolves to `payment_recovered`.
 
 ## FLOW I5: Collect + payment timeline
 
-- [ ] Finalized unpaid → POST /v1/invoices/{id}/collect → PI created.
-- [ ] GET /v1/invoices/{id}/payment-timeline → all attempts in order with ts/amount/status/PI id.
-- [ ] **Coalesced rows (ADR-020)**: a paid invoice shows ONE "Invoice paid · $29.00" row, NOT a separate "Payment succeeded" row beneath it.
+- [~] Finalized unpaid → POST /v1/invoices/{id}/collect → PI created. *(2026-07-26: no-PM negative path verified — 422 "customer has no payment method set up"; the PI-create mechanism verified via the finalize auto-charge (same charge path, real PI). A collect-specific pending-PI fixture needs `stripe login`.)*
+- [x] GET /v1/invoices/{id}/payment-timeline → all attempts in order with ts/amount/status/PI id. *(walked 2026-07-26 on NIM-000250 + NIM-000238.)*
+- [x] **Coalesced rows (ADR-020)**: a paid invoice shows ONE "Invoice paid · $29.00" row, NOT a separate "Payment succeeded" row beneath it. *(walked 2026-07-26: NIM-000250 — one invoice.paid row, $605.00.)*
 - [ ] A voided invoice with a previously-pending PI shows ONE "Invoice voided" row, NOT a duplicate "Payment canceled" row.
-- [ ] A dunning-recovered invoice shows "Invoice paid · after 3 retry attempts" — no separate "Dunning resolved" row.
+- [x] A dunning-recovered invoice shows "Invoice paid · after 3 retry attempts" — no separate "Dunning resolved" row. *(walked 2026-07-26: NIM-000241 resolved payment_recovered → one invoice.paid row with attempt_count:3, no resolved twin. NOTE: the write-off + void resolutions still show a bare "Dunning resolved" twin row — fold gap queued for the I13 walk.)*
 - [ ] **Failure rows fold inside-out**: each failed charge collapses to ONE row carrying the dunning attempt label ("Automatic retry scheduled" or "Payment retry #N attempted"), the PI id, the amount, the decline reason, and a `Customer notified by email` sub-line. No separate Stripe `payment_intent.payment_failed` row at the same instant; no separate "Payment-failed email sent" row beneath.
-- [ ] **Charged-card sub-line (ADR-020)**: paid invoice's "Invoice paid" row carries `via Visa •••• 4242` beneath the amount. Holds even when the customer paid via the hosted-invoice URL **without saving the PM** (lookup goes directly to Stripe, not the local payment_methods table). Non-card PMs (bank, wallet) or Stripe lookup failures render no sub-line — graceful, not broken.
+- [x] **Charged-card sub-line (ADR-020)**: paid invoice's "Invoice paid" row carries `via Visa •••• 4242` beneath the amount. *(walked 2026-07-26 on NIM-000250 — saved-PM variant; the hosted-pay-without-saving variant needs `stripe login`.)* Holds even when the customer paid via the hosted-invoice URL **without saving the PM** (lookup goes directly to Stripe, not the local payment_methods table). Non-card PMs (bank, wallet) or Stripe lookup failures render no sub-line — graceful, not broken.
 - [ ] **Unpaired rows survive**: a Stripe `payment_intent.payment_failed` with no dunning twin (dunning disabled, or webhook arrived ahead of the dunning event) stays as its own "Payment failed" row. A payment-failed email row whose dispatch is still pending or failed stays visible — delivery problems must not silently disappear.
 
 ## FLOW I5b: Invoice attention banner
@@ -1097,7 +1097,7 @@ Server-derived from invoice fields. Suppressed for healthy / paid / voided / dra
 - [ ] `/invoices` rows: severity-tinted dot next to invoice number; tooltip surfaces typed reason. Healthy/draft = no dot.
 - [ ] Draft rows show "draft" pill (Dashboard) or em dash (Invoices, Subscription detail) instead of `payment_status='pending'`.
 - [ ] Invoice detail draft row: muted "Draft invoice — finalize to issue and begin collection." hint.
-- [ ] **No-payment-method nudge (customer WITH email) resends the SETUP link, not the invoice email** — on that finalized-unpaid no-card invoice for a customer that **has an email on file**, the attention card states the behavior in present tense (*"Velox emails the customer a setup link when an invoice finalizes…"* — never a past-tense send it can't prove) and its button reads **"Resend setup link"**. Click it → a "Setup link resent" toast (no recipient dialog) and Mailpit shows another **"Set up payment"** email (`POST /v1/invoices/{id}/resend-setup-link`) — the same Checkout-setup link, NOT the hosted-invoice "pay this invoice" email. For an invoice in a different attention state (e.g. `payment_failed`), the `send_reminder` button still opens the email dialog and sends the hosted-invoice pay link.
+- [x] **No-payment-method nudge (customer WITH email) resends the SETUP link, not the invoice email** *(walked 2026-07-26 on NIM-000253: present-tense card copy, code payment.no_payment_method, Resend setup link → new "Set up payment for invoice NIM-000253" Mailpit email, no recipient dialog.)* — on that finalized-unpaid no-card invoice for a customer that **has an email on file**, the attention card states the behavior in present tense (*"Velox emails the customer a setup link when an invoice finalizes…"* — never a past-tense send it can't prove) and its button reads **"Resend setup link"**. Click it → a "Setup link resent" toast (no recipient dialog) and Mailpit shows another **"Set up payment"** email (`POST /v1/invoices/{id}/resend-setup-link`) — the same Checkout-setup link, NOT the hosted-invoice "pay this invoice" email. For an invoice in a different attention state (e.g. `payment_failed`), the `send_reminder` button still opens the email dialog and sends the hosted-invoice pay link.
 - [ ] **No-payment-method nudge (customer with NO email) shows the honest variant** — repeat on a finalized-unpaid no-card invoice for a customer with **no email address on file** (create one without an email, or clear it). The card now reads *"…We email a setup link only when the customer has an email address on file — open the customer page to copy a secure setup link…"* and offers **only "Open customer page"** — the **"Resend setup link" button is gone** (a resend can't send with no recipient). Open the customer page → **Add payment method → Copy link** mints a setup URL to hand to the customer directly.
 - [x] **Clock-aware auto-charge tail** — the no-PM banner on a test-clock invoice ends *"…auto-charges this invoice on the next test-clock advance"*; on a wall-clock invoice, *"…on the next billing tick — no operator action needed"*. No second client-rendered copy of the promise below the banner. *(walked 2026-07-22 on NIM-000234 live: "next test-clock advance" tail + no duplicate line.)*
 - [x] **Diagnostic detail agrees with the banner on a card-less invoice** — the run row reads "Payment recovery · No retries yet" (or "N retries", never "attempt 0"), and the date row is **"Next reminder"** with muted "Won't charge until a card is attached." Decline (has-card) dunning keeps "Next retry". *(walked 2026-07-22: NIM-000234 "No retries yet"/"Next reminder"; NIM-000214 "ended · 3 retries".)*
@@ -1106,10 +1106,10 @@ Server-derived from invoice fields. Suppressed for healthy / paid / voided / dra
 
 ## FLOW I6: Email + PDF preview
 
-- [ ] Invoice detail → Email → outbox row → PDF attached → Mailpit shows delivery.
-- [ ] Preview PDF → renders in overlay; close via X / backdrop.
+- [x] Invoice detail → Email → outbox row → PDF attached → Mailpit shows delivery. *(walked 2026-07-26: NIM-000253.pdf attached, multipart text+HTML, delivered.)*
+- [x] Preview PDF → renders in overlay; close via X / backdrop. *(walked 2026-07-26 — opens in dialog frame, Escape closes.)*
 - [ ] **Emailed PDF == downloaded PDF == hosted PDF** — for a customer with a billing profile (address + tax ID) and an issued credit note, all three PDFs carry the buyer's address, `Tax ID:` line, and the credit-note block (the emailed one used to omit all three).
-- [ ] **Emailed amount = amount due** — on an invoice with credits applied, the email's "Amount due" card shows the post-credit residual, not the total. The payment receipt states the amount actually charged.
+- [x] **Emailed amount = amount due** — on an invoice with credits applied, the email's "Amount due" card shows the post-credit residual, not the total. *(walked 2026-07-26: NIM-000253 total $55, credits $12 → email card AND subject read USD 43.00.)* The payment receipt states the amount actually charged.
 - [ ] **Uncollectible invoice's hosted page is honest** — a `mark_uncollectible` dunning outcome's "Resolve invoice" email link lands on a "This invoice is closed" banner with contact-support copy and no Pay button.
 
 ### Branded HTML body
@@ -1117,9 +1117,9 @@ Server-derived from invoice fields. Suppressed for healthy / paid / voided / dra
 Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_url`, `brand_color`, `support_url`.
 
 - [ ] Invoice email HTML: tenant logo + name in header, 3px brand-color accent bar, line-items summary, "Amount due" card, **View & pay invoice** CTA styled with brand_color.
-- [ ] CTA URL → `{HOSTED_INVOICE_BASE_URL}/invoice/{public_token}`.
+- [x] CTA URL → `{HOSTED_INVOICE_BASE_URL}/invoice/{public_token}`. *(walked 2026-07-26 — vlx_pinv_ + 64 hex.)*
 - [ ] Footer: "Contact support" + "Powered by Velox Billing".
-- [ ] Plain-text part still present.
+- [x] Plain-text part still present. *(walked 2026-07-26.)*
 - [ ] Receipt email: same chrome, CTA "View receipt".
 - [ ] Dunning email: attempt N of M, next retry date, CTA **"Pay invoice"** (warning) / **"Resolve invoice"** (escalation).
 - [ ] Payment-update-request email: CTA uses `PAYMENT_UPDATE_URL` token URL.
@@ -1127,7 +1127,7 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ## FLOW I7: Zero-amount invoice
 
-- [ ] **Finalizing a zero-due manual invoice lands it PAID, not "awaiting payment" (ADR-066/087)** — create a manual invoice, add no line items, Finalize. Status is **Paid** immediately (`payment_status=succeeded`, `paid_at` stamped) — no charge attempt, no payment-method email, no retry flag; it must never sit finalized/awaiting-payment.
+- [x] **Finalizing a zero-due manual invoice lands it PAID, not "awaiting payment" (ADR-066/087)** *(walked 2026-07-26: NIM-000254 — paid/succeeded/paid_at on finalize, no PI, no retry flag, total 0.)* — create a manual invoice, add no line items, Finalize. Status is **Paid** immediately (`payment_status=succeeded`, `paid_at` stamped) — no charge attempt, no payment-method email, no retry flag; it must never sit finalized/awaiting-payment.
 
 - [ ] Plan `base_amount_cents=0`, no meters → either no invoice or $0 auto-paid (no Stripe charge).
 
@@ -1148,11 +1148,11 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ## FLOW I9: Credit note on void
 
-- [ ] Void invoice → issue CN → error "cannot create credit notes for voided invoices". CN not created.
+- [x] Void invoice → issue CN → error "cannot create credit notes for voided invoices". CN not created. *(walked 2026-07-26: 409, exact copy, zero CN rows.)*
 
 ## FLOW I9b: Credit note PDF totals reconcile
 
-- [ ] On a taxed paid invoice (e.g. $100 net + 10% = $110), create + issue a full CN (one line, qty 1 × $110.00 gross). Download the CN PDF: line amount **$110.00**, totals rows read **"Total excluding tax" $100.00**, tax row **$10.00**, **"Credit Total" $110.00** — line amounts sum to Credit Total; no row claims to be a sum-of-lines "Subtotal" that doesn't match.
+- [x] On a taxed paid invoice (e.g. $100 net + 10% = $110), create + issue a full CN (one line, qty 1 × $110.00 gross). Download the CN PDF: line amount **$110.00**, totals rows read **"Total excluding tax" $100.00**, tax row **$10.00**, **"Credit Total" $110.00** — line amounts sum to Credit Total; no row claims to be a sum-of-lines "Subtotal" that doesn't match. *(walked 2026-07-26: CN-000032 on NIM-000250 — line $605.00 gross, "Total excluding tax" $550.00, "Sales Tax (10%)" $55.00, "Credit Total" $605.00, PDF verified visually.)*
 - [ ] CN numbers are sequential per tenant (CN-…-0001, -0002). A failed number allocation FAILS the Create loudly; no CN with a timestamp-shaped number (CN-YYYYMM-…) is ever created.
 
 ## FLOW TR-CXL: Trial cancellation (ADR-069)
@@ -1205,19 +1205,19 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 ### Variants
 - [ ] Voided invoice → "Voided on {date}" banner, no Pay, PDF works.
 - [ ] Draft invoice URL → 404.
-- [ ] Rotated → old URL 404, new works.
+- [x] Rotated → old URL 404, new works. *(walked 2026-07-26 via rotate-public-token: old 404, new 200.)*
 
 ### Security
-- [ ] Public JSON has no `tenant_id, subscription_id, tax_id, stripe_*_id`.
-- [ ] 61+ req/min same IP → 429 with `Retry-After`.
+- [x] Public JSON has no `tenant_id, subscription_id, tax_id, stripe_*_id`. *(walked 2026-07-26 — clean at both envelope and invoice levels; payload carries livemode:false for the test-mode banner.)*
+- [ ] 61+ req/min same IP → 429 with `Retry-After`. **FAILS OPEN when Redis is absent (2026-07-26): 62 rapid requests → zero 429s; boot log shows only raw redis dial errors, no operator-facing "rate limiting disabled" warning. Posture fix queued.**
 - [ ] Operator `POST /v1/invoices/{id}/rotate-public-token` requires `PermInvoiceWrite`.
 
 ## FLOW I11: `create_preview`
 
-- [ ] `POST /v1/invoices/create_preview {subscription_id}` → invoice shape with `id=null`, no DB row.
-- [ ] No `audit_log` row from a preview: open a customer detail page (the upcoming-invoice card fires `create_preview` on load), then open `/audit-log` → **no** new "Created invoice" row.
+- [x] `POST /v1/invoices/create_preview {subscription_id}` → invoice shape with `id=null`, no DB row. *(walked 2026-07-26 — lines/totals shape, zero invoice rows created; requires customer_id too.)*
+- [x] No `audit_log` row from a preview: open a customer detail page (the upcoming-invoice card fires `create_preview` on load), then open `/audit-log` → **no** new "Created invoice" row. *(walked 2026-07-26 — audit_log count unchanged across preview calls.)*
 - [ ] Plan-change confirmation dialog renders preview before commit.
-- [ ] Cost-dashboard projection populated when engine returns a value.
+- [x] Cost-dashboard projection populated when engine returns a value. *(walked 2026-07-26 — the customer page's upcoming-invoice card rendered base $29.00 + Usage $8.00 from the preview.)*
 - [ ] **`in_advance` preview** (ADR-031): for a sub on an `in_advance` plan, preview's `billing_period_start/end` is the **upcoming** period (matches what the cycle invoice will stamp). Base line description carries the "in advance for upcoming period" suffix. Usage line totals match the elapsed period (per the engine's stamping). Totals identical to in_arrears preview — only the period labels differ.
 
 ## FLOW I12: One-off invoice composer
