@@ -47,23 +47,57 @@ const (
 // anthropic_style keys "claude-3.5-sonnet" with a DOT). Keep in sync with the
 // anthropic_style / openai_style recipe `dimension_match.model` values.
 var modelFamilies = []struct{ prefix, recipeToken string }{
-	// Current Anthropic lineup (4.5 generation, late 2025 — dated ids
-	// like claude-opus-4-5-20251101 match via the prefix+"-" rule).
+	// Current Anthropic lineup (5 generation + the Opus 4.x line; dated ids
+	// like claude-opus-4-8-20260301 match via the prefix+"-" rule, and
+	// longest-prefix keeps claude-opus-4-8 ahead of claude-opus-4).
+	{"claude-fable-5", "claude-fable-5"},
+	{"claude-mythos-5", "claude-mythos-5"},
+	{"claude-opus-5", "claude-opus-5"},
+	{"claude-opus-4-8", "claude-opus-4.8"},
+	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-opus-4-6", "claude-opus-4.6"},
 	{"claude-opus-4-5", "claude-opus-4.5"},
+	{"claude-sonnet-5", "claude-sonnet-5"},
+	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
 	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
 	{"claude-haiku-4-5", "claude-haiku-4.5"},
 	// Legacy Anthropic families — proxies mid-migration still route
 	// them; removing a detection prefix silently un-families live
 	// traffic (the model dim falls back to the raw id and no recipe
-	// rule matches).
+	// rule matches). claude-3-7-sonnet is deliberately ABSENT: retired
+	// 2026-02-19 with no published price, so a recipe rule for it would
+	// carry an invented rate — its traffic keeps the raw id and surfaces
+	// as unmatched usage on the operator card instead (post-#551 loud).
+	{"claude-opus-4-1", "claude-opus-4.1"},
+	{"claude-opus-4", "claude-opus-4"},
+	{"claude-sonnet-4", "claude-sonnet-4"},
 	{"claude-3-5-sonnet", "claude-3.5-sonnet"},
+	{"claude-3-5-haiku", "claude-3.5-haiku"},
 	{"claude-3-opus", "claude-3-opus"},
 	{"claude-3-sonnet", "claude-3-sonnet"},
 	{"claude-3-haiku", "claude-3-haiku"},
 	// Current OpenAI lineup. The match rule is equality-or-prefix+"-",
-	// so the DOTTED ids (gpt-5.1, gpt-4.1) never collide with the bare
-	// gpt-5 entry and need their own rows; -mini/-nano still win over
-	// their base family via longest-prefix.
+	// so the DOTTED ids (gpt-5.6, gpt-4.1) never collide with the bare
+	// gpt-5 entry and need their own rows; -mini/-nano/-pro and the 5.6
+	// tier names still win over their base family via longest-prefix.
+	{"gpt-5.6-sol", "gpt-5.6-sol"},
+	{"gpt-5.6-terra", "gpt-5.6-terra"},
+	{"gpt-5.6-luna", "gpt-5.6-luna"},
+	{"gpt-5.5-pro", "gpt-5.5-pro"},
+	{"gpt-5.5", "gpt-5.5"},
+	{"gpt-5.4-mini", "gpt-5.4-mini"},
+	{"gpt-5.4-nano", "gpt-5.4-nano"},
+	{"gpt-5.4-pro", "gpt-5.4-pro"},
+	{"gpt-5.4", "gpt-5.4"},
+	{"gpt-5.3-codex", "gpt-5.3-codex"},
+	// o-series reasoning models (legacy; per-model page prices).
+	{"o1-mini", "o1-mini"},
+	{"o1-pro", "o1-pro"},
+	{"o1", "o1"},
+	{"o3-mini", "o3-mini"},
+	{"o3-pro", "o3-pro"},
+	{"o3", "o3"},
+	{"o4-mini", "o4-mini"},
 	{"gpt-5-mini", "gpt-5-mini"},
 	{"gpt-5-nano", "gpt-5-nano"},
 	{"gpt-5.1", "gpt-5.1"},

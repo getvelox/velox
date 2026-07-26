@@ -1,5 +1,5 @@
 key: openai_style
-version: 3.0.0
+version: 4.0.0
 name: OpenAI (GPT) token pricing
 summary: |
   Ready-made pricing for reselling OpenAI (GPT) API access. Bills each
@@ -9,8 +9,9 @@ description: |
   Sets up everything you need to bill customers for OpenAI usage:
 
     • A usage meter that counts tokens
-    • Per-token prices for the current GPT-5 and GPT-4.1 models, the older
-      GPT-4 / 3.5 models, and OpenAI's embedding models
+    • Per-token prices for the current GPT-5.x models, the o-series
+      reasoning models, the older GPT-4 / 3.5 models, and OpenAI's
+      embedding models
     • Separate rates for input, output, and cached input — cached input is
       discounted, matching OpenAI's pricing (OpenAI has no separate
       cache-write fee)
@@ -166,17 +167,14 @@ rating_rules:
   # and the LiteLLM mapper still families them — dropping the rules
   # would leave that traffic unbilled at cycle close). ----
 
-  # gpt-4-turbo — input $10 / output $30 per million; cache read $0.50 (per-token)
+  # gpt-4-turbo — input $10 / output $30 per million. NO cached-input
+  # price: OpenAI's model page publishes none (the model predates prompt
+  # caching) — the rate previously here was fictitious (dropped 2026-07-26).
   - key: gpt4_turbo_input
     name: GPT-4 Turbo input
     mode: flat
     currency: '{{ .currency }}'
     flat_amount_cents: '0.001'
-  - key: gpt4_turbo_cache_read
-    name: GPT-4 Turbo cache read
-    mode: flat
-    currency: '{{ .currency }}'
-    flat_amount_cents: '0.00005'
   - key: gpt4_turbo_output
     name: GPT-4 Turbo output
     mode: flat
@@ -248,6 +246,280 @@ rating_rules:
     flat_amount_cents: '0.00001'
 
 # Disjoint token roles → one rule per (model, token_type) at equal priority.
+
+  # ---- 2026-07-26 catalog refresh: current gpt-5.3-5.6 lineup and the
+  # ---- o-series reasoning models (per-model page prices). Pro models
+  # ---- have no cached-input price by OpenAI's pattern. ----
+
+  # GPT-5.6 Sol — input $5 / output $30 per million; cache read $0.5 (current; page-verified 2026-07-26).
+  - key: gpt56_sol_input
+    name: GPT-5.6 Sol input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0005'
+  - key: gpt56_sol_cache_read
+    name: GPT-5.6 Sol cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00005'
+  - key: gpt56_sol_output
+    name: GPT-5.6 Sol output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.003'
+
+  # GPT-5.6 Terra — input $2.5 / output $15 per million; cache read $0.25 (current; page-verified 2026-07-26).
+  - key: gpt56_terra_input
+    name: GPT-5.6 Terra input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00025'
+  - key: gpt56_terra_cache_read
+    name: GPT-5.6 Terra cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000025'
+  - key: gpt56_terra_output
+    name: GPT-5.6 Terra output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0015'
+
+  # GPT-5.6 Luna — input $1 / output $6 per million; cache read $0.1 (current; page-verified 2026-07-26).
+  - key: gpt56_luna_input
+    name: GPT-5.6 Luna input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0001'
+  - key: gpt56_luna_cache_read
+    name: GPT-5.6 Luna cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00001'
+  - key: gpt56_luna_output
+    name: GPT-5.6 Luna output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0006'
+
+  # GPT-5.5 — input $5 / output $30 per million; cache read $0.5 (current; page-verified 2026-07-26).
+  - key: gpt55_input
+    name: GPT-5.5 input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0005'
+  - key: gpt55_cache_read
+    name: GPT-5.5 cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00005'
+  - key: gpt55_output
+    name: GPT-5.5 output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.003'
+
+  # GPT-5.5 Pro — input $30 / output $180 per million (no cached-input price) (current; OpenAI publishes no cached-input price for pro models; page-verified 2026-07-26).
+  - key: gpt55_pro_input
+    name: GPT-5.5 Pro input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.003'
+  - key: gpt55_pro_output
+    name: GPT-5.5 Pro output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.018'
+
+  # GPT-5.4 — input $2.5 / output $15 per million; cache read $0.25 (current; page-verified 2026-07-26).
+  - key: gpt54_input
+    name: GPT-5.4 input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00025'
+  - key: gpt54_cache_read
+    name: GPT-5.4 cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000025'
+  - key: gpt54_output
+    name: GPT-5.4 output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0015'
+
+  # GPT-5.4 mini — input $0.75 / output $4.5 per million; cache read $0.075 (current; page-verified 2026-07-26).
+  - key: gpt54_mini_input
+    name: GPT-5.4 mini input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000075'
+  - key: gpt54_mini_cache_read
+    name: GPT-5.4 mini cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0000075'
+  - key: gpt54_mini_output
+    name: GPT-5.4 mini output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00045'
+
+  # GPT-5.4 nano — input $0.2 / output $1.25 per million; cache read $0.02 (current; page-verified 2026-07-26).
+  - key: gpt54_nano_input
+    name: GPT-5.4 nano input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00002'
+  - key: gpt54_nano_cache_read
+    name: GPT-5.4 nano cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000002'
+  - key: gpt54_nano_output
+    name: GPT-5.4 nano output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000125'
+
+  # GPT-5.4 Pro — input $30 / output $180 per million (no cached-input price) (current; no cached-input price; page-verified 2026-07-26).
+  - key: gpt54_pro_input
+    name: GPT-5.4 Pro input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.003'
+  - key: gpt54_pro_output
+    name: GPT-5.4 Pro output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.018'
+
+  # GPT-5.3 Codex — input $1.75 / output $14 per million; cache read $0.175 (current; page-verified 2026-07-26).
+  - key: gpt53_codex_input
+    name: GPT-5.3 Codex input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000175'
+  - key: gpt53_codex_cache_read
+    name: GPT-5.3 Codex cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0000175'
+  - key: gpt53_codex_output
+    name: GPT-5.3 Codex output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0014'
+
+  # o1 — input $15 / output $60 per million; cache read $7.5 (legacy reasoning; per-model page price; page-verified 2026-07-26).
+  - key: o1_input
+    name: o1 input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0015'
+  - key: o1_cache_read
+    name: o1 cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00075'
+  - key: o1_output
+    name: o1 output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.006'
+
+  # o1-mini — input $1.1 / output $4.4 per million; cache read $0.55 (legacy reasoning; page-verified 2026-07-26).
+  - key: o1_mini_input
+    name: o1-mini input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00011'
+  - key: o1_mini_cache_read
+    name: o1-mini cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000055'
+  - key: o1_mini_output
+    name: o1-mini output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00044'
+
+  # o1-pro — input $150 / output $600 per million (no cached-input price) (legacy reasoning; no cached-input price; page-verified 2026-07-26).
+  - key: o1_pro_input
+    name: o1-pro input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.015'
+  - key: o1_pro_output
+    name: o1-pro output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.06'
+
+  # o3 — input $2 / output $8 per million; cache read $0.5 (legacy reasoning; post-cut price ($10 -> $2 mid-2025); page-verified 2026-07-26).
+  - key: o3_input
+    name: o3 input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0002'
+  - key: o3_cache_read
+    name: o3 cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00005'
+  - key: o3_output
+    name: o3 output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0008'
+
+  # o3-mini — input $1.1 / output $4.4 per million; cache read $0.55 (legacy reasoning; page-verified 2026-07-26).
+  - key: o3_mini_input
+    name: o3-mini input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00011'
+  - key: o3_mini_cache_read
+    name: o3-mini cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.000055'
+  - key: o3_mini_output
+    name: o3-mini output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00044'
+
+  # o3-pro — input $20 / output $80 per million (no cached-input price) (legacy reasoning; no cached-input price; page-verified 2026-07-26).
+  - key: o3_pro_input
+    name: o3-pro input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.002'
+  - key: o3_pro_output
+    name: o3-pro output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.008'
+
+  # o4-mini — input $1.1 / output $4.4 per million; cache read $0.275 (legacy reasoning; page-verified 2026-07-26).
+  - key: o4_mini_input
+    name: o4-mini input
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00011'
+  - key: o4_mini_cache_read
+    name: o4-mini cache read
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.0000275'
+  - key: o4_mini_output
+    name: o4-mini output
+    mode: flat
+    currency: '{{ .currency }}'
+    flat_amount_cents: '0.00044'
+
 pricing_rules:
   - meter: tokens
     rating_rule: gpt51_input
@@ -367,11 +639,6 @@ pricing_rules:
     aggregation_mode: sum
     priority: 100
   - meter: tokens
-    rating_rule: gpt4_turbo_cache_read
-    dimension_match: { model: gpt-4-turbo, token_type: cache_read }
-    aggregation_mode: sum
-    priority: 100
-  - meter: tokens
     rating_rule: gpt4_turbo_output
     dimension_match: { model: gpt-4-turbo, token_type: output }
     aggregation_mode: sum
@@ -433,6 +700,243 @@ pricing_rules:
   - meter: tokens
     rating_rule: embed_ada_002
     dimension_match: { model: text-embedding-ada-002 }
+    aggregation_mode: sum
+    priority: 100
+
+
+  - meter: tokens
+    rating_rule: gpt56_sol_input
+    dimension_match: { model: gpt-5.6-sol, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_sol_cache_read
+    dimension_match: { model: gpt-5.6-sol, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_sol_output
+    dimension_match: { model: gpt-5.6-sol, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_terra_input
+    dimension_match: { model: gpt-5.6-terra, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_terra_cache_read
+    dimension_match: { model: gpt-5.6-terra, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_terra_output
+    dimension_match: { model: gpt-5.6-terra, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_luna_input
+    dimension_match: { model: gpt-5.6-luna, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_luna_cache_read
+    dimension_match: { model: gpt-5.6-luna, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt56_luna_output
+    dimension_match: { model: gpt-5.6-luna, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt55_input
+    dimension_match: { model: gpt-5.5, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt55_cache_read
+    dimension_match: { model: gpt-5.5, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt55_output
+    dimension_match: { model: gpt-5.5, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt55_pro_input
+    dimension_match: { model: gpt-5.5-pro, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt55_pro_output
+    dimension_match: { model: gpt-5.5-pro, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_input
+    dimension_match: { model: gpt-5.4, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_cache_read
+    dimension_match: { model: gpt-5.4, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_output
+    dimension_match: { model: gpt-5.4, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_mini_input
+    dimension_match: { model: gpt-5.4-mini, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_mini_cache_read
+    dimension_match: { model: gpt-5.4-mini, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_mini_output
+    dimension_match: { model: gpt-5.4-mini, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_nano_input
+    dimension_match: { model: gpt-5.4-nano, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_nano_cache_read
+    dimension_match: { model: gpt-5.4-nano, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_nano_output
+    dimension_match: { model: gpt-5.4-nano, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_pro_input
+    dimension_match: { model: gpt-5.4-pro, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt54_pro_output
+    dimension_match: { model: gpt-5.4-pro, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt53_codex_input
+    dimension_match: { model: gpt-5.3-codex, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt53_codex_cache_read
+    dimension_match: { model: gpt-5.3-codex, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: gpt53_codex_output
+    dimension_match: { model: gpt-5.3-codex, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_input
+    dimension_match: { model: o1, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_cache_read
+    dimension_match: { model: o1, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_output
+    dimension_match: { model: o1, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_mini_input
+    dimension_match: { model: o1-mini, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_mini_cache_read
+    dimension_match: { model: o1-mini, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_mini_output
+    dimension_match: { model: o1-mini, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_pro_input
+    dimension_match: { model: o1-pro, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o1_pro_output
+    dimension_match: { model: o1-pro, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_input
+    dimension_match: { model: o3, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_cache_read
+    dimension_match: { model: o3, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_output
+    dimension_match: { model: o3, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_mini_input
+    dimension_match: { model: o3-mini, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_mini_cache_read
+    dimension_match: { model: o3-mini, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_mini_output
+    dimension_match: { model: o3-mini, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_pro_input
+    dimension_match: { model: o3-pro, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o3_pro_output
+    dimension_match: { model: o3-pro, token_type: output }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o4_mini_input
+    dimension_match: { model: o4-mini, token_type: input }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o4_mini_cache_read
+    dimension_match: { model: o4-mini, token_type: cache_read }
+    aggregation_mode: sum
+    priority: 100
+  - meter: tokens
+    rating_rule: o4_mini_output
+    dimension_match: { model: o4-mini, token_type: output }
     aggregation_mode: sum
     priority: 100
 
