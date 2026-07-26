@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -14,7 +14,8 @@ import {
   type RatingRule,
 } from '@/lib/api'
 import { Layout } from '@/components/Layout'
-import { priceRate } from '@/lib/priceDisplay'
+import { priceRate, shiftDecimal } from '@/lib/priceDisplay'
+import { latestPerKey } from '@/lib/rules'
 import { showApiError } from '@/lib/formErrors'
 import { statusBadgeVariant } from '@/lib/status'
 
@@ -132,6 +133,18 @@ export default function PricingPage() {
     const binding = bindingsData?.data.find(b => b.rating_rule_version_id === ruleID)
     return meters.find(m => m.id === binding?.meter_id)?.unit ?? ''
   }
+
+  // The Rules tab shows one row per PRICE (rule_key) — billing resolves the
+  // key's latest active version per period (ADR-070), so historical
+  // versions are history, not peers. They stay reachable via expansion.
+  const currentRules = latestPerKey(rules)
+  const olderVersions = (key: string) =>
+    rules
+      .filter(r => r.rule_key === key)
+      .sort((a, b) => b.version - a.version)
+      .filter(r => r.id !== currentRules.find(c => c.rule_key === key)?.id)
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
+  const [republishRule, setRepublishRule] = useState<RatingRule | null>(null)
   const loading = plansLoading || metersLoading || rulesLoading
   const error = plansError || metersError || rulesError
 
@@ -159,7 +172,7 @@ export default function PricingPage() {
         <TabsList>
           <TabsTrigger value="plans">Plans ({plans.length})</TabsTrigger>
           <TabsTrigger value="meters">Meters ({meters.length})</TabsTrigger>
-          <TabsTrigger value="rules">Rules ({rules.length})</TabsTrigger>
+          <TabsTrigger value="rules">Rules ({currentRules.length})</TabsTrigger>
         </TabsList>
 
         <Card className="mt-4">
@@ -303,17 +316,57 @@ export default function PricingPage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {rules.map(r => (
-                          <TableRow key={r.id}>
-                            <TableCell className="font-medium text-foreground">{r.name}</TableCell>
-                            <TableCell className="font-mono text-muted-foreground">{r.rule_key}</TableCell>
-                            <TableCell><Badge variant={badgeVariant(r.mode)}>{r.mode}</Badge></TableCell>
-                            <TableCell className="text-muted-foreground">v{r.version}</TableCell>
-                            <TableCell className="text-right font-medium">
-                              {priceRate(r, unitForRule(r.id))}
-                            </TableCell>
-                          </TableRow>
-                        ))}
+                        {currentRules.map(r => {
+                          const older = olderVersions(r.rule_key)
+                          const expanded = expandedKeys.has(r.rule_key)
+                          return (
+                            <Fragment key={r.rule_key}>
+                              <TableRow>
+                                <TableCell className="font-medium text-foreground">{r.name}</TableCell>
+                                <TableCell className="font-mono text-muted-foreground">{r.rule_key}</TableCell>
+                                <TableCell><Badge variant={badgeVariant(r.mode)}>{r.mode}</Badge></TableCell>
+                                <TableCell className="text-muted-foreground">
+                                  v{r.version}
+                                  {r.lifecycle_state === 'archived' && <Badge variant="secondary" className="ml-1.5 text-xs">archived</Badge>}
+                                  {older.length > 0 && (
+                                    <button
+                                      type="button"
+                                      className="ml-1.5 text-xs text-muted-foreground underline-offset-2 hover:underline"
+                                      aria-label={`${expanded ? 'Hide' : 'Show'} ${older.length} older version${older.length !== 1 ? 's' : ''} of ${r.rule_key}`}
+                                      onClick={() => setExpandedKeys(prev => {
+                                        const next = new Set(prev)
+                                        if (next.has(r.rule_key)) next.delete(r.rule_key); else next.add(r.rule_key)
+                                        return next
+                                      })}
+                                    >
+                                      {expanded ? 'hide history' : `+${older.length} older`}
+                                    </button>
+                                  )}
+                                </TableCell>
+                                <TableCell className="text-right font-medium">
+                                  <span>{priceRate(r, unitForRule(r.id))}</span>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="ml-2 text-xs"
+                                    onClick={() => setRepublishRule(r)}
+                                  >
+                                    New version
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                              {expanded && older.map(o => (
+                                <TableRow key={o.id} className="bg-muted/30">
+                                  <TableCell className="text-muted-foreground pl-8">{o.name}</TableCell>
+                                  <TableCell className="font-mono text-muted-foreground/70">{o.rule_key}</TableCell>
+                                  <TableCell><Badge variant="secondary" className="text-xs">superseded</Badge></TableCell>
+                                  <TableCell className="text-muted-foreground">v{o.version}</TableCell>
+                                  <TableCell className="text-right text-muted-foreground">{priceRate(o, unitForRule(o.id))}</TableCell>
+                                </TableRow>
+                              ))}
+                            </Fragment>
+                          )
+                        })}
                       </TableBody>
                     </Table>
                   )}
@@ -324,6 +377,18 @@ export default function PricingPage() {
         </Card>
       </Tabs>
 
+      {republishRule && (
+        <CreateRuleDialog
+          rules={rules}
+          prefill={republishRule}
+          onClose={() => setRepublishRule(null)}
+          onCreated={() => {
+            setRepublishRule(null)
+            queryClient.invalidateQueries({ queryKey: ['rating-rules'] })
+            toast.success(`Published v${republishRule.version + 1} of ${republishRule.rule_key}`)
+          }}
+        />
+      )}
       {createFor === 'rules' && (
         <CreateRuleDialog
           rules={rules}
@@ -364,7 +429,7 @@ export default function PricingPage() {
 
 /* ─── Create Rule Dialog ─── */
 
-function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; onClose: () => void; onCreated: () => void }) {
+function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: RatingRule[]; prefill?: RatingRule; onClose: () => void; onCreated: () => void }) {
   // Publishing under the same rule_key reprices from each customer's next
   // period on real time — but for test-clock customers the change lands in
   // the current simulated period (catalog stamps are wall-clock, ADR-070
@@ -375,16 +440,32 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
     queryFn: () => api.listTestClocks(),
   })
   const hasClocks = (clocksData?.data ?? []).length > 0
-  const [mode, setMode] = useState('flat')
-  const [flatAmount, setFlatAmount] = useState('')
-  const [tiers, setTiers] = useState([
-    { upTo: '100', price: '0.10' },
-    { upTo: '', price: '0.05' },
-  ])
-  const [packageSize, setPackageSize] = useState('100')
-  const [packageAmount, setPackageAmount] = useState('10.00')
-  const [name, setName] = useState('')
-  const [ruleKey, setRuleKey] = useState('')
+  // Prefill = "publish new version": every field seeds from the current
+  // version (rates cents→dollars via exact decimal shift) and the key is
+  // locked — repricing must not require re-typing a tier ladder.
+  const [mode, setMode] = useState(prefill?.mode ?? 'flat')
+  const [flatAmount, setFlatAmount] = useState(prefill ? shiftDecimal(prefill.flat_amount_cents || '0', -2) : '')
+  const [tiers, setTiers] = useState(
+    prefill?.graduated_tiers?.length
+      ? prefill.graduated_tiers.map(t => ({ upTo: t.up_to > 0 ? String(t.up_to) : '', price: shiftDecimal(t.unit_amount_cents || '0', -2) }))
+      : [
+          { upTo: '100', price: '0.10' },
+          { upTo: '', price: '0.05' },
+        ],
+  )
+  const [packageSize, setPackageSize] = useState(prefill ? String(prefill.package_size || 100) : '100')
+  const [packageAmount, setPackageAmount] = useState(prefill ? (prefill.package_amount_cents / 100).toFixed(2) : '10.00')
+  const [name, setName] = useState(prefill?.name ?? '')
+  const [ruleKey, setRuleKey] = useState(prefill?.rule_key ?? '')
+
+  // Live existing-key resolution: drives the version/currency disclosure
+  // and the price-label symbols (the submit stamps THIS currency, so the
+  // label must never show a different one).
+  const existingLatest = (() => {
+    const versions = rules.filter(r => r.rule_key === ruleKey.trim())
+    return versions.length ? versions.reduce((a, b) => (b.version > a.version ? b : a)) : null
+  })()
+  const stampCurrency = existingLatest?.currency
   const [tierError, setTierError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -403,10 +484,7 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
       // form has no currency field, and stamping the tenant's current
       // default would turn a rate edit into a currency-changing republish
       // (refused by the ADR-100 guard) after a Settings currency switch.
-      const keyVersions = rules.filter(r => r.rule_key === ruleKey.trim())
-      const currency = keyVersions.length > 0
-        ? keyVersions.reduce((a, b) => (b.version > a.version ? b : a)).currency
-        : getActiveCurrency()
+      const currency = stampCurrency ?? getActiveCurrency()
       const payload: Record<string, unknown> = { rule_key: ruleKey, name, mode, currency }
       if (mode === 'flat') {
         payload.flat_amount_cents = dollarsToRateCents(flatAmount)
@@ -440,8 +518,8 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Create Rating Rule</DialogTitle>
-          <DialogDescription>Define how usage is priced for a specific event type</DialogDescription>
+          <DialogTitle>{prefill ? `Publish New Version — ${prefill.rule_key}` : 'Create Rating Rule'}</DialogTitle>
+          <DialogDescription>{prefill ? `Currently v${prefill.version}. The new version takes effect from each customer's next billing period.` : 'Define a price. Link it to a meter to bill usage.'}</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} noValidate className="space-y-4">
           <div>
@@ -450,8 +528,14 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
           </div>
           <div>
             <Label>Rule Key</Label>
-            <Input value={ruleKey} onChange={e => setRuleKey(e.target.value)} placeholder="api_calls" maxLength={100} className="mt-1 font-mono" />
-            <p className="text-xs text-muted-foreground mt-1">Matches against event names for usage metering</p>
+            <Input value={ruleKey} onChange={e => setRuleKey(e.target.value)} placeholder="api_calls" maxLength={100} className="mt-1 font-mono" disabled={!!prefill} />
+            {existingLatest ? (
+              <p className="text-xs text-amber-700 dark:text-amber-500 mt-1">
+                Existing price — this publishes v{existingLatest.version + 1} in {existingLatest.currency}, taking effect from each customer's next billing period.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground mt-1">Stable identity for this price. Publishing the same key again creates a new version. To bill usage, link the price to a meter.</p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -473,10 +557,10 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
 
           {mode === 'flat' && (
             <div>
-              <Label>Price per Unit ({getCurrencySymbol()})</Label>
+              <Label>Price per Unit ({getCurrencySymbol(stampCurrency)})</Label>
               <Input type="number" step="any" min={0} max={999999.99} value={flatAmount}
                 onChange={e => setFlatAmount(e.target.value)} placeholder="0.01" className="mt-1" />
-              <p className="text-xs text-muted-foreground mt-1">e.g. {getCurrencySymbol()}0.01 per API call. Sub-cent rates allowed.</p>
+              <p className="text-xs text-muted-foreground mt-1">e.g. {getCurrencySymbol(stampCurrency)}0.01 per API call. Sub-cent rates allowed.</p>
             </div>
           )}
 
@@ -529,10 +613,10 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
                 <p className="text-xs text-muted-foreground mt-1">e.g. 100 API calls per package</p>
               </div>
               <div>
-                <Label>Price per Package ({getCurrencySymbol()})</Label>
+                <Label>Price per Package ({getCurrencySymbol(stampCurrency)})</Label>
                 <Input type="number" step="0.01" min={0} max={999999.99} value={packageAmount}
                   onChange={e => setPackageAmount(e.target.value)} placeholder="10.00" className="mt-1" />
-                <p className="text-xs text-muted-foreground mt-1">e.g. {getCurrencySymbol()}10.00 per 100 calls</p>
+                <p className="text-xs text-muted-foreground mt-1">e.g. {getCurrencySymbol(stampCurrency)}10.00 per 100 calls</p>
               </div>
             </div>
           )}
@@ -543,18 +627,17 @@ function CreateRuleDialog({ rules, onClose, onCreated }: { rules: RatingRule[]; 
             </div>
           )}
 
-          {hasClocks && (
-            <p className="text-xs text-amber-700 dark:text-amber-500">
-              Re-using an existing rule key republishes its price: real-time customers get the new
-              rate from their next billing period, but test-clock customers get it in their current
-              simulated period.
-            </p>
-          )}
+          <p className="text-xs text-muted-foreground">
+            Re-using an existing rule key republishes its price, taking effect from each customer's
+            next billing period.{hasClocks && (
+              <span className="text-amber-700 dark:text-amber-500"> Test-clock customers get it in their current simulated period.</span>
+            )}
+          </p>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" disabled={saving}>
-              {saving ? <><Loader2 size={14} className="animate-spin mr-2" /> Saving...</> : 'Create Rule'}
+              {saving ? <><Loader2 size={14} className="animate-spin mr-2" /> Saving...</> : (prefill ? `Publish v${prefill.version + 1}` : 'Create Rule')}
             </Button>
           </DialogFooter>
         </form>
@@ -636,7 +719,7 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
             <div>
               <Label>Rating Rule</Label>
               <Select
-                items={rules.map(r => ({ value: r.id, label: `${r.name} — ${priceRate(r, form.unit)}` }))}
+                items={latestPerKey(rules).map(r => ({ value: r.id, label: `${r.name} — ${priceRate(r, form.unit)}` }))}
                 value={form.rating_rule_version_id}
                 onValueChange={v => setForm(f => ({ ...f, rating_rule_version_id: v ?? '' }))}
               >
@@ -644,7 +727,7 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
                   <SelectValue placeholder="None (assign later)" />
                 </SelectTrigger>
                 <SelectContent>
-                  {rules.map(r => (
+                  {latestPerKey(rules).map(r => (
                     <SelectItem key={r.id} value={r.id}>{r.name} — {priceRate(r, form.unit)}</SelectItem>
                   ))}
                 </SelectContent>

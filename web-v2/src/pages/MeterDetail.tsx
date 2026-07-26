@@ -7,6 +7,7 @@ import { api, formatCents, formatDateTime } from '@/lib/api'
 import type { MeterPricingRule, MeterAggregationMode, RatingRule } from '@/lib/api'
 import { showApiError } from '@/lib/formErrors'
 import { money, priceRate, unitScale } from '@/lib/priceDisplay'
+import { latestPerKey } from '@/lib/rules'
 import { Layout } from '@/components/Layout'
 import { statusBadgeVariant } from '@/lib/status'
 
@@ -528,7 +529,7 @@ function SetDefaultRuleDialog({
         <div>
           <Label className="text-xs uppercase tracking-wide text-muted-foreground">Rating rule</Label>
           <Select
-            items={ratingRules.map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
+            items={latestPerKey(ratingRules).map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
             value={ratingRuleId}
             onValueChange={(v) => setRatingRuleId(v ?? '')}
           >
@@ -737,7 +738,7 @@ function CreatePricingRuleDialog({
           <div>
             <Label className="text-xs uppercase tracking-wide text-muted-foreground">Rating rule</Label>
             <Select
-              items={ratingRules.map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
+              items={latestPerKey(ratingRules).map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
               value={ratingRuleId}
               onValueChange={(v) => setRatingRuleId(v ?? '')}
             >
