@@ -1,19 +1,20 @@
 -- Pricing recipes: thin index of which recipes have been instantiated for
 -- which tenant.
 --
--- The canonical entities a recipe creates (products, meters, rating rules,
+-- The canonical entities a recipe creates (meters, rating rules,
 -- pricing rules, plans, dunning policies, webhook endpoints) live in their
 -- own per-domain tables and obey their own constraints. This table only
 -- tracks instantiation metadata so we can:
 --
---   1. Idempotency-check by (tenant_id, recipe_key) on POST /v1/recipes/instantiate.
+--   1. Idempotency-check by (tenant_id, recipe_key) on POST /v1/recipes/{key}/instantiate.
 --   2. Surface "anthropic_style instantiated 3 days ago" on the dashboard.
---   3. Drive force-re-instantiate cleanup via the created_object_ids map.
+--   3. Record the created_object_ids map for the dashboard's install badge.
 --
 -- A tenant deleting a meter that came from a recipe does NOT cascade to
 -- recipe_instances; recipes are an instantiation event, not an ownership
--- relationship. Operators reconcile by re-instantiating with force=true
--- (platform key only) or by manually editing the entities they own.
+-- relationship. Re-instantiating is idempotent (a no-op if already
+-- installed); to retire generated entities operators edit/archive them
+-- directly (ADR-085: apply is idempotent additive — no force, no uninstall).
 --
 -- See docs/design-recipes.md for the full design and override semantics.
 

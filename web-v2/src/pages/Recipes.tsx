@@ -132,7 +132,7 @@ function RecipeCard({ recipe, onConfigure }: { recipe: Recipe; onConfigure: () =
 
         {recipe.instantiated && (
           <p className="text-xs text-muted-foreground mt-3">
-            Installed {formatDateTime(recipe.instantiated.instantiated_at)} · <span className="font-mono">{recipe.instantiated.id}</span>
+            Installed {formatDateTime(recipe.instantiated.created_at)} · <span className="font-mono">{recipe.instantiated.id}</span>
           </p>
         )}
 

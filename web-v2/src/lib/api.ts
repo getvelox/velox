@@ -466,8 +466,7 @@ export const api = {
   instantiateRecipe: (data: {
     key: string
     overrides?: Record<string, string | number | boolean>
-    idempotency_key?: string
-  }) => apiRequest<RecipeInstance>('POST', '/recipes/instantiate', data),
+  }) => apiRequest<RecipeInstance>('POST', `/recipes/${data.key}/instantiate`, { overrides: data.overrides }),
 
   // Audit Log
   // Response shape depends on pagination mode: offset (?offset=) returns
@@ -1304,7 +1303,7 @@ export interface Recipe {
   summary: string
   creates: RecipeCreatesSummary
   overridable: RecipeOverrideSchema[]
-  instantiated?: { id: string; instantiated_at: string } | null
+  instantiated?: { id: string; created_at: string } | null
 }
 
 export interface RecipeDetail extends Recipe {
