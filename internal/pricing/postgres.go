@@ -801,3 +801,148 @@ func scanMeterPricingRule(row rowScanner) (domain.MeterPricingRule, error) {
 	}
 	return r, nil
 }
+
+// ---- Currency-coherence reads (ADR-100) ----------------------------------
+
+// inScopePlansCond selects plans that still BILL: everything non-archived,
+// plus archived plans referenced by a non-terminal subscription item (those
+// keep billing at cycle close; excluding sub-less archived plans is what
+// makes the wrong-currency repair flow — archive, then republish — possible).
+const inScopePlansCond = `
+	(p.status != 'archived' OR EXISTS (
+		SELECT 1 FROM subscription_items si
+		JOIN subscriptions sub ON sub.id = si.subscription_id
+		WHERE si.tenant_id = p.tenant_id
+		  AND (si.plan_id = p.id OR si.pending_plan_id = p.id)
+		  AND sub.status IN ('draft', 'trialing', 'active')
+	))`
+
+// resolvedKeyCurrenciesCTE resolves each rule_key in bound_keys to its
+// engine-visible currency: the latest ACTIVE version's, with a mixed flag
+// when active versions span more than one currency.
+const resolvedKeyCurrenciesCTE = `
+	resolved AS (
+		SELECT rule_key,
+		       (ARRAY_AGG(currency ORDER BY version DESC))[1] AS currency,
+		       COUNT(DISTINCT currency) > 1 AS mixed
+		FROM rating_rule_versions
+		WHERE tenant_id = $1
+		  AND lifecycle_state = 'active'
+		  AND rule_key IN (SELECT rule_key FROM bound_keys)
+		GROUP BY rule_key
+	)`
+
+func (s *PostgresStore) PlanCurrenciesBoundToRuleKey(ctx context.Context, tenantID, ruleKey string) ([]planCurrency, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+	rows, err := tx.QueryContext(ctx, `
+		WITH key_versions AS (
+			SELECT id FROM rating_rule_versions WHERE tenant_id = $1 AND rule_key = $2
+		),
+		bound_meters AS (
+			SELECT m.id FROM meters m
+			WHERE m.tenant_id = $1 AND m.rating_rule_version_id IN (SELECT id FROM key_versions)
+			UNION
+			SELECT mpr.meter_id FROM meter_pricing_rules mpr
+			WHERE mpr.tenant_id = $1 AND mpr.rating_rule_version_id IN (SELECT id FROM key_versions)
+		)
+		SELECT DISTINCT p.code, p.currency
+		FROM plans p
+		JOIN bound_meters bm ON p.meter_ids @> to_jsonb(ARRAY[bm.id])
+		WHERE p.tenant_id = $1 AND `+inScopePlansCond+`
+	`, tenantID, ruleKey)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []planCurrency
+	for rows.Next() {
+		var pc planCurrency
+		if err := rows.Scan(&pc.Code, &pc.Currency); err != nil {
+			return nil, err
+		}
+		out = append(out, pc)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) PlanCurrenciesWiringMeters(ctx context.Context, tenantID string, meterIDs []string) ([]planCurrency, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT p.code, p.currency
+		FROM plans p
+		JOIN unnest($2::text[]) AS mid(id) ON p.meter_ids @> to_jsonb(ARRAY[mid.id])
+		WHERE p.tenant_id = $1 AND `+inScopePlansCond+`
+	`, tenantID, postgres.StringArray(meterIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []planCurrency
+	for rows.Next() {
+		var pc planCurrency
+		if err := rows.Scan(&pc.Code, &pc.Currency); err != nil {
+			return nil, err
+		}
+		out = append(out, pc)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) MeterBoundKeyCurrencies(ctx context.Context, tenantID string, meterIDs []string) ([]keyCurrency, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+	rows, err := tx.QueryContext(ctx, `
+		WITH bound_keys AS (
+			SELECT DISTINCT rrv.rule_key
+			FROM meters m JOIN rating_rule_versions rrv ON rrv.id = m.rating_rule_version_id
+			WHERE m.tenant_id = $1 AND m.id = ANY($2::text[])
+			UNION
+			SELECT DISTINCT rrv.rule_key
+			FROM meter_pricing_rules mpr JOIN rating_rule_versions rrv ON rrv.id = mpr.rating_rule_version_id
+			WHERE mpr.tenant_id = $1 AND mpr.meter_id = ANY($2::text[])
+		),
+		`+resolvedKeyCurrenciesCTE+`
+		SELECT rule_key, currency, mixed FROM resolved
+	`, tenantID, postgres.StringArray(meterIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []keyCurrency
+	for rows.Next() {
+		var kc keyCurrency
+		if err := rows.Scan(&kc.RuleKey, &kc.Currency, &kc.Mixed); err != nil {
+			return nil, err
+		}
+		out = append(out, kc)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) RuleKeyResolvedCurrency(ctx context.Context, tenantID, ruleVersionID string) (keyCurrency, error) {
+	var kc keyCurrency
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return keyCurrency{}, err
+	}
+	defer postgres.Rollback(tx)
+	err = tx.QueryRowContext(ctx, `
+		WITH bound_keys AS (
+			SELECT rule_key FROM rating_rule_versions WHERE tenant_id = $1 AND id = $2
+		),
+		`+resolvedKeyCurrenciesCTE+`
+		SELECT rule_key, currency, mixed FROM resolved
+	`, tenantID, ruleVersionID).Scan(&kc.RuleKey, &kc.Currency, &kc.Mixed)
+	return kc, err
+}

@@ -408,6 +408,12 @@ func (s *Service) Create(ctx context.Context, tenantID string, input CreateInput
 	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
 	if currency == "" {
 		currency = "USD"
+	} else if err := domain.ValidateCurrency(currency); err != nil {
+		// Allowlist-validate only when a currency was actually supplied — the
+		// empty→USD default above is a working API contract (composer sends
+		// no currency). Catches typos and the zero-decimal class (ADR-100)
+		// before an unchargeable or 100x-mischarged label reaches Stripe.
+		return domain.Invoice{}, err
 	}
 
 	// Resolve net payment terms. An explicit value (including 0 = "Due on

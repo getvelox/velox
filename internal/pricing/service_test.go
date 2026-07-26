@@ -1282,3 +1282,120 @@ func TestUpdateMeter_DefaultBinding(t *testing.T) {
 		t.Fatalf("valid aggregation switch: %v", err)
 	}
 }
+
+// ---- ADR-100 currency-coherence fake implementations -----------------------
+// Real semantics over the in-memory maps, mirroring the SQL: in-scope plans
+// (non-archived; the fake has no subs, so archived == out of scope), key
+// currency = highest active version, both binding edges.
+
+func (m *memStore) keyOf(versionID string) string {
+	if r, ok := m.rules[versionID]; ok {
+		return r.RuleKey
+	}
+	return ""
+}
+
+func (m *memStore) resolvedKey(ruleKey string) keyCurrency {
+	kc := keyCurrency{RuleKey: ruleKey}
+	bestVersion := -1
+	seen := map[string]bool{}
+	for _, r := range m.rules {
+		if r.RuleKey != ruleKey || r.LifecycleState != domain.RatingRuleActive {
+			continue
+		}
+		seen[r.Currency] = true
+		if r.Version > bestVersion {
+			bestVersion = r.Version
+			kc.Currency = r.Currency
+		}
+	}
+	kc.Mixed = len(seen) > 1
+	return kc
+}
+
+func (m *memStore) metersBoundToKey(ruleKey string) map[string]bool {
+	out := map[string]bool{}
+	for _, mt := range m.meters {
+		if mt.RatingRuleVersionID != "" && m.keyOf(mt.RatingRuleVersionID) == ruleKey {
+			out[mt.ID] = true
+		}
+	}
+	for _, mr := range m.meterRules {
+		if m.keyOf(mr.RatingRuleVersionID) == ruleKey {
+			out[mr.MeterID] = true
+		}
+	}
+	return out
+}
+
+func (m *memStore) PlanCurrenciesBoundToRuleKey(_ context.Context, _ string, ruleKey string) ([]planCurrency, error) {
+	bound := m.metersBoundToKey(ruleKey)
+	var out []planCurrency
+	for _, p := range m.plans {
+		if p.Status == domain.PlanArchived {
+			continue
+		}
+		for _, mid := range p.MeterIDs {
+			if bound[mid] {
+				out = append(out, planCurrency{Code: p.Code, Currency: p.Currency})
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) PlanCurrenciesWiringMeters(_ context.Context, _ string, meterIDs []string) ([]planCurrency, error) {
+	want := map[string]bool{}
+	for _, id := range meterIDs {
+		want[id] = true
+	}
+	var out []planCurrency
+	for _, p := range m.plans {
+		if p.Status == domain.PlanArchived {
+			continue
+		}
+		for _, mid := range p.MeterIDs {
+			if want[mid] {
+				out = append(out, planCurrency{Code: p.Code, Currency: p.Currency})
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) MeterBoundKeyCurrencies(_ context.Context, _ string, meterIDs []string) ([]keyCurrency, error) {
+	want := map[string]bool{}
+	for _, id := range meterIDs {
+		want[id] = true
+	}
+	keys := map[string]bool{}
+	for _, mt := range m.meters {
+		if want[mt.ID] && mt.RatingRuleVersionID != "" {
+			if k := m.keyOf(mt.RatingRuleVersionID); k != "" {
+				keys[k] = true
+			}
+		}
+	}
+	for _, mr := range m.meterRules {
+		if want[mr.MeterID] {
+			if k := m.keyOf(mr.RatingRuleVersionID); k != "" {
+				keys[k] = true
+			}
+		}
+	}
+	var out []keyCurrency
+	for k := range keys {
+		out = append(out, m.resolvedKey(k))
+	}
+	return out, nil
+}
+
+func (m *memStore) RuleKeyResolvedCurrency(_ context.Context, _ string, ruleVersionID string) (keyCurrency, error) {
+	k := m.keyOf(ruleVersionID)
+	if k == "" {
+		return keyCurrency{}, errs.ErrNotFound
+	}
+	return m.resolvedKey(k), nil
+}

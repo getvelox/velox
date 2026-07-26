@@ -1290,9 +1290,13 @@ type subscriptionCheckerAdapter struct {
 	plans *pricing.Service
 }
 
-func (a *subscriptionCheckerAdapter) NonTerminalForCustomer(ctx context.Context, tenantID, customerID string) ([]customer.NonTerminalSubscription, error) {
+func (a *subscriptionCheckerAdapter) NonTerminalForCustomer(ctx context.Context, tenantID, customerID string, includeDraft bool) ([]customer.NonTerminalSubscription, error) {
 	var out []customer.NonTerminalSubscription
-	for _, status := range []string{string(domain.SubscriptionActive), string(domain.SubscriptionTrialing)} {
+	statuses := []string{string(domain.SubscriptionActive), string(domain.SubscriptionTrialing)}
+	if includeDraft {
+		statuses = append(statuses, string(domain.SubscriptionDraft))
+	}
+	for _, status := range statuses {
 		subs, _, err := a.subs.List(ctx, subscription.ListFilter{
 			TenantID:   tenantID,
 			CustomerID: customerID,

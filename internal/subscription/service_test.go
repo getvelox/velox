@@ -3835,3 +3835,10 @@ func (m *memStore) CancelAtTrialEnd(ctx context.Context, tenantID, id string, ob
 	s.Items = m.hydrateItems(id)
 	return s, nil
 }
+
+// CustomerSubPlanCurrencies (ADR-100 pin) — the fake has no plan table, so
+// it reports no cross-sub currencies; the pin's cross-sub clause is covered
+// by the real-Postgres integration tests.
+func (m *memStore) CustomerSubPlanCurrencies(_ context.Context, _, _, _ string) ([]SubPlanCurrency, error) {
+	return nil, nil
+}

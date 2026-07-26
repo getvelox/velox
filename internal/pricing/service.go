@@ -114,6 +114,13 @@ func (s *Service) CreateRatingRule(ctx context.Context, tenantID string, input C
 				"cannot change currency from %s to %s: %d active customer price override(s) reference rule %q and would be silently repriced in the new currency — remove the overrides first",
 				existing[0].Currency, currency, n, input.RuleKey))
 		}
+		// ADR-100: overrides are not the only downstream — plans bound to
+		// this key (via meter pricing rules or a meter's default binding)
+		// bill it at cycle close, and their invoices would silently carry
+		// amounts computed in the new currency under the old label.
+		if err := s.guardRuleCurrencyChange(ctx, tenantID, input.RuleKey, currency); err != nil {
+			return domain.RatingRuleVersion{}, err
+		}
 	}
 
 	rule := domain.RatingRuleVersion{
@@ -365,6 +372,12 @@ func (s *Service) UpdateMeter(ctx context.Context, tenantID, id string, input Up
 			if _, err := s.store.GetRatingRule(ctx, tenantID, rid); err != nil {
 				return domain.Meter{}, errs.Invalid("rating_rule_version_id", "rating rule not found")
 			}
+			// Currency coherence (ADR-100): the default binding is a live
+			// rating edge — the engine resolves it by rule_key at cycle
+			// close — so it must share the meter's / wired plans' currency.
+			if err := s.guardMeterBinding(ctx, tenantID, m.ID, rid); err != nil {
+				return domain.Meter{}, err
+			}
 		}
 		m.RatingRuleVersionID = rid
 	}
@@ -494,6 +507,12 @@ func (s *Service) CreatePlan(ctx context.Context, tenantID string, input CreateP
 	if err := s.assertMetersPriced(ctx, tenantID, input.MeterIDs); err != nil {
 		return domain.Plan{}, err
 	}
+	// Currency coherence (ADR-100): the plan's currency labels the invoice;
+	// the wired meters' rules compute the amounts. They must agree or the
+	// invoice re-denominates rule cents without conversion.
+	if err := s.guardPlanMeterCurrencies(ctx, tenantID, currency, input.MeterIDs); err != nil {
+		return domain.Plan{}, err
+	}
 
 	return s.store.CreatePlan(ctx, tenantID, domain.Plan{
 		Code:            code,
@@ -567,6 +586,13 @@ func (s *Service) UpdatePlan(ctx context.Context, tenantID, id string, input Cre
 	// returns the immutability error first.
 	if input.MeterIDs != nil {
 		if err := s.assertMetersPriced(ctx, tenantID, input.MeterIDs); err != nil {
+			return domain.Plan{}, err
+		}
+		// Currency coherence (ADR-100): meter attach on UPDATE is the same
+		// write edge as plan create — without this, a plan created meterless
+		// (vacuously coherent) gains differently-denominated rules here.
+		// Plan currency is immutable, so compare against the stored value.
+		if err := s.guardPlanMeterCurrencies(ctx, tenantID, existing.Currency, input.MeterIDs); err != nil {
 			return domain.Plan{}, err
 		}
 	}
@@ -706,6 +732,12 @@ func (s *Service) UpsertMeterPricingRule(ctx context.Context, tenantID string, i
 	if _, err := s.store.GetRatingRule(ctx, tenantID, rrvID); err != nil {
 		return domain.MeterPricingRule{}, errs.Invalid("rating_rule_version_id", fmt.Sprintf("rating rule %q not found", rrvID))
 	}
+	// Currency coherence (ADR-100): binding is the third write edge that can
+	// put a differently-denominated rule under a plan (no republish, no plan
+	// create involved) — guard it like the other two.
+	if err := s.guardMeterBinding(ctx, tenantID, meterID, rrvID); err != nil {
+		return domain.MeterPricingRule{}, err
+	}
 
 	mode := input.AggregationMode
 	if mode == "" {
@@ -801,6 +833,38 @@ func (s *Service) pricingRuleDeleteEmission(ctx context.Context) func(tx *sql.Tx
 // CreateRatingRuleTx forwards to the store's tx-aware insert. Caller owns
 // the *sql.Tx and is responsible for Commit/Rollback.
 func (s *Service) CreateRatingRuleTx(ctx context.Context, tx *sql.Tx, tenantID string, rule domain.RatingRuleVersion) (domain.RatingRuleVersion, error) {
+	// Currency hardening (ADR-100): this Tx path used to skip every currency
+	// check on the promise that the recipe template layer validated — but
+	// that layer checks enum membership only, and the store persists
+	// verbatim (the lowercase class that broke analytics once). Normalize +
+	// allowlist here, and run the ADR-070/100 republish clauses when the key
+	// already has versions: a recipe CREATES only when no ACTIVE version
+	// exists (adoption otherwise), so a create over an all-archived key is a
+	// republish in disguise — the exact silent-reprice those guards block.
+	rule.Currency = strings.ToUpper(strings.TrimSpace(rule.Currency))
+	if err := domain.ValidateCurrency(rule.Currency); err != nil {
+		return domain.RatingRuleVersion{}, err
+	}
+	existing, err := s.store.ListRatingRules(ctx, RatingRuleFilter{
+		TenantID: tenantID, RuleKey: rule.RuleKey, LatestOnly: true,
+	})
+	if err != nil {
+		return domain.RatingRuleVersion{}, err
+	}
+	if len(existing) > 0 && existing[0].Currency != rule.Currency {
+		n, err := s.store.CountActiveOverridesByRuleKey(ctx, tenantID, rule.RuleKey)
+		if err != nil {
+			return domain.RatingRuleVersion{}, fmt.Errorf("check overrides for currency guard: %w", err)
+		}
+		if n > 0 {
+			return domain.RatingRuleVersion{}, errs.InvalidState(fmt.Sprintf(
+				"cannot change currency from %s to %s: %d active customer price override(s) reference rule %q and would be silently repriced in the new currency — remove the overrides first",
+				existing[0].Currency, rule.Currency, n, rule.RuleKey))
+		}
+		if err := s.guardRuleCurrencyChange(ctx, tenantID, rule.RuleKey, rule.Currency); err != nil {
+			return domain.RatingRuleVersion{}, err
+		}
+	}
 	return s.store.CreateRatingRuleTx(ctx, tx, tenantID, rule)
 }
 
@@ -814,7 +878,13 @@ func (s *Service) CreatePlanTx(ctx context.Context, tx *sql.Tx, tenantID string,
 	return s.store.CreatePlanTx(ctx, tx, tenantID, p)
 }
 
-// UpsertMeterPricingRuleTx forwards to the store's tx-aware upsert.
+// UpsertMeterPricingRuleTx forwards to the store's tx-aware upsert. No
+// currency guard here BY DESIGN: within a recipe apply the bound rule was
+// created (or adopted with a conformance check) in the same call, and the
+// binding guard's committed-state reads cannot see this tx's own inserts —
+// it would falsely refuse every fresh install. Recipe-level coherence is
+// enforced in recipe.Instantiate (single {{ .currency }} + adopted-meter
+// currency check); the guarded public path is UpsertMeterPricingRule.
 func (s *Service) UpsertMeterPricingRuleTx(ctx context.Context, tx *sql.Tx, tenantID string, rule domain.MeterPricingRule) (domain.MeterPricingRule, error) {
 	return s.store.UpsertMeterPricingRuleTx(ctx, tx, tenantID, rule)
 }

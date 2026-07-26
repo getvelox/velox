@@ -8,7 +8,18 @@ import (
 	"github.com/sagarsuperuser/velox/internal/domain"
 )
 
+// SubPlanCurrency is one (subscription, plan currency) pair from the
+// customer currency-pin query (ADR-100).
+type SubPlanCurrency struct {
+	SubCode  string
+	Currency string
+}
+
 type Store interface {
+	// CustomerSubPlanCurrencies backs the ADR-100 customer currency pin:
+	// distinct plan currencies (incl. pending swaps) across the customer's
+	// non-terminal subs, excluding excludeSubID ("" = none).
+	CustomerSubPlanCurrencies(ctx context.Context, tenantID, customerID, excludeSubID string) ([]SubPlanCurrency, error)
 	// Create writes a subscription plus its initial items in one transaction.
 	// sub.Items is required and must be non-empty. The returned subscription
 	// is hydrated with the inserted items (including their assigned IDs).

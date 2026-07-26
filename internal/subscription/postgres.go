@@ -2720,3 +2720,44 @@ func (s *PostgresStore) StreamForExport(ctx context.Context, tenantID string, fr
 	}
 	return rows.Err()
 }
+
+// CustomerSubPlanCurrencies returns the distinct (sub code, plan currency)
+// pairs across the customer's non-terminal subscriptions — including pending
+// plan swaps, which will bill at the next cycle boundary — excluding one sub
+// id ("" excludes none). Backs the ADR-100 customer currency pin: one
+// customer's live billing stays in one currency.
+func (s *PostgresStore) CustomerSubPlanCurrencies(ctx context.Context, tenantID, customerID, excludeSubID string) ([]SubPlanCurrency, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT sub.code, p.currency
+		FROM subscriptions sub
+		JOIN subscription_items si
+		  ON si.subscription_id = sub.id AND si.deleted_at IS NULL
+		JOIN plans p
+		  ON p.id = si.plan_id OR p.id = si.pending_plan_id
+		WHERE sub.customer_id = $1
+		  AND sub.status IN ('draft', 'trialing', 'active')
+		  AND sub.id <> $2
+		ORDER BY sub.code`,
+		customerID, excludeSubID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SubPlanCurrency
+	for rows.Next() {
+		var sc SubPlanCurrency
+		if err := rows.Scan(&sc.SubCode, &sc.Currency); err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, tx.Commit()
+}

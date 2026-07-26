@@ -112,6 +112,7 @@ type Service struct {
 	clock     clock.Clock
 	settings  SettingsReader
 	customers CustomerReader
+	profiles  ProfileCurrencyReader
 	plans     PlanReader
 	biller    Biller
 	resolver  clock.Resolver
@@ -164,6 +165,18 @@ func (s *Service) SetSettingsReader(r SettingsReader) {
 // store via router.go.
 func (s *Service) SetCustomerReader(r CustomerReader) {
 	s.customers = r
+}
+
+// ProfileCurrencyReader is the narrow seam for the ADR-100 currency pin:
+// the customer's billing-profile currency is the highest-precedence invoice
+// label, so a new plan must match it. Nil-safe like every sibling guard
+// seam; production wires the customer store via router.go.
+type ProfileCurrencyReader interface {
+	GetBillingProfile(ctx context.Context, tenantID, customerID string) (domain.CustomerBillingProfile, error)
+}
+
+func (s *Service) SetProfileReader(r ProfileCurrencyReader) {
+	s.profiles = r
 }
 
 // SetPlanReader wires the plan fetcher used to read BillingInterval
@@ -416,6 +429,93 @@ func (s *Service) rejectMixedItemIntervals(ctx context.Context, tenantID string,
 // plan's meters don't self-conflict ("" for creates and adds). Skipped
 // when PlanReader isn't wired (narrow unit tests) — mirrors every sibling
 // guard.
+
+// guardSwapCurrency assembles the currency-pin inputs for a plan swap: the
+// incoming plan, the sub's OTHER items' plans, and the outgoing plan of the
+// swapped item (raw-cents proration makes a cross-currency swap wrong even
+// on a single-item sub).
+func (s *Service) guardSwapCurrency(ctx context.Context, tenantID string, sub domain.Subscription, subscriptionID, itemID, newPlanID string) error {
+	pin := []string{newPlanID}
+	outgoing := ""
+	for _, it := range sub.Items {
+		if it.ID == itemID {
+			outgoing = it.PlanID
+			continue
+		}
+		pin = append(pin, it.PlanID)
+	}
+	return s.rejectCurrencyMismatch(ctx, tenantID, sub.CustomerID, subscriptionID, pin, outgoing)
+}
+
+// rejectCurrencyMismatch is the ADR-100 customer currency pin, enforced at
+// every write that binds a plan to a subscription (create, add-item, swap,
+// activate). The invoice engine attaches rule-computed cents to ONE currency
+// label without conversion, so every currency source in a customer's billing
+// must agree: the candidate plans among themselves, the outgoing plan on a
+// swap (proration subtracts old cents from new cents raw), the customer's
+// billing-profile currency (highest-precedence invoice label), and the
+// customer's other non-terminal subs (the credit ledger is a currency-blind
+// per-customer pot — mixed-currency subs would drain it across
+// denominations 1:1). Skipped when PlanReader isn't wired (narrow unit
+// tests), mirroring every sibling guard.
+func (s *Service) rejectCurrencyMismatch(ctx context.Context, tenantID, customerID, excludeSubID string, planIDs []string, outgoingPlanID string) error {
+	if s.plans == nil {
+		return nil
+	}
+	target, describe := "", ""
+	if outgoingPlanID != "" {
+		if op, err := s.plans.GetPlan(ctx, tenantID, outgoingPlanID); err == nil {
+			target = strings.ToUpper(strings.TrimSpace(op.Currency))
+			describe = fmt.Sprintf("the item's current plan %q (%s)", op.Code, target)
+		}
+	}
+	for _, pid := range planIDs {
+		plan, err := s.plans.GetPlan(ctx, tenantID, pid)
+		if err != nil {
+			return errs.Invalid("items", fmt.Sprintf("plan %q not found", pid))
+		}
+		cur := strings.ToUpper(strings.TrimSpace(plan.Currency))
+		if cur == "" {
+			continue
+		}
+		if target == "" {
+			target, describe = cur, fmt.Sprintf("plan %q (%s)", plan.Code, cur)
+			continue
+		}
+		if cur != target {
+			return errs.InvalidState(fmt.Sprintf(
+				"plan %q is in %s but %s is in %s — a subscription bills in one currency; pick same-currency plans or use a separate customer",
+				plan.Code, cur, describe, target))
+		}
+	}
+	if target == "" {
+		return nil
+	}
+	if s.profiles != nil {
+		if bp, err := s.profiles.GetBillingProfile(ctx, tenantID, customerID); err == nil {
+			pc := strings.ToUpper(strings.TrimSpace(bp.Currency))
+			if pc != "" && pc != target {
+				return errs.InvalidState(fmt.Sprintf(
+					"the customer's billing profile is set to %s but this plan bills in %s — invoices would relabel amounts without conversion; change the profile currency or pick a %s plan",
+					pc, target, pc))
+			}
+		}
+	}
+	others, err := s.store.CustomerSubPlanCurrencies(ctx, tenantID, customerID, excludeSubID)
+	if err != nil {
+		return fmt.Errorf("currency pin: customer subs: %w", err)
+	}
+	for _, o := range others {
+		oc := strings.ToUpper(strings.TrimSpace(o.Currency))
+		if oc != "" && oc != target {
+			return errs.InvalidState(fmt.Sprintf(
+				"this customer already has subscription %q billing in %s — a customer's subscriptions share one currency (credits and balances don't convert); use a %s plan or a separate customer",
+				o.SubCode, oc, oc))
+		}
+	}
+	return nil
+}
+
 func (s *Service) rejectMeterOverlap(ctx context.Context, tenantID, customerID, currentSubID, excludeItemID string, planIDs []string) error {
 	if s.plans == nil {
 		return nil
@@ -613,6 +713,11 @@ func (s *Service) Create(ctx context.Context, tenantID string, input CreateInput
 		if err := s.rejectMeterOverlap(ctx, tenantID, input.CustomerID, "", "", planIDs); err != nil {
 			return domain.Subscription{}, err
 		}
+		// Currency pin (ADR-100): the new sub's plans must agree with each
+		// other, the profile currency, and the customer's other live subs.
+		if err := s.rejectCurrencyMismatch(ctx, tenantID, input.CustomerID, "", planIDs, ""); err != nil {
+			return domain.Subscription{}, err
+		}
 	}
 
 	status := domain.SubscriptionDraft
@@ -757,6 +862,19 @@ func (s *Service) Activate(ctx context.Context, tenantID, id string) (domain.Sub
 	}
 	if sub.Status != domain.SubscriptionDraft {
 		return domain.Subscription{}, errs.InvalidState(fmt.Sprintf("can only activate draft subscriptions, current status: %s", sub.Status))
+	}
+
+	// Currency pin (ADR-100): drafts predating the pin (or created while a
+	// divergent profile existed) must not start billing in a currency that
+	// conflicts with the profile or the customer's other live subs.
+	if len(sub.Items) > 0 {
+		pin := make([]string, 0, len(sub.Items))
+		for _, it := range sub.Items {
+			pin = append(pin, it.PlanID)
+		}
+		if err := s.rejectCurrencyMismatch(ctx, tenantID, sub.CustomerID, id, pin, ""); err != nil {
+			return domain.Subscription{}, err
+		}
 	}
 
 	// Bind effective-now via the sub's TestClockID; downstream stamps
@@ -969,6 +1087,19 @@ func (s *Service) AddItem(ctx context.Context, tenantID, subscriptionID string, 
 	if err := s.rejectMeterOverlap(ctx, tenantID, sub.CustomerID, subscriptionID, "", []string{input.PlanID}); err != nil {
 		return domain.SubscriptionItem{}, err
 	}
+	// Currency pin (ADR-100): the added plan + this sub's existing items
+	// must share one currency (and match profile + the customer's other
+	// subs — this sub is excluded from the cross-sub query, so its own
+	// items ride in planIDs).
+	{
+		pin := []string{input.PlanID}
+		for _, it := range sub.Items {
+			pin = append(pin, it.PlanID)
+		}
+		if err := s.rejectCurrencyMismatch(ctx, tenantID, sub.CustomerID, subscriptionID, pin, ""); err != nil {
+			return domain.SubscriptionItem{}, err
+		}
+	}
 
 	ctx = s.bindForSub(ctx, tenantID, subscriptionID)
 	return s.store.AddItem(ctx, tenantID, domain.SubscriptionItem{
@@ -1022,6 +1153,16 @@ func (s *Service) AddItemTx(ctx context.Context, tx *sql.Tx, tenantID, subscript
 	// write-time gate for same-plan duplicates.
 	if err := s.rejectMeterOverlap(ctx, tenantID, sub.CustomerID, subscriptionID, "", []string{input.PlanID}); err != nil {
 		return domain.SubscriptionItem{}, err
+	}
+	// Currency pin (ADR-100) — same as the non-Tx AddItem.
+	{
+		pin := []string{input.PlanID}
+		for _, it := range sub.Items {
+			pin = append(pin, it.PlanID)
+		}
+		if err := s.rejectCurrencyMismatch(ctx, tenantID, sub.CustomerID, subscriptionID, pin, ""); err != nil {
+			return domain.SubscriptionItem{}, err
+		}
 	}
 
 	ctx = s.bindForSub(ctx, tenantID, subscriptionID)
@@ -1110,6 +1251,13 @@ func (s *Service) UpdateItemTx(ctx context.Context, tx *sql.Tx, tenantID, subscr
 		// OTHER items. The item being swapped is excluded — its outgoing
 		// plan stops billing when the new one starts.
 		if err := s.rejectMeterOverlap(ctx, tenantID, sub.CustomerID, subscriptionID, itemID, []string{input.NewPlanID}); err != nil {
+			return ItemChangeResult{}, err
+		}
+		// Currency pin (ADR-100): a swap may not cross currencies — the
+		// proration path subtracts old-plan cents from new-plan cents as
+		// raw integers, and the sub's other items + profile + other subs
+		// must stay coherent. Outgoing plan resolved via the swapped item.
+		if err := s.guardSwapCurrency(ctx, tenantID, sub, subscriptionID, itemID, input.NewPlanID); err != nil {
 			return ItemChangeResult{}, err
 		}
 		if !input.Immediate {
@@ -1290,6 +1438,11 @@ func (s *Service) UpdateItem(ctx context.Context, tenantID, subscriptionID, item
 		// changes: a pending swap onto an already-billed meter would start
 		// double-billing at the next cycle boundary.
 		if err := s.rejectMeterOverlap(ctx, tenantID, sub.CustomerID, subscriptionID, itemID, []string{input.NewPlanID}); err != nil {
+			return ItemChangeResult{}, err
+		}
+		// Currency pin (ADR-100) — same as UpdateItemTx; also gates
+		// scheduled swaps, which would re-denominate at the next boundary.
+		if err := s.guardSwapCurrency(ctx, tenantID, sub, subscriptionID, itemID, input.NewPlanID); err != nil {
 			return ItemChangeResult{}, err
 		}
 		currentTiming := currentPlan.BaseBillTiming

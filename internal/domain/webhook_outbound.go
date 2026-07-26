@@ -120,6 +120,13 @@ const (
 	// drift residual). Detection-only: books show the delta, operator
 	// reconciles. ADR-068.
 	EventPaymentAmountMismatch = "payment.amount_mismatch"
+	// EventPaymentCurrencyMismatch fires when a charge settles in a currency
+	// different from the invoice header's — Stripe's independently-reported
+	// charge currency vs Velox's label, compared case-folded on the webhook
+	// settle path (the one entry point carrying Stripe's value). Velox
+	// creates the PaymentIntent from the header, so this firing means the
+	// label moved (or an out-of-band charge) — detection-only. ADR-100.
+	EventPaymentCurrencyMismatch = "payment.currency_mismatch"
 	// EventPaymentReceivedOnVoidedInvoice fires when a payment lands on a
 	// voided (or otherwise non-payable) invoice — the void's session-expire
 	// leg failed and the customer paid inside the residual. Distinct cause

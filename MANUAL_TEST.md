@@ -1127,10 +1127,14 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 - [ ] Plan `base_amount_cents=0`, no meters → either no invoice or $0 auto-paid (no Stripe charge).
 
-## FLOW I8: Currency consistency
+## FLOW I8: Currency coherence (ADR-100 guard ring)
 
-- [ ] Tenant default USD → switch to EUR → new invoices EUR, existing unchanged.
-- [ ] Customer with `billing_profile.currency=GBP` → invoices GBP regardless of tenant default.
+- [x] Republish a plan-bound price in a different currency → 409 naming the plan(s); same-currency rate change → new version OK. Archive the (sub-less) plan → the different-currency republish now passes (the wrong-currency repair flow). *(CI-locked `TestCurrencyRing_RepublishBlockedWhilePlanBound` / `ArchivedPlanRepairFlow`, real-Postgres, green 2026-07-26.)*
+- [x] Create an EUR plan wiring a USD-ruled meter → 409 naming the price key; same for ATTACHING the meter via plan update, for binding an EUR price onto a USD meter (pricing-rule row or default binding), and for a JPY/KRW/VND/CLP currency anywhere (zero-decimal: refused loud with the minor-unit explanation — Stripe would read the cents as whole units, a 100× charge). *(CI-locked `TestCurrencyRing_*`.)*
+- [x] Customer currency pin: set `billing_profile.currency=EUR` first → creating a USD-plan sub 409s (ordering bypass closed); with an EUR sub live, a USD second sub 409s naming it; a cross-currency plan swap 409s even on a single-item sub (raw-cents proration); a draft that diverged before the pin refuses at Activate. Coherent twins all pass. *(CI-locked `TestCurrencyPin`, real-Postgres.)*
+- [x] Second AI recipe in a different currency → 409 at meter adoption naming the conflicting price ("a meter's prices share one currency"); same-currency install adopts fine. *(CI-locked `TestService_Instantiate_RefusesCrossCurrencyMeterAdoption`.)*
+- [ ] Invoice-header precedence (what the engine actually does, comments truthed 2026-07-26): billing profile > first item's plan > tenant settings (dead branch — plans always carry currency) > USD. Tenant-default switches never re-label existing subs' invoices; post-ring, all sources agree by construction.
+- [ ] Webhook settle in a currency ≠ invoice header → `payment.currency_mismatch` anomaly on the invoice (report-only tripwire; case-folded).
 
 ## FLOW SUB7: Mid-period change outcome on the timeline + invoice
 
