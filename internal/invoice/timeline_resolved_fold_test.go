@@ -130,6 +130,23 @@ func TestPaymentTimeline_ResolvedRowFoldsIntoCauseRow(t *testing.T) {
 		}
 	})
 
+	t.Run("EVERY reason spelling folds — the gate is the invoice field, not the string", func(t *testing.T) {
+		// Each resolver spells its event reason differently; the
+		// ResolveByInvoice path writes "invoice manually_resolved"
+		// (with a space), which survived the reason-matched fold on
+		// NIM-000233. Any spelling — including ones that don't exist
+		// yet — must fold once the invoice actually transitioned.
+		for _, reason := range []string{"invoice manually_resolved", "some_future_spelling"} {
+			h, id := seed(t, func(i *domain.Invoice) {
+				i.Status = domain.InvoiceVoided
+				i.VoidedAt = &at
+			}, reason)
+			if n, descs := countResolved(fetch(t, h, id)); n != 0 {
+				t.Errorf("reason %q twin survived: %v", reason, descs)
+			}
+		}
+	})
+
 	t.Run("FAILED propagation keeps the dunning row — the only surviving record", func(t *testing.T) {
 		// Run resolved as write-off but the invoice never transitioned
 		// (MarkUncollectible failed): UncollectibleAt nil → no cause row

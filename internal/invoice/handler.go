@@ -2120,32 +2120,24 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					if evt.AttemptCount > maxAttemptCount {
 						maxAttemptCount = evt.AttemptCount
 					}
-					// Suppress dunning 'resolved' when a lifecycle row from
-					// the SAME operator action already says it (ADR-020
-					// fold): paid owns payment_recovered, the "Marked
-					// uncollectible" row owns the write-off, "Invoice
-					// voided" owns the void-flavored resolutions. Each
-					// suppression is gated on the cause row's own field so
-					// a failed propagation (run resolved but the invoice
-					// never transitioned) keeps the dunning row as the
-					// only surviving record. Found live on FLOW I13: a
-					// write-off rendered its cause row PLUS a bare
-					// "Dunning resolved" twin at the same instant.
-					if string(evt.EventType) == "resolved" {
-						switch evt.Reason {
-						case "payment_recovered":
-							if inv.PaidAt != nil {
-								continue
-							}
-						case "invoice_not_collectible", "invoice_uncollectible":
-							if inv.UncollectibleAt != nil {
-								continue
-							}
-						case "manually_resolved", "invoice_voided":
-							if inv.VoidedAt != nil {
-								continue
-							}
-						}
+					// Suppress dunning 'resolved' when a lifecycle cause row
+					// already says it (ADR-020 fold): "Invoice paid" owns a
+					// recovered run, "Marked uncollectible" owns a write-off,
+					// "Invoice voided" owns a void-flavored resolution. Gated
+					// on the invoice's own transition FIELDS — never the
+					// event's reason string, because each resolver spells its
+					// reason differently ("manually_resolved",
+					// "invoice_voided", "invoice manually_resolved" from
+					// ResolveByInvoice, …) and a reason-matched fold silently
+					// misses the next spelling (found live twice on FLOW I13:
+					// first the write-off twin, then NIM-000233's void twin
+					// surviving the reason-matched version of this fold). A
+					// failed propagation (run resolved, invoice never
+					// transitioned) sets none of the fields, so the dunning
+					// row stays as the only surviving record.
+					if string(evt.EventType) == "resolved" &&
+						(inv.PaidAt != nil || inv.UncollectibleAt != nil || inv.VoidedAt != nil) {
+						continue
 					}
 					desc, status := describeDunningEvent(string(evt.EventType), evt.Reason, evt.AttemptCount)
 					events = append(events, timelineEvent{
