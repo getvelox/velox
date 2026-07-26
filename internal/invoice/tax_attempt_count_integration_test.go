@@ -38,7 +38,7 @@ func TestUpdateTaxAtomic_InitialAttemptDoesNotCountAsRetry(t *testing.T) {
 	inv, err := store.Create(ctx, tenantID, domain.Invoice{
 		CustomerID: cust.ID, Status: domain.InvoiceDraft,
 		PaymentStatus: domain.PaymentPending,
-		Currency: "USD", SubtotalCents: 10000, TotalAmountCents: 10000,
+		Currency:      "USD", SubtotalCents: 10000, TotalAmountCents: 10000,
 		AmountDueCents: 10000,
 	})
 	if err != nil {
