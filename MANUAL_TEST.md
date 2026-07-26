@@ -1015,7 +1015,7 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 
 ## FLOW I1: Multiple meters
 
-- [ ] Plan with **$29 base** + API ($0.01/call) + Storage ($0.10/GB). Ingest 2000 calls + 50 GB → invoice has 3 line items: base $29 + API $20 (2000 × $0.01) + storage $5 (50 × $0.10).
+- [x] Plan with **$29 base** + API ($0.01/call) + Storage ($0.10/GB). Ingest 2000 calls + 50 GB → invoice has 3 line items: base $29 + API $20 (2000 × $0.01) + storage $5 (50 × $0.10). *(walked 2026-07-26, NIM-000248: first walk caught the ADR-012 first-period regression — base billed "$28.06 prorated 30/31 days" on a full anniversary month (NIM-000247) — fixed in #615; re-walked post-fix: base $29.00 flat, no proration suffix, all 3 line periods == the invoice period, subtotal $54.00 + 10% tax = $59.40.)*
 
 ## FLOW I2: Negative usage
 
