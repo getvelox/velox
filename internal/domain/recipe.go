@@ -7,11 +7,12 @@ import (
 )
 
 // RecipeInstance is the DB-backed record of a recipe being instantiated for
-// a tenant. The canonical entities a recipe creates (products, meters,
+// a tenant. The canonical entities a recipe creates (meters, rating rules,
 // pricing rules, plans, dunning policies, webhook endpoints) live in their
 // own per-domain tables; RecipeInstance only tracks instantiation metadata
 // so we can answer "is this recipe already installed?" idempotently and
-// drive force-re-instantiate cleanup via CreatedObjects.
+// record what it created (CreatedObjects) for the dashboard's install badge.
+// (ADR-085: apply is idempotent additive — no force, no uninstall.)
 //
 // See docs/design-recipes.md.
 type RecipeInstance struct {

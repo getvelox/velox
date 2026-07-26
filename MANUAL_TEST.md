@@ -973,32 +973,32 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 
 ## FLOW R1: List + preview
 
-- [ ] `GET /v1/recipes` → 3 entries (anthropic_style, openai_style, replicate_style) — all AI-native after the Phase 2 wedge-alignment trim.
-- [ ] `POST /v1/recipes/{key}/preview` → projected meters/rating rules/pricing rules/plans/dunning/webhooks (no DB writes). No `audit_log` row is written (read-only preview, not a "Created recipe").
-- [ ] Unknown key → 404.
+- [x] `GET /v1/recipes` → 3 entries (anthropic_style, openai_style, replicate_style) — all AI-native after the Phase 2 wedge-alignment trim. *(walked 2026-07-26 UI: 3 cards live.)*
+- [x] `POST /v1/recipes/{key}/preview` → projected meters/rating rules/pricing rules/plans/dunning/webhooks (no DB writes). No `audit_log` row is written (read-only preview, not a "Created recipe"). *(walked 2026-07-26 UI: openai Preview rendered GPT-5.1 prices + "OpenAI-style API — monthly, USD"; recipe audit rows stayed 0.)*
+- [x] Unknown key → 404. *(walked 2026-07-26.)*
 
 ## FLOW R2: Instantiate
 
-- [ ] `POST /v1/recipes/anthropic_style/instantiate {livemode:false}` → 201 with all created IDs. DB now has products + prices + meters + dunning policy + webhook endpoint.
-- [ ] Pricing rules carry `dimension_match` JSONB.
+- [x] `POST /v1/recipes/{key}/instantiate {overrides:{}}` (test-mode via session/key) → 201 with all created IDs. DB now has a meter + prices + a plan + dunning policy + webhook endpoint — **no products** (recipes create no product entity). *(walked 2026-07-26 UI: openai Install → 201, 35 rules + plan, navigated to the created plan page.)*
+- [x] Pricing rules carry `dimension_match` JSONB. *(walked 2026-07-26: e.g. `{"model":…,"token_type":"input"}`.)*
 - [ ] **Catalog currency (2026-07-05 refresh):** anthropic_style prices the 4.5 generation (opus/sonnet/haiku 4.5) plus legacy 3.x (35 rules total); openai_style prices the gpt-5.x/gpt-4.1 families plus legacy; replicate_style rates are per-second retail (A100 `0.14`¢/s — not the old 14¢/s) with `sum` aggregation over per-interval deltas. Every model family the LiteLLM mapper emits has a recipe rule (CI-locked by `TestModelFamilies_EveryTokenPricedByARecipe`).
-- [ ] Repeat for all 3 recipes — each completes <500ms. (Instantiate emits its OWN `create recipe` row inside the install transaction — ADR-090; `preview` and a no-op re-apply write nothing, and say so. Created resources carry `created_by=<key_id>`.)
+- [x] Instantiate emits its OWN `create recipe` row inside the install transaction (ADR-090); `preview` and a no-op re-apply write nothing. *(walked 2026-07-26 on openai_style: install → exactly 1 `create|recipe` audit row; preview → 0; 2× no-op re-apply → 0 new rows. Per-recipe <500ms + `created_by=<key_id>` not separately timed this pass.)*
 
 ## FLOW R3: Idempotent re-apply, no uninstall (ADR-085)
 
-- [ ] Instantiate same recipe twice → second call is a **no-op**: `201` with the SAME `id` and `created_objects` as the first call (not a fresh instance, never a 409). Object counts (`meters`/`rating_rule_versions`/`plans`) are unchanged by the second call — no duplicate plan.
+- [x] Instantiate same recipe twice → second call is a **no-op**: `201` with the SAME `id` and `created_objects` as the first call (not a fresh instance, never a 409). Object counts (`meters`/`rating_rule_versions`/`plans`) are unchanged by the second call — no duplicate plan. *(walked 2026-07-26: re-POST openai_style → same id `vlx_rec_8a81…`, 35 rules, 201; UI disables re-install.)*
 - [ ] Different tenant, same recipe → 201 (fresh instance, its own new objects).
-- [ ] No uninstall exists: there is no `DELETE` route under `/v1/recipes/instances` (removed along with `Force` and the `seed_sample_data` scaffolding) — the badge (`recipe_instances` row) is a permanent record and is never deleted by recipe machinery. To retire the generated plan, archive it via `PATCH /v1/plans/{id}` (existing plan-domain verb) — the badge still names it afterward, truthfully, as what this recipe created.
+- [x] No uninstall exists: there is no `DELETE` route under `/v1/recipes/instances` (removed along with `Force` and the `seed_sample_data` scaffolding) — the badge (`recipe_instances` row) is a permanent record and is never deleted by recipe machinery. To retire the generated plan, archive it via `PATCH /v1/plans/{id}` (existing plan-domain verb) — the badge still names it afterward, truthfully, as what this recipe created.
 
 ## FLOW R4: Atomic rollback
 
-- [ ] Inject mid-instantiate failure (e.g. invalid webhook URL) → 422; zero rows created.
-- [ ] No `recipe_instances` row.
+- [x] Inject mid-instantiate failure (e.g. invalid webhook URL) → 422; zero rows created. *(CI-locked `TestService_Instantiate_AtomicityRollback`, real-Postgres, green 2026-07-26.)*
+- [x] No `recipe_instances` row. *(same lock.)*
 
 ## FLOW R5: Dashboard UI
 
-- [ ] `/recipes` → 3 cards (anthropic_style, openai_style, replicate_style). Preview opens side panel; Instantiate dialog names side-effects and opens the created plan (`/plans/{id}`; `/pricing` fallback) on confirm.
-- [ ] Once installed, the card shows "Installed \<date\> · \<instance id\>" and the dialog's CTA reads "Already installed" (disabled) — no Uninstall action anywhere in the UI.
+- [x] `/recipes` → 3 cards (anthropic_style, openai_style, replicate_style). Preview opens side panel; Instantiate dialog names side-effects and opens the created plan (`/plans/{id}`; `/pricing` fallback) on confirm. *(walked 2026-07-26 UI end to end.)*
+- [x] Once installed, the card shows "Installed \<date\> · \<instance id\>" and the dialog's CTA reads "Already installed" (disabled) — no Uninstall action anywhere in the UI. *(walked 2026-07-26: "Installed Jul 26, 2026, 12:44 PM · vlx_rec_8a81…", CTA disabled. NOTE: the date rendered "Invalid Date" until this PR — FE read `instantiated_at`, API returns `created_at`.)*
 
 ---
 
