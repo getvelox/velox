@@ -5733,6 +5733,18 @@ func (e *Engine) computeAndPersistInvoiceTax(ctx context.Context, tenantID, invo
 		TaxFacts:         taxApp.TaxFacts,
 		TotalAmountCents: totalWithTax,
 		TaxNextRetryAt:   nextTaxRetry(ctx, taxApp.TaxStatus, taxApp.TaxErrorCode, inv.TaxRetryCount),
+		// A computation over a fresh draft (tax_status still the create-time
+		// 'ok') is the INITIAL attempt — the finalize-time compute of an
+		// operator-composed invoice — not a retry, so it must not bump
+		// tax_retry_count ("Tax retries: 1" on every healthy one-off invoice,
+		// found live on FLOW I12/NIM-000258). Derived from the invoice's
+		// PRIOR state rather than the caller: RetryTaxForInvoice gates on
+		// pending/failed so it always counts, and a re-finalize of a STUCK
+		// draft (prior compute failed → pending/failed) counts too — that
+		// second compute genuinely is a retry. Cycle invoices never pass
+		// through here at build time, so the counter now uniformly means
+		// "attempts after the initial computation" for both invoice types.
+		InitialAttempt: inv.TaxStatus != domain.InvoiceTaxPending && inv.TaxStatus != domain.InvoiceTaxFailed,
 	}
 
 	return e.invoices.UpdateTaxAtomic(ctx, tenantID, invoiceID, update, items)
