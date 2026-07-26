@@ -163,7 +163,22 @@ function Chip({ n, label }: { n: number; label: string }) {
 function RecipeDialog({ recipe, onClose }: { recipe: RecipeListItem; onClose: () => void }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const [overrides, setOverrides] = useState<Record<string, string | number>>({})
+  const installed = !!recipe.instantiated
+  // Installed recipes get a READ-ONLY dialog seeded with the settings the
+  // install actually used (recorded on the badge): re-apply is a no-op that
+  // never reads overrides, so live inputs here would accept edits that can
+  // do nothing. Preview stays enabled — with the recorded values it shows
+  // what this install rendered.
+  const [overrides, setOverrides] = useState<Record<string, string | number>>(() => {
+    if (!installed) return {}
+    const recorded = recipe.instantiated?.overrides ?? {}
+    const out: Record<string, string | number> = {}
+    for (const schema of recipe.overridable) {
+      const v = recorded[schema.key]
+      if (typeof v === 'string' || typeof v === 'number') out[schema.key] = v
+    }
+    return out
+  })
   const [preview, setPreview] = useState<RecipePreviewResult | null>(null)
 
   const detailQuery = useQuery({
@@ -230,7 +245,9 @@ function RecipeDialog({ recipe, onClose }: { recipe: RecipeListItem; onClose: ()
 
         {/* Overrides */}
         <div>
-          <Label className="text-xs uppercase tracking-wide text-muted-foreground">Customize before installing</Label>
+          <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+            {installed ? 'Installed with these settings' : 'Customize before installing'}
+          </Label>
           {recipe.overridable.length > 0 ? (
             <div className="space-y-3 mt-2">
               {recipe.overridable.map(schema => (
@@ -239,11 +256,17 @@ function RecipeDialog({ recipe, onClose }: { recipe: RecipeListItem; onClose: ()
                   schema={schema}
                   value={overrides[schema.key] ?? String(schema.default ?? '')}
                   onChange={(v) => setOverride(schema.key, v)}
+                  disabled={installed}
                 />
               ))}
             </div>
           ) : (
             <p className="text-sm text-muted-foreground mt-2">Nothing to customize — this recipe installs as-is.</p>
+          )}
+          {installed && (
+            <p className="text-xs text-muted-foreground mt-2">
+              These were set when the recipe was installed and can't be changed here — edit the plan's name on its page and prices on the Pricing page. Re-running a recipe never changes what it already created.
+            </p>
           )}
         </div>
 
@@ -313,10 +336,12 @@ function OverrideField({
   schema,
   value,
   onChange,
+  disabled,
 }: {
   schema: RecipeOverride
   value: string | number
   onChange: (v: string | number) => void
+  disabled?: boolean
 }) {
   const id = `override-${schema.key}`
   const label = overrideLabel(schema.key)
@@ -338,6 +363,7 @@ function OverrideField({
         className="mt-1.5"
         maxLength={schema.max_length}
         pattern={schema.pattern}
+        disabled={disabled}
       />
     </div>
   )
