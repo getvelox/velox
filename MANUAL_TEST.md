@@ -1002,7 +1002,8 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 ## FLOW R5: Dashboard UI
 
 - [x] `/recipes` → 3 cards (anthropic_style, openai_style, replicate_style). Preview opens side panel; Instantiate dialog names side-effects and opens the created plan (`/plans/{id}`; `/pricing` fallback) on confirm. *(walked 2026-07-26 UI end to end.)*
-- [x] Once installed, the card shows "Installed \<date\> · \<instance id\>" and the dialog's CTA reads "Already installed" (disabled) — no Uninstall action anywhere in the UI. *(walked 2026-07-26: "Installed Jul 26, 2026, 12:44 PM · vlx_rec_8a81…", CTA disabled. NOTE: the date rendered "Invalid Date" until this PR — FE read `instantiated_at`, API returns `created_at`.)*
+- [x] Once installed, the card shows "Installed \<date\> · \<instance id\>" and the dialog's CTA reads "Already installed" (disabled) — no Uninstall action anywhere in the UI.
+- [x] An installed recipe's dialog is READ-ONLY: header reads "Installed with these settings", the fields show the values recorded on the badge (not defaults) and are disabled, with a caption pointing to the plan/pricing pages for edits — no live inputs whose values a no-op re-apply would ignore. *(walked 2026-07-26 both states; user catch — install-time parameters are not post-install settings.)* *(walked 2026-07-26: "Installed Jul 26, 2026, 12:44 PM · vlx_rec_8a81…", CTA disabled. NOTE: the date rendered "Invalid Date" until this PR — FE read `instantiated_at`, API returns `created_at`.)*
 
 ---
 
