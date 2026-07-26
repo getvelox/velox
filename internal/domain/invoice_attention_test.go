@@ -713,3 +713,40 @@ func TestClassifyInvoiceAttention_DunningExhausted(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyInvoiceAttention_SinceIsSimDomainOnSimulatedInvoices pins
+// the 2026-07-26 fix (found live, FLOW I12 fixture NIM-000258): the
+// banner's `since` was sourced from UpdatedAt — a wall-clock DB stamp —
+// while a simulated invoice's page anchors relative time to the sim
+// axis, so a one-off invoice finalized at sim-today rendered "since
+// 70d ago" (the wall→sim distance). Simulated invoices anchor since to
+// IssuedAt (sim-domain); wall-clock invoices keep UpdatedAt.
+func TestClassifyInvoiceAttention_SinceIsSimDomainOnSimulatedInvoices(t *testing.T) {
+	simIssued := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	wallUpdated := time.Date(2026, 7, 26, 17, 53, 0, 0, time.UTC)
+
+	inv := draft()
+	inv.Status = InvoiceFinalized
+	inv.PaymentStatus = PaymentPending
+	inv.AmountDueCents = 4300
+	inv.IsSimulated = true
+	inv.IssuedAt = &simIssued
+	inv.UpdatedAt = wallUpdated
+
+	att := ClassifyInvoiceAttention(inv, AttentionContext{})
+	if att == nil || att.Since == nil {
+		t.Fatalf("expected an attention with Since, got %+v", att)
+	}
+	if !att.Since.Equal(simIssued) {
+		t.Errorf("simulated invoice Since = %v, want the sim-domain IssuedAt %v (wall UpdatedAt %v leaks cross-domain deltas)", att.Since, simIssued, wallUpdated)
+	}
+
+	inv.IsSimulated = false
+	att = ClassifyInvoiceAttention(inv, AttentionContext{})
+	if att == nil || att.Since == nil {
+		t.Fatalf("expected an attention with Since on the wall twin")
+	}
+	if !att.Since.Equal(wallUpdated) {
+		t.Errorf("wall-clock invoice Since = %v, want UpdatedAt %v", att.Since, wallUpdated)
+	}
+}
