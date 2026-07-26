@@ -201,31 +201,37 @@ func TestRLSIsolation_Livemode(t *testing.T) {
 	assertLivemodeTriggerOverridesCaller(t, db, ctx, tenantID)
 }
 
-// TestRLSIsolation_AllModeAwareTablesHaveLivemodePredicate scans pg_policies
-// and asserts that every table listed in migration 0020 as mode-aware has a
-// tenant_isolation policy whose qual references app.livemode. A future
-// migration that ALTERs one of these policies without preserving the livemode
-// clause is the exact regression this test catches.
+// TestRLSIsolation_AllModeAwareTablesHaveLivemodePredicate derives the
+// mode-aware table set from the schema itself — every table carrying a
+// tenant_isolation policy — and asserts each one is mode-partitioned or
+// explicitly justified as mode-neutral. An earlier version of this test
+// checked a hand-maintained table list, and recipe_instances shipped
+// livemode-BLIND for two months precisely because nothing forced a new
+// tenant table onto that list (found 2026-07-26: a test-mode recipe install
+// silently no-op'd the live-mode install of the same recipe). Self-deriving
+// closes that hole: a new tenant-isolated table fails here until it either
+// gets the 0020 treatment or earns an allowlist entry with a justification.
 func TestRLSIsolation_AllModeAwareTablesHaveLivemodePredicate(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), true), 10*time.Second)
 	defer cancel()
 
-	// Kept in lockstep with the ARRAY[] block in 0020_test_mode.up.sql. When a
-	// new mode-aware table is added, append it here — the test will otherwise
-	// pass silently without covering the new policy.
-	modeAwareTables := []string{
-		"api_keys", "audit_log", "billed_entries", "billing_provider_connections",
-		"coupon_redemptions", "coupons", "credit_note_line_items", "credit_notes",
-		"customer_billing_profiles", "customer_credit_ledger",
-		"customer_price_overrides", "customers",
-		"dunning_policies", "email_outbox", "idempotency_keys", "invoice_dunning_events",
-		"invoice_dunning_runs", "invoice_line_items", "invoices", "meters",
-		"payment_update_tokens", "plans", "rating_rule_versions",
-		"stripe_webhook_events", "subscriptions", "subscription_items",
-		"test_clocks", "usage_events",
-		"webhook_deliveries", "webhook_endpoints", "webhook_events", "webhook_outbox",
-		"payment_methods", "customer_portal_sessions", "customer_portal_magic_links",
+	// Tables that carry tenant_isolation but deliberately NO livemode column.
+	// The safety rule for membership: a mode-blind tenant table is safe only
+	// if every lookup against it rides an FK to a mode-aware parent (the row
+	// inherits mode through the referenced PK — 0020's FK-inheritance
+	// argument), or the table is genuinely account-level. A NATURAL-key
+	// lookup (recipe_instances.recipe_key, pre-0157) is the shape that
+	// breaks: the key resolves across modes, so gates reading it act on the
+	// other mode's state.
+	modeNeutralByDesign := map[string]string{
+		"tenant_settings":              "account-level config, shared across modes by design (0020)",
+		"user_tenants":                 "account-level membership; no mode axis",
+		"member_invitations":           "account-level invites; unique key is a random token hash",
+		"customer_discounts":           "FK-scoped to customers (mode-aware parent)",
+		"meter_pricing_rules":          "unique key is (meter_id, rating_rule_version_id) — both FK mode-aware parents",
+		"subscription_item_thresholds": "FK-scoped to subscription items (mode-aware parent)",
+		"tax_calculations":             "FK-scoped to invoices (mode-aware parent)",
 	}
 
 	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
@@ -234,15 +240,41 @@ func TestRLSIsolation_AllModeAwareTablesHaveLivemodePredicate(t *testing.T) {
 	}
 	defer postgres.Rollback(tx)
 
-	for _, table := range modeAwareTables {
-		var qual string
-		err := tx.QueryRowContext(ctx,
-			`SELECT qual FROM pg_policies WHERE tablename = $1 AND policyname = 'tenant_isolation'`,
-			table,
-		).Scan(&qual)
-		if err != nil {
-			t.Errorf("%s: read tenant_isolation policy: %v", table, err)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT p.tablename, p.qual,
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns c
+		           WHERE c.table_schema = p.schemaname
+		             AND c.table_name  = p.tablename
+		             AND c.column_name = 'livemode'
+		       ) AS has_livemode
+		FROM pg_policies p
+		WHERE p.policyname = 'tenant_isolation'
+		ORDER BY p.tablename
+	`)
+	if err != nil {
+		t.Fatalf("scan pg_policies: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	seen := map[string]bool{}
+	for rows.Next() {
+		var table, qual string
+		var hasLivemode bool
+		if err := rows.Scan(&table, &qual, &hasLivemode); err != nil {
+			t.Fatalf("scan policy row: %v", err)
+		}
+		seen[table] = true
+
+		if !hasLivemode {
+			if _, ok := modeNeutralByDesign[table]; !ok {
+				t.Errorf("%s: tenant-isolated table has NO livemode column and no mode-neutral justification — give it the 0020 treatment (column + widened UNIQUEs + policy predicate + set_livemode trigger) or add it to modeNeutralByDesign with the reason it is safe",
+					table)
+			}
 			continue
+		}
+		if _, ok := modeNeutralByDesign[table]; ok {
+			t.Errorf("%s: listed as mode-neutral but now HAS a livemode column — prune the stale allowlist entry", table)
 		}
 		// The policy qual is the expanded form of the USING clause. Postgres
 		// normalises it, so the exact string shape can shift across versions —
@@ -251,6 +283,15 @@ func TestRLSIsolation_AllModeAwareTablesHaveLivemodePredicate(t *testing.T) {
 		if !containsLivemodePredicate(qual) {
 			t.Errorf("%s: tenant_isolation policy qual does NOT reference app.livemode — mode partitioning is missing. qual was: %s",
 				table, qual)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	for table := range modeNeutralByDesign {
+		if !seen[table] {
+			t.Errorf("%s: on the mode-neutral allowlist but has no tenant_isolation policy (dropped or renamed?) — prune the stale entry", table)
 		}
 	}
 }

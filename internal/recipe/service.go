@@ -317,7 +317,10 @@ func (s *Service) Instantiate(
 	// recorded is still present (plans are
 	// ON DELETE RESTRICT with no hard-delete; the catalog is shared reference
 	// data), so there is nothing to re-create and never a second plan to mint
-	// on a double-submit — the badge IS the idempotency gate. Additive re-apply
+	// on a double-submit — the badge IS the idempotency gate. The badge is
+	// mode-scoped like the objects it records (0157): RLS partitions this read
+	// by app.livemode, so a test-mode install never gates a live-mode one.
+	// Additive re-apply
 	// against a NEWER template version is deferred (ADR-085); v1 ships a single
 	// version per recipe, so a re-apply at the same version is a pure no-op.
 	if existing, err := s.store.GetByKeyTx(ctx, tx, tenantID, recipeKey); err == nil {

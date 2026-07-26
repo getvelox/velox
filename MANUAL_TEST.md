@@ -988,6 +988,7 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 
 - [x] Instantiate same recipe twice → second call is a **no-op**: `201` with the SAME `id` and `created_objects` as the first call (not a fresh instance, never a 409). Object counts (`meters`/`rating_rule_versions`/`plans`) are unchanged by the second call — no duplicate plan. *(walked 2026-07-26: re-POST openai_style → same id `vlx_rec_8a81…`, 35 rules, 201; UI disables re-install.)*
 - [ ] Different tenant, same recipe → 201 (fresh instance, its own new objects).
+- [x] Same tenant, other MODE → 201 with a **fresh** instance and fresh mode-scoped objects, not a no-op against the first mode's badge; each mode's card shows only its own "Installed" state. *(CI-locked `TestService_Instantiate_LivemodePartitioned`, real-Postgres, green 2026-07-26 — regression for the livemode-blind badge fixed in m0157.)*
 - [x] No uninstall exists: there is no `DELETE` route under `/v1/recipes/instances` (removed along with `Force` and the `seed_sample_data` scaffolding) — the badge (`recipe_instances` row) is a permanent record and is never deleted by recipe machinery. To retire the generated plan, archive it via `PATCH /v1/plans/{id}` (existing plan-domain verb) — the badge still names it afterward, truthfully, as what this recipe created.
 
 ## FLOW R4: Atomic rollback
