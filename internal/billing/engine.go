@@ -41,6 +41,7 @@ func roundDays(d time.Duration) int {
 	return int(math.Round(d.Hours() / 24))
 }
 
+
 // Engine orchestrates the billing cycle: finds subscriptions due for billing,
 // aggregates usage, computes charges, and generates invoices with line items.
 //
@@ -967,7 +968,17 @@ type baseSegment struct {
 //
 //   - No changes → one full-period segment at the item's current state.
 //   - Plan or quantity change → two segments (before / after the change).
-//   - Item added mid-period → first segment starts at the add time.
+//   - Item added mid-period → first segment starts at the add time —
+//     UNLESS the add lands on the period-start calendar day in the
+//     tenant timezone, in which case the item exists from periodStart
+//     (day-grade: the add day counts whole, ADR-012 amendment
+//     2026-07-26). Without the clamp, the creation-time 'add' row
+//     (trigger 0029/0129 stamps the raw creation instant) re-prorates
+//     a first period whose start ADR-012 deliberately snapped back to
+//     the signup day's midnight — reintroducing the exact "prorated
+//     30/31 days on a full month" defect the snap removed. Only 'add'
+//     rows clamp; plan/quantity/remove changes stay instant-precise
+//     per ADR-012's Consequences.
 //   - Item removed mid-period → last segment ends at the remove time;
 //     no tail segment beyond remove.
 //   - Item both added AND removed in the same period → segment(s) only
@@ -977,7 +988,7 @@ type baseSegment struct {
 // (removed mid-period); in that case the tail state is determined
 // entirely from the last change's to_* fields (or absent if the last
 // change is 'remove').
-func itemBaseSegments(item *domain.SubscriptionItem, changes []domain.SubscriptionItemChange, periodStart, periodEnd time.Time) []baseSegment {
+func itemBaseSegments(item *domain.SubscriptionItem, changes []domain.SubscriptionItemChange, periodStart, periodEnd time.Time, loc *time.Location) []baseSegment {
 	if len(changes) == 0 {
 		if item == nil {
 			return nil
@@ -986,6 +997,17 @@ func itemBaseSegments(item *domain.SubscriptionItem, changes []domain.Subscripti
 			start: periodStart, end: periodEnd,
 			planID: item.PlanID, quantity: item.Quantity,
 		}}
+	}
+
+	// Day-grade clamp: a first-in-window 'add' on the period-start day
+	// moves to periodStart ITSELF — never beginningOfDay — because
+	// threshold-reset and org-TZ-seam (ADR-091) periods legitimately
+	// start mid-day and a day-floor would push a boundary before the
+	// period. Copy-on-write so the caller's slice (shared between the
+	// base and usage passes) is never mutated.
+	if changes[0].ChangeType == "add" && domain.SameCalendarDayIn(changes[0].ChangedAt, periodStart, loc) {
+		changes = append([]domain.SubscriptionItemChange(nil), changes...)
+		changes[0].ChangedAt = periodStart
 	}
 
 	// Initial state at periodStart, derived from the first change.
@@ -2647,7 +2669,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 			continue
 		}
 		itemForSeg := it
-		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, periodEnd)
+		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok || segPlan.BaseAmountCents <= 0 {
@@ -2683,7 +2705,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		if _, stillPresent := itemsByID[itemID]; stillPresent {
 			continue
 		}
-		segments := itemBaseSegments(nil, changes, periodStart, periodEnd)
+		segments := itemBaseSegments(nil, changes, periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok || segPlan.BaseAmountCents <= 0 {
@@ -2771,7 +2793,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	}
 	for _, it := range sub.Items {
 		itemForSeg := it
-		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, periodEnd)
+		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
 		if len(segments) == 0 {
 			// Item present at period_end but no segments (e.g. zero-duration
 			// boundary swap collapsed by the helper). Treat the post-change
@@ -2796,7 +2818,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		if _, stillPresent := itemsByID[itemID]; stillPresent {
 			continue
 		}
-		segments := itemBaseSegments(nil, changes, periodStart, periodEnd)
+		segments := itemBaseSegments(nil, changes, periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok {
@@ -3975,7 +3997,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 				continue
 			}
 			itemForSeg := it
-			segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, canceledAt)
+			segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
 			for _, seg := range segments {
 				segPlan, ok := plans[seg.planID]
 				if !ok || segPlan.BaseAmountCents <= 0 || segPlan.BaseBillTiming == domain.BillInAdvance {
@@ -3992,7 +4014,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 			if _, stillPresent := itemsByID[itemID]; stillPresent {
 				continue
 			}
-			segments := itemBaseSegments(nil, changes, periodStart, canceledAt)
+			segments := itemBaseSegments(nil, changes, periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
 			for _, seg := range segments {
 				segPlan, ok := plans[seg.planID]
 				if !ok || segPlan.BaseAmountCents <= 0 || segPlan.BaseBillTiming == domain.BillInAdvance {
@@ -4078,7 +4100,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 	}
 	for _, it := range sub.Items {
 		itemForSeg := it
-		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, canceledAt)
+		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
 		if len(segments) == 0 {
 			for _, mid := range plans[it.PlanID].MeterIDs {
 				addMeterInterval(mid, periodStart, canceledAt)
@@ -4099,7 +4121,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 		if _, stillPresent := itemsByID[itemID]; stillPresent {
 			continue
 		}
-		segments := itemBaseSegments(nil, changes, periodStart, canceledAt)
+		segments := itemBaseSegments(nil, changes, periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok {

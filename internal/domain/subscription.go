@@ -35,6 +35,21 @@ func BeginningOfDayIn(t time.Time, loc *time.Location) time.Time {
 	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc).UTC()
 }
 
+// SameCalendarDayIn reports whether a and b fall on the same calendar
+// day in loc. Calendar-day identity — deliberately not a duration
+// test — so DST-transition days and mid-day period starts (threshold
+// reset, ADR-091 org-TZ seams) classify correctly. Shared by the
+// day-grade add clamps in billing.itemBaseSegments and the
+// subscription AddItem proration (ADR-012 amendment 2026-07-26).
+func SameCalendarDayIn(a, b time.Time, loc *time.Location) bool {
+	if loc == nil {
+		loc = time.UTC
+	}
+	ay, am, ad := a.In(loc).Date()
+	by, bm, bd := b.In(loc).Date()
+	return ay == by && am == bm && ad == bd
+}
+
 // BeginningOfMonthIn snaps `t` to the first-of-month-at-00:00 in `loc`,
 // returned as UTC. Calendar-billing anchor helper. Shared between
 // subscription.Service (initial activation / trial-end / reset) and
