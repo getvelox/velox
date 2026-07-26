@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { api, formatCents, formatDate, formatDateTime, type Plan, type Meter, type RatingRule, type Customer } from '@/lib/api'
 import { applyApiError, showApiError } from '@/lib/formErrors'
 import { priceRate } from '@/lib/priceDisplay'
+import { meterAggregationLabel } from '@/lib/meterLabels'
 import { Layout } from '@/components/Layout'
 import { TestClockBadge } from '@/components/TestClockBadge'
 import { statusBadgeVariant } from '@/lib/status'
@@ -322,7 +323,7 @@ export default function PlanDetailPage() {
                       <p className="text-xs text-muted-foreground font-mono mt-0.5">{meter.key}</p>
                     </Link>
                     <div className="flex items-center gap-2">
-                      <Badge variant="secondary">{meter.aggregation}</Badge>
+                      <Badge variant="secondary">{meterAggregationLabel(meter.aggregation)}</Badge>
                       <span className="text-xs text-muted-foreground">{meter.unit}</span>
                       {rule ? (
                         <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{rule.name} — {priceRate(rule, meter.unit)}</span>
@@ -346,7 +347,11 @@ export default function PlanDetailPage() {
               })}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground text-center py-8">No meters attached</p>
+            <div className="text-center py-8">
+              <p className="text-sm text-muted-foreground">
+                No meters attached — this plan charges only its base price. Attach a meter to bill usage.
+              </p>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -560,6 +565,7 @@ function EditPlanDialog({ plan, onClose, onSaved }: {
               onChange={e => setBasePrice(e.target.value)}
               placeholder="49.00"
             />
+            <p className="text-xs text-muted-foreground mt-1">Applies to every active subscription at its next invoice — the period in progress keeps the price it started with.</p>
             <p className="text-xs text-muted-foreground">{plan.billing_interval === 'yearly' ? 'Yearly' : 'Monthly'} recurring charge</p>
           </div>
 
@@ -594,6 +600,7 @@ function EditPlanDialog({ plan, onClose, onSaved }: {
                 ))}
               </SelectContent>
             </Select>
+            <p className="text-xs text-muted-foreground mt-1">Archived plans keep billing their existing subscriptions but can't be picked for new ones.</p>
           </div>
 
           <DialogFooter>

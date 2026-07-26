@@ -16,6 +16,7 @@ import {
 import { Layout } from '@/components/Layout'
 import { priceRate, shiftDecimal } from '@/lib/priceDisplay'
 import { latestPerKey } from '@/lib/rules'
+import { meterAggregationLabel } from '@/lib/meterLabels'
 import { showApiError } from '@/lib/formErrors'
 import { statusBadgeVariant } from '@/lib/status'
 
@@ -145,6 +146,25 @@ export default function PricingPage() {
       .filter(r => r.id !== currentRules.find(c => c.rule_key === key)?.id)
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [republishRule, setRepublishRule] = useState<RatingRule | null>(null)
+  const [ruleSearch, setRuleSearch] = useState('')
+  const visibleRules = currentRules.filter(r =>
+    ruleSearch.trim() === '' ||
+    r.name.toLowerCase().includes(ruleSearch.toLowerCase()) ||
+    r.rule_key.toLowerCase().includes(ruleSearch.toLowerCase()))
+
+  // Used-by: how many meters bill this key (both binding edges), so the
+  // blast radius of a republish is visible before publishing.
+  const metersUsingRule = (ruleKey: string): number => {
+    const versionIDs = new Set(rules.filter(r => r.rule_key === ruleKey).map(r => r.id))
+    const ids = new Set<string>()
+    for (const m of meters) {
+      if (m.rating_rule_version_id && versionIDs.has(m.rating_rule_version_id)) ids.add(m.id)
+    }
+    for (const b of bindingsData?.data ?? []) {
+      if (versionIDs.has(b.rating_rule_version_id)) ids.add(b.meter_id)
+    }
+    return ids.size
+  }
   const loading = plansLoading || metersLoading || rulesLoading
   const error = plansError || metersError || rulesError
 
@@ -182,7 +202,13 @@ export default function PricingPage() {
                 <p className="text-sm text-destructive mb-3">
                   {error instanceof Error ? error.message : 'Failed to load pricing data'}
                 </p>
-                <Button variant="outline" size="sm" onClick={() => queryClient.invalidateQueries({ queryKey: ['plans'] })}>
+                <Button variant="outline" size="sm" onClick={() => {
+                  // A failure may have come from any of the tab queries —
+                  // retrying only one leaves the button dead for the rest.
+                  for (const key of ['plans', 'meters', 'rating-rules', 'meter-pricing-rules']) {
+                    queryClient.invalidateQueries({ queryKey: [key] })
+                  }
+                }}>
                   Retry
                 </Button>
               </div>
@@ -261,6 +287,7 @@ export default function PricingPage() {
                           <TableHead>Name</TableHead>
                           <TableHead>Key</TableHead>
                           <TableHead>Unit</TableHead>
+                          <TableHead>Pricing</TableHead>
                           <TableHead>Aggregation</TableHead>
                           <TableHead>Created</TableHead>
                         </TableRow>
@@ -283,7 +310,22 @@ export default function PricingPage() {
                             </TableCell>
                             <TableCell className="font-mono text-muted-foreground">{m.key}</TableCell>
                             <TableCell className="text-muted-foreground">{m.unit}</TableCell>
-                            <TableCell><Badge variant={badgeVariant(m.aggregation)}>{m.aggregation}</Badge></TableCell>
+                            {(() => {
+                              const def = rules.find(r => r.id === m.rating_rule_version_id)
+                              const dims = (bindingsData?.data ?? []).filter(b => b.meter_id === m.id).length
+                              return (
+                                <TableCell className="text-sm">
+                                  {def ? (
+                                    <span className="text-muted-foreground">{priceRate(def, m.unit)}</span>
+                                  ) : dims > 0 ? (
+                                    <span className="text-muted-foreground">{dims} dimension price{dims !== 1 ? 's' : ''}</span>
+                                  ) : (
+                                    <span className="text-amber-500">Not priced — usage won't be billed</span>
+                                  )}
+                                </TableCell>
+                              )
+                            })()}
+                            <TableCell><Badge variant={badgeVariant(m.aggregation)}>{meterAggregationLabel(m.aggregation)}</Badge></TableCell>
                             <TableCell className="text-muted-foreground">{formatDate(m.created_at)}</TableCell>
                           </TableRow>
                         ))}
@@ -305,6 +347,16 @@ export default function PricingPage() {
                       }}
                     />
                   ) : (
+                    <>
+                    <div className="px-4 pt-4">
+                      <Input
+                        value={ruleSearch}
+                        onChange={e => setRuleSearch(e.target.value)}
+                        placeholder="Search prices by name or key…"
+                        aria-label="Search prices"
+                        className="max-w-sm"
+                      />
+                    </div>
                     <Table>
                       <TableHeader>
                         <TableRow>
@@ -312,11 +364,12 @@ export default function PricingPage() {
                           <TableHead>Rule Key</TableHead>
                           <TableHead>Mode</TableHead>
                           <TableHead>Version</TableHead>
+                          <TableHead>Used by</TableHead>
                           <TableHead className="text-right">Price</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {currentRules.map(r => {
+                        {visibleRules.map(r => {
                           const older = olderVersions(r.rule_key)
                           const expanded = expandedKeys.has(r.rule_key)
                           return (
@@ -343,6 +396,11 @@ export default function PricingPage() {
                                     </button>
                                   )}
                                 </TableCell>
+                                <TableCell className="text-muted-foreground text-sm">
+                                  {metersUsingRule(r.rule_key) > 0
+                                    ? `${metersUsingRule(r.rule_key)} meter${metersUsingRule(r.rule_key) !== 1 ? 's' : ''}`
+                                    : <span className="text-amber-500">unused</span>}
+                                </TableCell>
                                 <TableCell className="text-right font-medium">
                                   <span>{priceRate(r, unitForRule(r.id))}</span>
                                   <Button
@@ -361,6 +419,7 @@ export default function PricingPage() {
                                   <TableCell className="font-mono text-muted-foreground/70">{o.rule_key}</TableCell>
                                   <TableCell><Badge variant="secondary" className="text-xs">superseded</Badge></TableCell>
                                   <TableCell className="text-muted-foreground">v{o.version}</TableCell>
+                                  <TableCell />
                                   <TableCell className="text-right text-muted-foreground">{priceRate(o, unitForRule(o.id))}</TableCell>
                                 </TableRow>
                               ))}
@@ -369,6 +428,7 @@ export default function PricingPage() {
                         })}
                       </TableBody>
                     </Table>
+                    </>
                   )}
                 </TabsContent>
               </>
@@ -404,10 +464,13 @@ export default function PricingPage() {
         <CreateMeterDialog
           rules={rules}
           onClose={() => setCreateFor(null)}
-          onCreated={() => {
+          onCreated={(meterId) => {
             setCreateFor(null)
             queryClient.invalidateQueries({ queryKey: ['meters'] })
             toast.success('Meter created')
+            // Land on the meter page — linking prices and adding
+            // dimension rules happens there, not on this list.
+            if (meterId) navigate(`/meters/${meterId}`)
           }}
         />
       )}
@@ -523,12 +586,12 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
         </DialogHeader>
         <form onSubmit={submit} noValidate className="space-y-4">
           <div>
-            <Label>Name</Label>
-            <Input value={name} onChange={e => setName(e.target.value)} placeholder="API Call Pricing" maxLength={255} className="mt-1" />
+            <Label htmlFor="rule-name">Name</Label>
+            <Input id="rule-name" value={name} onChange={e => setName(e.target.value)} placeholder="API Call Pricing" maxLength={255} className="mt-1" />
           </div>
           <div>
-            <Label>Rule Key</Label>
-            <Input value={ruleKey} onChange={e => setRuleKey(e.target.value)} placeholder="api_calls" maxLength={100} className="mt-1 font-mono" disabled={!!prefill} />
+            <Label htmlFor="rule-key">Rule Key</Label>
+            <Input id="rule-key" value={ruleKey} onChange={e => setRuleKey(e.target.value)} placeholder="api_calls" maxLength={100} className="mt-1 font-mono" disabled={!!prefill} />
             {existingLatest ? (
               <p className="text-xs text-amber-700 dark:text-amber-500 mt-1">
                 Existing price — this publishes v{existingLatest.version + 1} in {existingLatest.currency}, taking effect from each customer's next billing period.
@@ -557,8 +620,8 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
 
           {mode === 'flat' && (
             <div>
-              <Label>Price per Unit ({getCurrencySymbol(stampCurrency)})</Label>
-              <Input type="number" step="any" min={0} max={999999.99} value={flatAmount}
+              <Label htmlFor="rule-flat-price">Price per Unit ({getCurrencySymbol(stampCurrency)})</Label>
+              <Input id="rule-flat-price" type="number" step="any" min={0} max={999999.99} value={flatAmount}
                 onChange={e => setFlatAmount(e.target.value)} placeholder="0.01" className="mt-1" />
               <p className="text-xs text-muted-foreground mt-1">e.g. {getCurrencySymbol(stampCurrency)}0.01 per API call. Sub-cent rates allowed.</p>
             </div>
@@ -570,7 +633,7 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
               <div className="rounded-lg border border-border overflow-hidden">
                 <div className="grid grid-cols-[1fr_1fr_36px] gap-0 px-3 py-2 border-b border-border bg-muted">
                   <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Up to (units)</span>
-                  <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Price per unit ($)</span>
+                  <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Price per unit ({getCurrencySymbol(stampCurrency)})</span>
                   <span />
                 </div>
                 {tiers.map((tier, idx) => (
@@ -588,6 +651,7 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
                     <div className="flex justify-center">
                       {tiers.length > 1 && (
                         <button type="button" onClick={() => setTiers(t => t.filter((_, i) => i !== idx))}
+                          aria-label={`Remove tier ${idx + 1}`}
                           className="text-muted-foreground hover:text-destructive transition-colors">
                           <Trash2 size={14} />
                         </button>
@@ -613,8 +677,8 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
                 <p className="text-xs text-muted-foreground mt-1">e.g. 100 API calls per package</p>
               </div>
               <div>
-                <Label>Price per Package ({getCurrencySymbol(stampCurrency)})</Label>
-                <Input type="number" step="0.01" min={0} max={999999.99} value={packageAmount}
+                <Label htmlFor="rule-pkg-price">Price per Package ({getCurrencySymbol(stampCurrency)})</Label>
+                <Input id="rule-pkg-price" type="number" step="0.01" min={0} max={999999.99} value={packageAmount}
                   onChange={e => setPackageAmount(e.target.value)} placeholder="10.00" className="mt-1" />
                 <p className="text-xs text-muted-foreground mt-1">e.g. {getCurrencySymbol(stampCurrency)}10.00 per 100 calls</p>
               </div>
@@ -648,7 +712,7 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
 
 /* ─── Create Meter Dialog ─── */
 
-function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void; onCreated: () => void; rules: RatingRule[] }) {
+function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void; onCreated: (meterId?: string) => void; rules: RatingRule[] }) {
   const [form, setForm] = useState({ key: '', name: '', unit: 'unit', aggregation: 'sum', rating_rule_version_id: '' })
   const [saving, setSaving] = useState(false)
 
@@ -663,8 +727,8 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
     e.preventDefault()
     setSaving(true)
     try {
-      await api.createMeter(form)
-      onCreated()
+      const created = await api.createMeter(form)
+      onCreated(created?.id)
     } catch (err) {
       showApiError(err, 'Failed to create meter')
     } finally {
@@ -715,7 +779,15 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
               <p className="text-xs text-muted-foreground mt-1">{aggregationDescriptions[form.aggregation]}</p>
             </div>
           </div>
-          {rules.length > 0 && (
+          {rules.length === 0 ? (
+            <div>
+              <Label>Rating Rule</Label>
+              <p className="text-xs text-muted-foreground mt-1">
+                No prices exist yet — without one, usage on this meter won't be billed.
+                Create one on the <Link to="/pricing?tab=rules" className="text-primary hover:underline">Prices tab</Link>, then link it here or on the meter's page.
+              </p>
+            </div>
+          ) : (
             <div>
               <Label>Rating Rule</Label>
               <Select
@@ -800,8 +872,8 @@ function CreatePlanDialog({ onClose, onCreated, meters, rules }: { onClose: () =
               placeholder="Pro Plan" maxLength={255} className="mt-1" />
           </div>
           <div>
-            <Label>Code</Label>
-            <Input value={code} onChange={e => setCode(e.target.value)}
+            <Label htmlFor="plan-code">Code</Label>
+            <Input id="plan-code" value={code} onChange={e => setCode(e.target.value)}
               placeholder="pro" maxLength={100} className="mt-1 font-mono" />
             <p className="text-xs text-muted-foreground mt-1">Unique identifier used in API calls</p>
           </div>
