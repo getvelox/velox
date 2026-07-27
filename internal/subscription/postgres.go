@@ -205,6 +205,15 @@ func (s *PostgresStore) createInTx(ctx context.Context, tx *sql.Tx, tenantID str
 	}
 	sub.Items = inserted
 
+	// ADR-101: a StartNow create IS the items' billable open — one interval
+	// per item at the (already day-snapped) period start, same tx. Draft and
+	// trialing creates open nothing; their activation writer owns it.
+	if sub.Status == domain.SubscriptionActive {
+		if err := intervalOpenForItems(ctx, tx, sub, "create"); err != nil {
+			return domain.Subscription{}, err
+		}
+	}
+
 	// subscription.created rides the create tx (DispatchTx subscription
 	// subset, 2026-07-05) — durable iff the create commits.
 	if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCreated, sub, nil); err != nil {
@@ -499,6 +508,12 @@ func (s *PostgresStore) FireScheduledCancellation(ctx context.Context, tenantID,
 		return domain.Subscription{}, err
 	}
 
+	// ADR-101: the scheduled fire seals every open interval at the
+	// contracted instant, capped at the period end it fires against.
+	if err := intervalCloseAllForCancel(ctx, tx, sub, at); err != nil {
+		return domain.Subscription{}, err
+	}
+
 	// Schedule-driven cancel — enqueue in-tx with the schedule provenance
 	// the engine's post-commit dispatch historically stamped.
 	if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCanceled, sub, map[string]any{
@@ -571,6 +586,13 @@ func (s *PostgresStore) FireScheduledCancellationWithBill(ctx context.Context, t
 	}
 
 	if err := hydrateSubChildrenTx(ctx, tx, &sub); err != nil {
+		return domain.Subscription{}, err
+	}
+
+	// ADR-101: seal every open interval at the contracted instant (capped
+	// at period end; a months-past ADR-097 remediation instant zero-widths
+	// the current interval rather than rewriting billed history).
+	if err := intervalCloseAllForCancel(ctx, tx, sub, at); err != nil {
 		return domain.Subscription{}, err
 	}
 
@@ -736,6 +758,10 @@ func (s *PostgresStore) ActivateDraftWithBill(ctx context.Context, tenantID, id 
 	if err := hydrateSubChildrenTx(ctx, tx, &sub); err != nil {
 		return domain.Subscription{}, err
 	}
+	// ADR-101: activation IS the items' billable open.
+	if err := intervalOpenForItems(ctx, tx, sub, "activate"); err != nil {
+		return domain.Subscription{}, err
+	}
 	// The CAS above admits only draft rows, so reaching here IS the
 	// draft→active activation transition — enqueue subscription.activated
 	// in-tx (shared fate with the transition AND the day-1 bill below: a
@@ -803,6 +829,12 @@ func (s *PostgresStore) activateAfterTrialInTx(ctx context.Context, tx *sql.Tx, 
 		return domain.Subscription{}, err
 	}
 	if err := hydrateSubChildrenTx(ctx, tx, &sub); err != nil {
+		return domain.Subscription{}, err
+	}
+	// ADR-101: trial conversion IS the items' billable open — at the
+	// post-trial period start stamped at creation (kept current by
+	// ExtendTrial), not at the flip instant.
+	if err := intervalOpenForItems(ctx, tx, sub, "trial_convert"); err != nil {
 		return domain.Subscription{}, err
 	}
 	// Schedule-driven trial end (engine catchup / expiry sweep) — enqueue
@@ -906,6 +938,11 @@ func (s *PostgresStore) endTrialEarlyInTx(ctx context.Context, tx *sql.Tx, id st
 		return domain.Subscription{}, err
 	}
 	if err := hydrateSubChildrenTx(ctx, tx, &sub); err != nil {
+		return domain.Subscription{}, err
+	}
+	// ADR-101: the early end resets the period anchor above, so the open
+	// lands at the just-stamped period start.
+	if err := intervalOpenForItems(ctx, tx, sub, "trial_convert"); err != nil {
 		return domain.Subscription{}, err
 	}
 	// Operator-driven early trial end — enqueue in-tx.
@@ -1069,6 +1106,12 @@ func (s *PostgresStore) transitionInTx(ctx context.Context, tx *sql.Tx, id strin
 	// never disagree about who canceled. Pre-fix this hardcoded "operator"
 	// while the audit row could say "dunning" for the same event.
 	if spec.targetStatus == "canceled" {
+		// ADR-101: an immediate cancel seals every open interval — at the
+		// cancel instant for the common mid-period case, capped at the
+		// period end the final invoice covers.
+		if err := intervalCloseAllForCancel(ctx, tx, sub, now); err != nil {
+			return domain.Subscription{}, err
+		}
 		extra := map[string]any{"canceled_by": cancelActorLabel(ctx)}
 		if sub.CanceledAt != nil {
 			extra["canceled_at"] = sub.CanceledAt.UTC()
@@ -1488,6 +1531,10 @@ func (s *PostgresStore) addItemInTx(ctx context.Context, tx *sql.Tx, tenantID st
 		}
 		return domain.SubscriptionItem{}, err
 	}
+	// ADR-101: same-tx interval open (with the day-grade 'add' clamp).
+	if err := intervalOpenForAdd(ctx, tx, stored.ID, stored.SubscriptionID, stored.PlanID, stored.Quantity, now); err != nil {
+		return domain.SubscriptionItem{}, err
+	}
 	return stored, nil
 }
 
@@ -1529,6 +1576,11 @@ func (s *PostgresStore) updateItemQuantityInTx(ctx context.Context, tx *sql.Tx, 
 		return domain.SubscriptionItem{}, errs.ErrNotFound
 	}
 	if err != nil {
+		return domain.SubscriptionItem{}, err
+	}
+	// ADR-101: quantity moves at the raw instant — end the current
+	// interval, open the successor, same tx.
+	if err := intervalTransition(ctx, tx, stored.ID, stored.SubscriptionID, now, "", &quantity, "quantity"); err != nil {
 		return domain.SubscriptionItem{}, err
 	}
 	return stored, nil
@@ -1579,6 +1631,10 @@ func (s *PostgresStore) applyItemPlanImmediatelyInTx(ctx context.Context, tx *sq
 			return domain.SubscriptionItem{}, errs.AlreadyExists("plan_id",
 				fmt.Sprintf("subscription already has an item for plan %q", newPlanID))
 		}
+		return domain.SubscriptionItem{}, err
+	}
+	// ADR-101: the plan swap moves at its effective instant, same tx.
+	if err := intervalTransition(ctx, tx, stored.ID, stored.SubscriptionID, changedAt, newPlanID, nil, "plan"); err != nil {
 		return domain.SubscriptionItem{}, err
 	}
 	return stored, nil
@@ -1654,7 +1710,10 @@ func (s *PostgresStore) ApplyDuePendingItemPlansAtomic(ctx context.Context, tena
 	// Swap every item under the subscription whose pending change is due.
 	// All items move in one statement so a caller reading the result sees a
 	// consistent snapshot. Other items (no pending change or pending-but-future)
-	// are untouched.
+	// are untouched. Soft-deleted items are excluded (ADR-101 wiring pass):
+	// applying a stale pending to a removed row mutated dead state no reader
+	// bills, wrote no fact row (the 0129 trigger skips deleted rows), and
+	// would now demand an interval for an item whose lifetime already ended.
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE subscription_items
 		SET plan_id = pending_plan_id,
@@ -1663,6 +1722,7 @@ func (s *PostgresStore) ApplyDuePendingItemPlansAtomic(ctx context.Context, tena
 		    pending_plan_effective_at = NULL,
 		    updated_at = $1
 		WHERE subscription_id = $2
+		  AND deleted_at IS NULL
 		  AND pending_plan_id IS NOT NULL
 		  AND pending_plan_effective_at IS NOT NULL
 		  AND pending_plan_effective_at <= $1
@@ -1684,6 +1744,15 @@ func (s *PostgresStore) ApplyDuePendingItemPlansAtomic(ctx context.Context, tena
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	// ADR-101: each swap moves at the gate it was applied at ($now — the
+	// caller's period boundary during catch-up, NOT re-snapped). When a
+	// later-instant change already sealed past the gate (engine-down
+	// interleave), intervalTransition splices retroactively.
+	for _, it := range updated {
+		if err := intervalTransition(ctx, tx, it.ID, it.SubscriptionID, now, it.PlanID, nil, "plan_scheduled"); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -1718,18 +1787,19 @@ func (s *PostgresStore) removeItemInTx(ctx context.Context, tx *sql.Tx, itemID s
 	// back-pointer for auditors while making the item invisible to
 	// active-state queries via their `deleted_at IS NULL` filter.
 	now := clock.Now(ctx)
-	result, err := tx.ExecContext(ctx,
-		`UPDATE subscription_items SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`,
+	var subID string
+	err := tx.QueryRowContext(ctx,
+		`UPDATE subscription_items SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL RETURNING subscription_id`,
 		now, itemID,
-	)
+	).Scan(&subID)
+	if err == sql.ErrNoRows {
+		return errs.ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return errs.ErrNotFound
-	}
-	return nil
+	// ADR-101: the soft-delete instant seals the item's billable lifetime.
+	return intervalCloseForRemove(ctx, tx, itemID, subID, now)
 }
 
 // FindMeterConflicts implements the double-billing guard's conflict scan:
@@ -2637,6 +2707,9 @@ func (s *PostgresStore) CancelAtTrialEnd(ctx context.Context, tenantID, id strin
 	if err := hydrateSubChildrenTx(ctx, tx, &sub); err != nil {
 		return domain.Subscription{}, err
 	}
+	// ADR-101: no interval work — the CAS admits only trialing rows, and a
+	// trialing sub has never opened an interval (the activation writer
+	// would have been the first). Nothing to seal on a free cancel.
 	// Free trialing→canceled (ADR-069) — enqueue in-tx with the provenance
 	// both prior dispatch sites (service + engine) stamped.
 	extra := map[string]any{"canceled_by": "schedule", "reason": "trial_end_cancel"}

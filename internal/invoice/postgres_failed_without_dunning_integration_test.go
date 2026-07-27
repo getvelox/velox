@@ -49,6 +49,7 @@ func TestListFailedWithoutDunningRun_CandidateSet(t *testing.T) {
 		Code: "sub-backfill", DisplayName: "Backfill Sub", CustomerID: cust.ID,
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
 		StartedAt: &ps, Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
+		CurrentBillingPeriodStart: &ps, CurrentBillingPeriodEnd: bivPE(ps),
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)

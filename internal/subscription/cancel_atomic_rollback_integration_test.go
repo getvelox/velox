@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -43,6 +44,7 @@ func TestCancelAtomicWithBill_BillFailure_RealTxRollsBackCancel(t *testing.T) {
 	created, err := store.Create(ctx, tenantID, domain.Subscription{
 		Code: "sub-cancel-rb", DisplayName: "Cancel RB", CustomerID: cust.ID,
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
+		CurrentBillingPeriodStart: bivPS(time.Now().UTC()), CurrentBillingPeriodEnd: bivPE(time.Now().UTC()),
 		Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 	})
 	if err != nil {

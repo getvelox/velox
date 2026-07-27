@@ -301,7 +301,8 @@ func TestFullBillingCycle_E2E(t *testing.T) {
 		CustomerID: cust.ID,
 		Items:      []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -496,7 +497,8 @@ func TestBillTiming_InAdvance_E2E(t *testing.T) {
 		CustomerID: cust.ID,
 		Items:      []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -748,7 +750,8 @@ func TestBillOnCancel_UnpaidPrebillRelief_E2E(t *testing.T) {
 			Code: "sub-" + extID, DisplayName: extID, CustomerID: cust.ID,
 			Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 			Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-			StartedAt: &periodStart,
+			StartedAt:                 &periodStart,
+			CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 		})
 		if err != nil {
 			t.Fatalf("create sub: %v", err)

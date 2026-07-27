@@ -59,7 +59,8 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 		CustomerID: cust.ID,
 		Items:      []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: &periodEnd,
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)

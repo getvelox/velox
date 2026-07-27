@@ -156,16 +156,19 @@ func TestItemChangeTrigger_SoftDeleteEmitsRemove(t *testing.T) {
 		t.Fatalf("after dead-row update: %d rows, want still 2 (dead rows don't move MRR)", len(rows))
 	}
 
-	// Un-delete emits 'add' — MRR reappearance is never silent.
+	// Un-delete is REFUSED outright (ADR-101, migration 0159): no flow
+	// maintains billing_intervals for a resurrected item, so a manual
+	// resurrection would silently un-bill it once the interval reader cuts
+	// over. The 0129 behavior (emit 'add' so MRR reappearance is loud) is
+	// superseded by refusing the write entirely — louder still.
 	tx4, _ := db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	defer postgres.Rollback(tx4)
-	if _, err := tx4.ExecContext(ctx, `UPDATE subscription_items SET deleted_at = NULL, updated_at = $1 WHERE id = $2`, now, itemID); err != nil {
-		t.Fatalf("un-delete: %v", err)
+	_, err = tx4.ExecContext(ctx, `UPDATE subscription_items SET deleted_at = NULL, updated_at = $1 WHERE id = $2`, now, itemID)
+	if err == nil || !strings.Contains(err.Error(), "ADR-101") {
+		t.Fatalf("un-delete must be refused by the trigger (ADR-101), got: %v", err)
 	}
-	_ = tx4.Commit()
-	rows = changeRows()
-	if len(rows) != 3 || rows[2].changeType != "add" {
-		t.Fatalf("after un-delete: %+v, want a third 'add' row", rows)
+	if rows := changeRows(); len(rows) != 2 {
+		t.Fatalf("after refused un-delete: %d rows, want still 2", len(rows))
 	}
 }
 

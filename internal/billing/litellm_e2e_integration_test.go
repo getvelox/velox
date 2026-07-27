@@ -105,7 +105,8 @@ func TestLiteLLM_WedgeE2E(t *testing.T) {
 		Code: "sub-wedge", DisplayName: "Wedge sub", CustomerID: cust.ID,
 		Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("create sub: %v", err)

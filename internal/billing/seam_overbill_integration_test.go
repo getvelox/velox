@@ -101,7 +101,8 @@ func newSeamFixture(t *testing.T, zone string, billingTime domain.SubscriptionBi
 		Code: "sub-seam", DisplayName: "Seam", CustomerID: cust.ID,
 		Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status: domain.SubscriptionActive, BillingTime: billingTime,
-		StartedAt: &f.p0start,
+		StartedAt:                 &f.p0start,
+		CurrentBillingPeriodStart: &f.p0start, CurrentBillingPeriodEnd: &f.p0end,
 	})
 	if err != nil {
 		t.Fatalf("create sub: %v", err)

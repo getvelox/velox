@@ -52,6 +52,7 @@ func TestProrationInvoiceIndexes(t *testing.T) {
 	sub, err := subStore.Create(ctx, tenantID, domain.Subscription{
 		Code: "sub-prorate", DisplayName: "Prorate Sub", CustomerID: cust.ID,
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar, StartedAt: &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 		Items: []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}, {PlanID: planB.ID, Quantity: 1}},
 	})
 	if err != nil {

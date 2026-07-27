@@ -55,8 +55,9 @@ func TestFK_RestrictOnDelete(t *testing.T) {
 		Code: "sub-fk-test", DisplayName: "FK Sub",
 		CustomerID: cust.ID,
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &now,
-		Items:     []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
+		StartedAt:                 &now,
+		CurrentBillingPeriodStart: &now, CurrentBillingPeriodEnd: bivPE(now),
+		Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)

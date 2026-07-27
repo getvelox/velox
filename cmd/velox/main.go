@@ -24,6 +24,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/migrate"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/platform/telemetry"
+	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/testclock"
 	"github.com/sagarsuperuser/velox/internal/version"
 	"github.com/sagarsuperuser/velox/internal/webhook"
@@ -149,6 +150,17 @@ func serve() {
 	if err := db.VerifyAdvisoryLockTopology(context.Background()); err != nil {
 		slog.Error("connection topology check failed", "error", err)
 		os.Exit(1)
+	}
+
+	// ADR-101 Phase 1: reconstruct billing_intervals for items that predate
+	// the dual-write (idempotent — items with rows are skipped, so this is
+	// a no-op on every boot after the first). Runs BEFORE serving so no
+	// item mutation can race the reconstruction of its own history.
+	if n, err := subscription.NewPostgresStore(db).BackfillBillingIntervals(context.Background()); err != nil {
+		slog.Error("billing-intervals backfill failed", "error", err)
+		os.Exit(1)
+	} else if n > 0 {
+		slog.Info("billing-intervals backfill complete", "intervals", n)
 	}
 
 	server := api.NewServer(db, nil)
