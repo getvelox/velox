@@ -145,10 +145,19 @@ intervals intersecting the current period forward are ever billed).
    segment-source seam; `on` bills from intervals with a loud
    missing-interval invariant for live items; corpus CI runs every
    shape in BOTH modes and asserts line-for-line identical invoices).
-   Default remains `shadow` until the cutover PR flips it after a live
-   walk under `on`.
+   **CUTOVER EXECUTED 2026-07-27, same day**: default flipped to `on`
+   after a live test-clock walk under the interval reader (TZ-seam
+   period, mid-period quantity change, exact 9/31 + 22/31 day
+   segments, correct tax, zero divergence logged). `shadow`/`off`
+   remain the kill switches; the dormant interpretation keeps running
+   inside the comparator on every close.
 4. **Remove** interpretation; the flag dies in the same PR (a lying
    'off' value violates the doc-doesn't-lie bar).
+   **DEFERRED with trigger** (2026-07-27): the dormant legacy side is
+   the rollback net and the comparator's other half — it costs nothing
+   to keep while it stays silent. Trigger to execute Phase 4: one soak
+   period (a release cycle or the first DP onboarding, whichever
+   comes first) with zero unexplained divergence.
 
 ## Consequences
 
