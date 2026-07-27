@@ -644,3 +644,46 @@ func TestIntervals_BackfillCanceledSubSeals(t *testing.T) {
 		t.Fatalf("canceled-sub backfill must seal at canceled_at %s: %+v", at, ivs)
 	}
 }
+
+func TestIntervals_HardDeleteRefusedLoudly(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "IV HardDelete")
+	cust := ivCustomer(t, db, ctx, tenantID, "cus_iv_hd")
+	planA := ivPlan(t, db, ctx, tenantID, "iv-hd-a", 1000)
+	store := NewPostgresStore(db)
+	sub := ivActiveSub(t, store, ctx, tenantID, cust, "sub-iv-hd", []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}})
+
+	// Direct hard delete is refused (0160): it would strand the item's
+	// interval rows with no owning row.
+	tx, err := db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM subscription_items WHERE id = $1`, sub.Items[0].ID)
+	if err == nil || !strings.Contains(err.Error(), "ADR-101") {
+		t.Fatalf("direct hard delete must be refused by the trigger, got: %v", err)
+	}
+	postgres.Rollback(tx)
+
+	// The cascade path (parent subscription deleted — the ADR-086
+	// teardown shape) must stay silent and sweep the intervals away.
+	tx2, err := db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer postgres.Rollback(tx2)
+	if _, err := tx2.ExecContext(ctx, `DELETE FROM subscriptions WHERE id = $1`, sub.ID); err != nil {
+		t.Fatalf("cascade delete must stay allowed: %v", err)
+	}
+	var n int
+	if err := tx2.QueryRowContext(ctx, `SELECT count(*) FROM billing_intervals WHERE subscription_id = $1`, sub.ID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("cascade must sweep billing_intervals, %d rows remain", n)
+	}
+	if err := tx2.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}

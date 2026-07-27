@@ -703,6 +703,15 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	paymentReadiness := &paymentReadinessAdapter{customers: customerStore, pms: paymentMethodsSvc}
 	engine := billing.NewEngine(subStore, usageStore, pricingSvc,
 		&invoiceWriterAdapter{store: invoiceStore}, creditSvc, settingsStore, paymentReadiness, stripeAdapter, clk, customerStore)
+	// ADR-101: the interval-reader mode is frozen at boot. Unset means
+	// shadow — legacy bills, the parity comparator screams on divergence.
+	// An unknown value panics the boot (a mistyped kill-switch must never
+	// silently bill the wrong way).
+	ivMode := strings.TrimSpace(os.Getenv("VELOX_BILLING_INTERVALS_READER"))
+	if ivMode == "" {
+		ivMode = billing.IntervalReaderShadow
+	}
+	engine.SetIntervalReader(subStore, ivMode)
 	engine.SetTestClockReader(testClockStore)
 	engine.SetEventDispatcher(eventDispatcher)
 	// Coordinator-tx seam: fireThreshold's reset=true arm commits the

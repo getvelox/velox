@@ -383,6 +383,18 @@ type SubscriptionItem struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
+// ItemInterval is one row from billing_intervals (ADR-101): a
+// policy-applied billable lifetime slice [StartsAt, EndsAt) for one
+// (item, plan, quantity). EndsAt nil = still open. (Named ItemInterval
+// because BillingInterval is the monthly/yearly cadence enum.)
+type ItemInterval struct {
+	SubscriptionItemID string     `json:"subscription_item_id"`
+	PlanID             string     `json:"plan_id"`
+	Quantity           int64      `json:"quantity"`
+	StartsAt           time.Time  `json:"starts_at"`
+	EndsAt             *time.Time `json:"ends_at,omitempty"`
+}
+
 // SubscriptionItemChange is one row from the subscription_item_changes
 // audit table (migration 0029). Captures every plan/quantity mutation
 // on a subscription_item with both before- and after-state. Drives the

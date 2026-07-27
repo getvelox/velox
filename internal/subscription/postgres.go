@@ -2613,8 +2613,13 @@ func (s *PostgresStore) CountLiveSubsByPlan(ctx context.Context, tenantID, planI
 //
 // Range is exclusive-left, inclusive-right: a change exactly at
 // periodEnd (a scheduled plan swap firing at the boundary) belongs to
-// the closing period, NOT the next period. ORDER BY changed_at, id
-// gives a stable walk even when two changes share a timestamp.
+// the closing period, NOT the next period. Same-instant rows (frozen
+// sim time: an add and a plan swap can share one changed_at) tie-break
+// by wall-clock created_at — ids are random hex and carry no sequence,
+// and id-ordering was observed on real data putting a 'plan' row
+// before its own item's 'add', which walks the segments at the WRONG
+// plan (ADR-101 Phase 2 root-cause fix; previously "stable but
+// arbitrary").
 func (s *PostgresStore) ListItemChangesInPeriod(ctx context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) ([]domain.SubscriptionItemChange, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
@@ -2632,7 +2637,7 @@ func (s *PostgresStore) ListItemChangesInPeriod(ctx context.Context, tenantID, s
 		WHERE subscription_id = $1
 		  AND changed_at > $2
 		  AND changed_at <= $3
-		ORDER BY changed_at ASC, id ASC
+		ORDER BY changed_at ASC, created_at ASC, id ASC
 	`, subscriptionID, periodStart, periodEnd)
 	if err != nil {
 		return nil, err
