@@ -324,13 +324,13 @@ func TestIntervals_ScheduledPlanApply_RetroactiveSplice(t *testing.T) {
 	if len(ivs) != 3 {
 		t.Fatalf("want 3 intervals after splice, got %d: %+v", len(ivs), ivs)
 	}
-	if !(ivs[0].planID == planA.ID && ivs[0].quantity == 1 && ivs[0].startsAt.Equal(ivPS) && ivEndEq(ivs[0].endsAt, t2)) {
+	if ivs[0].planID != planA.ID || ivs[0].quantity != 1 || !ivs[0].startsAt.Equal(ivPS) || !ivEndEq(ivs[0].endsAt, t2) {
 		t.Errorf("seg 0 must stay planA qty1 [ps,t2): %+v", ivs[0])
 	}
-	if !(ivs[1].planID == planB.ID && ivs[1].quantity == 1 && ivs[1].startsAt.Equal(t2) && ivEndEq(ivs[1].endsAt, t3)) {
+	if ivs[1].planID != planB.ID || ivs[1].quantity != 1 || !ivs[1].startsAt.Equal(t2) || !ivEndEq(ivs[1].endsAt, t3) {
 		t.Errorf("seg 1 must be planB qty1 [t2,t3): %+v", ivs[1])
 	}
-	if !(ivs[2].planID == planB.ID && ivs[2].quantity == 7 && ivs[2].startsAt.Equal(t3) && ivs[2].endsAt == nil) {
+	if ivs[2].planID != planB.ID || ivs[2].quantity != 7 || !ivs[2].startsAt.Equal(t3) || ivs[2].endsAt != nil {
 		t.Errorf("seg 2 must be re-planned planB qty7 [t3,∞): %+v", ivs[2])
 	}
 }

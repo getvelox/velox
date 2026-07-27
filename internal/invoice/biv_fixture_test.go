@@ -8,8 +8,6 @@ import "time"
 // theirs. bivPE is one month out — superseded by any later
 // UpdateBillingCycle a test performs, so it never fights test-specific
 // period math.
-func bivPS(t time.Time) *time.Time { return &t }
-
 func bivPE(t time.Time) *time.Time {
 	e := t.AddDate(0, 1, 0)
 	return &e
