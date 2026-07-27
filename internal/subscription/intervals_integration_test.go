@@ -518,11 +518,17 @@ func TestIntervals_BackfillReconstructsHistory(t *testing.T) {
 		t.Fatalf("backfill must insert 3 segments, got %d", n)
 	}
 	ivs := readItemIntervals(t, db, ctx, tenantID, itemID)
-	if len(ivs) != 3 ||
-		!(ivs[0].planID == planA.ID && ivs[0].quantity == 1 && ivs[0].startsAt.Equal(ivPS) && ivEndEq(ivs[0].endsAt, t1)) ||
-		!(ivs[1].planID == planA.ID && ivs[1].quantity == 4 && ivs[1].startsAt.Equal(t1) && ivEndEq(ivs[1].endsAt, t2)) ||
-		!(ivs[2].planID == planB.ID && ivs[2].quantity == 4 && ivs[2].startsAt.Equal(t2) && ivs[2].endsAt == nil) {
-		t.Fatalf("backfill mismatch: %+v", ivs)
+	if len(ivs) != 3 {
+		t.Fatalf("backfill must yield 3 segments: %+v", ivs)
+	}
+	if ivs[0].planID != planA.ID || ivs[0].quantity != 1 || !ivs[0].startsAt.Equal(ivPS) || !ivEndEq(ivs[0].endsAt, t1) {
+		t.Fatalf("backfill seg 0 mismatch: %+v", ivs[0])
+	}
+	if ivs[1].planID != planA.ID || ivs[1].quantity != 4 || !ivs[1].startsAt.Equal(t1) || !ivEndEq(ivs[1].endsAt, t2) {
+		t.Fatalf("backfill seg 1 mismatch: %+v", ivs[1])
+	}
+	if ivs[2].planID != planB.ID || ivs[2].quantity != 4 || !ivs[2].startsAt.Equal(t2) || ivs[2].endsAt != nil {
+		t.Fatalf("backfill seg 2 mismatch: %+v", ivs[2])
 	}
 	for _, iv := range ivs {
 		if iv.source != "backfill" {
@@ -589,10 +595,14 @@ func TestIntervals_BackfillLogGaps(t *testing.T) {
 
 	// preItem: synthetic open at created_at with the qty row's from-state.
 	pre := readItemIntervals(t, db, ctx, tenantID, preItem)
-	if len(pre) != 2 ||
-		!(pre[0].planID == planA.ID && pre[0].quantity == 2 && pre[0].startsAt.Equal(ivPS) && ivEndEq(pre[0].endsAt, t1)) ||
-		!(pre[1].quantity == 5 && pre[1].endsAt == nil) {
-		t.Fatalf("pre-0029 reconstruction mismatch: %+v", pre)
+	if len(pre) != 2 {
+		t.Fatalf("pre-0029 reconstruction must yield 2 segments: %+v", pre)
+	}
+	if pre[0].planID != planA.ID || pre[0].quantity != 2 || !pre[0].startsAt.Equal(ivPS) || !ivEndEq(pre[0].endsAt, t1) {
+		t.Fatalf("pre-0029 seg 0 mismatch: %+v", pre[0])
+	}
+	if pre[1].quantity != 5 || pre[1].endsAt != nil {
+		t.Fatalf("pre-0029 seg 1 mismatch: %+v", pre[1])
 	}
 	// goneItem: sealed at deleted_at despite the missing 'remove' row.
 	gone := readItemIntervals(t, db, ctx, tenantID, goneItem)
