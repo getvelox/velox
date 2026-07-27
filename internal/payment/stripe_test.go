@@ -387,7 +387,7 @@ type recordedStartDunning struct {
 	failureAt  time.Time
 }
 
-func (r *recordingDunningStarter) StartDunning(_ context.Context, tenantID, invoiceID, customerID string, failureAt time.Time) (domain.InvoiceDunningRun, error) {
+func (r *recordingDunningStarter) StartDunning(_ context.Context, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) (domain.InvoiceDunningRun, error) {
 	r.calls = append(r.calls, recordedStartDunning{tenantID, invoiceID, customerID, failureAt})
 	return domain.InvoiceDunningRun{ID: "drun_test", InvoiceID: invoiceID}, nil
 }

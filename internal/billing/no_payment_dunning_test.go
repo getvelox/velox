@@ -15,9 +15,11 @@ import (
 type recordingDunningStarter struct {
 	started []string
 	err     error
+	causes  []domain.DunningStartCause
 }
 
-func (d *recordingDunningStarter) StartDunning(_ context.Context, _, invoiceID, _ string, _ time.Time) error {
+func (d *recordingDunningStarter) StartDunning(_ context.Context, _, invoiceID, _ string, _ time.Time, cause domain.DunningStartCause) error {
+	d.causes = append(d.causes, cause)
 	if d.err != nil {
 		return d.err
 	}
@@ -69,6 +71,11 @@ func TestEnrollStalledForDunning_EnrollsCardlessInvoice(t *testing.T) {
 	}
 	if len(starter.started) != 1 || starter.started[0] != "inv_1" {
 		t.Fatalf("StartDunning calls = %v, want [inv_1]", starter.started)
+	}
+	// The card-less sweep declares its cause honestly: nothing was ever
+	// charged, so the run must NOT claim a payment failure.
+	if len(starter.causes) != 1 || starter.causes[0] != domain.DunningCauseNoPaymentMethod {
+		t.Fatalf("causes = %v, want [no_payment_method]", starter.causes)
 	}
 }
 

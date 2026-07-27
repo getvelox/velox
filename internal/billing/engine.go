@@ -334,7 +334,7 @@ type NoPaymentMethodNotifier interface {
 // card-less invoices out of dunning forever. Wire in router.go via
 // SetDunningStarter.
 type DunningStarter interface {
-	StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time) error
+	StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) error
 }
 
 // DunningResolver resolves an active dunning run when an invoice settles via a
@@ -5412,7 +5412,7 @@ func (e *Engine) EnrollStalledForDunning(ctx context.Context, limit int) (int, [
 	if err != nil {
 		return 0, []error{fmt.Errorf("list stalled auto-charge for dunning: %w", err)}
 	}
-	return e.enrollStalledForDunning(ctx, pending)
+	return e.enrollStalledForDunning(ctx, pending, domain.DunningCauseNoPaymentMethod)
 }
 
 // EnrollStalledForDunningForClock is the catchup-path counterpart to
@@ -5425,7 +5425,7 @@ func (e *Engine) EnrollStalledForDunningForClock(ctx context.Context, tenantID, 
 	if err != nil {
 		return 0, []error{fmt.Errorf("list stalled auto-charge for dunning (clock %s): %w", clockID, err)}
 	}
-	return e.enrollStalledForDunning(ctx, pending)
+	return e.enrollStalledForDunning(ctx, pending, domain.DunningCauseNoPaymentMethod)
 }
 
 // failedDunningBackfillCoolOff lets the inline SettleFailed StartDunning win the
@@ -5456,7 +5456,7 @@ func (e *Engine) EnrollFailedWithoutDunning(ctx context.Context, limit int) (int
 	if err != nil {
 		return 0, []error{fmt.Errorf("list failed-without-dunning for backfill: %w", err)}
 	}
-	return e.enrollStalledForDunning(ctx, pending)
+	return e.enrollStalledForDunning(ctx, pending, domain.DunningCausePaymentFailed)
 }
 
 // enrollStalledForDunning is the shared body: enroll each candidate via
@@ -5467,11 +5467,11 @@ func (e *Engine) EnrollFailedWithoutDunning(ctx context.Context, limit int) (int
 // timing. A "dunning disabled" outcome is swallowed by the adapter as a
 // deliberate skip; other errors are collected per-invoice so one bad row
 // doesn't abort the sweep.
-func (e *Engine) enrollStalledForDunning(ctx context.Context, pending []domain.Invoice) (int, []error) {
+func (e *Engine) enrollStalledForDunning(ctx context.Context, pending []domain.Invoice, cause domain.DunningStartCause) (int, []error) {
 	swept := 0
 	var errs []error
 	for _, inv := range pending {
-		if err := e.dunningStarter.StartDunning(ctx, inv.TenantID, inv.ID, inv.CustomerID, dunningFailureAt(inv)); err != nil {
+		if err := e.dunningStarter.StartDunning(ctx, inv.TenantID, inv.ID, inv.CustomerID, dunningFailureAt(inv), cause); err != nil {
 			errs = append(errs, fmt.Errorf("enroll invoice %s for dunning: %w", inv.ID, err))
 			continue
 		}

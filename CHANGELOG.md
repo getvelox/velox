@@ -11,6 +11,11 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The invoice timeline now says why collection started (2026-07-28, found reviewing the I10 decline walk).** The dunning-start row was cause-blind — a real card decline and a card-less reminder enrollment both rendered "Automatic retry scheduled", and under the hood every run's reason was hardcoded `payment_failed`, including invoices that were never charged. Every code path that starts dunning now declares its cause at write time (`payment_failed` | `no_payment_method`, unknown values refused), the timeline renders it — "Payment failed — automatic retry scheduled" (with the payment intent lifted onto the row) vs "No payment method — reminder cycle started" — and migration 0161 repairs the historical rows so no never-charged invoice keeps a phantom payment failure. The failure story now survives on the timeline after the attention banner clears.
+- **The payment-failed banner speaks operator, not cardholder (same review).** The banner headline was Stripe's customer-facing string promoted verbatim — an operator reading "Your card was declined" whose card is fine. The headline is now Velox's own sentence ("The customer's card was declined."); the provider's exact wording stays verbatim under Provider response and in Diagnostic detail, labeled as evidence.
+
 ### Changed
 
 - **Billing now reads from `billing_intervals` by default (2026-07-27, ADR-101 Phase 3 cutover).** `VELOX_BILLING_INTERVALS_READER` defaults to `on`: cycle close and final-on-cancel bill from the write-time item lifetimes instead of re-deriving them from the fact log. The legacy interpretation still runs silently inside the parity comparator on every close and logs loudly on any disagreement; `shadow` and `off` remain as kill switches. Verified by the two-mode CI corpus (identical invoices across nine mutation shapes), a full-dataset parity sweep (140/140 subscriptions, zero unexplained divergences), and a live test-clock month under the new reader. Removing the legacy interpretation (Phase 4) is deferred until one clean soak period.

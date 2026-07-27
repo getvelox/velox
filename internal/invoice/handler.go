@@ -1755,6 +1755,18 @@ func describeEmailEvent(emailType, outboxStatus, deliveryState string) (string, 
 func describeDunningEvent(eventType, reason string, attemptCount int) (string, string) {
 	switch eventType {
 	case "dunning_started":
+		// The start row carries its CAUSE (recorded at write time by the
+		// caller that started the run) — the failure story must survive
+		// on the timeline after the attention banner clears. Pre-fix the
+		// row was cause-blind and the reason column was hardcoded
+		// payment_failed for every run, including card-less enrollments
+		// where nothing was ever charged (repaired in migration 0161).
+		switch reason {
+		case string(domain.DunningCausePaymentFailed):
+			return "Payment failed — automatic retry scheduled", "failed"
+		case string(domain.DunningCauseNoPaymentMethod):
+			return "No payment method — reminder cycle started", "scheduled"
+		}
 		return "Automatic retry scheduled", "scheduled"
 	case "retry_attempted":
 		return fmt.Sprintf("Payment retry #%d attempted", attemptCount), "processing"

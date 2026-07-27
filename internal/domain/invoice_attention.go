@@ -617,9 +617,16 @@ func attentionSince(inv Invoice) time.Time {
 }
 
 func classifyPaymentFailure(inv Invoice) *Attention {
-	headline := truncate(inv.LastPaymentError, 200)
-	if headline == "" {
-		headline = "Payment attempt failed."
+	// Operator voice, not provider voice: LastPaymentError is Stripe's
+	// CARDHOLDER-facing sentence ("Your card was declined") — promoted
+	// verbatim to the banner it read as Velox addressing the operator,
+	// whose card was not declined. The banner states the fact in the
+	// operator's frame; the provider's exact wording stays one
+	// disclosure away (ProviderResponse below) and in Diagnostic
+	// detail, where it is labeled as evidence.
+	headline := "The customer's card was declined."
+	if inv.LastPaymentError == "" {
+		headline = "The customer's payment attempt failed."
 	}
 	since := attentionSince(inv)
 	// Update Payment Method is the primary action: the card on file
@@ -889,13 +896,6 @@ func classifyNoPaymentMethod(inv Invoice, atc AttentionContext) *Attention {
 		Since: &since,
 		DueBy: inv.DueAt,
 	}
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // classifyPaymentAnomaly renders the ADR-068 durable marker: Critical, both

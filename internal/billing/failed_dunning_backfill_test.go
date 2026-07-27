@@ -40,6 +40,11 @@ func TestEnrollFailedWithoutDunning_EnrollsFailedInvoice(t *testing.T) {
 	if len(starter.started) != 1 || starter.started[0] != "inv_1" {
 		t.Fatalf("StartDunning calls = %v, want [inv_1]", starter.started)
 	}
+	// The failed-invoice backfill enrolls invoices whose charge REALLY
+	// failed — its declared cause is payment_failed.
+	if len(starter.causes) != 1 || starter.causes[0] != domain.DunningCausePaymentFailed {
+		t.Fatalf("causes = %v, want [payment_failed]", starter.causes)
+	}
 }
 
 // TestEnrollFailedWithoutDunning_CoolOffExcludesFresh locks the cool-off: a

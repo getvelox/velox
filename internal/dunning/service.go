@@ -261,7 +261,18 @@ func (s *Service) fireEvent(ctx context.Context, tenantID, eventType string, pay
 // responsible for resolving failureAt from invoice period boundaries.
 // Pass time.Now() (or s.clock.Now(ctx)) when no period anchor is
 // available — that's the wall-clock / manual-invoice case.
-func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, customerID string, failureAt time.Time) (domain.InvoiceDunningRun, error) {
+//
+// cause is WHY collection needs a run — declared by the caller at write
+// time (decline paths pass payment_failed; the card-less enrollment
+// sweeps pass no_payment_method) and stamped on the run + started
+// event. Pre-fix this was hardcoded "payment_failed" for every start,
+// so card-less invoices carried a payment-failure they never had; the
+// timeline hid the lie by rendering a generic row. An unknown cause is
+// refused loudly.
+func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) (domain.InvoiceDunningRun, error) {
+	if !cause.Valid() {
+		return domain.InvoiceDunningRun{}, errs.Invalid("cause", fmt.Sprintf("unknown dunning start cause %q", cause))
+	}
 	existing, err := s.store.GetRunByInvoice(ctx, tenantID, invoiceID)
 	if err == nil && existing.ID != "" {
 		return existing, nil // Idempotent — return existing run regardless of state.
@@ -311,7 +322,7 @@ func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, 
 		CustomerID:   customerID,
 		PolicyID:     policy.ID,
 		State:        domain.DunningActive,
-		Reason:       "payment_failed",
+		Reason:       string(cause),
 		AttemptCount: 0,
 		NextActionAt: nextActionAt,
 		// CreatedAt = failureAt so the dunning run lives on simulated
@@ -332,7 +343,7 @@ func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, 
 		InvoiceID: invoiceID,
 		EventType: domain.DunningEventStarted,
 		State:     domain.DunningActive,
-		Reason:    "payment_failed",
+		Reason:    string(cause),
 		CreatedAt: failureAt,
 	})
 

@@ -43,6 +43,32 @@ const (
 	DunningPaused    DunningRunState = "paused"
 )
 
+// DunningStartCause is WHY collection needed a dunning run — recorded
+// at write time by the caller that starts the run (each one knows the
+// cause precisely; deriving it later from invoice state re-creates the
+// interpretation-drift class ADR-101 killed for billing). Stamped on
+// the run and its dunning_started event, and rendered on the invoice
+// timeline so the failure story survives after the attention banner
+// clears.
+type DunningStartCause string
+
+const (
+	// A real charge was attempted and failed (interactive decline,
+	// auto-charge decline, or the failed-invoice backfill sweep).
+	DunningCausePaymentFailed DunningStartCause = "payment_failed"
+	// No usable payment method existed, so nothing was ever charged —
+	// the card-less "reminder cycle" enrollment. Rendering a "payment
+	// failed" row for these would be a lie: no payment happened.
+	DunningCauseNoPaymentMethod DunningStartCause = "no_payment_method"
+)
+
+// Valid reports whether the cause is a known enum value — StartDunning
+// refuses anything else (no-silent-fallbacks: an unlabeled run would
+// re-introduce the hardcoded-reason lie this type exists to end).
+func (c DunningStartCause) Valid() bool {
+	return c == DunningCausePaymentFailed || c == DunningCauseNoPaymentMethod
+}
+
 type DunningEventType string
 
 const (

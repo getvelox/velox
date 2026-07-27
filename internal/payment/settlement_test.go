@@ -511,7 +511,7 @@ func (r sequencedFailedEmail) SendPaymentFailed(ctx context.Context, _, _ string
 // mockDunningStarter records StartDunning into the shared sequencer.
 type mockDunningStarter struct{ seq *callSequencer }
 
-func (m *mockDunningStarter) StartDunning(ctx context.Context, _, _, _ string, _ time.Time) (domain.InvoiceDunningRun, error) {
+func (m *mockDunningStarter) StartDunning(ctx context.Context, _, _, _ string, _ time.Time, _ domain.DunningStartCause) (domain.InvoiceDunningRun, error) {
 	m.seq.record("dunning_start", ctx)
 	return domain.InvoiceDunningRun{}, nil
 }

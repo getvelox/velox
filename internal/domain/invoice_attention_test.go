@@ -207,8 +207,15 @@ func TestClassifyInvoiceAttention_PaymentFailed(t *testing.T) {
 	if att.Reason != AttentionReasonPaymentFailed {
 		t.Errorf("reason = %s, want %s", att.Reason, AttentionReasonPaymentFailed)
 	}
-	if att.Message != "card declined: insufficient funds" {
-		t.Errorf("message = %q, want headline from LastPaymentError", att.Message)
+	// Operator voice: the banner headline is Velox's sentence, never the
+	// provider's cardholder-facing string ("Your card was declined" read
+	// as Velox addressing the operator). The provider's exact wording is
+	// preserved verbatim in ProviderResponse.
+	if att.Message != "The customer's card was declined." {
+		t.Errorf("message = %q, want the operator-voice headline", att.Message)
+	}
+	if att.ProviderResponse != "card declined: insufficient funds" {
+		t.Errorf("provider response = %q, want the verbatim provider string", att.ProviderResponse)
 	}
 	// Primary action is now update_payment_method (the card on file
 	// is broken — retrying the same card will decline again).

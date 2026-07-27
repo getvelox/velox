@@ -56,7 +56,7 @@ func TestResolveRunNow_Idempotent_FiresEventOnce(t *testing.T) {
 	svc.SetEventDispatcher(disp)
 	ctx := context.Background()
 
-	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 	if err != nil {
 		t.Fatalf("StartDunning: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestServiceResolveRun_Idempotent_AfterAutomatedResolve(t *testing.T) {
 	svc.SetEventDispatcher(disp)
 	ctx := context.Background()
 
-	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 	if err != nil {
 		t.Fatalf("StartDunning: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestDunningResolved_EventFires(t *testing.T) {
 		svc.SetEventDispatcher(disp)
 		ctx := context.Background()
 
-		run, _ := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+		run, _ := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 		if _, err := svc.ResolveRun(ctx, "t1", run.ID, domain.ResolutionPaymentRecovered); err != nil {
 			t.Fatalf("ResolveRun: %v", err)
 		}
@@ -139,7 +139,7 @@ func TestDunningResolved_EventFires(t *testing.T) {
 		svc.SetEventDispatcher(disp)
 		ctx := context.Background()
 
-		if _, err := svc.StartDunning(ctx, "t1", "inv_2", "cus_2", time.Now()); err != nil {
+		if _, err := svc.StartDunning(ctx, "t1", "inv_2", "cus_2", time.Now(), domain.DunningCausePaymentFailed); err != nil {
 			t.Fatalf("StartDunning: %v", err)
 		}
 		if err := svc.ResolveByInvoice(ctx, "t1", "inv_2", domain.ResolutionPaymentRecovered); err != nil {

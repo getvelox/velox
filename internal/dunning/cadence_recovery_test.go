@@ -2,6 +2,7 @@ package dunning
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/domain"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestProcessDueRuns_WallClockCadenceAfterDowntime(t *testing.T) {
 	svc := NewService(store, &failingRetrier{}, clock.NewFake(recoveryNow))
 	ctx := context.Background()
 
-	run, _ := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", recoveryNow.Add(-30*24*time.Hour))
+	run, _ := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", recoveryNow.Add(-30*24*time.Hour), domain.DunningCausePaymentFailed)
 	// Simulate multi-interval scheduler downtime: this run was due 10 days ago
 	// and never fired.
 	stalePast := recoveryNow.Add(-10 * 24 * time.Hour)

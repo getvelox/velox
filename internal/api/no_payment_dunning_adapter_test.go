@@ -15,7 +15,7 @@ type fakeRunStarter struct {
 	err   error
 }
 
-func (f *fakeRunStarter) StartDunning(_ context.Context, _, _, _ string, _ time.Time) (domain.InvoiceDunningRun, error) {
+func (f *fakeRunStarter) StartDunning(_ context.Context, _, _, _ string, _ time.Time, _ domain.DunningStartCause) (domain.InvoiceDunningRun, error) {
 	f.calls++
 	return domain.InvoiceDunningRun{}, f.err
 }
@@ -28,7 +28,7 @@ func (f *fakeRunStarter) StartDunning(_ context.Context, _, _, _ string, _ time.
 func TestDunningStarterAdapter_SwallowsDisabled(t *testing.T) {
 	f := &fakeRunStarter{err: errs.InvalidState("dunning is disabled")}
 	a := &dunningStarterAdapter{dunning: f}
-	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}); err != nil {
+	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCauseNoPaymentMethod); err != nil {
 		t.Fatalf("disabled StartDunning should be swallowed, got %v", err)
 	}
 	if f.calls != 1 {
@@ -43,7 +43,7 @@ func TestDunningStarterAdapter_SwallowsDisabled(t *testing.T) {
 func TestDunningStarterAdapter_SwallowsNotConfigured(t *testing.T) {
 	f := &fakeRunStarter{err: errs.InvalidState("dunning not configured — no policy for tenant")}
 	a := &dunningStarterAdapter{dunning: f}
-	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}); err != nil {
+	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCauseNoPaymentMethod); err != nil {
 		t.Fatalf("no-policy InvalidState should be swallowed, got %v", err)
 	}
 	if f.calls != 1 {
@@ -57,7 +57,7 @@ func TestDunningStarterAdapter_SwallowsNotConfigured(t *testing.T) {
 func TestDunningStarterAdapter_PropagatesRealError(t *testing.T) {
 	f := &fakeRunStarter{err: errors.New("create run: db down")}
 	a := &dunningStarterAdapter{dunning: f}
-	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}); err == nil {
+	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCauseNoPaymentMethod); err == nil {
 		t.Fatal("expected the DB error to propagate, got nil")
 	}
 }
@@ -67,7 +67,7 @@ func TestDunningStarterAdapter_PropagatesRealError(t *testing.T) {
 func TestDunningStarterAdapter_SuccessReturnsNil(t *testing.T) {
 	f := &fakeRunStarter{}
 	a := &dunningStarterAdapter{dunning: f}
-	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}); err != nil {
+	if err := a.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCauseNoPaymentMethod); err != nil {
 		t.Fatalf("success should return nil, got %v", err)
 	}
 }

@@ -481,15 +481,15 @@ func classifyDunningRetryError(err error) error {
 // dunningRunStarter is the minimal slice of dunning.Service the adapter
 // needs — an interface so the disabled-skip branch is unit-testable.
 type dunningRunStarter interface {
-	StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time) (domain.InvoiceDunningRun, error)
+	StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) (domain.InvoiceDunningRun, error)
 }
 
 type dunningStarterAdapter struct {
 	dunning dunningRunStarter
 }
 
-func (a *dunningStarterAdapter) StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time) error {
-	if _, err := a.dunning.StartDunning(ctx, tenantID, invoiceID, customerID, failureAt); err != nil {
+func (a *dunningStarterAdapter) StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) error {
+	if _, err := a.dunning.StartDunning(ctx, tenantID, invoiceID, customerID, failureAt, cause); err != nil {
 		if errors.Is(err, errs.ErrInvalidState) {
 			return nil // dunning disabled — deliberate skip, not a sweep error
 		}
