@@ -120,9 +120,33 @@ intervals intersecting the current period forward are ever billed).
    MORE correct by design (the org-TZ clamp-miss class — write-time
    freezing fixes ADR-012's second accepted edge; parity asserting
    equality there would train WARN-blindness).
+   **SHIPPED 2026-07-27.** Implementation notes vs this spec: the
+   snapshot is ONE SQL statement (UNION of window-scoped fact rows +
+   the item's full interval history) — a single statement is a single
+   MVCC snapshot even under read committed, so no isolation-level
+   surgery on the money path; the comparator diffs NORMALIZED SEGMENT
+   multisets rather than line items (segments determine lines
+   deterministically given plans/period/TZ, and merging equal-adjacent
+   slices makes the comparison equivalence-exact). The allowlist grew
+   two classes found by sweeping the real dev database — pre-0102
+   hard-delete residue (legacy bills a phantom for a row that no
+   longer exists) and 0102→0129 remove-gap residue (legacy misses a
+   sealed stub) — both shapes where the interval side is authoritative,
+   plus the registered catch-up-lifetime class. Same-instant fact rows
+   now tie-break by wall created_at in the legacy reader (root-cause
+   fix, not allowlisted). Direct hard-DELETE of subscription_items is
+   refused by trigger (0160), closing the writer bypass the residue
+   class revealed. Sweep evidence: 140/140 active subs, 2 allowlisted,
+   0 unexplained.
 3. **Cutover**: `VELOX_BILLING_INTERVALS_READER=off|shadow|on`,
    global env, read ONCE at boot (no half-legacy invoices); clamp +
    interpretation stay dormant one release.
+   **Machinery SHIPPED 2026-07-27** (mode plumbed through the one
+   segment-source seam; `on` bills from intervals with a loud
+   missing-interval invariant for live items; corpus CI runs every
+   shape in BOTH modes and asserts line-for-line identical invoices).
+   Default remains `shadow` until the cutover PR flips it after a live
+   walk under `on`.
 4. **Remove** interpretation; the flag dies in the same PR (a lying
    'off' value violates the doc-doesn't-lie bar).
 

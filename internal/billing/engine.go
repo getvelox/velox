@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -82,6 +83,15 @@ type Engine struct {
 	// deferredThresholdNotes dedups the crossed-but-deferred loudness
 	// artifact to once per (sub, period) — see noteThresholdDeferred.
 	deferredThresholdNotes sync.Map
+
+	// ADR-101 segment-source seam (intervals_reader.go): the snapshot
+	// reader, the boot-frozen mode (off|shadow|on), and the parity
+	// counters the corpus CI gate asserts on.
+	intervalSnap      IntervalSnapshotter
+	intervalMode      string
+	shadowCompared    atomic.Uint64
+	shadowAllowlisted atomic.Uint64
+	shadowUnexplained atomic.Uint64
 }
 
 // TxRunner runs fn inside one tenant-scoped transaction — the coordinator-tx
@@ -2506,9 +2516,15 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	for _, c := range itemChanges {
 		changesByItem[c.SubscriptionItemID] = append(changesByItem[c.SubscriptionItemID], c)
 	}
-	// Hydrate any plans referenced only in the change log (items removed
-	// mid-period, or pre-swap plans not present on current items). Plans
-	// already loaded for current items are skipped.
+	// ADR-101 segment source: legacy interpretation, shadow-compared or
+	// replaced by the billing_intervals reader per the boot mode.
+	segsByItem, err := e.windowSegments(ctx, sub, changesByItem, periodStart, periodEnd)
+	if err != nil {
+		return nil, 0, fmt.Errorf("resolve segments: %w", err)
+	}
+	// Hydrate any plans referenced only in the change log or an interval
+	// segment (items removed mid-period, pre-swap plans not present on
+	// current items). Plans already loaded for current items are skipped.
 	//
 	// Failure here propagates as above. Pre-fix the segment under a
 	// failed plan lookup would be silently dropped from the invoice,
@@ -2527,6 +2543,21 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 				return nil, 0, fmt.Errorf("get segment plan %s: %w", pid, err)
 			}
 			plans[pid] = pl
+		}
+	}
+	for _, segs := range segsByItem {
+		for _, seg := range segs {
+			if seg.planID == "" {
+				continue
+			}
+			if _, ok := plans[seg.planID]; ok {
+				continue
+			}
+			pl, err := e.pricing.GetPlan(ctx, sub.TenantID, seg.planID)
+			if err != nil {
+				return nil, 0, fmt.Errorf("get segment plan %s: %w", seg.planID, err)
+			}
+			plans[seg.planID] = pl
 		}
 	}
 	// Augment meterAggs with meters from hydrated change-log plans —
@@ -2667,8 +2698,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		if thresholdBilledThrough != nil {
 			continue
 		}
-		itemForSeg := it
-		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
+		segments := segsByItem[it.ID]
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok || segPlan.BaseAmountCents <= 0 {
@@ -2689,7 +2719,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		}
 	}
 
-	// Pass 2: items removed mid-period (in the change log but not on
+	// Pass 2: items removed mid-period (in the segment map but not on
 	// sub.Items now). Bill the pre-remove segments at their own rates.
 	// in_arrears only — in_advance items removed mid-period already
 	// paid upfront for the period; refund flows through the cancel-
@@ -2697,14 +2727,13 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	// Skipped when a threshold invoice billed this cycle — same
 	// double-bill guard as Pass 1 (an item removed after the fire had
 	// its full base on the threshold invoice).
-	for itemID, changes := range changesByItem {
+	for itemID, segments := range segsByItem {
 		if thresholdBilledThrough != nil {
 			break
 		}
 		if _, stillPresent := itemsByID[itemID]; stillPresent {
 			continue
 		}
-		segments := itemBaseSegments(nil, changes, periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok || segPlan.BaseAmountCents <= 0 {
@@ -2791,8 +2820,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		meterIntervals[mid] = append(meterIntervals[mid], usageInterval{start, end})
 	}
 	for _, it := range sub.Items {
-		itemForSeg := it
-		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
+		segments := segsByItem[it.ID]
 		if len(segments) == 0 {
 			// Item present at period_end but no segments (e.g. zero-duration
 			// boundary swap collapsed by the helper). Treat the post-change
@@ -2813,11 +2841,10 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 			}
 		}
 	}
-	for itemID, changes := range changesByItem {
+	for itemID, segments := range segsByItem {
 		if _, stillPresent := itemsByID[itemID]; stillPresent {
 			continue
 		}
-		segments := itemBaseSegments(nil, changes, periodStart, periodEnd, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok {
@@ -3954,6 +3981,16 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 	for _, c := range itemChanges {
 		changesByItem[c.SubscriptionItemID] = append(changesByItem[c.SubscriptionItemID], c)
 	}
+	// ADR-101 segment source for the cancel window — same seam as the
+	// cycle path, window-ended at the cancel instant. The interval side
+	// reads pre-cancel state (the close-all seal rides the cancel tx,
+	// invisible to the snapshot), which clips identically to
+	// [periodStart, canceledAt] — open intervals end at the window edge
+	// either way.
+	segsByItem, err := e.windowSegments(ctx, sub, changesByItem, periodStart, canceledAt)
+	if err != nil {
+		return nil, 0, fmt.Errorf("resolve segments on cancel: %w", err)
+	}
 	for _, c := range itemChanges {
 		for _, pid := range []string{c.FromPlanID, c.ToPlanID} {
 			if pid == "" {
@@ -3971,6 +4008,21 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 				return nil, 0, fmt.Errorf("get segment plan %s on cancel: %w", pid, err)
 			}
 			plans[pid] = pl
+		}
+	}
+	for _, segs := range segsByItem {
+		for _, seg := range segs {
+			if seg.planID == "" {
+				continue
+			}
+			if _, ok := plans[seg.planID]; ok {
+				continue
+			}
+			pl, err := e.pricing.GetPlan(ctx, sub.TenantID, seg.planID)
+			if err != nil {
+				return nil, 0, fmt.Errorf("get segment plan %s on cancel: %w", seg.planID, err)
+			}
+			plans[seg.planID] = pl
 		}
 	}
 	itemsByID := map[string]domain.SubscriptionItem{}
@@ -3995,8 +4047,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 			if plan.BaseBillTiming == domain.BillInAdvance {
 				continue
 			}
-			itemForSeg := it
-			segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
+			segments := segsByItem[it.ID]
 			for _, seg := range segments {
 				segPlan, ok := plans[seg.planID]
 				if !ok || segPlan.BaseAmountCents <= 0 || segPlan.BaseBillTiming == domain.BillInAdvance {
@@ -4007,13 +4058,12 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 		}
 
 		// Pass 2: items removed between periodStart and canceledAt (in the
-		// change log but not on sub.Items now). Bill their pre-remove
+		// segment map but not on sub.Items now). Bill their pre-remove
 		// segments at the respective plans' rates.
-		for itemID, changes := range changesByItem {
+		for itemID, segments := range segsByItem {
 			if _, stillPresent := itemsByID[itemID]; stillPresent {
 				continue
 			}
-			segments := itemBaseSegments(nil, changes, periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
 			for _, seg := range segments {
 				segPlan, ok := plans[seg.planID]
 				if !ok || segPlan.BaseAmountCents <= 0 || segPlan.BaseBillTiming == domain.BillInAdvance {
@@ -4098,8 +4148,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 		meterIntervals[mid] = append(meterIntervals[mid], usageInterval{start, end})
 	}
 	for _, it := range sub.Items {
-		itemForSeg := it
-		segments := itemBaseSegments(&itemForSeg, changesByItem[it.ID], periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
+		segments := segsByItem[it.ID]
 		if len(segments) == 0 {
 			for _, mid := range plans[it.PlanID].MeterIDs {
 				addMeterInterval(mid, periodStart, canceledAt)
@@ -4116,11 +4165,10 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 			}
 		}
 	}
-	for itemID, changes := range changesByItem {
+	for itemID, segments := range segsByItem {
 		if _, stillPresent := itemsByID[itemID]; stillPresent {
 			continue
 		}
-		segments := itemBaseSegments(nil, changes, periodStart, canceledAt, e.tenantLocation(ctx, sub.TenantID))
 		for _, seg := range segments {
 			segPlan, ok := plans[seg.planID]
 			if !ok {

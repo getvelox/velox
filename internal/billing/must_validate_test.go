@@ -58,7 +58,10 @@ func TestMustValidate_CoversEveryCollaborator(t *testing.T) {
 		// If this fails, a collaborator was added/removed — update BOTH
 		// the wiring in router.go and this count deliberately.
 		// 25th: ScheduledCancelExecutor (ADR-097 mid-period cancel fire).
-		const collaborators = 25
+		// 26th: IntervalSnapshotter (ADR-101 segment-source seam — the
+		// producer always wires the real subscription store, even in
+		// reader mode "off", so the kill switch can never dangle unwired).
+		const collaborators = 26
 		if nilCount != collaborators {
 			t.Errorf("zero engine names %d nil collaborators, expected %d — Engine's dep set changed; update router wiring + this count deliberately", nilCount, collaborators)
 		}
