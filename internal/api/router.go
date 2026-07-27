@@ -703,13 +703,20 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	paymentReadiness := &paymentReadinessAdapter{customers: customerStore, pms: paymentMethodsSvc}
 	engine := billing.NewEngine(subStore, usageStore, pricingSvc,
 		&invoiceWriterAdapter{store: invoiceStore}, creditSvc, settingsStore, paymentReadiness, stripeAdapter, clk, customerStore)
-	// ADR-101: the interval-reader mode is frozen at boot. Unset means
-	// shadow — legacy bills, the parity comparator screams on divergence.
-	// An unknown value panics the boot (a mistyped kill-switch must never
-	// silently bill the wrong way).
+	// ADR-101 Phase 3 CUTOVER (2026-07-27): the interval-reader mode is
+	// frozen at boot; unset now means ON — billing_intervals bill, the
+	// dormant legacy interpretation still runs inside the comparator and
+	// screams if it ever disagrees. `shadow` (legacy bills, comparator
+	// on) and `off` (legacy only) remain the kill switches until Phase 4
+	// removes the interpretation. Cutover evidence: two-mode corpus CI
+	// (line-identical invoices across nine shapes), a 140/140-sub sweep
+	// of the dev dataset (0 unexplained), and a live clock walk under
+	// `on` (TZ-seam period, mid-period qty change, exact 9/31 + 22/31
+	// segments). An unknown value panics the boot — a mistyped
+	// kill-switch must never silently bill the wrong way.
 	ivMode := strings.TrimSpace(os.Getenv("VELOX_BILLING_INTERVALS_READER"))
 	if ivMode == "" {
-		ivMode = billing.IntervalReaderShadow
+		ivMode = billing.IntervalReaderOn
 	}
 	engine.SetIntervalReader(subStore, ivMode)
 	engine.SetTestClockReader(testClockStore)

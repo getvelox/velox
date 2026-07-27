@@ -11,7 +11,9 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
-### Added
+### Changed
+
+- **Billing now reads from `billing_intervals` by default (2026-07-27, ADR-101 Phase 3 cutover).** `VELOX_BILLING_INTERVALS_READER` defaults to `on`: cycle close and final-on-cancel bill from the write-time item lifetimes instead of re-deriving them from the fact log. The legacy interpretation still runs silently inside the parity comparator on every close and logs loudly on any disagreement; `shadow` and `off` remain as kill switches. Verified by the two-mode CI corpus (identical invoices across nine mutation shapes), a full-dataset parity sweep (140/140 subscriptions, zero unexplained divergences), and a live test-clock month under the new reader. Removing the legacy interpretation (Phase 4) is deferred until one clean soak period.
 
 - **Billing intervals, Phases 2+3 machinery (2026-07-27, ADR-101).** Every cycle close and final-on-cancel now computes its per-item billing segments twice from one database snapshot — the legacy fact-log interpretation and the new `billing_intervals` reader — and logs any divergence with a classified verdict; a CI corpus runs nine mutation shapes under both readers and requires line-for-line identical invoices. The reader mode is frozen at boot via `VELOX_BILLING_INTERVALS_READER` (`off` | `shadow` | `on`, default `shadow`; invalid values refuse to boot). Sweeping the comparator across the full development dataset (140 active subscriptions) found zero unexplained divergences and two known-class ones where the interval side corrects real legacy misbills from historical fact-log gaps: a hard-deleted item whose out-of-window 'remove' fact made the old reader bill a phantom month, and a soft-deleted item whose missing 'remove' row hid a billable stub. Also fixed at the root: same-instant fact rows (frozen simulated time) now order by insertion stamp in the billing walk, and direct hard-`DELETE` of a subscription item is refused by the database (no flow issues one; it would strand the item's intervals).
 
