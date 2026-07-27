@@ -151,8 +151,9 @@ func TestApplyItemPlanImmediately_RaceConverges(t *testing.T) {
 		Code: "sub-plan-race", DisplayName: "Plan Race Sub",
 		CustomerID: cust.ID,
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &now,
-		Items:     []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}},
+		StartedAt:                 &now,
+		CurrentBillingPeriodStart: &now, CurrentBillingPeriodEnd: bivPE(now),
+		Items: []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -250,8 +251,9 @@ func TestApplyItemPlanImmediately_SupersedesPendingUnderRace(t *testing.T) {
 		Code: "sub-supersede", DisplayName: "Supersede Sub",
 		CustomerID: cust.ID,
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &now,
-		Items:     []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}},
+		StartedAt:                 &now,
+		CurrentBillingPeriodStart: &now, CurrentBillingPeriodEnd: bivPE(now),
+		Items: []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -416,8 +418,9 @@ func seedActiveSubscription(t *testing.T, db *postgres.DB, tenantID, custExt, pl
 		Code: subCode, DisplayName: "Transition Sub",
 		CustomerID: cust.ID,
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &now,
-		Items:     []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
+		StartedAt:                 &now,
+		CurrentBillingPeriodStart: &now, CurrentBillingPeriodEnd: bivPE(now),
+		Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)

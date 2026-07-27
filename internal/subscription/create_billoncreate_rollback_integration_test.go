@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -48,6 +49,7 @@ func TestCreateWithBill_BillFailure_RealTxRollsBackSubscription(t *testing.T) {
 	_, err = store.CreateWithBill(ctx, tenantID, domain.Subscription{
 		Code: "sub-create-rb", DisplayName: "Create RB", CustomerID: cust.ID,
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
+		CurrentBillingPeriodStart: bivPS(time.Now().UTC()), CurrentBillingPeriodEnd: bivPE(time.Now().UTC()),
 		Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 	}, func(tx *sql.Tx, created domain.Subscription) error {
 		// The sub row + items were inserted on THIS tx; returning an error must

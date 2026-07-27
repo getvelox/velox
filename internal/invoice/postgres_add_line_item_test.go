@@ -247,8 +247,9 @@ func seedDraftInvoice(t *testing.T, db *postgres.DB, tenantID string) string {
 		Code: "sub-line-item", DisplayName: "Line Item Sub",
 		CustomerID: cust.ID,
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
-		Items:     []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
+		Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)

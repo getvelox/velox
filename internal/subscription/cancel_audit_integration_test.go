@@ -55,6 +55,7 @@ func seedCancelAuditSub(t *testing.T, ctx context.Context, db *postgres.DB, tena
 	sub, err := NewPostgresStore(db).Create(ctx, tenantID, domain.Subscription{
 		Code: "sub-cancel-audit-" + suffix, DisplayName: "Cancel Audit " + suffix, CustomerID: cust.ID,
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
+		CurrentBillingPeriodStart: bivPS(time.Now().UTC()), CurrentBillingPeriodEnd: bivPE(time.Now().UTC()),
 		Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 	})
 	if err != nil {

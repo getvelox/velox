@@ -132,7 +132,8 @@ func TestCancelCredit_DraftFailure_RealTxRollsBackCancel(t *testing.T) {
 		Code: "sub-rb", DisplayName: "RB", CustomerID: cust.ID,
 		Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("create sub: %v", err)
@@ -235,7 +236,8 @@ func TestCancelCredit_PaidInAdvance_DraftAtomicAndReconcilerRecovers(t *testing.
 		Code: "sub-cc", DisplayName: "CC", CustomerID: cust.ID,
 		Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("create sub: %v", err)

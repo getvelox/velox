@@ -70,7 +70,8 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 		CustomerID: cust.ID,
 		Items:      []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
-		StartedAt: &periodStart,
+		StartedAt:                 &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -165,6 +166,7 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 		Code: "sub-race2", DisplayName: "Race2", CustomerID: cust.ID,
 		Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar, StartedAt: &periodStart,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 	})
 	if err != nil {
 		t.Fatalf("sub: %v", err)
@@ -243,6 +245,7 @@ func TestRunCycleForTenant_BillsOnlyCallerLivemode(t *testing.T) {
 			Code: "sub-" + suffix, DisplayName: suffix, CustomerID: cust.ID,
 			Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 			Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar, StartedAt: &periodStart,
+			CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
 		})
 		if err != nil {
 			t.Fatalf("%s sub: %v", suffix, err)

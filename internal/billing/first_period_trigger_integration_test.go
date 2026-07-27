@@ -74,6 +74,7 @@ func TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E(t *testing.T) {
 		CustomerID: cust.ID,
 		Items:      []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		Status:     domain.SubscriptionActive, BillingTime: domain.BillingTimeAnniversary,
+		CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: &periodEnd,
 	})
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)

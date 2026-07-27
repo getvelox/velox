@@ -154,7 +154,9 @@ var clockTeardownStatements = []string{
 	`DELETE FROM billed_entries         WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
 	`DELETE FROM usage_events           WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
 	`DELETE FROM customer_credit_ledger WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
-	// Subscriptions — CASCADE removes subscription_items / _changes / _thresholds.
+	// Subscriptions — CASCADE removes subscription_items / _changes /
+	// _thresholds / billing_intervals (ADR-101; the intervals FK is the
+	// ADR-086 teardown carve-out).
 	`DELETE FROM subscriptions          WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
 	// Per-customer config + portal (customer_discounts / payment_methods /
 	// portal also ON DELETE CASCADE from the customer; deleted explicitly so

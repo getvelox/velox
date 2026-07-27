@@ -136,14 +136,29 @@ func TestMRRQueries_RemoveAware_CurrencyScoped_AddRemoveMovement(t *testing.T) {
 	item1 := mkItem(s1, usd10b, 1, d(60))
 	softDelete(item1, d(5))          // removed INSIDE window: counts at t, contraction in window
 	_ = mkItem(s1, usd20a, 1, d(10)) // added INSIDE window: expansion
-	// Resurrection: removed before t, un-deleted + resized after t. The
-	// 0129 trigger stamps 'add' and 'quantity' rows from updated_at.
+	// Resurrection-shaped log: removed before t, re-added + resized after
+	// t. Un-deleting subscription_items is REFUSED since ADR-101 (0159 —
+	// no flow maintains billing_intervals for resurrection), so the 0129
+	// trigger can no longer mint this shape; the MRR queries must still
+	// fold any legacy add-after-remove rows correctly, so the fixture
+	// writes the fact rows directly with the item row left in the same
+	// end state the old un-delete produced (live, qty 2).
 	item5 := mkItem(s1, usd10d, 1, d(60))
-	softDelete(item5, d(40))
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE subscription_items SET deleted_at = NULL, updated_at = $2 WHERE id = $1
-	`, item5, d(20)); err != nil {
-		t.Fatalf("un-delete: %v", err)
+		INSERT INTO subscription_item_changes
+			(tenant_id, livemode, subscription_id, subscription_item_id,
+			 change_type, from_plan_id, from_quantity, changed_at)
+		VALUES ($1, false, $2, $3, 'remove', $4, 1, $5)
+	`, tenantID, s1, item5, usd10d, d(40)); err != nil {
+		t.Fatalf("seed remove row: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO subscription_item_changes
+			(tenant_id, livemode, subscription_id, subscription_item_id,
+			 change_type, to_plan_id, to_quantity, changed_at)
+		VALUES ($1, false, $2, $3, 'add', $4, 1, $5)
+	`, tenantID, s1, item5, usd10d, d(20)); err != nil {
+		t.Fatalf("seed re-add row: %v", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE subscription_items SET quantity = 2, updated_at = $2 WHERE id = $1

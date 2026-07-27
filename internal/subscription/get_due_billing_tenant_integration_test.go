@@ -55,6 +55,7 @@ func TestGetDueBillingForTenant_ScopesToTenant(t *testing.T) {
 			Code: "sub-" + suffix, DisplayName: suffix, CustomerID: cust.ID,
 			Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
 			StartedAt: &past, NextBillingAt: &past,
+			CurrentBillingPeriodStart: &past, CurrentBillingPeriodEnd: bivPE(past),
 			Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		})
 		if err != nil {
@@ -127,6 +128,7 @@ func TestGetDueBillingForTenant_ExcludesClockPinnedAndNotDue(t *testing.T) {
 			Code: code, DisplayName: code, CustomerID: cust.ID,
 			Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar,
 			StartedAt: &past, NextBillingAt: &next,
+			CurrentBillingPeriodStart: &past, CurrentBillingPeriodEnd: bivPE(past),
 			Items: []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
 		})
 		if err != nil {
