@@ -107,6 +107,10 @@ intervals intersecting the current period forward are ever billed).
 
 1. **Dual-write** (unconditional — writers are NEVER gated by the
    flag; that is what keeps every later state reversible).
+   **SHIPPED 2026-07-27** (migration 0159 + store writers + boot-time
+   state-grounded backfill). The 0129 trigger's un-delete branch now
+   RAISEs — resurrection has no interval writer, so the write is
+   refused rather than left to silently un-bill after cutover.
 2. **Shadow parity**: cycle close computes both ways **in one
    repeatable-read snapshot** (two-tx shadow reads produce false
    divergence), compares line-item multisets, WARN+metric; CI

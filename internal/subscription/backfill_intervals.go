@@ -155,11 +155,16 @@ type ivSegment struct {
 }
 
 func backfillOneItem(ctx context.Context, tx *sql.Tx, tenantID string, loc *time.Location, it backfillItem) (int, error) {
+	// Tie-break same-instant rows by wall-clock created_at, NOT id: under a
+	// frozen test clock an add and a plan change can share one sim instant
+	// (changed_at), ids are random hex, and only the insert stamp carries
+	// the true sequence — found on real dev data, where id-ordering put a
+	// 'plan' row before its own item's 'add'.
 	logRows, err := tx.QueryContext(ctx, `
 		SELECT change_type, COALESCE(from_plan_id,''), COALESCE(to_plan_id,''), from_quantity, to_quantity, changed_at
 		FROM subscription_item_changes
 		WHERE subscription_item_id = $1
-		ORDER BY changed_at, id`,
+		ORDER BY changed_at, created_at, id`,
 		it.id,
 	)
 	if err != nil {
