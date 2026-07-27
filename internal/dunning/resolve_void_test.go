@@ -71,7 +71,7 @@ func TestResolveRun_ManualVoid_RoutesThroughServiceAndGatesSideEffects(t *testin
 	ctx := context.Background()
 	newHandler := func(voider *recordingVoider) (*Handler, *recordingCanceler, string) {
 		svc := NewService(newMemStore(), &noopRetrier{}, nil)
-		run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+		run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 		if err != nil {
 			t.Fatalf("StartDunning: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestResolveRun_ManualVoid_RoutesThroughServiceAndGatesSideEffects(t *testin
 func TestResolveRun_RejectsUnknownResolution(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(newMemStore(), &noopRetrier{}, nil)
-	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 	if err != nil {
 		t.Fatalf("StartDunning: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestResolveRun_RejectsUnknownResolution(t *testing.T) {
 func TestResolveRun_PaymentRecovered_RoutesThroughOfflinePaymentWriter(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(newMemStore(), &noopRetrier{}, nil)
-	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now())
+	run, err := svc.StartDunning(ctx, "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 	if err != nil {
 		t.Fatalf("StartDunning: %v", err)
 	}

@@ -401,7 +401,7 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 	// panel — dunning-start is a schedule, not a money artifact).
 	if s.dunning != nil {
 		failureAt := simulatedFailureAt(inv)
-		if err := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt); err != nil {
+		if err := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt, domain.DunningCausePaymentFailed); err != nil {
 			slog.Error("payment failure StartDunning failed after retries — no action needed: the dunning backfill sweep starts the run automatically on a later scheduler tick (clock-pinned invoices on their next advance)",
 				"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", err)
 		} else {

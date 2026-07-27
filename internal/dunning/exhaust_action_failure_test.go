@@ -19,7 +19,7 @@ func markUncollectiblePolicy(store *memStore) {
 
 func exhaustedRun(t *testing.T, store *memStore, svc *Service) domain.InvoiceDunningRun {
 	t.Helper()
-	run, err := svc.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Now())
+	run, err := svc.StartDunning(context.Background(), "t1", "inv_1", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
 	if err != nil {
 		t.Fatalf("start dunning: %v", err)
 	}
