@@ -125,6 +125,10 @@ type EmailEventRow struct {
 	DispatchedAt  *time.Time
 	LastError     string
 	To            string // resolved from payload
+	// AttemptNumber pairs a dunning_warning email with the retry
+	// attempt it warns about (payload attempt_number = run.AttemptCount
+	// at send time). 0 for non-dunning types and legacy rows.
+	AttemptNumber int
 }
 
 // RefundIssuer issues a direct refund on a paid invoice. Concretely this
@@ -1752,6 +1756,41 @@ func describeEmailEvent(emailType, outboxStatus, deliveryState string) (string, 
 	return desc, "succeeded"
 }
 
+// emailClause renders a suppressed dunning email row as a lowercase
+// clause for threading into the matching dunning row's detail subline
+// ("reminder sent — bounced"). Same status/verdict grammar as
+// describeEmailEvent — the row is real outbox data, just displayed on
+// the retry row instead of as its own timeline entry (the entry lives
+// on the customer page's "Sent emails" card, Stripe shape).
+func emailClause(noun string, em EmailEventRow) string {
+	switch em.Status {
+	case "failed":
+		return noun + " failed to send"
+	case "pending":
+		return noun + " queued"
+	case "skipped":
+		return noun + " skipped — invoice settled first"
+	}
+	switch em.DeliveryState {
+	case "delivered":
+		return noun + " sent — delivered"
+	case "bounced":
+		return noun + " sent — bounced"
+	case "complained":
+		return noun + " sent — recipient marked it as spam"
+	}
+	return noun + " sent"
+}
+
+// capFirst uppercases the leading ASCII letter so an emailClause can
+// stand alone as a detail subline.
+func capFirst(s string) string {
+	if s == "" || s[0] < 'a' || s[0] > 'z' {
+		return s
+	}
+	return string(s[0]-'a'+'A') + s[1:]
+}
+
 // describeDunningEvent renders one dunning lifecycle row: uniform
 // machine-event TITLES ("Payment recovery started", "Payment retry #N
 // attempted" — the timeline's title=event, subline=detail grammar, and
@@ -1783,8 +1822,12 @@ func describeDunningEvent(eventType, reason string, attemptCount int) (desc, sta
 			// the attempt and reminded the customer. Rendering it as a
 			// bare "attempted" read as a repeat charge failure (legacy
 			// sentinel matched for pre-normalization rows: our own
-			// single-writer string, not an operator spelling).
-			return desc, "scheduled", "No payment method — reminder sent"
+			// single-writer string, not an operator spelling). The
+			// reminder clause ("reminder sent — bounced") is composed
+			// by the timeline builder from the actual email_outbox row
+			// — claimed here it would assert a send this function
+			// can't see.
+			return desc, "scheduled", "No payment method"
 		}
 		return desc, "processing", ""
 	case "resolved":
@@ -2015,6 +2058,17 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// emailed" alongside the Stripe + dunning rows. Without this,
 	// operators have no signal that the customer was actually told
 	// about the issue — the email outbox is the durable trace.
+	//
+	// Suppressed dunning emails are captured here and threaded into
+	// the matching dunning rows' detail sublines below, so a bounced
+	// reminder is visible from the invoice without re-introducing the
+	// wall-clock rows. Warnings pair by payload attempt_number =
+	// run.AttemptCount at send time (exact key, no index heuristics);
+	// the payload carries no run id, so across multiple runs on one
+	// invoice a repeated attempt number keeps the newest email —
+	// accepted display nuance on an already-rare shape.
+	reminderByAttempt := map[int]EmailEventRow{}
+	var escalationEmail *EmailEventRow
 	if h.emailEvents != nil {
 		emailEvts, err := h.emailEvents.ListByInvoice(r.Context(), tenantID, inv.InvoiceNumber)
 		if err != nil {
@@ -2037,6 +2091,12 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				// on the dunning_started row (same time domain = both
 				// wall-clock from the Stripe webhook side).
 				if evt.EmailType == "dunning_warning" || evt.EmailType == "dunning_escalation" {
+					if evt.EmailType == "dunning_warning" && evt.AttemptNumber > 0 {
+						reminderByAttempt[evt.AttemptNumber] = evt
+					} else if evt.EmailType == "dunning_escalation" {
+						e := evt
+						escalationEmail = &e
+					}
 					continue
 				}
 				desc, status := describeEmailEvent(evt.EmailType, evt.Status, evt.DeliveryState)
@@ -2177,6 +2237,28 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					rowErr := evt.Reason
 					if detail != "" || evt.EventType == domain.DunningEventStarted {
 						rowErr = ""
+					}
+					// Thread the suppressed dunning email's delivery
+					// verdict (ADR-098) into the row it belongs to.
+					// Skipped for the succeeded retry: warnings are only
+					// enqueued after FAILED attempts, so a same-numbered
+					// email would belong to another run's failure.
+					if status != "succeeded" {
+						switch evt.EventType {
+						case domain.DunningEventRetryAttempted:
+							if em, ok := reminderByAttempt[evt.AttemptCount]; ok {
+								clause := emailClause("reminder", em)
+								if detail != "" {
+									detail += " — " + clause
+								} else {
+									detail = capFirst(clause)
+								}
+							}
+						case domain.DunningEventEscalated:
+							if escalationEmail != nil {
+								detail = capFirst(emailClause("escalation email", *escalationEmail))
+							}
+						}
 					}
 					events = append(events, timelineEvent{
 						Timestamp:    evt.CreatedAt.Format(time.RFC3339),

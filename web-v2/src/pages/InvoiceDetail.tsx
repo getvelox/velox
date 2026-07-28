@@ -1289,7 +1289,7 @@ export default function InvoiceDetailPage() {
             <CardTitle className="text-sm">{externalLaneTitle}</CardTitle>
             <p className="text-xs text-muted-foreground mt-0.5">
               {externalLaneTitle === 'Notifications'
-                ? 'Emails sent to the customer, in real (wall-clock) time.'
+                ? "Emails sent for this invoice, shown in real time. Payment reminders are listed on the customer's page."
                 : 'Emails and payment-processor outcomes, in real (wall-clock) time.'}
             </p>
           </CardHeader>

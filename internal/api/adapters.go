@@ -625,6 +625,9 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 	out := make([]invoice.EmailEventRow, 0, len(rows))
 	for _, r := range rows {
 		to, _ := r.Payload["to"].(string)
+		// JSON numbers decode to float64; dunning_warning payloads
+		// stamp attempt_number for pairing with retry rows.
+		attempt, _ := r.Payload["attempt_number"].(float64)
 		out = append(out, invoice.EmailEventRow{
 			EmailType:     r.EmailType,
 			Status:        r.Status,
@@ -633,6 +636,7 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 			DispatchedAt:  r.DispatchedAt,
 			LastError:     r.LastError,
 			To:            to,
+			AttemptNumber: int(attempt),
 		})
 	}
 	return out, nil
