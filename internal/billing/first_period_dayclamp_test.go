@@ -36,15 +36,6 @@ func (s *tzSettings) Get(_ context.Context, _ string) (domain.TenantSettings, er
 	return domain.TenantSettings{Timezone: s.tz}, nil
 }
 
-func mustLoc(t *testing.T, name string) *time.Location {
-	t.Helper()
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		t.Fatalf("load location %s: %v", name, err)
-	}
-	return loc
-}
-
 // The live I1 fixture: tenant TZ Asia/Kolkata, anniversary-monthly sub
 // created 2026-07-26 21:05 IST. ADR-012 snapped the first period to
 // Jul 26 00:00 → Aug 26 00:00 IST (a full 31-day month).
