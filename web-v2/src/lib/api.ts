@@ -770,6 +770,7 @@ export type AttentionReason =
   | 'awaiting_payment'
   | 'no_payment_method'
   | 'dunning_exhausted'
+  | 'collection_paused'
 
 export type AttentionAction =
   | 'edit_billing_profile'

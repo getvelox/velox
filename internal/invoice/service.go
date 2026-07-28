@@ -150,6 +150,7 @@ type Service struct {
 	stripeChecker  StripeChecker
 	customerReader CustomerReader
 	dunningReader  DunningRunReader
+	subPauseReader SubscriptionPauseReader
 	creditApplier  CreditApplier
 	settings       TenantSettingsReader
 	audit          AuditLogger
@@ -328,6 +329,38 @@ type DunningRunReader interface {
 // SetDunningRunReader wires the dunning-run lookup (see DunningRunReader).
 func (s *Service) SetDunningRunReader(r DunningRunReader) {
 	s.dunningReader = r
+}
+
+// SubscriptionPauseReader is the narrow subscription lookup the tax-retry
+// auto-finalize gate uses to honour `pause_collection`. Satisfied by
+// *subscription.PostgresStore.
+type SubscriptionPauseReader interface {
+	Get(ctx context.Context, tenantID, id string) (domain.Subscription, error)
+}
+
+// SetSubscriptionPauseReader wires the pause lookup (see
+// SubscriptionPauseReader). Optional: when nil, auto-finalize behaves as it
+// did before the gate existed — the conservative direction is to finalize,
+// since a stuck draft is the state operators complain about.
+func (s *Service) SetSubscriptionPauseReader(r SubscriptionPauseReader) {
+	s.subPauseReader = r
+}
+
+// collectionPaused reports whether the invoice's subscription has
+// pause_collection set. A read error or unwired reader answers false: the gate
+// it feeds only WITHHOLDS auto-finalize, so guessing "paused" on a failed read
+// would strand a healthy invoice as a draft indefinitely.
+func (s *Service) collectionPaused(ctx context.Context, tenantID, subscriptionID string) bool {
+	if s.subPauseReader == nil || subscriptionID == "" {
+		return false
+	}
+	sub, err := s.subPauseReader.Get(ctx, tenantID, subscriptionID)
+	if err != nil {
+		slog.Warn("invoice: could not read subscription pause state; treating as not paused",
+			"error", err, "tenant_id", tenantID, "subscription_id", subscriptionID)
+		return false
+	}
+	return sub.PauseCollection != nil
 }
 
 // SetCustomerReader wires the customer lookup used to (a) stamp is_simulated
@@ -701,6 +734,16 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 		if run, err := s.dunningReader.GetRunByInvoice(ctx, inv.TenantID, inv.ID); err == nil {
 			atc.DunningEscalated = run.State == domain.DunningEscalated
 		}
+	}
+	// Pause state for the queued-but-not-scheduled banner, gated on the exact
+	// precondition of the branch that reads it. A list page still pays one
+	// primary-key subscription read per QUEUED row — healthy, paid, draft and
+	// failed rows skip it entirely, and a queued row is the only one whose
+	// banner can make the false promise. Same shape and cost profile as the
+	// dunning-run lookup above.
+	if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized &&
+		inv.PaymentStatus == domain.PaymentPending {
+		atc.CollectionPaused = s.collectionPaused(ctx, inv.TenantID, inv.SubscriptionID)
 	}
 	if s.stripeChecker != nil && inv.TenantID != "" {
 		// Livemode comes off ctx (auth middleware set it) — invoice
@@ -1523,6 +1566,19 @@ func (s *Service) RetryTax(ctx context.Context, tenantID, invoiceID string) (dom
 	if err != nil {
 		return domain.Invoice{}, err
 	}
+	// A paused subscription keeps its invoices as drafts — that is the whole
+	// meaning of pause_collection's keep_as_draft, and the engine holds the
+	// same line at cycle close. Auto-finalize is the one path that ignored it,
+	// because a tax-deferred draft is draft for two independent reasons and
+	// resolving the tax only clears one of them. Issuing it here would hand
+	// the operator an invoice they asked us not to send, and its banner would
+	// promise an automatic charge that collection (correctly) refuses to make.
+	// The draft simply waits for the resume or an explicit Finalize.
+	if shouldAutoFinalizeAfterRetry(inv) && s.collectionPaused(ctx, tenantID, inv.SubscriptionID) {
+		slog.Info("invoice: tax resolved but collection is paused on the subscription; leaving the invoice as a draft",
+			"tenant_id", tenantID, "invoice_id", invoiceID, "subscription_id", inv.SubscriptionID)
+		return s.attachAttention(ctx, inv), nil
+	}
 	if shouldAutoFinalizeAfterRetry(inv) {
 		final, ferr := s.Finalize(ctx, tenantID, invoiceID)
 		if ferr != nil {
@@ -1557,6 +1613,33 @@ func (s *Service) RetryTax(ctx context.Context, tenantID, invoiceID string) (dom
 			}
 			return s.attachAttention(ctx, paid), nil
 		}
+		// Still owed after finalize: hand the invoice to the auto-charge
+		// sweep, the single retry owner for invoices finalized outside a
+		// collection pipeline. Finalizing is not collecting — this path
+		// charges nothing, so without the flag the invoice is invisible to
+		// every recovery mechanism at once: both charge sweeps list only
+		// auto_charge_pending rows, the dunning backfill lists only
+		// payment_status='failed', and dunning itself never starts because
+		// nothing ever failed. It would sit finalized and owed until an
+		// operator happened to read the banner — the silent-overdue sink
+		// already closed for the manual-finalize path (handler.collectAtFinalize).
+		//
+		// The flag rather than an inline charge: the sweep already owns the
+		// full sequence (credit re-apply, PM resolve, charge, decline →
+		// dunning, no-PM → setup-link email), this runs inside a cron batch
+		// with no operator waiting, and a second charger would be a second
+		// idempotency-key minter on the same invoice. It also makes the
+		// catchup pipeline's deliberate Phase 2 → Phase 3 ordering mean
+		// something: the charge phase can now see what the tax retry unstuck.
+		if err := s.store.SetAutoChargePending(ctx, tenantID, invoiceID, true); err != nil {
+			// Liveness sink (playbook class G): the invoice stays invisible
+			// to the sweep until something else sets the flag. Non-fatal —
+			// the tax decision and finalize are already authoritative.
+			slog.Warn("invoice: failed to queue tax-retry-finalized invoice for auto-charge; collection will not retry until this is set",
+				"error", err, "tenant_id", tenantID, "invoice_id", invoiceID)
+			return s.attachAttention(ctx, final), nil
+		}
+		final.AutoChargePending = true
 		return s.attachAttention(ctx, final), nil
 	}
 	return s.attachAttention(ctx, inv), nil

@@ -2051,6 +2051,31 @@ func (s *PostgresStore) SetTaxTransaction(ctx context.Context, tenantID, id stri
 	return tx.Commit()
 }
 
+// notPausedForCollection is the SQL predicate both auto-charge sweeps use to
+// honour `pause_collection`. A paused subscription means the operator (or
+// dunning's `pause` final action) stopped automatic collection on it, so the
+// sweeps must not charge its invoices — "pause_collection neuters the
+// financial side without touching the cycle".
+//
+// The engine's own finalize sites already skip collection for a paused sub,
+// which used to make this unreachable by accident: nothing set
+// auto_charge_pending on a paused sub's invoice, so the sweeps never saw one.
+// That stopped being true once the tax-retry chain queued the invoices it
+// auto-finalizes — a paused sub's tax-deferred draft finalizes on retry and
+// would otherwise have been charged, contradicting the pause. Enforcing it in
+// the predicate keeps the rule with the collection owner rather than with
+// whichever writer happened to set the flag.
+//
+// One-off invoices (no subscription) are unaffected — NOT EXISTS holds when
+// there is nothing to join to.
+func notPausedForCollection(alias string) string {
+	return `NOT EXISTS (
+			SELECT 1 FROM subscriptions ps
+			 WHERE ps.id = ` + alias + `.subscription_id
+			   AND ps.pause_collection_behavior IS NOT NULL
+		)`
+}
+
 // ListAutoChargePending returns invoices that need auto-charge retry —
 // CRON path. Excludes clock-pinned subscriptions per ADR-029: simulation
 // time progresses only on operator Advance, so the wall-clock scheduler
@@ -2086,6 +2111,7 @@ func (s *PostgresStore) ListAutoChargePending(ctx context.Context, limit int) ([
 		  AND i.amount_due_cents > 0
 		  AND i.livemode = $1
 		  AND i.is_simulated = false
+		  AND `+notPausedForCollection("i")+`
 		ORDER BY i.created_at ASC
 		LIMIT $2
 	`, postgres.Livemode(ctx), limit)
@@ -2205,6 +2231,7 @@ func (s *PostgresStore) ListAutoChargePendingForClock(ctx context.Context, tenan
 		  AND i.amount_due_cents > 0
 		  AND i.tenant_id = $1
 		  AND c.test_clock_id = $2
+		  AND `+notPausedForCollection("i")+`
 		ORDER BY i.created_at ASC
 		LIMIT $3
 	`, tenantID, clockID, limit)

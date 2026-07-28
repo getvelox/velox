@@ -293,6 +293,7 @@ components:
         - awaiting_payment
         - no_payment_method
         - dunning_exhausted
+        - collection_paused
       description: |
         Closed, typed code naming why an invoice needs operator
         attention. Stable public-API contract — codes are never
@@ -303,7 +304,11 @@ components:
         mismatch, or a payment on a voided invoice — and is surfaced
         even on paid/voided invoices. `dunning_exhausted` reports a
         no-payment-method invoice whose automatic recovery has ended
-        without collecting (2026-07-22).
+        without collecting (2026-07-22). `collection_paused` reports an
+        invoice that is queued for auto-charge but whose subscription
+        has `pause_collection` set, so the charge sweeps deliberately
+        skip it — it will not be charged automatically until
+        collection resumes (2026-07-28).
 
     AttentionAction:
       type: string

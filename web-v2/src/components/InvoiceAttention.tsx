@@ -386,6 +386,7 @@ function humanReason(reason: string): string {
     awaiting_payment: 'Awaiting first charge',
     no_payment_method: 'No payment method',
     dunning_exhausted: 'Payment recovery ended',
+    collection_paused: 'Collection paused',
   }
   return map[reason] ?? reason
 }

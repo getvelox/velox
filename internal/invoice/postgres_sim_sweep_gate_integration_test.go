@@ -109,3 +109,74 @@ func TestListFailedWithoutDunningRun_ExcludesSimulatedOneOff(t *testing.T) {
 		t.Error("a wall-clock failed invoice must remain eligible for dunning enrollment")
 	}
 }
+
+// TestListAutoChargePending_ExcludesPausedSubscription pins that collection
+// honours `pause_collection`. A paused subscription is one the operator — or
+// dunning's `pause` final action — took off automatic collection, so the sweep
+// must not charge its invoices.
+//
+// This used to hold by accident: every finalize site skips collection for a
+// paused sub, so nothing ever set auto_charge_pending on one and the sweep
+// never saw it. That stopped being true once the tax-retry chain began queueing
+// the invoices it auto-finalizes — a paused sub's tax-deferred draft finalizes
+// on retry, and without this predicate the very next sweep would charge it.
+func TestListAutoChargePending_ExcludesPausedSubscription(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	store := invoice.NewPostgresStore(db)
+
+	paused := seedSweepInvoice(t, ctx, db, "AutoCharge Paused Sub", `
+		UPDATE invoices SET auto_charge_pending = TRUE, payment_status = 'pending',
+		       status = 'finalized', amount_due_cents = 1000, is_simulated = false,
+		       updated_at = now()
+		 WHERE id = $1`)
+	pauseSubscriptionOf(t, ctx, db, paused)
+
+	running := seedSweepInvoice(t, ctx, db, "AutoCharge Running Sub", `
+		UPDATE invoices SET auto_charge_pending = TRUE, payment_status = 'pending',
+		       status = 'finalized', amount_due_cents = 1000, is_simulated = false,
+		       updated_at = now()
+		 WHERE id = $1`)
+
+	listed, err := store.ListAutoChargePending(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListAutoChargePending: %v", err)
+	}
+	var sawPaused, sawRunning bool
+	for _, inv := range listed {
+		switch inv.ID {
+		case paused:
+			sawPaused = true
+		case running:
+			sawRunning = true
+		}
+	}
+	if sawPaused {
+		t.Error("a paused subscription's invoice was listed for auto-charge — collection must respect pause_collection")
+	}
+	if !sawRunning {
+		t.Error("a running subscription's invoice must still be listed (the pause predicate over-filtered)")
+	}
+}
+
+// pauseSubscriptionOf sets pause_collection on the subscription owning the
+// given invoice, mirroring what dunning's `pause` final action persists.
+func pauseSubscriptionOf(t *testing.T, ctx context.Context, db *postgres.DB, invoiceID string) {
+	t.Helper()
+	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		t.Fatalf("begin pause tx: %v", err)
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE subscriptions SET pause_collection_behavior = 'keep_as_draft'
+		 WHERE id = (SELECT subscription_id FROM invoices WHERE id = $1)`, invoiceID)
+	if err != nil {
+		t.Fatalf("pause subscription: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("fixture expectation: invoice %s must own exactly one subscription to pause, updated %d", invoiceID, n)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit pause tx: %v", err)
+	}
+}

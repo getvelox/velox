@@ -400,3 +400,29 @@ func TestApplyCreditsAndCollect(t *testing.T) {
 		}
 	})
 }
+
+// TestCollectAfterFinalize_RefusesDraft pins the pipeline's no-drafts
+// precondition. It was prose-only, and billOnePeriod violated it: a
+// tax-pending cycle invoice is born draft, and the cycle's collect arm gates
+// on amount + pause but not status. The no-PM arm then emailed the customer a
+// setup link quoting a PRE-TAX amount_due and stamped no_pm_notified_at, so
+// the corrected total was never sent; the charge arm just logged a rejection
+// (the charger refuses non-finalized invoices).
+//
+// Collection for those drafts is owned at finalize instead — RetryTax queues
+// them for the sweep when tax resolves, and the sweep emails the final total.
+func TestCollectAfterFinalize_RefusesDraft(t *testing.T) {
+	ctx := context.Background()
+	e, invoices, notifier, sub, inv := collectFixture()
+	inv.Status = domain.InvoiceDraft
+	inv.TaxStatus = domain.InvoiceTaxPending
+
+	e.collectAfterFinalize(ctx, sub, inv, "test")
+
+	if len(notifier.got) != 0 {
+		t.Errorf("draft must not trigger the setup-link email (it would quote a pre-tax total), got %d notifies", len(notifier.got))
+	}
+	if autoChargePending(t, invoices, inv.ID) {
+		t.Error("draft must not be queued here; the tax-retry finalize owns that handoff")
+	}
+}
