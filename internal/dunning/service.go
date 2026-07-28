@@ -615,13 +615,21 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		if errors.As(retryErr, &rerr) && rerr.PaymentIntentID != "" {
 			evtMeta = map[string]any{"payment_intent_id": rerr.PaymentIntentID}
 		}
+		// A card-less "attempt" records the same no_payment_method cause
+		// vocabulary the start event uses — the timeline renders it as a
+		// reminder tick, not a charge failure. Real declines keep their
+		// provider reason text.
+		evtReason := retryErr.Error()
+		if errors.Is(retryErr, domain.ErrNoPaymentMethodOnRetry) {
+			evtReason = string(domain.DunningCauseNoPaymentMethod)
+		}
 		_, _ = s.store.CreateEvent(ctx, tenantID, domain.InvoiceDunningEvent{
 			RunID:        run.ID,
 			InvoiceID:    run.InvoiceID,
 			EventType:    domain.DunningEventRetryAttempted,
 			State:        domain.DunningActive,
 			AttemptCount: run.AttemptCount,
-			Reason:       retryErr.Error(),
+			Reason:       evtReason,
 			Metadata:     evtMeta,
 			CreatedAt:    now,
 		})
