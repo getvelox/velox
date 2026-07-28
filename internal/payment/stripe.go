@@ -236,6 +236,13 @@ type InvoiceUpdater interface {
 	SetPaymentCard(ctx context.Context, tenantID, id, brand, last4 string) error
 	GetByStripePaymentIntentID(ctx context.Context, tenantID, stripePaymentIntentID string) (domain.Invoice, error)
 	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
+	// RecordChargeAttempt writes/upserts one charge-attempt fact
+	// (ADR-102): inserted at PI-create time by the charge chokepoint,
+	// outcome-resolved by the settle paths keyed on the PI. Best-effort
+	// at every call site — the timeline's precedence chain falls back
+	// to the webhook row when the attempt row is absent, so a lost
+	// write degrades display, never money.
+	RecordChargeAttempt(ctx context.Context, tenantID string, a domain.InvoiceChargeAttempt) error
 }
 
 // WebhookStore persists and queries Stripe webhook events.
@@ -584,6 +591,16 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		// even though the reconciler will later resolve the per-invoice state.
 		mw.RecordPaymentCharge("failed")
 
+		// ADR-102: the attempt is a billing fact regardless of what
+		// follows (dunning or nothing). Covers the empty-PI shape too —
+		// a PI-create network failure is an attempt with no webhook twin,
+		// and this row is its only record.
+		attemptOutcome := domain.ChargeAttemptFailed
+		if pe.Unknown {
+			attemptOutcome = domain.ChargeAttemptUnknown
+		}
+		recordChargeAttempt(ctx, s.invoices, tenantID, inv, pe.PaymentIntentID, purpose, attemptOutcome, pe.Message)
+
 		// Inline StartDunning for known-failed charges so the dunning run
 		// exists by the time the orchestrator's Phase 5 queries due runs
 		// in the same Advance. Pre-fix this was deferred to the
@@ -627,6 +644,11 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		"request_id", chimw.GetReqID(ctx),
 	)
 	mw.RecordPaymentCharge("succeeded")
+
+	// ADR-102: insert the attempt at PI-create time so trigger_source
+	// and the sim anchor are recorded by the writer that knows them;
+	// the settle paths only flip the outcome.
+	recordChargeAttempt(ctx, s.invoices, tenantID, inv, result.ID, purpose, domain.ChargeAttemptPending, "")
 
 	// Honor the synchronous confirmation outcome (ADR-049 Phase 3,
 	// discover-then-settle). With Confirm:true + OffSession:true, Stripe
@@ -769,6 +791,39 @@ func persistChargeOutcomeWithRetry(ctx context.Context, invoices InvoiceUpdater,
 		return nil
 	}
 	return fmt.Errorf("persist charge outcome failed after %d attempts: %w", len(delays), lastErr)
+}
+
+// recordChargeAttempt best-effort writes the ADR-102 attempt fact. The
+// sim anchor comes from the Advance ctx when present — that is the
+// billing-axis instant the attempt belongs to; wall-clock callers leave
+// it nil and the fact stays on the wall axis. Best-effort: the
+// timeline's precedence chain (dunning row → attempt row → webhook row)
+// falls back to the webhook row when this write is lost, so failure
+// degrades display, never money.
+func recordChargeAttempt(ctx context.Context, invoices InvoiceUpdater, tenantID string, inv domain.Invoice, piID, purpose string, outcome domain.ChargeAttemptOutcome, reason string) {
+	trigger := domain.ChargeTriggerAutoCharge
+	if purpose == piPurposeDunningRetry {
+		trigger = domain.ChargeTriggerDunningRetry
+	}
+	var simAt *time.Time
+	if sim, ok := clock.SimOf(ctx); ok {
+		t := sim.At
+		simAt = &t
+	}
+	a := domain.InvoiceChargeAttempt{
+		InvoiceID:             inv.ID,
+		StripePaymentIntentID: piID,
+		Trigger:               trigger,
+		Outcome:               outcome,
+		ProviderReason:        reason,
+		AmountCents:           inv.AmountDueCents,
+		OccurredAt:            time.Now().UTC(),
+		SimEffectiveAt:        simAt,
+	}
+	if err := invoices.RecordChargeAttempt(ctx, tenantID, a); err != nil {
+		slog.Warn("record charge attempt failed — timeline falls back to the webhook row",
+			"invoice_id", inv.ID, "payment_intent_id", piID, "error", err)
+	}
 }
 
 func simulatedFailureAt(inv domain.Invoice) time.Time {

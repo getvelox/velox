@@ -443,6 +443,10 @@ type mockInvoiceUpdaterHandler struct {
 	markPaidErr error             // when set, MarkPaid returns this (simulates a transient DB failure)
 }
 
+func (m *mockInvoiceUpdaterHandler) RecordChargeAttempt(_ context.Context, _ string, _ domain.InvoiceChargeAttempt) error {
+	return nil
+}
+
 func newMockInvoiceUpdaterH() *mockInvoiceUpdaterHandler {
 	return &mockInvoiceUpdaterHandler{
 		invoices:    make(map[string]mockInvoice),

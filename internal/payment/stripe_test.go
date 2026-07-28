@@ -59,6 +59,9 @@ func (m *mockStripeClient) GetPaymentIntent(_ context.Context, piID string) (Pay
 
 type mockInvoiceUpdater struct {
 	markPaidErr error // injected: MarkPaid*Transition returns this (voided-target shape)
+	// chargeAttempts records every ADR-102 attempt-fact write (chokepoint
+	// insert + settle-path upserts), in call order.
+	chargeAttempts []domain.InvoiceChargeAttempt
 	invoices    map[string]domain.Invoice
 	byPI        map[string]string // PI ID -> invoice ID
 	failNotedPI map[string]string // invoice ID -> PI whose failure notifications fired
@@ -112,6 +115,11 @@ func (m *mockInvoiceUpdater) GetByStripePaymentIntentID(_ context.Context, _, pi
 		return domain.Invoice{}, errs.ErrNotFound
 	}
 	return m.invoices[id], nil
+}
+
+func (m *mockInvoiceUpdater) RecordChargeAttempt(_ context.Context, _ string, a domain.InvoiceChargeAttempt) error {
+	m.chargeAttempts = append(m.chargeAttempts, a)
+	return nil
 }
 
 func (m *mockInvoiceUpdater) Get(_ context.Context, _, id string) (domain.Invoice, error) {

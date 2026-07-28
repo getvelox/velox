@@ -3200,3 +3200,97 @@ func (s *PostgresStore) StreamForExport(ctx context.Context, tenantID string, fr
 	}
 	return rows.Err()
 }
+
+// RecordChargeAttempt writes one charge attempt (ADR-102), upserting by
+// PaymentIntent id: the create-time writer inserts the row and the
+// settle paths (webhook, inline, reconciler) resolve its outcome in
+// place — one attempt, one row. Monotonicity: 'succeeded' is terminal
+// (a settle can never un-succeed an attempt); every other outcome may
+// advance, including failed → succeeded (3DS second try on one PI).
+// sim_effective_at and trigger_source are set at insert and never
+// overwritten — the settle path's wall-clock context must not strip an
+// attempt's billing-axis anchor. Empty-PI attempts (the PI create
+// itself failed) insert-only; there is no twin to dedup against.
+func (s *PostgresStore) RecordChargeAttempt(ctx context.Context, tenantID string, a domain.InvoiceChargeAttempt) error {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return err
+	}
+	defer postgres.Rollback(tx)
+
+	if a.StripePaymentIntentID == "" {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO invoice_charge_attempts
+				(tenant_id, invoice_id, stripe_payment_intent_id, trigger_source,
+				 outcome, provider_reason, amount_cents, occurred_at, sim_effective_at)
+			VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8)`,
+			tenantID, a.InvoiceID, a.Trigger, a.Outcome, a.ProviderReason,
+			a.AmountCents, a.OccurredAt, postgres.NullableTime(a.SimEffectiveAt),
+		)
+	} else {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO invoice_charge_attempts
+				(tenant_id, invoice_id, stripe_payment_intent_id, trigger_source,
+				 outcome, provider_reason, amount_cents, occurred_at, sim_effective_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (tenant_id, stripe_payment_intent_id)
+				WHERE stripe_payment_intent_id <> ''
+			DO UPDATE SET
+				outcome = CASE WHEN invoice_charge_attempts.outcome = 'succeeded'
+					THEN invoice_charge_attempts.outcome ELSE EXCLUDED.outcome END,
+				provider_reason = CASE WHEN EXCLUDED.provider_reason <> ''
+					THEN EXCLUDED.provider_reason ELSE invoice_charge_attempts.provider_reason END,
+				amount_cents = CASE WHEN EXCLUDED.amount_cents > 0
+					THEN EXCLUDED.amount_cents ELSE invoice_charge_attempts.amount_cents END,
+				sim_effective_at = COALESCE(invoice_charge_attempts.sim_effective_at, EXCLUDED.sim_effective_at),
+				updated_at = now()`,
+			tenantID, a.InvoiceID, a.StripePaymentIntentID, a.Trigger, a.Outcome,
+			a.ProviderReason, a.AmountCents, a.OccurredAt, postgres.NullableTime(a.SimEffectiveAt),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("record charge attempt: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ListChargeAttemptsByInvoice returns the invoice's charge attempts,
+// oldest first — the timeline's billing-axis payment facts (ADR-102).
+func (s *PostgresStore) ListChargeAttemptsByInvoice(ctx context.Context, tenantID, invoiceID string) ([]domain.InvoiceChargeAttempt, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, tenant_id, invoice_id, stripe_payment_intent_id, trigger_source,
+		       outcome, provider_reason, amount_cents, occurred_at, sim_effective_at,
+		       livemode, created_at, updated_at
+		FROM invoice_charge_attempts
+		WHERE invoice_id = $1
+		ORDER BY occurred_at, created_at`,
+		invoiceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list charge attempts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.InvoiceChargeAttempt
+	for rows.Next() {
+		var a domain.InvoiceChargeAttempt
+		var simAt sql.NullTime
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.InvoiceID, &a.StripePaymentIntentID,
+			&a.Trigger, &a.Outcome, &a.ProviderReason, &a.AmountCents, &a.OccurredAt,
+			&simAt, &a.Livemode, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if simAt.Valid {
+			t := simAt.Time
+			a.SimEffectiveAt = &t
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}

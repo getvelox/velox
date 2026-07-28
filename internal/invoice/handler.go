@@ -1502,6 +1502,135 @@ func piFromEventMetadata(meta map[string]any) string {
 	return pi
 }
 
+// applyChargeAttemptPrecedence renders the ADR-102 charge-attempt facts:
+// every attempt appears on the timeline exactly once, via the richest
+// owner available — dunning row (campaign context with the provider
+// facts folded on) → attempt row (the billing-axis fact) → stripe
+// webhook row (wall-clock provider echo; the pre-ADR-102 carrier, kept
+// so invoices that predate the attempts table render unchanged).
+//
+// Concretely: an attempt whose PI a dunning row carries is suppressed
+// (that row already renders the charge — the walked fold design); an
+// attempt whose PI a surviving stripe row carries REPLACES that row on
+// simulated invoices (the invoice's own axis prefers its own facts —
+// the dunning-off gap fix) and defers to it on wall-clock invoices
+// (already the right time domain; zero rendering churn); an attempt
+// nothing carries renders itself (webhook-loss window, and PI-create
+// failures that never get a webhook twin).
+func applyChargeAttemptPrecedence(events []timelineEvent, attempts []domain.InvoiceChargeAttempt, inv domain.Invoice, invoiceSimulated bool) []timelineEvent {
+	if len(attempts) == 0 {
+		return events
+	}
+	dunningPIs := map[string]bool{}
+	stripeIdxByPI := map[string]int{}
+	for i, e := range events {
+		switch e.Source {
+		case "dunning":
+			if e.PaymentIntentID != "" {
+				dunningPIs[e.PaymentIntentID] = true
+			}
+		case "stripe":
+			if e.PaymentIntentID != "" &&
+				(e.EventType == "payment_intent.payment_failed" || e.EventType == "payment_intent.succeeded") {
+				stripeIdxByPI[e.PaymentIntentID] = i
+			}
+		}
+	}
+	drop := map[int]bool{}
+	var added []timelineEvent
+	for _, a := range attempts {
+		switch a.Outcome {
+		case domain.ChargeAttemptFailed, domain.ChargeAttemptUnknown:
+			// Always timeline-worthy.
+		case domain.ChargeAttemptSucceeded:
+			// The "Invoice paid" lifecycle row owns the success story
+			// (attempt-count subline, card subline). A succeeded attempt
+			// on a NOT-paid invoice is an anomaly worth its own row.
+			if inv.PaidAt != nil {
+				continue
+			}
+		default:
+			// pending — in flight; the attention banner owns it.
+			continue
+		}
+		lift := timelineEvent{}
+		if a.StripePaymentIntentID != "" {
+			if dunningPIs[a.StripePaymentIntentID] {
+				continue
+			}
+			if sIdx, ok := stripeIdxByPI[a.StripePaymentIntentID]; ok {
+				if !invoiceSimulated || a.SimEffectiveAt == nil {
+					// The webhook row already renders this attempt in
+					// the right time domain.
+					continue
+				}
+				// The attempt replaces its webhook echo; carry over
+				// what the echo had folded on (email Detail, the
+				// provider's verbatim error).
+				lift = events[sIdx]
+				drop[sIdx] = true
+			}
+		}
+		row := chargeAttemptRow(a, inv)
+		if row.Error == "" {
+			row.Error = lift.Error
+		}
+		if row.Detail == "" {
+			row.Detail = lift.Detail
+		}
+		added = append(added, row)
+	}
+	if len(drop) == 0 && len(added) == 0 {
+		return events
+	}
+	out := make([]timelineEvent, 0, len(events)+len(added))
+	for i, e := range events {
+		if drop[i] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, added...)
+}
+
+// chargeAttemptRow renders one attempt fact. Simulated attempts carry
+// their billing-axis instant (Activity lane); wall attempts keep their
+// wall-clock stamp and the SPA routes them with the other wall rows.
+func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelineEvent {
+	ts := a.OccurredAt
+	sim := false
+	if a.SimEffectiveAt != nil {
+		ts = *a.SimEffectiveAt
+		sim = true
+	}
+	desc, status := "Payment failed", "failed"
+	switch a.Outcome {
+	case domain.ChargeAttemptUnknown:
+		desc, status = "Charge attempted — outcome unconfirmed", "processing"
+	case domain.ChargeAttemptSucceeded:
+		desc, status = "Payment collected", "succeeded"
+	}
+	var amtPtr *int64
+	if a.AmountCents > 0 {
+		amt := a.AmountCents
+		amtPtr = &amt
+	}
+	return timelineEvent{
+		Timestamp:       ts.Format(time.RFC3339),
+		sortAt:          ts,
+		tieRank:         rankStripe,
+		Source:          "payment",
+		EventType:       "charge_attempt." + string(a.Outcome),
+		Status:          status,
+		Description:     desc,
+		Error:           a.ProviderReason,
+		AmountCents:     amtPtr,
+		Currency:        inv.Currency,
+		PaymentIntentID: a.StripePaymentIntentID,
+		IsSimulated:     sim,
+	}
+}
+
 func mergeFailedPaymentTwins(events []timelineEvent) []timelineEvent {
 	var stripeIdxs, dunningIdxs []int
 	for i, e := range events {
@@ -2302,6 +2431,16 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// the merged Detail ("Customer notified by email") in one pass.
 	events = foldEmailIntoStripeFailed(events, 2*time.Minute)
 	events = mergeFailedPaymentTwins(events)
+
+	// ADR-102: charge-attempt facts render AFTER the folds so the
+	// dunning-vs-stripe pairing above stays exactly the walked design;
+	// this pass only fills what the folds left uncovered (the
+	// dunning-off gap, webhook-loss windows, PI-create failures).
+	if attempts, aerr := h.svc.ListChargeAttempts(r.Context(), tenantID, inv.ID); aerr != nil {
+		degrade("charge_attempts", aerr)
+	} else {
+		events = applyChargeAttemptPrecedence(events, attempts, inv, isSimulated)
+	}
 
 	// Full-precision ascending with CAUSAL tie ranks — see
 	// sortInvoiceTimeline. The prior string sort compared second-

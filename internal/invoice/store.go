@@ -233,6 +233,14 @@ type Store interface {
 	// reset_billing_cycle=false threshold fire doesn't get re-billed at
 	// period end. errs.ErrNotFound when no threshold invoice exists.
 	LatestThresholdPeriodEnd(ctx context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (time.Time, error)
+
+	// RecordChargeAttempt / ListChargeAttemptsByInvoice are the ADR-102
+	// charge-attempt facts: one row per attempt, upserted by
+	// PaymentIntent id as settle paths resolve the outcome. The
+	// timeline renders each attempt exactly once via the precedence
+	// chain dunning row → attempt row → stripe webhook row.
+	RecordChargeAttempt(ctx context.Context, tenantID string, a domain.InvoiceChargeAttempt) error
+	ListChargeAttemptsByInvoice(ctx context.Context, tenantID, invoiceID string) ([]domain.InvoiceChargeAttempt, error)
 }
 
 // OutstandingBalance is the customer-AR snapshot — total cents owed
