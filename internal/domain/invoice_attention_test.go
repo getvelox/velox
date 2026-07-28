@@ -757,3 +757,46 @@ func TestClassifyInvoiceAttention_SinceIsSimDomainOnSimulatedInvoices(t *testing
 		t.Errorf("wall-clock invoice Since = %v, want UpdatedAt %v", att.Since, wallUpdated)
 	}
 }
+
+// TestClassify_CollectionPaused_BeatsPaymentScheduled pins that a queued
+// invoice on a paused subscription does not claim a charge is coming.
+//
+// Both auto-charge sweeps skip paused subscriptions, so the queue flag alone
+// no longer means "the engine will charge this". The state is reachable
+// whenever a subscription is paused AFTER its invoice was queued — which is
+// exactly what dunning's `pause` final action does to every in-flight invoice.
+func TestClassify_CollectionPaused_BeatsPaymentScheduled(t *testing.T) {
+	inv := Invoice{
+		Status:            InvoiceFinalized,
+		PaymentStatus:     PaymentPending,
+		AutoChargePending: true,
+		TaxFacts:          TaxFacts{TaxStatus: InvoiceTaxOK},
+	}
+
+	scheduled := ClassifyInvoiceAttention(inv, AttentionContext{HasPaymentMethod: true})
+	if scheduled == nil || scheduled.Reason != AttentionReasonPaymentScheduled {
+		t.Fatalf("unpaused: reason = %v, want payment_scheduled", scheduled)
+	}
+
+	paused := ClassifyInvoiceAttention(inv, AttentionContext{HasPaymentMethod: true, CollectionPaused: true})
+	if paused == nil {
+		t.Fatal("paused: got no attention, want collection_paused")
+	}
+	if paused.Reason != AttentionReasonCollectionPaused {
+		t.Errorf("paused: reason = %s, want collection_paused", paused.Reason)
+	}
+	if strings.Contains(paused.Message, "next tick") || strings.Contains(paused.Message, "next test-clock advance") {
+		t.Errorf("paused copy must not promise an automatic charge, got %q", paused.Message)
+	}
+	// Charge now survives: a manual collect is an explicit operator override
+	// and has no pause filter.
+	var hasChargeNow bool
+	for _, a := range paused.Actions {
+		if a.Code == AttentionActionChargeNow {
+			hasChargeNow = true
+		}
+	}
+	if !hasChargeNow {
+		t.Error("paused banner must still offer Charge now — the pause governs automation, not the operator")
+	}
+}

@@ -735,6 +735,13 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 			atc.DunningEscalated = run.State == domain.DunningEscalated
 		}
 	}
+	// Pause state for the queued-but-not-scheduled banner. Lazy under the
+	// exact precondition of the branch that reads it (queued + finalized +
+	// pending), so list reads don't pay a subscription lookup per row.
+	if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized &&
+		inv.PaymentStatus == domain.PaymentPending {
+		atc.CollectionPaused = s.collectionPaused(ctx, inv.TenantID, inv.SubscriptionID)
+	}
 	if s.stripeChecker != nil && inv.TenantID != "" {
 		// Livemode comes off ctx (auth middleware set it) — invoice
 		// rows don't carry the column on the domain struct since the

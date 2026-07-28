@@ -101,10 +101,18 @@ const (
 	// scheduled state.
 	AttentionReasonPaymentScheduled AttentionReason = "payment_scheduled"
 
+	// AttentionReasonCollectionPaused: the invoice is queued for
+	// auto-charge but its subscription has pause_collection set, so the
+	// sweeps deliberately skip it. Distinct from payment_scheduled
+	// because nothing is scheduled — saying otherwise promises a charge
+	// that will never fire. Reached when a subscription is paused AFTER
+	// its invoice was queued, which is what dunning's `pause` final
+	// action does to every invoice already in flight.
+	AttentionReasonCollectionPaused AttentionReason = "collection_paused"
+
 	// AttentionReasonAwaitingPayment: invoice is finalized and unpaid,
 	// no charge attempt has fired yet (no PaymentIntent or
-	// auto_charge_pending=false). Customer-pay collection mode, or a
-	// pre-first-charge window. Operator can trigger a charge or send a
+	// auto_charge_pending=false). Operator can trigger a charge or send a
 	// reminder. Stripe parity: `open` invoice with no payment activity.
 	AttentionReasonAwaitingPayment AttentionReason = "awaiting_payment"
 
@@ -334,6 +342,17 @@ type AttentionContext struct {
 	// the pre-escalation banner — safe for callers without the signal.
 	DunningEscalated bool
 
+	// CollectionPaused is true when the invoice's subscription has
+	// pause_collection set. Both auto-charge sweeps skip paused
+	// subscriptions, so a queued invoice on one is NOT scheduled — the
+	// payment_scheduled copy would promise a charge that never fires.
+	// Reached whenever a subscription is paused after its invoice was
+	// already queued (dunning's `pause` final action does exactly that).
+	// Zero-value (false) keeps the scheduled copy — safe for callers
+	// without the signal, and the honest default for the common case
+	// where nothing is paused.
+	CollectionPaused bool
+
 	// Now is wall-clock now, used only to age the in-flight payment banner
 	// (processing → Info under the expected-settle window, Warning past it).
 	// Staleness is a REAL-WORLD duration (the provider settles in wall-clock),
@@ -421,6 +440,13 @@ func ClassifyInvoiceAttention(inv Invoice, atc AttentionContext) *Attention {
 	// retry will skip again until a PM is attached.
 	case inv.Status == InvoiceFinalized && inv.PaymentStatus == PaymentPending && !atc.HasPaymentMethod:
 		return classifyNoPaymentMethod(inv, atc)
+	// collection_paused beats payment_scheduled for the same reason
+	// no_payment_method does: the flag says the invoice is queued, but the
+	// sweeps skip paused subscriptions, so "the engine will charge this"
+	// would be a promise nothing keeps.
+	case inv.Status == InvoiceFinalized && inv.PaymentStatus == PaymentPending &&
+		inv.AutoChargePending && atc.CollectionPaused:
+		return classifyCollectionPaused(inv)
 	case inv.Status == InvoiceFinalized && inv.PaymentStatus == PaymentPending && inv.AutoChargePending:
 		return classifyPaymentScheduled(inv)
 	case inv.Status == InvoiceFinalized && inv.PaymentStatus == PaymentPending:
@@ -744,6 +770,31 @@ func classifyPaymentScheduled(inv Invoice) *Attention {
 		Code:     "payment.scheduled",
 		Message:  message,
 		DocURL:   docBaseURL + "payment-scheduled",
+		Actions: []AttentionActionItem{
+			{Code: AttentionActionChargeNow, Label: "Charge now"},
+		},
+		Since: &since,
+		DueBy: inv.DueAt,
+	}
+}
+
+// classifyCollectionPaused surfaces a queued invoice whose subscription is
+// paused for collection. The queue flag is still set — it is what will make
+// the sweep pick the invoice up the moment collection resumes — but nothing
+// charges it in the meantime, so this must not borrow payment_scheduled's
+// "the engine will charge this" copy.
+//
+// Severity info, not warning: the operator asked for this. Charge now stays
+// offered because a manual collect is an explicit override and has no pause
+// filter — the pause governs automation, not the operator.
+func classifyCollectionPaused(inv Invoice) *Attention {
+	since := attentionSince(inv)
+	return &Attention{
+		Severity: AttentionSeverityInfo,
+		Reason:   AttentionReasonCollectionPaused,
+		Code:     "payment.collection_paused",
+		Message:  "Collection is paused on this subscription, so this invoice will not be charged automatically. Resume collection on the subscription, or use Charge now to collect this one invoice.",
+		DocURL:   docBaseURL + "collection-paused",
 		Actions: []AttentionActionItem{
 			{Code: AttentionActionChargeNow, Label: "Charge now"},
 		},
