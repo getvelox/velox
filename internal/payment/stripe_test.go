@@ -62,9 +62,12 @@ type mockInvoiceUpdater struct {
 	// chargeAttempts records every ADR-102 attempt-fact write (chokepoint
 	// insert + settle-path upserts), in call order.
 	chargeAttempts []domain.InvoiceChargeAttempt
-	invoices       map[string]domain.Invoice
-	byPI           map[string]string // PI ID -> invoice ID
-	failNotedPI    map[string]string // invoice ID -> PI whose failure notifications fired
+	// leaseReleases records ReleaseAutoChargeClaim calls — the
+	// definitive-outcome lease release (declines + inline settles).
+	leaseReleases []string
+	invoices      map[string]domain.Invoice
+	byPI          map[string]string // PI ID -> invoice ID
+	failNotedPI   map[string]string // invoice ID -> PI whose failure notifications fired
 	// cardEventEnqueues counts payment.succeeded enqueues — mirrors the real
 	// store enqueuing payment.succeeded IN-TX, gated on the transition (so a
 	// concurrent redelivery increments it once, not twice).
@@ -119,6 +122,11 @@ func (m *mockInvoiceUpdater) GetByStripePaymentIntentID(_ context.Context, _, pi
 
 func (m *mockInvoiceUpdater) RecordChargeAttempt(_ context.Context, _ string, a domain.InvoiceChargeAttempt) error {
 	m.chargeAttempts = append(m.chargeAttempts, a)
+	return nil
+}
+
+func (m *mockInvoiceUpdater) ReleaseAutoChargeClaim(_ context.Context, _, id string) error {
+	m.leaseReleases = append(m.leaseReleases, id)
 	return nil
 }
 
