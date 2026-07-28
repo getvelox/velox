@@ -1303,11 +1303,19 @@ export default function InvoiceDetailPage() {
         <Card className={cn('mt-6', invoice.status === 'voided' && 'opacity-60')}>
           <CardHeader>
             <CardTitle className="text-sm">{externalLaneTitle}</CardTitle>
+            {/* One scannable line for WHY this lane is separate, then an
+                actionable pointer instead of a sentence about one. */}
             <p className="text-xs text-muted-foreground mt-0.5">
-              Emails and payment-processor events for this invoice. These happen
-              in real time, not on the test clock — which is why they are listed
-              separately. Payment reminders are on the customer's page.
+              Real times — not the test clock's dates.
             </p>
+            {invoice.customer_id && (
+              <Link
+                to={`/customers/${invoice.customer_id}`}
+                className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground mt-0.5 inline-block"
+              >
+                Payment reminders on the customer page →
+              </Link>
+            )}
           </CardHeader>
           <CardContent>
             <div className="relative">
