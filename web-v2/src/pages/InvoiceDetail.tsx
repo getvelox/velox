@@ -283,11 +283,21 @@ export default function InvoiceDetailPage() {
   //     sim-stamped attempt is a billing fact and belongs in Activity;
   //     a wall-stamped attempt on a simulated invoice (interactive
   //     checkout, webhook-resolved) joins the wall-clock lane.
+  //
+  // The second lane exists for ONE reason: to stop two time domains from
+  // interleaving. A wall-clock invoice has exactly one clock, so there is
+  // nothing to separate — emails sort into Activity with everything else
+  // and the operator reads one chronological story instead of checking two
+  // cards. Splitting there would separate CONTENT TYPES, a distinction the
+  // page never claimed to make, and it made the lane caption promise
+  // payment events that structurally never appear on a live invoice
+  // (2026-07-28 review). So: the whole external lane is gated on
+  // is_simulated.
   const isExternalRow = (e: typeof timeline[number]) =>
-    e.source === 'email' ||
-    (!!invoice?.is_simulated &&
-      (e.source === 'stripe' ||
-        ((e.source === 'credit_note' || e.source === 'payment') && !e.is_simulated)))
+    !!invoice?.is_simulated &&
+    (e.source === 'email' ||
+      e.source === 'stripe' ||
+      ((e.source === 'credit_note' || e.source === 'payment') && !e.is_simulated))
   const billingTimeline = timeline.filter(e => !isExternalRow(e))
   const externalTimeline = timeline.filter(isExternalRow)
   // Constant identity (2026-07-28 design review): the card previously
@@ -1294,8 +1304,9 @@ export default function InvoiceDetailPage() {
           <CardHeader>
             <CardTitle className="text-sm">{externalLaneTitle}</CardTitle>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Emails and payment events for this invoice, shown in real time.
-              Payment reminders are listed on the customer's page.
+              Emails and payment-processor events for this invoice. These happen
+              in real time, not on the test clock — which is why they are listed
+              separately. Payment reminders are on the customer's page.
             </p>
           </CardHeader>
           <CardContent>
