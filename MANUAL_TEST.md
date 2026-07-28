@@ -1077,7 +1077,7 @@ Server-derived from invoice fields. Suppressed for healthy / paid / voided / dra
 - [ ] Severity styling: critical=red+AlertCircle, warning=amber+AlertTriangle, info=muted+Info.
 - [x] Reason badge + dotted code in mono. `since` = relative time. `doc_url` → "Learn more ↗". *(walked 2026-07-28 on VLX-000024: badge "Customer address required", `tax.customer_data_invalid` in mono under the actions, "· since 19d ago" beside the badge, "Learn more ↗" opening the doc anchor.)*
 - [x] `provider_response` (raw upstream payload) → `<details>` "Provider response" disclosure. *(walked 2026-07-28 on VLX-000024: collapsed "▸ Provider response" disclosure below the code. The `detail` half is unverified here — this deferral produced no Velox-framed detail string.)*
-- [ ] Healthy/paid/voided/draft → no banner.
+- [x] Healthy/paid/voided/draft → no banner. *(walked 2026-07-28 across three terminal/pre-issue states in Walkthrough Co: VLX-000012 (Paid), VLX-000018 (Voided) and VLX-000007 (Draft) each render zero attention codes and no "Learn more" — the draft showing its muted "Draft invoice — finalize to issue and begin collection." hint instead.)*
 
 ### Retry tax
 - [x] **A healthy one-off invoice shows no "Tax retries" diagnostic (fixed 2026-07-26):** finalize a manual invoice with manual-provider tax → `tax_retry_count` stays **0** (the finalize-time first computation is not a retry) and the invoice page renders **no** "Diagnostic detail · Tax retries" card. Retries still count uniformly: the Retry-tax button, the background worker, and a re-finalize of a STUCK draft each bump the counter — for cycle and manual invoices alike. *(operator-reported on NIM-000258; automated + mutation-verified: `TestUpdateTaxAtomic_InitialAttemptDoesNotCountAsRetry`.)*
