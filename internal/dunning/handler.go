@@ -18,9 +18,11 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 )
 
-// PaymentCanceler cancels Stripe PaymentIntent when invoice is voided via dunning.
+// PaymentCanceler stops an invoice from being payable at Stripe when a
+// dunning resolution voids it (expire live Checkout sessions, then cancel the
+// PI where Stripe allows). Satisfied by *payment.Stripe.
 type PaymentCanceler interface {
-	CancelPaymentIntent(ctx context.Context, paymentIntentID string) error
+	StopCollection(ctx context.Context, tenantID string, inv domain.Invoice)
 }
 
 // InvoiceVoider routes dunning resolution outcomes through the invoice
@@ -76,6 +78,10 @@ func (h *Handler) SetResolver(r clock.Resolver) { h.resolver = r }
 // store's UpdateStatus. Wired post-construction (the invoice service is built
 // after the dunning handler), mirroring SetInvoiceUncollectibleMarker.
 func (h *Handler) SetInvoiceVoider(v InvoiceVoider) { h.invoiceVoider = v }
+
+// SetPaymentCanceler wires the collection-stop seam (lazy: the payment
+// service is built after this handler).
+func (h *Handler) SetPaymentCanceler(p PaymentCanceler) { h.paymentCancel = p }
 
 type HandlerDeps struct {
 	PaymentCancel PaymentCanceler
@@ -396,12 +402,11 @@ func (h *Handler) resolveRun(w http.ResponseWriter, r *http.Request) {
 				slog.WarnContext(r.Context(), "failed to void invoice after dunning resolution; skipping PI cancel", "invoice_id", run.InvoiceID, "error", err)
 				break
 			}
-			// Cancel Stripe PI (only after a confirmed void). Credit reversal
-			// already happened atomically inside Void.
-			if h.paymentCancel != nil && voided.StripePaymentIntentID != "" {
-				if err := h.paymentCancel.CancelPaymentIntent(r.Context(), voided.StripePaymentIntentID); err != nil {
-					slog.WarnContext(r.Context(), "failed to cancel PI on dunning void", "invoice_id", run.InvoiceID, "error", err)
-				}
+			// Stop collection at Stripe (only after a confirmed void):
+			// expire live Checkout sessions, then cancel the PI where
+			// cancelable. Credit reversal already happened inside Void.
+			if h.paymentCancel != nil {
+				h.paymentCancel.StopCollection(r.Context(), tenantID, voided)
 			}
 		}
 	}

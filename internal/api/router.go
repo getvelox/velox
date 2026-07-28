@@ -334,9 +334,10 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	stripeClient := payment.NewLiveStripeClient(stripeClients)
 	dunningStore := dunning.NewPostgresStore(db)
 	dunningSvc := dunning.NewService(dunningStore, nil, clk) // retrier set below after stripeAdapter created
-	dunningH := dunning.NewHandler(dunningSvc, dunning.HandlerDeps{
-		PaymentCancel: payment.NewLiveStripeClient(stripeClients),
-	})
+	// PaymentCancel is wired lazily below (SetPaymentCanceler) — stopping
+	// collection needs the payment SERVICE (session expiry + PI cancel),
+	// which is constructed after this handler.
+	dunningH := dunning.NewHandler(dunningSvc)
 
 	// Recipe registry — built-in pricing recipes loaded once at boot from
 	// the embedded YAML. Failure here is fatal: a malformed recipe would
@@ -417,6 +418,9 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// void writer: guards + in-flight block + tax reversal + invoice.voided
 	// event) instead of the raw store. Same lazy wire as the marker above.
 	dunningH.SetInvoiceVoider(invoiceSvc)
+	// Void-resolve must stop collection at Stripe the same way the operator
+	// void does — one seam, both callers.
+	dunningH.SetPaymentCanceler(stripeAdapter)
 	// Wire the post-connect tax-retry hook (ADR-019). When an
 	// operator (re)connects Stripe in Settings → Payments, the
 	// tenantstripe service fans out a goroutine that flushes any
@@ -426,7 +430,7 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 		CreditNotes:     &creditNoteListerAdapter{svc: creditNoteSvc},
 		Charger:         stripeAdapter,
 		PaymentSetups:   paymentSetupStore,
-		PaymentCancel:   stripeClient,
+		PaymentCancel:   stripeAdapter,
 		Dunning:         dunningSvc,
 		WebhookEvents:   webhookStore,
 		DunningTimeline: &dunningTimelineAdapter{store: dunningStore},

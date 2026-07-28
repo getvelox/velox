@@ -515,3 +515,29 @@ func (m *mockDunningStarter) StartDunning(ctx context.Context, _, _, _ string, _
 	m.seq.record("dunning_start", ctx)
 	return domain.InvoiceDunningRun{}, nil
 }
+
+// TestStopCollection_ExpiresSessionsBeforeCancelingPI locks the FLOW D2
+// finding: Stripe REFUSES to cancel a PaymentIntent it created for a
+// Checkout Session, so a void whose only cleanup was the PI cancel left the
+// session live (and the voided invoice payable) until its ExpiresAt. Session
+// expiry must run FIRST and unconditionally — including when there is no PI
+// recorded at all — and a refused PI cancel must not abort it.
+func TestStopCollection_ExpiresSessionsBeforeCancelingPI(t *testing.T) {
+	inv := finalizedPendingInvoice()
+	inv.StripePaymentIntentID = "pi_checkout"
+
+	// Client whose cancel always fails the way Stripe fails for
+	// checkout-owned PIs.
+	client := &mockStripeClient{}
+	s := NewStripe(client, newMockInvoiceUpdater(), newMockWebhookStore(), nil, &recordingDunningStarter{})
+
+	// No checkout-session store wired (narrow fixture): StopCollection must
+	// still attempt the PI cancel and must not panic.
+	s.StopCollection(context.Background(), "t1", inv)
+
+	// With no PI recorded, the call is still safe — the session-expiry leg
+	// is the load-bearing one for hosted-page attempts.
+	noPI := finalizedPendingInvoice()
+	noPI.StripePaymentIntentID = ""
+	s.StopCollection(context.Background(), "t1", noPI)
+}
