@@ -1257,12 +1257,12 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ## FLOW D1: Retry cycle + escalation
 
-- [ ] Decline card → run billing → dunning run created. Page shows stat cards (Active, Escalated, Recovered, At Risk $) + tab filters with counts.
+- [x] Decline card → run billing → dunning run created. Page shows stat cards (Active, Escalated, Recovered, At Risk $) + tab filters with counts. *(walked 2026-07-28 on the fresh Walkthrough Co tenant: 0341 card, cycle close declined VLX-000001 → run created with write-time cause payment_failed; page read Active 1 / Escalated 0 / Recovered 0 / At risk $4.00 — every number explainable — and later Escalated 2 / Recovered 1 after the escalation + card-less recovery legs. Tabs All/Active/Escalated/Recovered present.)*
 - [ ] Sidebar Dunning badge shows count.
-- [ ] Run state Active, "No retries yet", `next_action_at` scheduled.
-- [ ] Backdate `next_action_at` → next tick increments attempt count.
-- [ ] After max retries → state Escalated.
-- [ ] **Card-less invoice enters dunning and reaches a terminal (ADR-060)**: a finalized `auto_charge_pending` invoice for a customer with **no saved card** gets a dunning run created on the next scheduler tick (no charge attempted) and escalates through grace + retries to the policy `final_action` (e.g. `pause`) — instead of being retried forever with no terminal. Adding a card mid-campaign → the auto-charge sweep collects it and the run resolves `payment_recovered`. With dunning disabled for the tenant, the invoice stays un-dunned (deliberate — same as the declined-card path).
+- [x] Run state Active, "No retries yet", `next_action_at` scheduled. *(walked 2026-07-28: VLX-000001's run row — active, "No retries yet", Next Retry "in 2d" (= failure + 3d grace, sim-relative), Started "12h ago" sim-relative.)*
+- [x] Backdate `next_action_at` → next tick increments attempt count. *(walked 2026-07-28 via clock advance past the due instant: attempt 0→1, later 1→2→3 in ONE advance. This walk found + fixed the charge-lease starvation: a definitive decline held the per-invoice lease its full 5-minute window, so back-to-back due retries in one catchup were skipped as transient and the loop exited "no progress" — the chokepoint now releases the lease on definitive outcomes; ambiguous outcomes still hold it.)*
+- [x] After max retries → state Escalated. *(walked 2026-07-28: after attempt 3 the run escalated `retries_exhausted` (final_action pause); dunning page shows the escalated pill + "3 retries".)*
+- [x] **Card-less invoice enters dunning and reaches a terminal (ADR-060)**: a finalized `auto_charge_pending` invoice for a customer with **no saved card** gets a dunning run created on the next scheduler tick (no charge attempted) and escalates through grace + retries to the policy `final_action` (e.g. `pause`) — instead of being retried forever with no terminal. Adding a card mid-campaign → the auto-charge sweep collects it and the run resolves `payment_recovered`. With dunning disabled for the tenant, the invoice stays un-dunned (deliberate — same as the declined-card path). *(walked 2026-07-28, two card-less customers on one clock: VLX-000002 enrolled `no_payment_method` at the close tick, rode 3 reminder ticks → escalated `retries_exhausted` (pause); VLX-000003 enrolled the same tick, 4242 attached mid-campaign → the sweep collected it on the next advance → payment succeeded, run resolved `payment_recovered` at attempt 0. Dunning-disabled clause walked earlier on Nimbus NIM-000269/270.)*
 
 ## FLOW D2: Resolution
 
