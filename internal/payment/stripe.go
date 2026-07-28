@@ -606,7 +606,7 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		if !pe.Unknown && s.dunning != nil {
 			failureAt := simulatedFailureAt(inv)
 			// A definitively-declined charge — the cause is a real payment failure.
-			if derr := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt, domain.DunningCausePaymentFailed); derr != nil {
+			if _, derr := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt, domain.DunningCausePaymentFailed); derr != nil {
 				slog.Error("inline StartDunning after known-failed charge failed — no action needed: the payment-failed webhook or the dunning backfill sweep will start the run automatically",
 					"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", derr)
 			}
@@ -712,7 +712,7 @@ const purposePaymentUpdateToken = "payment_update_token"
 //
 // 2026-05-30 design-debt audit (Tier 1 #5) replaced two log-and-swallow
 // sites here and at the inline charge-failure path with this retry.
-func startDunningWithRetry(ctx context.Context, dunning DunningStarter, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) error {
+func startDunningWithRetry(ctx context.Context, dunning DunningStarter, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) (started bool, err error) {
 	delays := []time.Duration{0, 100 * time.Millisecond, 500 * time.Millisecond}
 	var lastErr error
 	for i, d := range delays {
@@ -720,7 +720,7 @@ func startDunningWithRetry(ctx context.Context, dunning DunningStarter, tenantID
 			select {
 			case <-time.After(d):
 			case <-ctx.Done():
-				return fmt.Errorf("ctx canceled during StartDunning retry (attempt %d): %w", i+1, ctx.Err())
+				return false, fmt.Errorf("ctx canceled during StartDunning retry (attempt %d): %w", i+1, ctx.Err())
 			}
 		}
 		if _, err := dunning.StartDunning(ctx, tenantID, invoiceID, customerID, failureAt, cause); err != nil {
@@ -730,14 +730,17 @@ func startDunningWithRetry(ctx context.Context, dunning DunningStarter, tenantID
 				// than burning all 3 retries and emitting the misleading "operator
 				// must start manually" ERROR for a tenant that never wanted
 				// automated retries. A real transient error still retries below.
-				return nil
+				// started=false lets the caller log the truth — the I5
+				// dunning-disabled walk caught "dunning started" logged
+				// on this path.
+				return false, nil
 			}
 			lastErr = err
 			continue
 		}
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("StartDunning failed after %d attempts: %w", len(delays), lastErr)
+	return false, fmt.Errorf("StartDunning failed after %d attempts: %w", len(delays), lastErr)
 }
 
 // persistChargeOutcomeWithRetry records the post-charge payment state (the
