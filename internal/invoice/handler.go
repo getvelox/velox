@@ -1281,8 +1281,8 @@ func (h *Handler) retryTax(w http.ResponseWriter, r *http.Request) {
 // order so ties never render effect-before-cause). Gaps left for
 // future event kinds.
 const (
-	rankInvoiceCreated    = 10
-	rankInvoiceFinalized  = 20
+	rankInvoiceCreated   = 10
+	rankInvoiceFinalized = 20
 	// A charge attempt CAUSES the dunning campaign that follows it, so a
 	// same-instant decline must sort above "Payment recovery started"
 	// (ADR-103 — with one payment owner the two are separate rows, and
@@ -1360,144 +1360,6 @@ type timelineEvent struct {
 	// processed, not the simulated cycle they belong to.
 	// SPA reads this flag directly — no client-side heuristic.
 	IsSimulated bool `json:"is_simulated,omitempty"`
-}
-
-// withinWindow reports whether |a - b| <= window. Used by the
-// timeline dedup to detect "this Stripe webhook co-occurred with
-// the lifecycle column flip" without treating long-separated
-// independent events as the same fact. Symmetric — order of args
-// doesn't matter.
-func withinWindow(a, b time.Time, window time.Duration) bool {
-	d := a.Sub(b)
-	if d < 0 {
-		d = -d
-	}
-	return d <= window
-}
-
-// dropCanceledForVoid reports whether a payment_intent.canceled webhook row
-// should be suppressed from the timeline because it co-occurred with a void
-// (the void cancels the invoice's pending PI — one fact, two angles).
-//
-// A void with no PI cancel, or a PI cancel with no void (24h expiry), must NOT
-// suppress anything — hence the nil guard. For a wall-clock invoice we only
-// drop within a 5-minute window so an unrelated *earlier* PI expiry isn't
-// suppressed by a much-later void. For a clock-pinned (simulated) invoice the
-// window can't apply — voidedAt is test-clock time while occurredAt (Stripe)
-// is wall-clock, so they're years apart and withinWindow never matches; there
-// a void unconditionally implies the pending PI was canceled, so drop.
-func dropCanceledForVoid(voidedAt *time.Time, occurredAt time.Time, isSimulated bool) bool {
-	if voidedAt == nil {
-		return false
-	}
-	return isSimulated || withinWindow(*voidedAt, occurredAt, 5*time.Minute)
-}
-
-// foldEmailIntoStripeFailed collapses a successfully dispatched
-// "Payment-failed email sent to customer" row into its co-occurring
-// Stripe payment_intent.payment_failed row as a Detail sub-line.
-// Both rows are wall-clock-stamped (email dispatcher and Stripe
-// webhook both run in real time), so a tight window matches
-// reliably even for test-clock-pinned invoices. Only succeeded
-// sends fold — pending or failed deliveries stay as standalone
-// rows so operators see delivery problems. One-to-one matching;
-// excess rows in either direction survive.
-func foldEmailIntoStripeFailed(events []timelineEvent, window time.Duration) []timelineEvent {
-	type pair struct{ stripeIdx, emailIdx int }
-	var pairs []pair
-	claimedStripe := make(map[int]bool)
-	for j := range events {
-		e := events[j]
-		if e.Source != "email" || e.EventType != "email.payment_failed" {
-			continue
-		}
-		if e.Status != "succeeded" {
-			continue
-		}
-		eTS, err := time.Parse(time.RFC3339, e.Timestamp)
-		if err != nil {
-			continue
-		}
-		for i := range events {
-			if claimedStripe[i] {
-				continue
-			}
-			s := events[i]
-			if s.Source != "stripe" || s.EventType != "payment_intent.payment_failed" {
-				continue
-			}
-			sTS, err := time.Parse(time.RFC3339, s.Timestamp)
-			if err != nil {
-				continue
-			}
-			if !withinWindow(sTS, eTS, window) {
-				continue
-			}
-			pairs = append(pairs, pair{stripeIdx: i, emailIdx: j})
-			claimedStripe[i] = true
-			break
-		}
-	}
-	if len(pairs) == 0 {
-		return events
-	}
-	for _, p := range pairs {
-		s := &events[p.stripeIdx]
-		if s.Detail == "" {
-			s.Detail = "Customer notified by email"
-		}
-	}
-	dropIdx := make(map[int]bool, len(pairs))
-	for _, p := range pairs {
-		dropIdx[p.emailIdx] = true
-	}
-	out := make([]timelineEvent, 0, len(events)-len(pairs))
-	for i, evt := range events {
-		if dropIdx[i] {
-			continue
-		}
-		out = append(out, evt)
-	}
-	return out
-}
-
-// mergeFailedPaymentTwins folds Stripe payment_intent.payment_failed
-// rows into corresponding dunning [dunning_started, retry_attempted]
-// rows by chronological index — the k-th Stripe failure on an
-// invoice pairs with the k-th dunning attempt event. Pairing by
-// index (not time window) is required because test-clock-pinned
-// invoices emit dunning events in frozen time while Stripe webhooks
-// land in wall-clock time; the two timestamps can differ by months,
-// far outside any reasonable window. Within an invoice the
-// dunning state machine produces attempt events in strict order
-// (started → retry #1 → retry #2 → …) and each corresponds to
-// exactly one Stripe charge attempt, so index pairing is canonical.
-//
-// The Stripe row's PaymentIntent id + amount + currency + error +
-// Detail lift onto the dunning row (which carries operator-meaningful
-// attempt # + scheduled-next context), then the Stripe row drops.
-// One-to-one pairing; excess Stripe rows survive (rare — dunning
-// disabled or lagging), excess dunning rows survive (rare — Stripe
-// webhook hasn't arrived yet).
-// liftStripeOntoDunning moves the Stripe failure row's payment facts onto
-// its dunning twin (which carries the operator-meaningful attempt context);
-// the Stripe row is then dropped by the caller.
-func liftStripeOntoDunning(d *timelineEvent, s timelineEvent) {
-	if d.PaymentIntentID == "" {
-		d.PaymentIntentID = s.PaymentIntentID
-	}
-	if d.AmountCents == nil {
-		d.AmountCents = s.AmountCents
-	}
-	if d.Currency == "" {
-		d.Currency = s.Currency
-	}
-	if d.Error == "" {
-		d.Error = s.Error
-	}
-	if d.Detail == "" {
-		d.Detail = s.Detail
-	}
 }
 
 func piFromEventMetadata(meta map[string]any) string {
@@ -1615,7 +1477,6 @@ func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelin
 	}
 }
 
-
 // formatPaymentCardDetail produces the sub-line shown under the
 // "Invoice paid" row, e.g. "via Visa •••• 4242". Returns empty
 // when card details aren't on the invoice — graceful: no
@@ -1693,26 +1554,6 @@ func titleCaseSnake(s string) string {
 		parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
 	}
 	return strings.Join(parts, " ")
-}
-
-// relevantStripeEvents filters to only operator-meaningful events.
-var relevantStripeEvents = map[string]bool{
-	"payment_intent.succeeded":      true,
-	"payment_intent.payment_failed": true,
-	"payment_intent.canceled":       true,
-}
-
-func describeStripeEvent(eventType, failureMessage string) (string, string) {
-	switch eventType {
-	case "payment_intent.succeeded":
-		return "Payment succeeded", "succeeded"
-	case "payment_intent.payment_failed":
-		return "Payment failed", "failed"
-	case "payment_intent.canceled":
-		return "Payment canceled", "canceled"
-	default:
-		return eventType, "info"
-	}
 }
 
 // relevantDunningEvents filters to only operator-meaningful events.
@@ -2106,11 +1947,12 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				// "May 16, 2026" send times next to dunning state rows
 				// at simulated cycle dates like "Mar 4, 2025."
 				//
-				// payment_failed (initial charge) still flows through:
-				// foldEmailIntoStripeFailed → mergeFailedPaymentTwins
-				// merges it as a "Customer notified by email" sub-line
-				// on the dunning_started row (same time domain = both
-				// wall-clock from the Stripe webhook side).
+				// payment_failed (initial charge) still flows through as
+				// its own row. It used to be folded onto the charge
+				// failure as a "Customer notified by email" sub-line;
+				// ADR-103 dropped that fold because pairing the two
+				// needed a time window, and telling the customer is a
+				// distinct fact with its own timestamp.
 				if evt.EmailType == "dunning_warning" || evt.EmailType == "dunning_escalation" {
 					if evt.EmailType == "dunning_warning" && evt.AttemptNumber > 0 {
 						reminderByAttempt[evt.AttemptNumber] = evt
