@@ -1186,7 +1186,7 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 - [ ] **Duplicate charge is loud:** simulate a second different-PI success on a paid invoice (Stripe CLI resend with a new PI) → invoice shows the Critical "second payment succeeded" banner naming both PIs; `payment.duplicate_charge` fires; same-PI redeliveries stay silent.
 - [x] **Post-payment settle poll (ADR-067 companion):** pay via the hosted page → on the `?paid=1` redirect the page shows "Processing your payment…" with NO Pay button, then flips to Paid within a few seconds without a manual refresh. Simulate a failed charge → red "Payment didn't complete — your card was not charged" banner and Pay returns. Stall the webhook >3 min → amber "taking longer than usual — you will not be charged twice" copy, Pay still hidden. *(walked 2026-07-28 by killing `stripe listen` before paying: NIM-000265 showed the green Processing interim with no Pay button, then the amber "Confirmation is taking longer than usual — you will not be charged twice" copy after the 3-min poll cap; restarting the forwarder + `stripe events resend` settled it to paid. Failed-charge leg on NIM-000266: red banner + Pay returned.)*
 
-- [ ] Draft invoice has no `public_token`. Finalize → token minted (`vlx_pinv_` + 64 hex).
+- [x] Draft invoice has no `public_token`. Finalize → token minted (`vlx_pinv_` + 64 hex). *(walked 2026-07-28 on VLX-000018: the draft's create response carries public_token=null; finalize mints `vlx_pinv_` + exactly 64 lowercase hex.)*
 - [ ] Detail page: **Copy Link** button. **Rotate** typed-confirm dialog (type `ROTATE`). Buttons hidden on draft.
 
 ### Public render (open in incognito)
@@ -1208,13 +1208,13 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ### Variants
 - [ ] Voided invoice → "Voided on {date}" banner, no Pay, PDF works.
-- [ ] Draft invoice URL → 404.
+- [x] Draft invoice URL → 404. *(walked 2026-07-28: a well-formed but unminted token on the public route returns HTTP 404 — no distinction leaked between "draft" and "never existed".)*
 - [x] Rotated → old URL 404, new works. *(walked 2026-07-26 via rotate-public-token: old 404, new 200.)*
 
 ### Security
 - [x] Public JSON has no `tenant_id, subscription_id, tax_id, stripe_*_id`. *(walked 2026-07-26 — clean at both envelope and invoice levels; payload carries livemode:false for the test-mode banner.)*
 - [x] 61+ req/min same IP → 429 with `Retry-After`. *(walked 2026-07-26 with Redis up: 60 pass, then 429 + `Retry-After: 60`. The earlier "fails open, no warning" note was wrong on both counts: with Redis down the boot WARN "redis not reachable — general/hosted rate limiters FAIL CLOSED in production…" fires, dev fail-open is the deliberate OWASP-anchored split, and production fails CLOSED — router.go documents the design.)*
-- [ ] Operator `POST /v1/invoices/{id}/rotate-public-token` requires `PermInvoiceWrite`.
+- [x] Operator `POST /v1/invoices/{id}/rotate-public-token` requires `PermInvoiceWrite`. *(walked 2026-07-28 on VLX-000018: a **publishable** key (the type that holds no tenant-wide scopes) gets 403 `forbidden` — "insufficient permissions: this key type does not have invoice:write access" — while the operator session rotates the token to a fresh vlx_pinv_. NOTE for future walks: Velox permissions are TYPE-derived, not per-key — an `api-keys` create body carrying a `permissions` array is silently ignored, and the type field is `key_type` (a `type` key silently yields a full secret key). Testing an authorization gate therefore requires choosing the right key TYPE.)*
 
 ## FLOW I11: `create_preview`
 
