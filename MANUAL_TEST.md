@@ -1228,6 +1228,8 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ## FLOW I12: One-off invoice composer
 
+> Walkthrough Co now carries **manual tax at 7.25% ("Sales Tax")** as its standing baseline, set during this walk. It was 0% before, which made every tax assertion in the tenant vacuous. Invoices stamp their own tax facts at finalize, so older fixtures are unaffected.
+
 - [x] Customer detail → "New invoice" → composer shows Currency + Payment terms (Net 30 default) + line editor. *(walked 2026-07-28 on I6 Chrome Co: dialog carries Currency ($ USD), Payment terms defaulting to **Net 30** with the "Due 30 days after the invoice is issued." hint, an Add-line editor (Description / Type / Qty / Unit ($)), optional service period + memo, and a running totals block.)*
 - [x] Enter three lines at `3333` / `3333` / `3334` cents → Subtotal ticks to $100.00; Tax row reads "Calculated at finalize". *(walked 2026-07-28: per-line echoes read "= $33.33 / $33.33 / $33.34", Subtotal **$100.00**, Tax row verbatim **"Calculated at finalize"**, Total (before tax) $100.00.)*
 - [x] Save draft → exactly ONE `POST /v1/invoices` (no follow-up `add-line-item` calls); row appears with `status=draft`, `subscription_id=null`, `billing_reason=manual`, `tax_amount_cents=0`. *(walked 2026-07-28 → VLX-000025: the network panel shows a single `POST /v1/invoices` → **201** with no `add-line-item` request after it, and the row is exactly draft / subscription_id NULL / billing_reason `manual` / tax 0 / subtotal 10000 / net terms 30.)*
