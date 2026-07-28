@@ -1070,8 +1070,8 @@ Server-derived from invoice fields. Suppressed for healthy / paid / voided / dra
 ### Info
 - [x] **payment_processing (fresh)**: muted banner, **no actions**, copy says Velox confirms it automatically (true via the synchronous inline settle / reconciler backstop — ADR-049 Phases 2–3). *(walked 2026-07-28 on VLX-000009: muted banner "Payment processing / Payment is in flight at the provider — Velox confirms it automatically when the provider responds.", code `payment.processing`, and NO action buttons.)*
 - [x] **payment_unconfirmed**: muted banner, **no actions** — copy says Velox resolves it on the next reconcile. The previously-greyed-out "Check provider" button is gone (it had no endpoint; on-demand re-check deferred per ADR-049). *(walked 2026-07-28 on VLX-000010: muted banner, code `payment.unconfirmed`, NO actions — the previously-greyed "Check provider" button is gone; copy says Velox re-checks automatically and names the 3-D Secure possibility with the Stripe next step.)*
-- [ ] **payment_scheduled**: `auto_charge_pending=true` → muted banner, action **Charge now**.
-- [ ] **awaiting_payment**: muted banner, actions **Charge now** + **Email payment link**.
+- [x] **payment_scheduled**: `auto_charge_pending=true` → muted banner, action **Charge now**. *(walked 2026-07-28 on VLX-000015, Walkthrough Co: muted banner, code `payment.scheduled`, single action **Charge now**. Fixture is CLEAN — a card-bearing customer's invoice finalized without a collect attempt, so no payment history contradicts the "not charged yet" claim; an earlier attempt reused a paid invoice and the page showed "Payment attempts: 1" beside it, which is why the rule is now: poke the state you are NOT asserting, never a state the page reports elsewhere.)*
+- [x] **awaiting_payment**: muted banner, actions **Charge now** + **Email payment link**. *(walked 2026-07-28 on the same clean VLX-000015 with auto_charge_pending=false: muted banner, code `payment.awaiting`, actions **Charge now** + **Email payment link**, and no Diagnostic/attempts card.)*
 
 ### Banner shape
 - [ ] Severity styling: critical=red+AlertCircle, warning=amber+AlertTriangle, info=muted+Info.
