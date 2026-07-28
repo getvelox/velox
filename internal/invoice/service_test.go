@@ -193,6 +193,14 @@ func (m *memStore) FindBaseInvoiceForPeriod(_ context.Context, tenantID, subscri
 	return best, nil
 }
 
+func (m *memStore) RecordChargeAttempt(_ context.Context, _ string, _ domain.InvoiceChargeAttempt) error {
+	return nil
+}
+
+func (m *memStore) ListChargeAttemptsByInvoice(_ context.Context, _, _ string) ([]domain.InvoiceChargeAttempt, error) {
+	return nil, nil
+}
+
 func (m *memStore) LatestThresholdPeriodEnd(_ context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (time.Time, error) {
 	var latest time.Time
 	found := false

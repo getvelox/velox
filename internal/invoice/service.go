@@ -1313,6 +1313,12 @@ func (s *Service) RecordPaymentFailure(ctx context.Context, tenantID, id, stripe
 	return s.store.UpdatePayment(ctx, tenantID, id, domain.PaymentFailed, stripePaymentIntentID, errorMessage, nil)
 }
 
+// ListChargeAttempts returns the invoice's ADR-102 charge-attempt
+// facts, oldest first — the timeline's billing-axis payment rows.
+func (s *Service) ListChargeAttempts(ctx context.Context, tenantID, invoiceID string) ([]domain.InvoiceChargeAttempt, error) {
+	return s.store.ListChargeAttemptsByInvoice(ctx, tenantID, invoiceID)
+}
+
 func (s *Service) GetWithLineItems(ctx context.Context, tenantID, id string) (domain.Invoice, []domain.InvoiceLineItem, error) {
 	inv, err := s.store.Get(ctx, tenantID, id)
 	if err != nil {

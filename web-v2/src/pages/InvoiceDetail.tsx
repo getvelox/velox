@@ -279,18 +279,24 @@ export default function InvoiceDetailPage() {
   //     bound time → e.is_simulated → they belong in Activity, sorted with
   //     the other simulated rows. Routing them externally showed a
   //     simulated timestamp in the wall-clock lane (the bug this fixes).
+  //   - charge-attempt rows (ADR-102) → routed by their OWN axis: a
+  //     sim-stamped attempt is a billing fact and belongs in Activity;
+  //     a wall-stamped attempt on a simulated invoice (interactive
+  //     checkout, webhook-resolved) joins the wall-clock lane.
   const isExternalRow = (e: typeof timeline[number]) =>
     e.source === 'email' ||
     (!!invoice?.is_simulated &&
-      (e.source === 'stripe' || (e.source === 'credit_note' && !e.is_simulated)))
+      (e.source === 'stripe' ||
+        ((e.source === 'credit_note' || e.source === 'payment') && !e.is_simulated)))
   const billingTimeline = timeline.filter(e => !isExternalRow(e))
   const externalTimeline = timeline.filter(isExternalRow)
-  // Honest title: "Notifications" when it's only emails, "Real-time activity"
-  // when it also carries Stripe payment outcomes (a payment event isn't a
-  // "notification").
-  const externalLaneTitle = externalTimeline.some(e => e.source !== 'email')
-    ? 'Real-time activity'
-    : 'Notifications'
+  // Constant identity (2026-07-28 design review): the card previously
+  // renamed itself between "Notifications" (emails only) and "Real-time
+  // activity" (payment rows present) — same slot, two names, and one
+  // invoice could flip over its life as folds consumed rows. A card
+  // that renames itself reads as two features; one honest name covers
+  // both contents.
+  const externalLaneTitle = 'Real-time activity'
 
   // Payment-method snapshot serves two purposes on this page:
   //   1. The success-state card on paid invoices (brand •••• last4).
@@ -1288,9 +1294,8 @@ export default function InvoiceDetailPage() {
           <CardHeader>
             <CardTitle className="text-sm">{externalLaneTitle}</CardTitle>
             <p className="text-xs text-muted-foreground mt-0.5">
-              {externalLaneTitle === 'Notifications'
-                ? "Emails sent for this invoice, shown in real time. Payment reminders are listed on the customer's page."
-                : 'Emails and payment-processor outcomes, in real (wall-clock) time.'}
+              Emails and payment events for this invoice, shown in real time.
+              Payment reminders are listed on the customer's page.
             </p>
           </CardHeader>
           <CardContent>

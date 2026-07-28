@@ -223,6 +223,10 @@ func (a *invoiceWriterAdapter) ListAutoChargePendingForClock(ctx context.Context
 	return a.store.ListAutoChargePendingForClock(ctx, tenantID, clockID, limit)
 }
 
+func (a *invoiceWriterAdapter) RecordChargeAttempt(ctx context.Context, tenantID string, att domain.InvoiceChargeAttempt) error {
+	return a.store.RecordChargeAttempt(ctx, tenantID, att)
+}
+
 func (a *invoiceWriterAdapter) ListFailedWithoutDunningRun(ctx context.Context, olderThan time.Time, limit int) ([]domain.Invoice, error) {
 	return a.store.ListFailedWithoutDunningRun(ctx, olderThan, limit)
 }

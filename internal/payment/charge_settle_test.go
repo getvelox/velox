@@ -88,3 +88,68 @@ func TestChargeInvoice_ProcessingStaysProcessing(t *testing.T) {
 		t.Errorf("stripe_payment_intent_id: got %q, want pi_async", stored.StripePaymentIntentID)
 	}
 }
+
+// TestChargeAttemptFacts_RecordedAtChokepointAndSettle locks the ADR-102
+// writer set: a declined charge records a FAILED attempt fact (with the
+// decline reason) even when no dunning follows and no webhook has landed —
+// the row that closes the dunning-off timeline gap; a synchronous success
+// records the attempt at PI-create time (pending) and the inline settle
+// resolves the SAME PI to succeeded; SettleFailed resolves a failure the
+// same way for PIs it didn't mint (hosted checkout).
+func TestChargeAttemptFacts_RecordedAtChokepointAndSettle(t *testing.T) {
+	// Declined charge → one failed attempt fact with the provider reason.
+	client := &mockStripeClient{shouldFail: true, failErr: &PaymentError{
+		Message: "Your card was declined.", DeclineCode: "card_declined", PaymentIntentID: "pi_declined",
+	}}
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	s := NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err == nil {
+		t.Fatal("declined charge must return an error")
+	}
+	if len(invoices.chargeAttempts) != 1 {
+		t.Fatalf("declined charge: %d attempt facts, want 1", len(invoices.chargeAttempts))
+	}
+	a := invoices.chargeAttempts[0]
+	if a.Outcome != domain.ChargeAttemptFailed || a.Trigger != domain.ChargeTriggerAutoCharge ||
+		a.StripePaymentIntentID != "pi_declined" || a.ProviderReason != "Your card was declined." {
+		t.Fatalf("declined attempt fact wrong: %+v", a)
+	}
+
+	// Synchronous success → pending at PI create, succeeded at inline settle,
+	// both on the SAME PI (the store upserts them into one row).
+	client = &mockStripeClient{piID: "pi_ok", chargeStatus: "succeeded"}
+	invoices = newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	s = NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err != nil {
+		t.Fatalf("ChargeInvoice: %v", err)
+	}
+	if len(invoices.chargeAttempts) != 2 {
+		t.Fatalf("sync success: %d attempt writes, want 2 (pending insert + succeeded resolve)", len(invoices.chargeAttempts))
+	}
+	if invoices.chargeAttempts[0].Outcome != domain.ChargeAttemptPending ||
+		invoices.chargeAttempts[1].Outcome != domain.ChargeAttemptSucceeded ||
+		invoices.chargeAttempts[0].StripePaymentIntentID != "pi_ok" ||
+		invoices.chargeAttempts[1].StripePaymentIntentID != "pi_ok" {
+		t.Fatalf("sync success attempt writes wrong: %+v", invoices.chargeAttempts)
+	}
+
+	// SettleFailed on a PI the chokepoint didn't mint (hosted checkout) →
+	// the settle-path insert IS the record, trigger external.
+	invoices = newMockInvoiceUpdater()
+	inv := finalizedPendingInvoice()
+	invoices.invoices["inv_1"] = inv
+	s = NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	if err := s.SettleFailed(context.Background(), "t1", inv, "pi_checkout", "Your card was declined.", true, SourceWebhook); err != nil {
+		t.Fatalf("SettleFailed: %v", err)
+	}
+	if len(invoices.chargeAttempts) != 1 {
+		t.Fatalf("SettleFailed: %d attempt facts, want 1", len(invoices.chargeAttempts))
+	}
+	a = invoices.chargeAttempts[0]
+	if a.Outcome != domain.ChargeAttemptFailed || a.Trigger != domain.ChargeTriggerExternal ||
+		a.StripePaymentIntentID != "pi_checkout" || a.SimEffectiveAt != nil {
+		t.Fatalf("checkout attempt fact wrong: %+v", a)
+	}
+}

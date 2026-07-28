@@ -265,6 +265,26 @@ func (s *Stripe) SettleSucceeded(ctx context.Context, tenantID string, inv domai
 	// (above), so it commits atomically with the paid-flip. Do NOT also fire it
 	// here — that would double-fire it (one in-tx, one post-commit).
 
+	// ADR-102: resolve the attempt fact to its terminal outcome. Upsert
+	// by PI — the chokepoint's insert (trigger + sim anchor) is
+	// preserved; for a PI Velox didn't mint inline (hosted checkout)
+	// this insert IS the record, deliberately wall-clock (an interactive
+	// act is a wall fact). Loss degrades display only — the timeline's
+	// precedence chain falls back to the webhook row.
+	if paymentIntentID != "" {
+		if err := s.invoices.RecordChargeAttempt(ctx, tenantID, domain.InvoiceChargeAttempt{
+			InvoiceID:             inv.ID,
+			StripePaymentIntentID: paymentIntentID,
+			Trigger:               domain.ChargeTriggerExternal,
+			Outcome:               domain.ChargeAttemptSucceeded,
+			AmountCents:           capturedCents,
+			OccurredAt:            time.Now().UTC(),
+		}); err != nil {
+			slog.Warn("settle succeeded: record charge attempt failed",
+				"invoice_id", inv.ID, "payment_intent_id", paymentIntentID, "error", err)
+		}
+	}
+
 	return nil
 }
 
@@ -408,6 +428,26 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 			slog.Info("dunning started for failed payment", "invoice_id", inv.ID)
 		} else {
 			slog.Info("dunning skipped for failed payment — policy disabled or not configured", "invoice_id", inv.ID)
+		}
+	}
+
+	// ADR-102: resolve the attempt fact. Upsert by PI — a chokepoint
+	// insert (engine attempt: trigger + sim anchor) keeps its identity
+	// and only the outcome/reason advance; for a PI Velox didn't mint
+	// inline (hosted checkout) this insert IS the record, deliberately
+	// wall-clock. Loss degrades display only.
+	if paymentIntentID != "" {
+		if err := s.invoices.RecordChargeAttempt(ctx, tenantID, domain.InvoiceChargeAttempt{
+			InvoiceID:             inv.ID,
+			StripePaymentIntentID: paymentIntentID,
+			Trigger:               domain.ChargeTriggerExternal,
+			Outcome:               domain.ChargeAttemptFailed,
+			ProviderReason:        failureMsg,
+			AmountCents:           inv.AmountDueCents,
+			OccurredAt:            time.Now().UTC(),
+		}); err != nil {
+			slog.Warn("settle failed: record charge attempt failed",
+				"invoice_id", inv.ID, "payment_intent_id", paymentIntentID, "error", err)
 		}
 	}
 
