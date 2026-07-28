@@ -1691,3 +1691,57 @@ func TestRetryPendingTaxCommit(t *testing.T) {
 		t.Errorf("CommitTax calls = %v, want exactly [orphan]", committer.calls)
 	}
 }
+
+// TestRetryTax_AutoFinalize_QueuesForCollection pins the handoff between the
+// tax reconciler and the auto-charge sweep. RetryTax auto-finalizes an engine
+// invoice the moment tax resolves — but finalizing is not collecting: nothing
+// charges the card, starts dunning, or emails the customer. The ONLY thing
+// that re-drives collection afterwards is auto_charge_pending, which is what
+// both sweeps list on (ListAutoChargePending / ListAutoChargePendingForClock).
+//
+// Without the flag the invoice is invisible to every retry owner: the charge
+// sweeps skip it (flag false), the dunning backfill skips it (payment_status
+// is 'pending', not 'failed'), and dunning never started because nothing ever
+// failed. It sits finalized and owed until an operator notices the banner —
+// the same silent-overdue sink already fixed for the manual-finalize path.
+//
+// The catchup pipeline encodes the intended handoff in its phase ORDER: tax
+// retry (Phase 2) runs before auto-charge (Phase 3) specifically so an
+// unstuck invoice charges in the same Advance. That ordering only means
+// something if this flag is set.
+func TestRetryTax_AutoFinalize_QueuesForCollection(t *testing.T) {
+	store := newMemStore()
+	now := time.Now().UTC()
+
+	store.invoices["inv_stuck"] = domain.Invoice{
+		ID: "inv_stuck", TenantID: "t1", CustomerID: "cus_a",
+		Status: domain.InvoiceDraft,
+		TaxFacts: domain.TaxFacts{
+			TaxStatus: domain.InvoiceTaxPending, TaxErrorCode: "provider_outage",
+		},
+		BillingReason:    "subscription_cycle",
+		Currency:         "USD",
+		TotalAmountCents: 5000,
+		AmountDueCents:   5000,
+		CreatedAt:        now,
+	}
+
+	svc := NewService(store, nil, nil)
+	svc.SetTaxRetrier(&stubTaxRetrier{store: store})
+
+	out, err := svc.RetryTax(context.Background(), "t1", "inv_stuck")
+	if err != nil {
+		t.Fatalf("RetryTax: %v", err)
+	}
+	if out.Status != domain.InvoiceFinalized {
+		t.Fatalf("status = %s, want finalized (the auto-finalize precondition)", out.Status)
+	}
+	if out.AmountDueCents <= 0 {
+		t.Fatalf("amount_due = %d, want > 0 (the zero-due arm settles paid instead)", out.AmountDueCents)
+	}
+
+	stored := store.invoices["inv_stuck"]
+	if !stored.AutoChargePending {
+		t.Error("auto_charge_pending = false after auto-finalize: no sweep will ever collect this invoice")
+	}
+}

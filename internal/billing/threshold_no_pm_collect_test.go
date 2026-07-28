@@ -101,15 +101,20 @@ func TestThresholdScan_NoPM_QueuesAndNotifies(t *testing.T) {
 	}
 }
 
-// TestThresholdScan_NoPM_DraftInvoiceQueuesButStaysQuiet pins the draft arm:
-// a tax-pending threshold invoice is a DRAFT — never charged (the charger
-// refuses non-finalized invoices) and never emailed (totals aren't final),
-// but it MUST be queued (auto_charge_pending=true): the flag is inert while
-// draft (ListAutoChargePending filters status='finalized') and is what makes
-// the sweep collect the invoice the moment tax retry finalizes it — there is
-// no collect arm on the tax-retry path itself. Dropping the draft-queue arm
-// makes this fail.
-func TestThresholdScan_NoPM_DraftInvoiceQueuesButStaysQuiet(t *testing.T) {
+// TestThresholdScan_NoPM_DraftInvoiceStaysQuiet pins the draft arm: a
+// tax-pending threshold invoice is a DRAFT and this site does nothing with it
+// — not charged (the charger refuses non-finalized invoices), not emailed
+// (totals aren't final), and not queued.
+//
+// It used to be queued here. The flag was inert while draft
+// (ListAutoChargePending filters status='finalized') and existed only because
+// the tax-retry chain finalized the invoice without collecting it, so
+// pre-flagging was the one thing that made the sweep notice. That gap is
+// closed at its source — invoice.Service.RetryTax queues on auto-finalize,
+// covering cycle closes as well as threshold fires — and
+// TestRetryTax_AutoFinalize_QueuesForCollection owns that half now. Queueing
+// here again would make two sites own one handoff, inconsistently.
+func TestThresholdScan_NoPM_DraftInvoiceStaysQuiet(t *testing.T) {
 	engine, invoices, charger, notifier := thresholdNoPMFixture()
 	// Force a tax defer -> the threshold invoice lands tax_status=pending, draft.
 	engine.SetTaxProviderResolver(stubResolver(&stubProvider{err: fmt.Errorf("stripe tax down")}))
@@ -128,8 +133,8 @@ func TestThresholdScan_NoPM_DraftInvoiceQueuesButStaysQuiet(t *testing.T) {
 	if len(charger.got) != 0 {
 		t.Errorf("a draft must never be charged, got %d calls", len(charger.got))
 	}
-	if !inv.AutoChargePending {
-		t.Error("a tax-deferred draft must be queued (inert while draft; collected by the sweep once tax retry finalizes it)")
+	if inv.AutoChargePending {
+		t.Error("a tax-deferred draft must not be queued here; RetryTax queues it when it auto-finalizes")
 	}
 	if len(notifier.got) != 0 {
 		t.Errorf("a draft must not trigger the no-PM notification, got %d", len(notifier.got))

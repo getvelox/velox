@@ -46,6 +46,28 @@ import (
 // the charger, so the decline arm here only queues the retry flag. logTag
 // prefixes every log line with the calling site's identity.
 func (e *Engine) collectAfterFinalize(ctx context.Context, sub domain.Subscription, inv domain.Invoice, logTag string) {
+	// The no-drafts contract above, enforced rather than asserted. A
+	// tax-pending cycle invoice is born DRAFT
+	// (domain.InvoiceFinalizationStatus) and billOnePeriod's collect arm
+	// gates on amount + pause, not status — so drafts reached here and took
+	// the no-PM arm, emailing the customer a setup link quoting a PRE-TAX
+	// amount_due, then stamping no_pm_notified_at so the corrected figure
+	// was never sent. The charge arm fared no better: the charger refuses a
+	// non-finalized invoice, so the attempt logged as a failure.
+	//
+	// Returning early is safe because collection is now owned at the moment
+	// of finalize: the tax-retry chain queues the invoice for the sweep when
+	// it auto-finalizes (invoice.Service.RetryTax), and the sweep emails the
+	// final total. A draft that never resolves its tax is not owed by anyone
+	// yet — the operator sees it on the tax banner, which is the actionable
+	// surface for that state.
+	if inv.Status != domain.InvoiceFinalized {
+		slog.WarnContext(ctx, logTag+": refusing to collect a non-finalized invoice; collection resumes when it finalizes",
+			"invoice_id", inv.ID,
+			"status", string(inv.Status),
+		)
+		return
+	}
 	// Collection is not abortable by the caller's cancellation. Two of this
 	// pipeline's callers (subscription_create day-1, final-on-cancel) arrive
 	// on HTTP request ctxs — a client disconnect mid-charge would otherwise

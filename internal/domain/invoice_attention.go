@@ -752,17 +752,19 @@ func classifyPaymentScheduled(inv Invoice) *Attention {
 	}
 }
 
-// classifyAwaitingPayment surfaces the steady-state finalized-but-
-// unpaid invoice. No charge attempt has fired yet — either customer-
-// pay collection mode (operator emails the link, customer self-pays)
-// or a pre-first-charge window. Operators get two paths: trigger the
-// charge themselves, or send the customer a reminder email.
+// classifyAwaitingPayment surfaces a finalized, unpaid invoice with a
+// card on file that nothing has queued for collection. Operators get
+// two paths: trigger the charge themselves, or send the customer a
+// reminder email.
+//
+// This is NOT a steady state Velox has a collection mode for — every
+// finalize writer either charges inline or sets auto_charge_pending
+// (which routes to payment_scheduled instead). Reaching here means
+// the window between the finalize commit and that write, or a crash
+// inside it. Both are operator-recoverable via Charge now, which is
+// why the actions matter more than the copy here.
 func classifyAwaitingPayment(inv Invoice) *Attention {
 	since := attentionSince(inv)
-	// Has-PM race window: PaymentSetup is ready but the engine hasn't
-	// run yet (sub-second to engine-tick window) OR the engine ran but
-	// charge_immediately_at_finalize was disabled. Operator-actionable
-	// only if they don't want to wait — Charge now is the override.
 	return &Attention{
 		Severity: AttentionSeverityInfo,
 		Reason:   AttentionReasonAwaitingPayment,

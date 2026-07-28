@@ -1557,6 +1557,33 @@ func (s *Service) RetryTax(ctx context.Context, tenantID, invoiceID string) (dom
 			}
 			return s.attachAttention(ctx, paid), nil
 		}
+		// Still owed after finalize: hand the invoice to the auto-charge
+		// sweep, the single retry owner for invoices finalized outside a
+		// collection pipeline. Finalizing is not collecting — this path
+		// charges nothing, so without the flag the invoice is invisible to
+		// every recovery mechanism at once: both charge sweeps list only
+		// auto_charge_pending rows, the dunning backfill lists only
+		// payment_status='failed', and dunning itself never starts because
+		// nothing ever failed. It would sit finalized and owed until an
+		// operator happened to read the banner — the silent-overdue sink
+		// already closed for the manual-finalize path (handler.collectAtFinalize).
+		//
+		// The flag rather than an inline charge: the sweep already owns the
+		// full sequence (credit re-apply, PM resolve, charge, decline →
+		// dunning, no-PM → setup-link email), this runs inside a cron batch
+		// with no operator waiting, and a second charger would be a second
+		// idempotency-key minter on the same invoice. It also makes the
+		// catchup pipeline's deliberate Phase 2 → Phase 3 ordering mean
+		// something: the charge phase can now see what the tax retry unstuck.
+		if err := s.store.SetAutoChargePending(ctx, tenantID, invoiceID, true); err != nil {
+			// Liveness sink (playbook class G): the invoice stays invisible
+			// to the sweep until something else sets the flag. Non-fatal —
+			// the tax decision and finalize are already authoritative.
+			slog.Warn("invoice: failed to queue tax-retry-finalized invoice for auto-charge; collection will not retry until this is set",
+				"error", err, "tenant_id", tenantID, "invoice_id", invoiceID)
+			return s.attachAttention(ctx, final), nil
+		}
+		final.AutoChargePending = true
 		return s.attachAttention(ctx, final), nil
 	}
 	return s.attachAttention(ctx, inv), nil
