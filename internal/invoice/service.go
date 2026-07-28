@@ -735,9 +735,12 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 			atc.DunningEscalated = run.State == domain.DunningEscalated
 		}
 	}
-	// Pause state for the queued-but-not-scheduled banner. Lazy under the
-	// exact precondition of the branch that reads it (queued + finalized +
-	// pending), so list reads don't pay a subscription lookup per row.
+	// Pause state for the queued-but-not-scheduled banner, gated on the exact
+	// precondition of the branch that reads it. A list page still pays one
+	// primary-key subscription read per QUEUED row — healthy, paid, draft and
+	// failed rows skip it entirely, and a queued row is the only one whose
+	// banner can make the false promise. Same shape and cost profile as the
+	// dunning-run lookup above.
 	if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized &&
 		inv.PaymentStatus == domain.PaymentPending {
 		atc.CollectionPaused = s.collectionPaused(ctx, inv.TenantID, inv.SubscriptionID)
