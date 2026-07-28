@@ -153,3 +153,51 @@ func TestChargeAttemptFacts_RecordedAtChokepointAndSettle(t *testing.T) {
 		t.Fatalf("checkout attempt fact wrong: %+v", a)
 	}
 }
+
+// TestChargeLease_ReleasedOnDefinitiveOutcomes locks the D1-walk fix:
+// the chokepoint frees the per-invoice charge lease when Stripe ANSWERS
+// (definite decline, or inline settle) — the round-trip is complete and
+// a held lease only starves the next initiator (under test-clock
+// catchup, back-to-back due dunning retries are seconds apart and a
+// 5-minute lease stalled the cascade: "dunning catchup loop made no
+// progress"). Ambiguous outcomes (unknown create error, async
+// processing) must NOT release — the charge may be live at Stripe and
+// the lease window is the anti-double-charge guard.
+func TestChargeLease_ReleasedOnDefinitiveOutcomes(t *testing.T) {
+	charge := func(client *mockStripeClient) *mockInvoiceUpdater {
+		t.Helper()
+		invoices := newMockInvoiceUpdater()
+		invoices.invoices["inv_1"] = finalizedPendingInvoice()
+		s := NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+		_, _ = s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test")
+		return invoices
+	}
+
+	// Definite decline → released.
+	inv := charge(&mockStripeClient{shouldFail: true, failErr: &PaymentError{
+		Message: "Your card was declined.", DeclineCode: "card_declined", PaymentIntentID: "pi_x",
+	}})
+	if len(inv.leaseReleases) != 1 {
+		t.Fatalf("definite decline: %d lease releases, want 1", len(inv.leaseReleases))
+	}
+
+	// Inline settle success → released.
+	inv = charge(&mockStripeClient{piID: "pi_ok", chargeStatus: "succeeded"})
+	if len(inv.leaseReleases) != 1 {
+		t.Fatalf("inline settle: %d lease releases, want 1", len(inv.leaseReleases))
+	}
+
+	// Unknown outcome → lease HELD for the reconciler.
+	inv = charge(&mockStripeClient{shouldFail: true, failErr: &PaymentError{
+		Message: "connection reset", Unknown: true,
+	}})
+	if len(inv.leaseReleases) != 0 {
+		t.Fatalf("unknown outcome: %d lease releases, want 0 (lease must wait out the window)", len(inv.leaseReleases))
+	}
+
+	// Async processing → lease HELD (charge genuinely in flight).
+	inv = charge(&mockStripeClient{piID: "pi_async", chargeStatus: "processing"})
+	if len(inv.leaseReleases) != 0 {
+		t.Fatalf("processing: %d lease releases, want 0", len(inv.leaseReleases))
+	}
+}

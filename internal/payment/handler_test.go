@@ -447,6 +447,10 @@ func (m *mockInvoiceUpdaterHandler) RecordChargeAttempt(_ context.Context, _ str
 	return nil
 }
 
+func (m *mockInvoiceUpdaterHandler) ReleaseAutoChargeClaim(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func newMockInvoiceUpdaterH() *mockInvoiceUpdaterHandler {
 	return &mockInvoiceUpdaterHandler{
 		invoices:    make(map[string]mockInvoice),

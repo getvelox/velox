@@ -243,6 +243,17 @@ type InvoiceUpdater interface {
 	// to the webhook row when the attempt row is absent, so a lost
 	// write degrades display, never money.
 	RecordChargeAttempt(ctx context.Context, tenantID string, a domain.InvoiceChargeAttempt) error
+	// ReleaseAutoChargeClaim frees the per-invoice charge lease. The
+	// chokepoint calls it on DEFINITIVE outcomes only (Stripe answered:
+	// declined, or settled) — the round-trip is complete, so no charge
+	// is in flight and holding the lease adds no protection. Ambiguous
+	// outcomes (unknown / timeout / still-processing) never release —
+	// the call may have reached Stripe and the lease window is exactly
+	// what prevents a blind concurrent re-charge. Found by the D1
+	// walk: a declined dunning retry held the lease 5 wall-minutes,
+	// starving every later same-advance retry in test-clock catchup
+	// ("dunning catchup loop made no progress").
+	ReleaseAutoChargeClaim(ctx context.Context, tenantID, id string) error
 }
 
 // WebhookStore persists and queries Stripe webhook events.
@@ -601,6 +612,19 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		}
 		recordChargeAttempt(ctx, s.invoices, tenantID, inv, pe.PaymentIntentID, purpose, attemptOutcome, pe.Message)
 
+		// A DEFINITE decline completed the round-trip — no charge is in
+		// flight, so free the lease instead of starving the next
+		// initiator for the 5-minute window (under test-clock catchup,
+		// back-to-back due retries are seconds apart in wall time and a
+		// held lease stalls the whole cascade). Unknown outcomes fall
+		// through and keep the lease — the reconciler owns them.
+		if !pe.Unknown {
+			if rerr := s.invoices.ReleaseAutoChargeClaim(ctx, tenantID, inv.ID); rerr != nil {
+				slog.Warn("release charge lease after definite decline failed — next initiator waits out the lease window",
+					"invoice_id", inv.ID, "error", rerr)
+			}
+		}
+
 		// Inline StartDunning for known-failed charges so the dunning run
 		// exists by the time the orchestrator's Phase 5 queries due runs
 		// in the same Advance. Pre-fix this was deferred to the
@@ -670,6 +694,12 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		}
 		if serr := s.SettleSucceeded(settleCtx, tenantID, inv, result.ID, inv.AmountDueCents, SourceChargeResponse); serr != nil {
 			return domain.Invoice{}, fmt.Errorf("settle succeeded inline: %w", serr)
+		}
+		// Definitive outcome — the settle's status flips already make the
+		// claim predicates refuse this invoice, but keep the lease column
+		// truthful rather than letting it decay to expiry.
+		if rerr := s.invoices.ReleaseAutoChargeClaim(ctx, tenantID, inv.ID); rerr != nil {
+			slog.Warn("release charge lease after inline settle failed", "invoice_id", inv.ID, "error", rerr)
 		}
 		// Return the freshly-settled row so callers (dunning retrier, portal,
 		// operator charge-now) observe the paid state immediately. On a re-read
