@@ -1752,32 +1752,49 @@ func describeEmailEvent(emailType, outboxStatus, deliveryState string) (string, 
 	return desc, "succeeded"
 }
 
-func describeDunningEvent(eventType, reason string, attemptCount int) (string, string) {
+// describeDunningEvent renders one dunning lifecycle row: uniform
+// machine-event TITLES ("Payment recovery started", "Payment retry #N
+// attempted" — the timeline's title=event, subline=detail grammar, and
+// the same "Payment recovery" vocabulary the Diagnostic card uses),
+// with the row's CAUSE as the detail subline. The cause is recorded at
+// write time by the caller (never re-derived): pre-fix the start row
+// was cause-blind over a hardcoded payment_failed reason (repaired in
+// 0161), and card-less retry rows read as real charge attempts.
+func describeDunningEvent(eventType, reason string, attemptCount int) (desc, status, detail string) {
 	switch eventType {
 	case "dunning_started":
-		// The start row carries its CAUSE (recorded at write time by the
-		// caller that started the run) — the failure story must survive
-		// on the timeline after the attention banner clears. Pre-fix the
-		// row was cause-blind and the reason column was hardcoded
-		// payment_failed for every run, including card-less enrollments
-		// where nothing was ever charged (repaired in migration 0161).
 		switch reason {
 		case string(domain.DunningCausePaymentFailed):
-			return "Payment failed — automatic retry scheduled", "failed"
+			return "Payment recovery started", "failed", "Card was declined — automatic retries scheduled"
 		case string(domain.DunningCauseNoPaymentMethod):
-			return "No payment method — reminder cycle started", "scheduled"
+			return "Payment recovery started", "scheduled", "No payment method — reminders until a card is added"
 		}
-		return "Automatic retry scheduled", "scheduled"
+		// Legacy rows with no recorded cause: the start is still true,
+		// the cause is honestly absent.
+		return "Payment recovery started", "scheduled", ""
 	case "retry_attempted":
-		return fmt.Sprintf("Payment retry #%d attempted", attemptCount), "processing"
+		desc := fmt.Sprintf("Payment retry #%d attempted", attemptCount)
+		switch reason {
+		case "succeeded":
+			// The recovering attempt (its own row since the I5 walk).
+			return desc, "succeeded", ""
+		case string(domain.DunningCauseNoPaymentMethod), domain.ErrNoPaymentMethodOnRetry.Error():
+			// Nothing was charged — there was no card. The tick counted
+			// the attempt and reminded the customer. Rendering it as a
+			// bare "attempted" read as a repeat charge failure (legacy
+			// sentinel matched for pre-normalization rows: our own
+			// single-writer string, not an operator spelling).
+			return desc, "scheduled", "No payment method — reminder sent"
+		}
+		return desc, "processing", ""
 	case "resolved":
 		switch reason {
 		case "payment_recovered":
-			return "Payment recovered via retry", "succeeded"
+			return "Payment recovered via retry", "succeeded", ""
 		case "manually_resolved":
-			return "Resolved by operator", "resolved"
+			return "Resolved by operator", "resolved", ""
 		default:
-			return "Dunning resolved", "resolved"
+			return "Dunning resolved", "resolved", ""
 		}
 	case "escalated":
 		// reason carries the policy.final_action that fired. ADR-036
@@ -1786,16 +1803,16 @@ func describeDunningEvent(eventType, reason string, attemptCount int) (string, s
 		// write_off_later → mark_uncollectible; new cancel_subscription.
 		switch reason {
 		case "pause":
-			return "Collection paused — retries exhausted", "escalated"
+			return "Collection paused — retries exhausted", "escalated", ""
 		case "mark_uncollectible":
-			return "Marked uncollectible — retries exhausted", "escalated"
+			return "Marked uncollectible — retries exhausted", "escalated", ""
 		case "cancel_subscription":
-			return "Subscription canceled — retries exhausted", "escalated"
+			return "Subscription canceled — retries exhausted", "escalated", ""
 		default:
-			return "Escalated for manual review", "escalated"
+			return "Escalated for manual review", "escalated", ""
 		}
 	default:
-		return eventType, "info"
+		return eventType, "info", ""
 	}
 }
 
@@ -2151,7 +2168,16 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 						(inv.PaidAt != nil || inv.UncollectibleAt != nil || inv.VoidedAt != nil) {
 						continue
 					}
-					desc, status := describeDunningEvent(string(evt.EventType), evt.Reason, evt.AttemptCount)
+					desc, status, detail := describeDunningEvent(string(evt.EventType), evt.Reason, evt.AttemptCount)
+					// Reason is machine vocabulary (cause enums, our no-PM
+					// sentinel) once a detail subline carries the operator
+					// copy — don't ship it as red error text. Decline
+					// retries keep their provider reason; the start row's
+					// provider message lifts in via the Stripe fold.
+					rowErr := evt.Reason
+					if detail != "" || evt.EventType == domain.DunningEventStarted {
+						rowErr = ""
+					}
 					events = append(events, timelineEvent{
 						Timestamp:    evt.CreatedAt.Format(time.RFC3339),
 						sortAt:       evt.CreatedAt,
@@ -2160,7 +2186,8 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 						EventType:    string(evt.EventType),
 						Status:       status,
 						Description:  desc,
-						Error:        evt.Reason,
+						Detail:       detail,
+						Error:        rowErr,
 						AttemptCount: evt.AttemptCount,
 						IsSimulated:  isSimulated,
 						// Exact-attribution key written by the dunning
