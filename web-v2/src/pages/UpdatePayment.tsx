@@ -7,11 +7,15 @@ import { formatCents } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 
-import { CreditCard, AlertTriangle, ExternalLink, ShieldCheck, Clock, Loader2 } from 'lucide-react'
+import { CreditCard, AlertTriangle, ExternalLink, ShieldCheck, Clock, Loader2, Info } from 'lucide-react'
 
 interface TokenData {
   customer_name: string
   invoice_number: string
+  // Terminal invoice states must not be dressed as "you owe this" —
+  // the link outlives the invoice's collectible life (24h token; the
+  // operator can void or settle at any moment).
+  invoice_status?: string
   amount_due_cents: number
   currency: string
   branding?: {
@@ -147,7 +151,28 @@ export default function UpdatePaymentPage() {
               </div>
             ) : data ? (
               <>
-                {/* Alert banner */}
+                {/* Alert banner — settled/annulled invoices state the
+                    truth instead of asking for payment; adding a card is
+                    still offered because it serves the NEXT invoice. */}
+                {data.invoice_status === 'paid' || data.invoice_status === 'voided' ? (
+                  <div className="bg-muted px-6 py-4 border-b border-border">
+                    <div className="flex items-start gap-3">
+                      <Info size={18} className="text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium text-foreground">
+                          {data.invoice_status === 'paid'
+                            ? 'This invoice is already paid'
+                            : 'This invoice was canceled'}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {data.invoice_status === 'paid'
+                            ? 'Nothing is due. You can still add a payment method so future invoices are collected automatically.'
+                            : 'No payment is needed. You can still add a payment method so future invoices are collected automatically.'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                 <div className="bg-amber-50 dark:bg-amber-500/10 px-6 py-4 border-b border-amber-100 dark:border-amber-500/20">
                   <div className="flex items-start gap-3">
                     <AlertTriangle size={18} className="text-amber-500 mt-0.5 shrink-0" />
@@ -159,6 +184,7 @@ export default function UpdatePaymentPage() {
                     </div>
                   </div>
                 </div>
+                )}
 
                 {/* Invoice details */}
                 <div className="p-6 space-y-4">
@@ -172,8 +198,17 @@ export default function UpdatePaymentPage() {
                       <span className="text-sm text-muted-foreground">Invoice</span>
                       <span className="text-sm font-mono text-foreground">{data.invoice_number}</span>
                     </div>
+                    {/* amount_due_cents survives a void/settle by design
+                        (the transition reverses collection, it doesn't
+                        rewrite the figure) — so label it for what it is
+                        once nothing is owed, rather than dunning a
+                        customer for a settled invoice. */}
                     <div className="flex items-center justify-between">
-                      <span className="text-sm text-muted-foreground">Amount Due</span>
+                      <span className="text-sm text-muted-foreground">
+                        {data.invoice_status === 'paid' || data.invoice_status === 'voided'
+                          ? 'Invoice amount'
+                          : 'Amount Due'}
+                      </span>
                       <span className="text-lg font-semibold text-foreground">{formatCents(data.amount_due_cents, data.currency)}</span>
                     </div>
                   </div>
