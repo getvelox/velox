@@ -1745,3 +1745,108 @@ func TestRetryTax_AutoFinalize_QueuesForCollection(t *testing.T) {
 		t.Error("auto_charge_pending = false after auto-finalize: no sweep will ever collect this invoice")
 	}
 }
+
+// stubPauseReader answers the auto-finalize gate's pause lookup.
+type stubPauseReader struct {
+	paused bool
+	err    error
+	calls  int
+}
+
+func (s *stubPauseReader) Get(_ context.Context, _, id string) (domain.Subscription, error) {
+	s.calls++
+	if s.err != nil {
+		return domain.Subscription{}, s.err
+	}
+	sub := domain.Subscription{ID: id}
+	if s.paused {
+		sub.PauseCollection = &domain.PauseCollection{Behavior: domain.PauseCollectionKeepAsDraft}
+	}
+	return sub, nil
+}
+
+// TestRetryTax_AutoFinalize_RespectsPauseCollection pins that a paused
+// subscription's draft stays a draft when its tax resolves.
+//
+// A tax-deferred invoice on a paused sub is draft for two independent reasons;
+// resolving the tax clears only one. Auto-finalizing on that would issue an
+// invoice the operator asked us not to send — and since auto-finalize now
+// queues for collection, its banner would promise an automatic charge that the
+// sweeps (correctly) refuse to make. keep_as_draft means keep it as a draft.
+func TestRetryTax_AutoFinalize_RespectsPauseCollection(t *testing.T) {
+	newStuckInvoice := func(store *memStore) {
+		store.invoices["inv_paused"] = domain.Invoice{
+			ID: "inv_paused", TenantID: "t1", CustomerID: "cus_a",
+			SubscriptionID: "sub_1",
+			Status:         domain.InvoiceDraft,
+			TaxFacts: domain.TaxFacts{
+				TaxStatus: domain.InvoiceTaxPending, TaxErrorCode: "provider_outage",
+			},
+			BillingReason:    "subscription_cycle",
+			Currency:         "USD",
+			TotalAmountCents: 5000,
+			AmountDueCents:   5000,
+			CreatedAt:        time.Now().UTC(),
+		}
+	}
+
+	t.Run("paused → stays draft, not queued", func(t *testing.T) {
+		store := newMemStore()
+		newStuckInvoice(store)
+		svc := NewService(store, nil, nil)
+		svc.SetTaxRetrier(&stubTaxRetrier{store: store})
+		pauses := &stubPauseReader{paused: true}
+		svc.SetSubscriptionPauseReader(pauses)
+
+		out, err := svc.RetryTax(context.Background(), "t1", "inv_paused")
+		if err != nil {
+			t.Fatalf("RetryTax: %v", err)
+		}
+		if out.Status != domain.InvoiceDraft {
+			t.Errorf("status = %s, want draft (pause_collection keeps it a draft)", out.Status)
+		}
+		if store.invoices["inv_paused"].AutoChargePending {
+			t.Error("a paused subscription's invoice must not be queued for collection")
+		}
+		// The tax recompute itself must still stick — the gate withholds
+		// issuance, it does not discard the retry.
+		if store.invoices["inv_paused"].TaxStatus != domain.InvoiceTaxOK {
+			t.Error("tax retry result must persist even when finalize is withheld")
+		}
+	})
+
+	t.Run("not paused → finalizes and queues", func(t *testing.T) {
+		store := newMemStore()
+		newStuckInvoice(store)
+		svc := NewService(store, nil, nil)
+		svc.SetTaxRetrier(&stubTaxRetrier{store: store})
+		svc.SetSubscriptionPauseReader(&stubPauseReader{paused: false})
+
+		out, err := svc.RetryTax(context.Background(), "t1", "inv_paused")
+		if err != nil {
+			t.Fatalf("RetryTax: %v", err)
+		}
+		if out.Status != domain.InvoiceFinalized {
+			t.Errorf("status = %s, want finalized", out.Status)
+		}
+		if !store.invoices["inv_paused"].AutoChargePending {
+			t.Error("a running subscription's invoice must still be queued (the pause gate over-reached)")
+		}
+	})
+
+	t.Run("read error → finalizes (never strand a healthy draft)", func(t *testing.T) {
+		store := newMemStore()
+		newStuckInvoice(store)
+		svc := NewService(store, nil, nil)
+		svc.SetTaxRetrier(&stubTaxRetrier{store: store})
+		svc.SetSubscriptionPauseReader(&stubPauseReader{err: errs.ErrNotFound})
+
+		out, err := svc.RetryTax(context.Background(), "t1", "inv_paused")
+		if err != nil {
+			t.Fatalf("RetryTax: %v", err)
+		}
+		if out.Status != domain.InvoiceFinalized {
+			t.Errorf("status = %s, want finalized — an unreadable pause state must not strand the draft", out.Status)
+		}
+	})
+}
