@@ -107,7 +107,9 @@ func TestPaymentTimeline_DegradationDisclosure(t *testing.T) {
 		h.dunningTimeline = &dunningLaneFake{runsErr: boom}
 
 		resp := fetch(t, h, inv.ID)
-		want := []string{"credit_notes", "emails", "stripe", "dunning"}
+		// "stripe" is no longer a lane: webhook rows stopped being a
+		// display source at ADR-103 (payments render from charge attempts).
+		want := []string{"credit_notes", "emails", "dunning"}
 		if len(resp.Degraded) != len(want) {
 			t.Fatalf("degraded: got %v, want %v", resp.Degraded, want)
 		}

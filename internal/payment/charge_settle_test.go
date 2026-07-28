@@ -89,14 +89,15 @@ func TestChargeInvoice_ProcessingStaysProcessing(t *testing.T) {
 	}
 }
 
-// TestChargeAttemptFacts_RecordedAtChokepointAndSettle locks the ADR-102
-// writer set: a declined charge records a FAILED attempt fact (with the
-// decline reason) even when no dunning follows and no webhook has landed —
-// the row that closes the dunning-off timeline gap; a synchronous success
-// records the attempt at PI-create time (pending) and the inline settle
-// resolves the SAME PI to succeeded; SettleFailed resolves a failure the
-// same way for PIs it didn't mint (hosted checkout).
-func TestChargeAttemptFacts_RecordedAtChokepointAndSettle(t *testing.T) {
+// TestChargeAttemptFacts_RecordedAtChokepoint locks the ADR-102/103
+// writer split: the CHOKEPOINT records the attempt when it asks Stripe
+// for money — a definite decline is a failed fact even with no dunning
+// and no webhook yet, and a synchronous success is inserted `pending`
+// before the settle resolves it. The OUTCOME half now lands inside the
+// settle transaction (store-side, ADR-103), so it is proven by
+// TestChargeAttempt_SettleTransitionsResolveOutcomeAtomically rather
+// than by a post-commit write here.
+func TestChargeAttemptFacts_RecordedAtChokepoint(t *testing.T) {
 	// Declined charge → one failed attempt fact with the provider reason.
 	client := &mockStripeClient{shouldFail: true, failErr: &PaymentError{
 		Message: "Your card was declined.", DeclineCode: "card_declined", PaymentIntentID: "pi_declined",
@@ -116,8 +117,8 @@ func TestChargeAttemptFacts_RecordedAtChokepointAndSettle(t *testing.T) {
 		t.Fatalf("declined attempt fact wrong: %+v", a)
 	}
 
-	// Synchronous success → pending at PI create, succeeded at inline settle,
-	// both on the SAME PI (the store upserts them into one row).
+	// Synchronous success → the chokepoint's pending insert carries the
+	// trigger + PI; the settle tx flips it to succeeded.
 	client = &mockStripeClient{piID: "pi_ok", chargeStatus: "succeeded"}
 	invoices = newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
@@ -125,32 +126,12 @@ func TestChargeAttemptFacts_RecordedAtChokepointAndSettle(t *testing.T) {
 	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err != nil {
 		t.Fatalf("ChargeInvoice: %v", err)
 	}
-	if len(invoices.chargeAttempts) != 2 {
-		t.Fatalf("sync success: %d attempt writes, want 2 (pending insert + succeeded resolve)", len(invoices.chargeAttempts))
+	if len(invoices.chargeAttempts) != 1 {
+		t.Fatalf("sync success: %d chokepoint writes, want 1 (pending insert)", len(invoices.chargeAttempts))
 	}
 	if invoices.chargeAttempts[0].Outcome != domain.ChargeAttemptPending ||
-		invoices.chargeAttempts[1].Outcome != domain.ChargeAttemptSucceeded ||
-		invoices.chargeAttempts[0].StripePaymentIntentID != "pi_ok" ||
-		invoices.chargeAttempts[1].StripePaymentIntentID != "pi_ok" {
-		t.Fatalf("sync success attempt writes wrong: %+v", invoices.chargeAttempts)
-	}
-
-	// SettleFailed on a PI the chokepoint didn't mint (hosted checkout) →
-	// the settle-path insert IS the record, trigger external.
-	invoices = newMockInvoiceUpdater()
-	inv := finalizedPendingInvoice()
-	invoices.invoices["inv_1"] = inv
-	s = NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
-	if err := s.SettleFailed(context.Background(), "t1", inv, "pi_checkout", "Your card was declined.", true, SourceWebhook); err != nil {
-		t.Fatalf("SettleFailed: %v", err)
-	}
-	if len(invoices.chargeAttempts) != 1 {
-		t.Fatalf("SettleFailed: %d attempt facts, want 1", len(invoices.chargeAttempts))
-	}
-	a = invoices.chargeAttempts[0]
-	if a.Outcome != domain.ChargeAttemptFailed || a.Trigger != domain.ChargeTriggerExternal ||
-		a.StripePaymentIntentID != "pi_checkout" || a.SimEffectiveAt != nil {
-		t.Fatalf("checkout attempt fact wrong: %+v", a)
+		invoices.chargeAttempts[0].StripePaymentIntentID != "pi_ok" {
+		t.Fatalf("sync success insert wrong: %+v", invoices.chargeAttempts[0])
 	}
 }
 

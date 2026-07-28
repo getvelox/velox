@@ -922,6 +922,12 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 			return domain.Invoice{}, false, fmt.Errorf("enqueue payment.failed: %w", err)
 		}
 	}
+	// ADR-103: the attempt's outcome lands in THIS tx, so the timeline's
+	// single payment owner can never disagree with the invoice's state.
+	if err := upsertChargeAttemptTx(ctx, tx, tenantID, inv.ID, paymentIntentID,
+		domain.ChargeAttemptFailed, lastPaymentError, inv.AmountDueCents); err != nil {
+		return domain.Invoice{}, false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.Invoice{}, false, err
 	}
@@ -1147,6 +1153,12 @@ func (s *PostgresStore) markPaidReportingTransition(ctx context.Context, tenantI
 		}); err != nil {
 			return domain.Invoice{}, false, fmt.Errorf("enqueue payment.succeeded: %w", err)
 		}
+	}
+	// ADR-103: same-tx outcome resolution (see upsertChargeAttemptTx).
+	// amount_paid_cents is what this PaymentIntent actually settled.
+	if err := upsertChargeAttemptTx(ctx, tx, tenantID, inv.ID, stripePaymentIntentID,
+		domain.ChargeAttemptSucceeded, "", inv.AmountPaidCents); err != nil {
+		return domain.Invoice{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.Invoice{}, false, err
@@ -3219,6 +3231,42 @@ func (s *PostgresStore) StreamForExport(ctx context.Context, tenantID string, fr
 		}
 	}
 	return rows.Err()
+}
+
+// upsertChargeAttemptTx resolves an attempt's outcome INSIDE the caller's
+// settle transaction (ADR-103). Atomic with the invoice's own state flip:
+// the attempt fact and the invoice's truth about that same payment can
+// never disagree, which is what lets the timeline render payments from
+// ONE owner and drop the Stripe-webhook fallback tier.
+//
+// Insert-time identity (trigger_source, sim_effective_at) is preserved by
+// the ON CONFLICT — the chokepoint knows those; a settle does not. A
+// settle for a PaymentIntent Velox never minted (hosted checkout) INSERTS
+// here, and that row is the only record of the attempt.
+func upsertChargeAttemptTx(ctx context.Context, tx *sql.Tx, tenantID, invoiceID, piID string, outcome domain.ChargeAttemptOutcome, reason string, amountCents int64) error {
+	if piID == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO invoice_charge_attempts
+			(tenant_id, invoice_id, stripe_payment_intent_id, trigger_source,
+			 outcome, provider_reason, amount_cents, occurred_at)
+		VALUES ($1, $2, $3, 'external', $4, $5, $6, now())
+		ON CONFLICT (tenant_id, stripe_payment_intent_id)
+			WHERE stripe_payment_intent_id <> ''
+		DO UPDATE SET
+			outcome = CASE WHEN invoice_charge_attempts.outcome = 'succeeded'
+				THEN invoice_charge_attempts.outcome ELSE EXCLUDED.outcome END,
+			provider_reason = CASE WHEN EXCLUDED.provider_reason <> ''
+				THEN EXCLUDED.provider_reason ELSE invoice_charge_attempts.provider_reason END,
+			amount_cents = CASE WHEN EXCLUDED.amount_cents > 0
+				THEN EXCLUDED.amount_cents ELSE invoice_charge_attempts.amount_cents END,
+			updated_at = now()`,
+		tenantID, invoiceID, piID, outcome, reason, amountCents)
+	if err != nil {
+		return fmt.Errorf("upsert charge attempt in settle tx: %w", err)
+	}
+	return nil
 }
 
 // RecordChargeAttempt writes one charge attempt (ADR-102), upserting by

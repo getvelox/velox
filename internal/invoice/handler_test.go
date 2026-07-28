@@ -70,98 +70,87 @@ func TestEmailClause(t *testing.T) {
 	}
 }
 
-// TestApplyChargeAttemptPrecedence locks the ADR-102 render rule: every
-// charge attempt appears exactly once, via the richest owner available —
-// dunning row → attempt row → stripe webhook row — with the attempt
-// replacing its webhook echo only on simulated invoices (the invoice's
-// own axis prefers its own facts; wall-clock invoices keep the webhook
-// row so pre-ADR-102 rendering is unchanged).
-func TestApplyChargeAttemptPrecedence(t *testing.T) {
-	simT := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+// TestRenderChargeAttempts locks the ADR-103 single-source rule: payment
+// rows come from charge attempts alone, with exactly two exact-keyed
+// suppressions — a dunning row carrying the same PaymentIntent absorbs
+// the attempt (and inherits its provider facts), and a succeeded attempt
+// defers to the "Invoice paid" lifecycle row, which is the superset
+// (credits / offline / $0 pay an invoice with no charge).
+func TestRenderChargeAttempts(t *testing.T) {
 	wallT := time.Date(2026, 7, 28, 14, 12, 0, 0, time.UTC)
+	simT := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	failed := func(pi string, sim bool) domain.InvoiceChargeAttempt {
 		a := domain.InvoiceChargeAttempt{
-			StripePaymentIntentID: pi,
-			Outcome:               domain.ChargeAttemptFailed,
-			ProviderReason:        "Your card was declined.",
-			AmountCents:           440,
-			OccurredAt:            wallT,
+			StripePaymentIntentID: pi, Outcome: domain.ChargeAttemptFailed,
+			ProviderReason: "Your card was declined.", AmountCents: 440, OccurredAt: wallT,
 		}
 		if sim {
 			a.SimEffectiveAt = &simT
 		}
 		return a
 	}
-	stripeRow := func(pi string) timelineEvent {
-		return timelineEvent{Source: "stripe", EventType: "payment_intent.payment_failed", PaymentIntentID: pi, Detail: "Customer notified by email", Error: "Your card was declined."}
-	}
 	dunningRow := func(pi string) timelineEvent {
-		return timelineEvent{Source: "dunning", EventType: "dunning_started", PaymentIntentID: pi}
+		return timelineEvent{Source: "dunning", EventType: "retry_attempted", PaymentIntentID: pi}
 	}
-	countBy := func(events []timelineEvent, source string) int {
+	count := func(evts []timelineEvent, src string) int {
 		n := 0
-		for _, e := range events {
-			if e.Source == source {
+		for _, e := range evts {
+			if e.Source == src {
 				n++
 			}
 		}
 		return n
 	}
 
-	// Dunning owns the PI → attempt suppressed, nothing added or dropped.
-	out := applyChargeAttemptPrecedence([]timelineEvent{dunningRow("pi_1")},
-		[]domain.InvoiceChargeAttempt{failed("pi_1", true)}, domain.Invoice{}, true)
-	if len(out) != 1 || countBy(out, "payment") != 0 {
-		t.Fatalf("dunning-owned PI: got %d rows (%d payment), want the 1 dunning row only", len(out), countBy(out, "payment"))
+	// Dunning owns the PI → attempt absorbed, and its provider facts
+	// land on the dunning row.
+	out := renderChargeAttempts([]timelineEvent{dunningRow("pi_1")},
+		[]domain.InvoiceChargeAttempt{failed("pi_1", true)}, domain.Invoice{Currency: "USD"})
+	if len(out) != 1 || count(out, "payment") != 0 {
+		t.Fatalf("dunning-owned PI: got %d rows (%d payment), want 1 dunning row only", len(out), count(out, "payment"))
+	}
+	if out[0].Error != "Your card was declined." || out[0].AmountCents == nil || *out[0].AmountCents != 440 {
+		t.Fatalf("dunning row must inherit the attempt's provider facts: %+v", out[0])
 	}
 
-	// Simulated invoice, stripe owns the PI, sim-stamped attempt →
-	// attempt REPLACES the webhook row and lifts its folded Detail.
-	out = applyChargeAttemptPrecedence([]timelineEvent{stripeRow("pi_2")},
-		[]domain.InvoiceChargeAttempt{failed("pi_2", true)}, domain.Invoice{}, true)
-	if countBy(out, "stripe") != 0 || countBy(out, "payment") != 1 {
-		t.Fatalf("sim replace: got %d stripe / %d payment rows, want 0/1", countBy(out, "stripe"), countBy(out, "payment"))
-	}
-	if out[0].Detail != "Customer notified by email" {
-		t.Fatalf("sim replace must lift the folded Detail, got %q", out[0].Detail)
+	// No dunning row → the attempt renders itself, on the billing axis
+	// when it carries a sim anchor.
+	out = renderChargeAttempts(nil, []domain.InvoiceChargeAttempt{failed("pi_2", true)}, domain.Invoice{})
+	if count(out, "payment") != 1 {
+		t.Fatalf("unowned attempt must render: %+v", out)
 	}
 	if !out[0].IsSimulated || !out[0].sortAt.Equal(simT) {
-		t.Fatalf("sim replace must render on the billing axis (is_simulated at simT), got sim=%v at %v", out[0].IsSimulated, out[0].sortAt)
+		t.Fatalf("sim-anchored attempt must render on the billing axis: sim=%v at %v", out[0].IsSimulated, out[0].sortAt)
+	}
+	// A wall-stamped attempt keeps wall time.
+	out = renderChargeAttempts(nil, []domain.InvoiceChargeAttempt{failed("pi_3", false)}, domain.Invoice{})
+	if out[0].IsSimulated || !out[0].sortAt.Equal(wallT) {
+		t.Fatalf("wall attempt must keep wall time: sim=%v at %v", out[0].IsSimulated, out[0].sortAt)
+	}
+	// Empty-PI attempts (the PI create itself failed) still render —
+	// they can never have a dunning twin to absorb them.
+	out = renderChargeAttempts([]timelineEvent{dunningRow("pi_9")},
+		[]domain.InvoiceChargeAttempt{failed("", true)}, domain.Invoice{})
+	if count(out, "payment") != 1 {
+		t.Fatalf("empty-PI attempt must render: %+v", out)
 	}
 
-	// Wall-clock invoice, stripe owns the PI → attempt defers (zero churn).
-	out = applyChargeAttemptPrecedence([]timelineEvent{stripeRow("pi_3")},
-		[]domain.InvoiceChargeAttempt{failed("pi_3", false)}, domain.Invoice{}, false)
-	if countBy(out, "stripe") != 1 || countBy(out, "payment") != 0 {
-		t.Fatalf("wall defer: got %d stripe / %d payment rows, want 1/0", countBy(out, "stripe"), countBy(out, "payment"))
-	}
-
-	// Nothing owns the PI (webhook lost, or dunning off pre-webhook) →
-	// the attempt renders itself. Empty-PI attempts (PI create failed)
-	// always render — they can never have a twin.
-	out = applyChargeAttemptPrecedence(nil,
-		[]domain.InvoiceChargeAttempt{failed("pi_4", true), failed("", true)}, domain.Invoice{}, true)
-	if countBy(out, "payment") != 2 {
-		t.Fatalf("unowned attempts: got %d payment rows, want 2", countBy(out, "payment"))
-	}
-
-	// Succeeded attempt on a paid invoice → the invoice.paid lifecycle
-	// row owns the story; on a NOT-paid invoice it renders (anomaly).
+	// Succeeded: deferred on a paid invoice, rendered on an unpaid one.
 	paidAt := wallT
-	succ := domain.InvoiceChargeAttempt{StripePaymentIntentID: "pi_5", Outcome: domain.ChargeAttemptSucceeded, OccurredAt: wallT}
-	out = applyChargeAttemptPrecedence(nil, []domain.InvoiceChargeAttempt{succ}, domain.Invoice{PaidAt: &paidAt}, false)
-	if countBy(out, "payment") != 0 {
-		t.Fatalf("succeeded+paid: got %d payment rows, want 0", countBy(out, "payment"))
+	succ := domain.InvoiceChargeAttempt{StripePaymentIntentID: "pi_4", Outcome: domain.ChargeAttemptSucceeded, OccurredAt: wallT}
+	out = renderChargeAttempts(nil, []domain.InvoiceChargeAttempt{succ}, domain.Invoice{PaidAt: &paidAt, StripePaymentIntentID: "pi_4"})
+	if count(out, "payment") != 0 {
+		t.Fatalf("succeeded+paid must defer to the lifecycle row: %+v", out)
 	}
-	out = applyChargeAttemptPrecedence(nil, []domain.InvoiceChargeAttempt{succ}, domain.Invoice{}, false)
-	if countBy(out, "payment") != 1 || out[0].Description != "Payment collected" {
-		t.Fatalf("succeeded+unpaid anomaly: got %d payment rows (%q), want 1 'Payment collected'", countBy(out, "payment"), out[0].Description)
+	out = renderChargeAttempts(nil, []domain.InvoiceChargeAttempt{succ}, domain.Invoice{})
+	if count(out, "payment") != 1 || out[0].Description != "Payment collected" {
+		t.Fatalf("succeeded+unpaid is an anomaly and must render: %+v", out)
 	}
 
-	// Pending attempts never render — the attention banner owns in-flight.
-	out = applyChargeAttemptPrecedence(nil,
-		[]domain.InvoiceChargeAttempt{{StripePaymentIntentID: "pi_6", Outcome: domain.ChargeAttemptPending, OccurredAt: wallT}}, domain.Invoice{}, false)
+	// Pending never renders — the attention banner owns in-flight.
+	out = renderChargeAttempts(nil,
+		[]domain.InvoiceChargeAttempt{{StripePaymentIntentID: "pi_5", Outcome: domain.ChargeAttemptPending, OccurredAt: wallT}}, domain.Invoice{})
 	if len(out) != 0 {
-		t.Fatalf("pending: got %d rows, want 0", len(out))
+		t.Fatalf("pending must not render: %+v", out)
 	}
 }

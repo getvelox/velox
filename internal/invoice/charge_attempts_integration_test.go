@@ -150,3 +150,100 @@ func TestRecordChargeAttempt_UpsertContract(t *testing.T) {
 		t.Fatalf("after empty-PI inserts: %d rows, want 3", len(got))
 	}
 }
+
+// TestChargeAttempt_SettleTransitionsResolveOutcomeAtomically is the
+// ADR-103 proof: the settle transitions resolve an attempt's outcome
+// INSIDE their own transaction, so the timeline's single payment owner
+// can never disagree with the invoice's state. It also covers the
+// hosted-checkout shape — a PaymentIntent the chokepoint never recorded
+// gets its row created by the settle itself.
+func TestChargeAttempt_SettleTransitionsResolveOutcomeAtomically(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	store := invoice.NewPostgresStore(db)
+	tenantID := testutil.CreateTestTenant(t, db, "Attempt Settle Atomicity")
+
+	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{
+		ExternalID: "cus_settle_atomic", DisplayName: "Settle Atomic",
+	})
+	if err != nil {
+		t.Fatalf("create customer: %v", err)
+	}
+	ps := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	due := ps.AddDate(0, 0, 30)
+	mk := func(number string) domain.Invoice {
+		t.Helper()
+		inv, err := store.Create(ctx, tenantID, domain.Invoice{
+			CustomerID: cust.ID, InvoiceNumber: number,
+			Status: domain.InvoiceDraft, PaymentStatus: domain.PaymentPending, Currency: "USD",
+			BillingPeriodStart: ps, BillingPeriodEnd: ps.AddDate(0, 1, 0),
+			IssuedAt: &ps, DueAt: &due, NetPaymentTermDays: 30,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", number, err)
+		}
+		tx, err := db.BeginTx(ctx, postgres.TxTenant, tenantID)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer postgres.Rollback(tx)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE invoices SET status='finalized', amount_due_cents=2500, total_amount_cents=2500
+			WHERE id=$1`, inv.ID); err != nil {
+			t.Fatalf("finalize %s: %v", number, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit %s: %v", number, err)
+		}
+		return inv
+	}
+
+	// FAILED settle on a PI no chokepoint ever recorded (hosted checkout):
+	// the transition itself must create the row.
+	failed := mk("VLX-ATOMIC-FAIL")
+	if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, failed.ID, "pi_atomic_fail", "Your card was declined."); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	got, err := store.ListChargeAttemptsByInvoice(ctx, tenantID, failed.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != domain.ChargeAttemptFailed ||
+		got[0].StripePaymentIntentID != "pi_atomic_fail" || got[0].ProviderReason != "Your card was declined." {
+		t.Fatalf("failed settle must record the attempt in-tx: %+v", got)
+	}
+	if got[0].Trigger != domain.ChargeTriggerExternal {
+		t.Fatalf("a settle-created row is an external attempt, got %s", got[0].Trigger)
+	}
+
+	// SUCCEEDED settle resolves an existing chokepoint row in place —
+	// insert-time identity (trigger, sim anchor) must survive.
+	paid := mk("VLX-ATOMIC-PAID")
+	simAt := ps.AddDate(0, 0, 3)
+	if err := store.RecordChargeAttempt(ctx, tenantID, domain.InvoiceChargeAttempt{
+		InvoiceID: paid.ID, StripePaymentIntentID: "pi_atomic_ok",
+		Trigger: domain.ChargeTriggerDunningRetry, Outcome: domain.ChargeAttemptPending,
+		AmountCents: 2500, OccurredAt: time.Now().UTC(), SimEffectiveAt: &simAt,
+	}); err != nil {
+		t.Fatalf("chokepoint insert: %v", err)
+	}
+	if _, _, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, paid.ID, "pi_atomic_ok", time.Now().UTC()); err != nil {
+		t.Fatalf("mark paid: %v", err)
+	}
+	got, err = store.ListChargeAttemptsByInvoice(ctx, tenantID, paid.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("settle must resolve the SAME row, got %d", len(got))
+	}
+	if got[0].Outcome != domain.ChargeAttemptSucceeded {
+		t.Fatalf("outcome not resolved in-tx: %+v", got[0])
+	}
+	if got[0].Trigger != domain.ChargeTriggerDunningRetry {
+		t.Fatalf("settle overwrote the chokepoint's trigger: %s", got[0].Trigger)
+	}
+	if got[0].SimEffectiveAt == nil || !got[0].SimEffectiveAt.Equal(simAt) {
+		t.Fatalf("settle stripped the billing-axis anchor: %v", got[0].SimEffectiveAt)
+	}
+}
