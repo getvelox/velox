@@ -71,6 +71,7 @@ func (e AttentionAction) Valid() bool {
 // Defines values for AttentionReason.
 const (
 	AwaitingPayment      AttentionReason = "awaiting_payment"
+	CollectionPaused     AttentionReason = "collection_paused"
 	DunningExhausted     AttentionReason = "dunning_exhausted"
 	NoPaymentMethod      AttentionReason = "no_payment_method"
 	PaymentAnomaly       AttentionReason = "payment_anomaly"
@@ -86,6 +87,8 @@ const (
 func (e AttentionReason) Valid() bool {
 	switch e {
 	case AwaitingPayment:
+		return true
+	case CollectionPaused:
 		return true
 	case DunningExhausted:
 		return true
@@ -878,7 +881,11 @@ type Attention struct {
 	// mismatch, or a payment on a voided invoice — and is surfaced
 	// even on paid/voided invoices. `dunning_exhausted` reports a
 	// no-payment-method invoice whose automatic recovery has ended
-	// without collecting (2026-07-22).
+	// without collecting (2026-07-22). `collection_paused` reports an
+	// invoice that is queued for auto-charge but whose subscription
+	// has `pause_collection` set, so the charge sweeps deliberately
+	// skip it — it will not be charged automatically until
+	// collection resumes (2026-07-28).
 	Reason AttentionReason `json:"reason"`
 
 	// Severity Urgency of an Attention surface. Operators sort/filter on this
@@ -918,7 +925,11 @@ type AttentionActionItem struct {
 // mismatch, or a payment on a voided invoice — and is surfaced
 // even on paid/voided invoices. `dunning_exhausted` reports a
 // no-payment-method invoice whose automatic recovery has ended
-// without collecting (2026-07-22).
+// without collecting (2026-07-22). `collection_paused` reports an
+// invoice that is queued for auto-charge but whose subscription
+// has `pause_collection` set, so the charge sweeps deliberately
+// skip it — it will not be charged automatically until
+// collection resumes (2026-07-28).
 type AttentionReason string
 
 // AttentionSeverity Urgency of an Attention surface. Operators sort/filter on this

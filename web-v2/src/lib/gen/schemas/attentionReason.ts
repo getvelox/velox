@@ -18,7 +18,11 @@ not reconcile — double charge, captured-vs-booked amount
 mismatch, or a payment on a voided invoice — and is surfaced
 even on paid/voided invoices. `dunning_exhausted` reports a
 no-payment-method invoice whose automatic recovery has ended
-without collecting (2026-07-22).
+without collecting (2026-07-22). `collection_paused` reports an
+invoice that is queued for auto-charge but whose subscription
+has `pause_collection` set, so the charge sweeps deliberately
+skip it — it will not be charged automatically until
+collection resumes (2026-07-28).
 
  */
 export type AttentionReason = typeof AttentionReason[keyof typeof AttentionReason];
@@ -35,4 +39,5 @@ export const AttentionReason = {
   awaiting_payment: 'awaiting_payment',
   no_payment_method: 'no_payment_method',
   dunning_exhausted: 'dunning_exhausted',
+  collection_paused: 'collection_paused',
 } as const;
