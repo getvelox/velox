@@ -53,13 +53,15 @@ func (r *recordingDeliverer) SendCreditNote(_ context.Context, _, _ string, _ []
 // recordingChecker records consults and returns a scripted answer.
 type recordingChecker struct {
 	consulted []string
-	obsolete  bool
-	err       error
+	// state is the terminal state to report: "" = live, else
+	// paid/voided/uncollectible/gone.
+	state string
+	err   error
 }
 
-func (c *recordingChecker) ActionRequiredObsolete(_ context.Context, _, invoiceNumber string) (bool, error) {
+func (c *recordingChecker) InvoiceTerminalState(_ context.Context, _, invoiceNumber string) (string, error) {
 	c.consulted = append(c.consulted, invoiceNumber)
-	return c.obsolete, c.err
+	return c.state, c.err
 }
 
 func rowOf(emailType string) OutboxRow {
@@ -81,7 +83,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		for _, typ := range []string{TypePaymentSetupRequest, TypePaymentFailed, TypeDunningWarning, TypeDunningEscalation} {
 			sender := &recordingDeliverer{}
 			d := NewDispatcher(nil, sender, DispatcherConfig{})
-			d.SetSettledChecker(&recordingChecker{obsolete: true})
+			d.SetSettledChecker(&recordingChecker{state: "paid"})
 			err := d.handle(ctx, rowOf(typ))
 			if !errors.Is(err, ErrEmailObsolete) {
 				t.Errorf("%s: want ErrEmailObsolete, got %v", typ, err)
@@ -92,10 +94,44 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		}
 	})
 
+	t.Run("uncollectible does NOT mute the escalation that announces it", func(t *testing.T) {
+		// mark_uncollectible marks the invoice uncollectible in the same
+		// breath as it enqueues this email, so a blanket settled-gate
+		// skipped it every time and the customer was never told (FLOW I6
+		// walk, VLX-000016). Other action-required types stay muted —
+		// asking for a card on a written-off invoice is still noise.
+		sender := &recordingDeliverer{}
+		d := NewDispatcher(nil, sender, DispatcherConfig{})
+		d.SetSettledChecker(&recordingChecker{state: "uncollectible"})
+		if err := d.handle(ctx, rowOf(TypeDunningEscalation)); err != nil {
+			t.Fatalf("escalation must deliver on uncollectible: %v", err)
+		}
+		if len(sender.sent) != 1 {
+			t.Fatal("the escalation announcing the write-off was skipped — the customer is never told")
+		}
+		for _, typ := range []string{TypePaymentSetupRequest, TypePaymentFailed, TypeDunningWarning} {
+			s2 := &recordingDeliverer{}
+			d2 := NewDispatcher(nil, s2, DispatcherConfig{})
+			d2.SetSettledChecker(&recordingChecker{state: "uncollectible"})
+			if err := d2.handle(ctx, rowOf(typ)); !errors.Is(err, ErrEmailObsolete) {
+				t.Errorf("%s on an uncollectible invoice must stay muted, got %v", typ, err)
+			}
+		}
+		// paid/voided still mute the escalation itself.
+		for _, st := range []string{"paid", "voided"} {
+			s3 := &recordingDeliverer{}
+			d3 := NewDispatcher(nil, s3, DispatcherConfig{})
+			d3.SetSettledChecker(&recordingChecker{state: st})
+			if err := d3.handle(ctx, rowOf(TypeDunningEscalation)); !errors.Is(err, ErrEmailObsolete) {
+				t.Errorf("escalation on a %s invoice must stay muted, got %v", st, err)
+			}
+		}
+	})
+
 	t.Run("live invoice sends normally", func(t *testing.T) {
 		sender := &recordingDeliverer{}
 		d := NewDispatcher(nil, sender, DispatcherConfig{})
-		d.SetSettledChecker(&recordingChecker{obsolete: false})
+		d.SetSettledChecker(&recordingChecker{state: ""})
 		if err := d.handle(ctx, rowOf(TypePaymentSetupRequest)); err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -119,7 +155,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 	t.Run("informational types never consult the checker", func(t *testing.T) {
 		for _, typ := range []string{TypeInvoice, TypePaymentReceipt} {
 			sender := &recordingDeliverer{}
-			checker := &recordingChecker{obsolete: true}
+			checker := &recordingChecker{state: "paid"}
 			d := NewDispatcher(nil, sender, DispatcherConfig{})
 			d.SetSettledChecker(checker)
 			if err := d.handle(ctx, rowOf(typ)); err != nil {

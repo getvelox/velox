@@ -363,9 +363,25 @@ func (s *PostgresStore) CreateAudited(
 // ABSENT (test-clock teardown hard-deletes invoices; the email must not
 // deliver a dead link asking for payment) both count as obsolete.
 func (s *PostgresStore) ActionRequiredObsolete(ctx context.Context, tenantID, invoiceNumber string) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	state, err := s.InvoiceTerminalState(ctx, tenantID, invoiceNumber)
 	if err != nil {
 		return false, err
+	}
+	return state != "", nil
+}
+
+// InvoiceTerminalState reports the terminal state an action-required
+// email's invoice has reached — "" when it is still live, otherwise
+// "paid", "voided", "uncollectible", or "gone" (row deleted). The
+// dispatcher needs the SPECIFIC state, not just "settled": a
+// mark_uncollectible dunning outcome makes the invoice uncollectible in
+// the same breath as it enqueues the escalation email that ANNOUNCES
+// that outcome, so a blanket settled-check muted the one email whose
+// purpose is that state (found on the FLOW I6 walk, VLX-000016).
+func (s *PostgresStore) InvoiceTerminalState(ctx context.Context, tenantID, invoiceNumber string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return "", err
 	}
 	defer postgres.Rollback(tx)
 	var status, paymentStatus string
@@ -374,16 +390,20 @@ func (s *PostgresStore) ActionRequiredObsolete(ctx context.Context, tenantID, in
 		invoiceNumber,
 	).Scan(&status, &paymentStatus)
 	if err == sql.ErrNoRows {
-		return true, nil
+		return "gone", nil
 	}
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	settled := paymentStatus == string(domain.PaymentSucceeded) ||
-		status == string(domain.InvoicePaid) ||
-		status == string(domain.InvoiceVoided) ||
-		status == string(domain.InvoiceUncollectible)
-	return settled, nil
+	switch {
+	case paymentStatus == string(domain.PaymentSucceeded) || status == string(domain.InvoicePaid):
+		return string(domain.InvoicePaid), nil
+	case status == string(domain.InvoiceVoided):
+		return string(domain.InvoiceVoided), nil
+	case status == string(domain.InvoiceUncollectible):
+		return string(domain.InvoiceUncollectible), nil
+	}
+	return "", nil
 }
 
 func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (domain.Invoice, error) {

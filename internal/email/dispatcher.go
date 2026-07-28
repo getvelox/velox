@@ -143,7 +143,11 @@ func (d *Dispatcher) tick(ctx context.Context) {
 // by the invoice store through a composition-root adapter — the email
 // package never imports a peer domain. Optional: nil skips the gate.
 type InvoiceSettledChecker interface {
-	ActionRequiredObsolete(ctx context.Context, tenantID, invoiceNumber string) (bool, error)
+	// InvoiceTerminalState returns "" while the invoice is still live,
+	// else "paid" / "voided" / "uncollectible" / "gone". The dispatcher
+	// needs the specific state because ONE email type survives one of
+	// them — see handle().
+	InvoiceTerminalState(ctx context.Context, tenantID, invoiceNumber string) (string, error)
 }
 
 // SetSettledChecker wires the staleness gate (see handle).
@@ -155,6 +159,19 @@ func (d *Dispatcher) SetSettledChecker(c InvoiceSettledChecker) { d.settled = c 
 // informational types (invoice document, receipt, credit note) stay
 // deliverable regardless — a paid invoice's document is still the
 // customer's record.
+// escalationAnnounces reports the one case where a terminal invoice must
+// NOT mute its email: a dunning escalation whose final action is
+// mark_uncollectible marks the invoice uncollectible in the same breath
+// as it enqueues the email that ANNOUNCES that outcome. The blanket
+// settled-gate therefore skipped it every single time — the customer
+// was never told, and the template's uncollectible branch ("View
+// invoice" instead of a Pay CTA that would dead-end) was unreachable in
+// production. paid/voided still mute it: there the escalation genuinely
+// no longer describes reality.
+func escalationAnnounces(emailType, terminalState string) bool {
+	return emailType == TypeDunningEscalation && terminalState == "uncollectible"
+}
+
 var actionRequiredTypes = map[string]bool{
 	TypePaymentSetupRequest: true,
 	TypePaymentFailed:       true,
@@ -183,13 +200,13 @@ func (d *Dispatcher) handle(ctx context.Context, row OutboxRow) error {
 	// customer mail; the pre-gate behavior (send) is the fallback.
 	if d.settled != nil && actionRequiredTypes[row.EmailType] && msg.InvoiceNumber != "" {
 		livemodeCtx := postgres.WithLivemode(ctx, row.Livemode)
-		obsolete, cerr := d.settled.ActionRequiredObsolete(livemodeCtx, row.TenantID, msg.InvoiceNumber)
+		state, cerr := d.settled.InvoiceTerminalState(livemodeCtx, row.TenantID, msg.InvoiceNumber)
 		if cerr != nil {
 			slog.Warn("email staleness check failed — sending anyway (fail-open)",
 				"outbox_id", row.ID, "email_type", row.EmailType,
 				"invoice_number", msg.InvoiceNumber, "error", cerr)
-		} else if obsolete {
-			return fmt.Errorf("%w: invoice %s settled or gone before delivery", ErrEmailObsolete, msg.InvoiceNumber)
+		} else if state != "" && !escalationAnnounces(row.EmailType, state) {
+			return fmt.Errorf("%w: invoice %s reached %s before delivery", ErrEmailObsolete, msg.InvoiceNumber, state)
 		}
 	}
 
