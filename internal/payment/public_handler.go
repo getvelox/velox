@@ -85,8 +85,16 @@ func (h *PublicPaymentHandler) Routes() chi.Router {
 }
 
 type tokenValidateResponse struct {
-	CustomerName   string               `json:"customer_name"`
-	InvoiceNumber  string               `json:"invoice_number"`
+	CustomerName  string `json:"customer_name"`
+	InvoiceNumber string `json:"invoice_number"`
+	// InvoiceStatus lets the page tell the truth about a terminal
+	// invoice. The token outlives the invoice's collectible life (24h
+	// validity, and the operator can void/settle at any moment), so
+	// without it the page asked a customer to pay an invoice we had
+	// already annulled — amount_due_cents survives a void by design
+	// (the void reverses collection, it doesn't rewrite the figure).
+	// Found on the FLOW D4 walk (VLX-000005, voided).
+	InvoiceStatus  string               `json:"invoice_status"`
 	AmountDueCents int64                `json:"amount_due_cents"`
 	Currency       string               `json:"currency"`
 	Branding       publicUpdateBranding `json:"branding"`
@@ -136,11 +144,11 @@ func (h *PublicPaymentHandler) validateToken(w http.ResponseWriter, r *http.Requ
 	}
 	defer postgres.Rollback(tx)
 
-	var invoiceNumber, currency string
+	var invoiceNumber, currency, invoiceStatus string
 	var amountDueCents int64
 	err = tx.QueryRowContext(scopedCtx, `
-		SELECT invoice_number, amount_due_cents, currency FROM invoices WHERE id = $1
-	`, token.InvoiceID).Scan(&invoiceNumber, &amountDueCents, &currency)
+		SELECT invoice_number, amount_due_cents, currency, status FROM invoices WHERE id = $1
+	`, token.InvoiceID).Scan(&invoiceNumber, &amountDueCents, &currency, &invoiceStatus)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Validate's JOIN already proved the invoice exists, so
@@ -184,6 +192,7 @@ func (h *PublicPaymentHandler) validateToken(w http.ResponseWriter, r *http.Requ
 	respond.JSON(w, r, http.StatusOK, tokenValidateResponse{
 		CustomerName:   cust.DisplayName,
 		InvoiceNumber:  invoiceNumber,
+		InvoiceStatus:  invoiceStatus,
 		AmountDueCents: amountDueCents,
 		Currency:       currency,
 		Branding:       branding,
