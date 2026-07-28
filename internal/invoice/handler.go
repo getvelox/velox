@@ -70,9 +70,12 @@ type NoPaymentMethodNotifier interface {
 	NotifyNoPaymentMethod(ctx context.Context, tenantID string, inv domain.Invoice, trigger string) (domain.NotifyOutcome, error)
 }
 
-// PaymentCanceler cancels a Stripe PaymentIntent when an invoice is voided.
+// PaymentCanceler stops an invoice from being payable at Stripe when it is
+// voided: expire any live Checkout session, then cancel the PaymentIntent if
+// Stripe allows it (it refuses for Checkout-owned PIs — the session expiry is
+// what stops those). Satisfied by *payment.Stripe.
 type PaymentCanceler interface {
-	CancelPaymentIntent(ctx context.Context, paymentIntentID string) error
+	StopCollection(ctx context.Context, tenantID string, inv domain.Invoice)
 }
 
 // BillingProfileGetter reads customer billing profile for PDF.
@@ -680,13 +683,10 @@ func (h *Handler) void(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cancel Stripe PaymentIntent if one was created
-	if h.paymentCancel != nil && inv.StripePaymentIntentID != "" {
-		if err := h.paymentCancel.CancelPaymentIntent(r.Context(), inv.StripePaymentIntentID); err != nil {
-			slog.WarnContext(r.Context(), "failed to cancel payment intent on void", "invoice_id", id, "pi_id", inv.StripePaymentIntentID, "error", err)
-		} else {
-			slog.InfoContext(r.Context(), "payment intent canceled on void", "invoice_id", id)
-		}
+	// Stop collection at Stripe: expire live Checkout sessions, then cancel
+	// the PI where cancelable. Best-effort by design (see StopCollection).
+	if h.paymentCancel != nil {
+		h.paymentCancel.StopCollection(r.Context(), tenantID, inv)
 	}
 
 	// Consumed-credit reversal now happens atomically inside svc.Void (status

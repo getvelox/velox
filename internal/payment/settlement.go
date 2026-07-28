@@ -508,6 +508,39 @@ func (s *Stripe) escalatePaymentAnomaly(ctx context.Context, tenantID string, in
 	}
 }
 
+// StopCollection is the void path's twin of the settle path's cleanup: an
+// invoice that will never be collected must stop being PAYABLE at Stripe.
+//
+// Order matters. Session expiry comes FIRST because Stripe REFUSES to cancel
+// a PaymentIntent it created for a Checkout Session ("You cannot perform this
+// action on PaymentIntents created by Checkout. Try expiring the Checkout
+// Session instead") — so for every hosted-page attempt, PI cancel alone was
+// a no-op that logged a warning while the session stayed live until its
+// ExpiresAt (<=1h), leaving a voided invoice payable. Found on the FLOW D2
+// walk (VLX-000004): void → PI cancel refused → session still open.
+// Expiring the session is what actually closes that window; the PI then
+// terminates with it.
+//
+// The PI cancel still runs afterwards for engine-minted PIs (auto-charge,
+// dunning retry) — those are cancelable and have no session. Both legs are
+// best-effort: the DB-side claim close (in the void tx) already stops OUR
+// reuse path, ExpiresAt bounds the Stripe-side window, and the ADR-068
+// payment-received-on-voided-invoice anomaly remains the last backstop.
+func (s *Stripe) StopCollection(ctx context.Context, tenantID string, inv domain.Invoice) {
+	s.expireCheckoutSessionsBestEffort(ctx, tenantID, inv)
+	if inv.StripePaymentIntentID == "" {
+		return
+	}
+	if err := s.client.CancelPaymentIntent(ctx, inv.StripePaymentIntentID); err != nil {
+		// Checkout-owned PIs are expected to refuse; the expire above is
+		// the real stop for those. Anything else is worth a line.
+		slog.InfoContext(ctx, "stop collection: payment intent not canceled (checkout-owned PIs expire with their session)",
+			"invoice_id", inv.ID, "payment_intent_id", inv.StripePaymentIntentID, "error", err)
+		return
+	}
+	slog.InfoContext(ctx, "stop collection: payment intent canceled", "invoice_id", inv.ID)
+}
+
 // expireCheckoutSessionsBestEffort expires, at Stripe, every session for the
 // invoice not yet confirmed terminal — including superseded rows whose
 // earlier expire call failed (their sessions stay payable at Stripe). Errors

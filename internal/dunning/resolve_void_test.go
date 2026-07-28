@@ -43,9 +43,8 @@ func (v *recordingVoider) Void(_ context.Context, tenantID, id string) (domain.I
 
 type recordingCanceler struct{ calls int }
 
-func (c *recordingCanceler) CancelPaymentIntent(_ context.Context, _ string) error {
+func (c *recordingCanceler) StopCollection(_ context.Context, _ string, _ domain.Invoice) {
 	c.calls++
-	return nil
 }
 
 func resolveManually(t *testing.T, h *Handler, runID string) {
@@ -91,7 +90,7 @@ func TestResolveRun_ManualVoid_RoutesThroughServiceAndGatesSideEffects(t *testin
 			t.Errorf("void must route through the invoice service voider; calls=%d, want 1", voider.calls)
 		}
 		if canceler.calls != 1 {
-			t.Errorf("PI cancel should run after a successful void; calls=%d, want 1", canceler.calls)
+			t.Errorf("stop-collection should run after a successful void; calls=%d, want 1", canceler.calls)
 		}
 	})
 
@@ -103,7 +102,7 @@ func TestResolveRun_ManualVoid_RoutesThroughServiceAndGatesSideEffects(t *testin
 			t.Errorf("voider should be attempted once; calls=%d", voider.calls)
 		}
 		if canceler.calls != 0 {
-			t.Errorf("PI cancel MUST NOT run when the void was refused — would cancel a live in-flight charge; calls=%d, want 0", canceler.calls)
+			t.Errorf("stop-collection MUST NOT run when the void was refused — the invoice is still collectible; calls=%d, want 0", canceler.calls)
 		}
 	})
 }
