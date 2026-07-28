@@ -60,6 +60,7 @@ func TestBillOnCreate_CreditBalance_E2E(t *testing.T) {
 			creditSvc, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{},
 			clock.NewFake(periodStart.Add(time.Hour)),
 		)
+		e.SetIntervalReader(subStore)
 		e.SetTaxProviderResolver(tax.NewResolver(nil))
 		e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 		e.SetDunningResolver(&testDunningResolver{})

@@ -64,6 +64,7 @@ func TestSimAxis_ClockDrivenLifecycle_EveryAuditRowIsStamped(t *testing.T) {
 		&invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, nil,
 	)
+	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 	engine.SetTxRunner(db)
@@ -142,6 +143,11 @@ func TestSimAxis_ClockDrivenLifecycle_EveryAuditRowIsStamped(t *testing.T) {
 		INSERT INTO subscription_items (id, tenant_id, subscription_id, plan_id, quantity, metadata, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,1,'{}'::jsonb,$5,$5)`,
 		itemID, tenantID, subID, plan.ID, cycleStart)
+	// Raw-SQL fixture bypasses the ADR-101 interval writer — mirror it.
+	execTx(t, db, ctx, tenantID, `
+		INSERT INTO billing_intervals (tenant_id, subscription_id, subscription_item_id, plan_id, quantity, starts_at, source)
+		VALUES ($1,$2,$3,$4,1,$5,'create')`,
+		tenantID, subID, itemID, plan.ID, cycleStart)
 
 	// Everything below this line runs on the ctx CATCHUP binds (asserted
 	// separately by testclock.TestRunCatchup_BindsClockOntoCtx): the clock, not

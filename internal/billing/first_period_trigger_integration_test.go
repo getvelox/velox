@@ -105,6 +105,7 @@ func TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E(t *testing.T) {
 		&invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
 	)
+	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 

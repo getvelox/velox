@@ -703,22 +703,17 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	paymentReadiness := &paymentReadinessAdapter{customers: customerStore, pms: paymentMethodsSvc}
 	engine := billing.NewEngine(subStore, usageStore, pricingSvc,
 		&invoiceWriterAdapter{store: invoiceStore}, creditSvc, settingsStore, paymentReadiness, stripeAdapter, clk, customerStore)
-	// ADR-101 Phase 3 CUTOVER (2026-07-27): the interval-reader mode is
-	// frozen at boot; unset now means ON — billing_intervals bill, the
-	// dormant legacy interpretation still runs inside the comparator and
-	// screams if it ever disagrees. `shadow` (legacy bills, comparator
-	// on) and `off` (legacy only) remain the kill switches until Phase 4
-	// removes the interpretation. Cutover evidence: two-mode corpus CI
-	// (line-identical invoices across nine shapes), a 140/140-sub sweep
-	// of the dev dataset (0 unexplained), and a live clock walk under
-	// `on` (TZ-seam period, mid-period qty change, exact 9/31 + 22/31
-	// segments). An unknown value panics the boot — a mistyped
-	// kill-switch must never silently bill the wrong way.
-	ivMode := strings.TrimSpace(os.Getenv("VELOX_BILLING_INTERVALS_READER"))
-	if ivMode == "" {
-		ivMode = billing.IntervalReaderOn
+	// ADR-101 Phase 4 (2026-07-28): billing_intervals is the ONLY
+	// segment source — the legacy fact-log interpretation, the shadow
+	// comparator, and the VELOX_BILLING_INTERVALS_READER kill switches
+	// are gone (clean soak: 140/140 cutover sweep, two-mode corpus CI on
+	// every PR since, zero unexplained divergences). A stale env value
+	// can no longer change behavior; say so loudly instead of silently
+	// ignoring an operator's kill-switch intent.
+	if v := strings.TrimSpace(os.Getenv("VELOX_BILLING_INTERVALS_READER")); v != "" && v != "on" {
+		slog.Warn("VELOX_BILLING_INTERVALS_READER is set but the flag was removed at ADR-101 Phase 4 — billing_intervals always bill; the legacy reader no longer exists", "value", v)
 	}
-	engine.SetIntervalReader(subStore, ivMode)
+	engine.SetIntervalReader(subStore)
 	engine.SetTestClockReader(testClockStore)
 	engine.SetEventDispatcher(eventDispatcher)
 	// Coordinator-tx seam: fireThreshold's reset=true arm commits the

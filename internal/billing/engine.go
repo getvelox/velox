@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -87,11 +86,7 @@ type Engine struct {
 	// ADR-101 segment-source seam (intervals_reader.go): the snapshot
 	// reader, the boot-frozen mode (off|shadow|on), and the parity
 	// counters the corpus CI gate asserts on.
-	intervalSnap      IntervalSnapshotter
-	intervalMode      string
-	shadowCompared    atomic.Uint64
-	shadowAllowlisted atomic.Uint64
-	shadowUnexplained atomic.Uint64
+	intervalSnap IntervalSnapshotter
 }
 
 // TxRunner runs fn inside one tenant-scoped transaction — the coordinator-tx
@@ -971,97 +966,9 @@ type baseSegment struct {
 	quantity   int64
 }
 
-// itemBaseSegments walks a chronologically-ordered slice of changes
-// for one subscription item and produces the [start, end, plan, qty]
-// segments that span [periodStart, periodEnd]. Handles every shape:
-//
-//   - No changes → one full-period segment at the item's current state.
-//   - Plan or quantity change → two segments (before / after the change).
-//   - Item added mid-period → first segment starts at the add time —
-//     UNLESS the add lands on the period-start calendar day in the
-//     tenant timezone, in which case the item exists from periodStart
-//     (day-grade: the add day counts whole, ADR-012 amendment
-//     2026-07-26). Without the clamp, the creation-time 'add' row
-//     (trigger 0029/0129 stamps the raw creation instant) re-prorates
-//     a first period whose start ADR-012 deliberately snapped back to
-//     the signup day's midnight — reintroducing the exact "prorated
-//     30/31 days on a full month" defect the snap removed. Only 'add'
-//     rows clamp; plan/quantity/remove changes stay instant-precise
-//     per ADR-012's Consequences.
-//   - Item removed mid-period → last segment ends at the remove time;
-//     no tail segment beyond remove.
-//   - Item both added AND removed in the same period → segment(s) only
-//     span [add, remove].
-//
-// item may be nil for items that no longer exist at periodEnd
-// (removed mid-period); in that case the tail state is determined
-// entirely from the last change's to_* fields (or absent if the last
-// change is 'remove').
-func itemBaseSegments(item *domain.SubscriptionItem, changes []domain.SubscriptionItemChange, periodStart, periodEnd time.Time, loc *time.Location) []baseSegment {
-	if len(changes) == 0 {
-		if item == nil {
-			return nil
-		}
-		return []baseSegment{{
-			start: periodStart, end: periodEnd,
-			planID: item.PlanID, quantity: item.Quantity,
-		}}
-	}
-
-	// Day-grade clamp: a first-in-window 'add' on the period-start day
-	// moves to periodStart ITSELF — never beginningOfDay — because
-	// threshold-reset and org-TZ-seam (ADR-091) periods legitimately
-	// start mid-day and a day-floor would push a boundary before the
-	// period. Copy-on-write so the caller's slice (shared between the
-	// base and usage passes) is never mutated.
-	if changes[0].ChangeType == "add" && domain.SameCalendarDayIn(changes[0].ChangedAt, periodStart, loc) {
-		changes = append([]domain.SubscriptionItemChange(nil), changes...)
-		changes[0].ChangedAt = periodStart
-	}
-
-	// Initial state at periodStart, derived from the first change.
-	// 'add' means the item didn't exist at periodStart.
-	first := changes[0]
-	exists := first.ChangeType != "add"
-	var planID string
-	var quantity int64
-	if exists {
-		planID = first.FromPlanID
-		quantity = first.FromQuantity
-	}
-
-	prevTime := periodStart
-	out := []baseSegment{}
-	for _, c := range changes {
-		if exists && c.ChangedAt.After(prevTime) {
-			out = append(out, baseSegment{
-				start: prevTime, end: c.ChangedAt,
-				planID: planID, quantity: quantity,
-			})
-		}
-		prevTime = c.ChangedAt
-		switch c.ChangeType {
-		case "add", "plan", "quantity":
-			planID = c.ToPlanID
-			quantity = c.ToQuantity
-			exists = true
-		case "remove":
-			exists = false
-		}
-	}
-
-	if exists && periodEnd.After(prevTime) {
-		out = append(out, baseSegment{
-			start: prevTime, end: periodEnd,
-			planID: planID, quantity: quantity,
-		})
-	}
-	return out
-}
-
 // usageInterval is one [start, end) range during which a meter was
 // active for the subscription. Built per-segment from the same
-// itemBaseSegments walk used for base-fee billing — Orb-shape
+// windowSegments derivation used for base-fee billing — Orb-shape
 // segment-aware metering. Multiple items with overlapping segments on
 // the same meter get merged so the meter is billed once per disjoint
 // active range, not double-counted per item.
@@ -2494,57 +2401,27 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	}
 	thresholdBilledThrough := wm.billedThrough
 
-	// Pull the per-item change log for this period — drives segment-
-	// aware base-fee billing (Lago / Chargebee / Orb shape). Each row
-	// demarcates a [pre-change, post-change] boundary, so the in_arrears
-	// base for a sub that had a mid-period plan or quantity change is
-	// emitted as one line per segment at the segment's own plan + qty
-	// rate × duration fraction. No mid-period changes → segments collapse
-	// to a single full-period line (same as pre-segment-aware behavior).
-	//
-	// Failure here propagates to the per-sub error handler. Pre-fix
-	// (2026-05-30 design-debt audit): read failure silently fell back
-	// to single-line billing, mis-billing any sub that had a mid-period
-	// plan or quantity change with no signal to the operator. Per
-	// feedback_no_silent_fallbacks, fail loud — the engine already
-	// continues to the next sub when this one errors.
-	itemChanges, err := e.subs.ListItemChangesInPeriod(ctx, sub.TenantID, sub.ID, periodStart, periodEnd)
-	if err != nil {
-		return nil, 0, fmt.Errorf("list item changes: %w", err)
-	}
-	changesByItem := map[string][]domain.SubscriptionItemChange{}
-	for _, c := range itemChanges {
-		changesByItem[c.SubscriptionItemID] = append(changesByItem[c.SubscriptionItemID], c)
-	}
-	// ADR-101 segment source: legacy interpretation, shadow-compared or
-	// replaced by the billing_intervals reader per the boot mode.
-	segsByItem, err := e.windowSegments(ctx, sub, changesByItem, periodStart, periodEnd)
+	// ADR-101 segment source: billing_intervals — policy-applied item
+	// lifetimes recorded at write time; the read is a dumb
+	// interval×window intersection (Phase 4 removed the fact-log
+	// interpretation). Drives segment-aware base-fee billing (Lago /
+	// Chargebee / Orb shape): a mid-period plan or quantity change
+	// bills one line per segment at the segment's own plan + qty
+	// rate × duration fraction; no mid-period changes → one
+	// full-period line.
+	segsByItem, err := e.windowSegments(ctx, sub, periodStart, periodEnd)
 	if err != nil {
 		return nil, 0, fmt.Errorf("resolve segments: %w", err)
 	}
-	// Hydrate any plans referenced only in the change log or an interval
-	// segment (items removed mid-period, pre-swap plans not present on
-	// current items). Plans already loaded for current items are skipped.
+	// Hydrate any plans referenced only by an interval segment (items
+	// removed mid-period, pre-swap plans not on current items). Plans
+	// already loaded for current items are skipped.
 	//
-	// Failure here propagates as above. Pre-fix the segment under a
-	// failed plan lookup would be silently dropped from the invoice,
-	// undercharging the customer; per feedback_no_silent_fallbacks the
-	// engine fails the sub's cycle rather than guess.
-	for _, c := range itemChanges {
-		for _, pid := range []string{c.FromPlanID, c.ToPlanID} {
-			if pid == "" {
-				continue
-			}
-			if _, ok := plans[pid]; ok {
-				continue
-			}
-			pl, err := e.pricing.GetPlan(ctx, sub.TenantID, pid)
-			if err != nil {
-				return nil, 0, fmt.Errorf("get segment plan %s: %w", pid, err)
-			}
-			plans[pid] = pl
-		}
-	}
+	// Failure propagates to the per-sub error handler. Pre-fix the
+	// segment under a failed plan lookup would be silently dropped from
+	// the invoice, undercharging the customer; per
+	// feedback_no_silent_fallbacks the engine fails the sub's cycle
+	// rather than guess.
 	for _, segs := range segsByItem {
 		for _, seg := range segs {
 			if seg.planID == "" {
@@ -3973,42 +3850,15 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 	// full-window line at the current plan's rate — mis-billing with no
 	// operator signal. Per feedback_no_silent_fallbacks the cancel bill
 	// fails instead; the operator's cancel retries.
-	itemChanges, err := e.subs.ListItemChangesInPeriod(ctx, sub.TenantID, sub.ID, periodStart, canceledAt)
-	if err != nil {
-		return nil, 0, fmt.Errorf("list item changes on cancel: %w", err)
-	}
-	changesByItem := map[string][]domain.SubscriptionItemChange{}
-	for _, c := range itemChanges {
-		changesByItem[c.SubscriptionItemID] = append(changesByItem[c.SubscriptionItemID], c)
-	}
 	// ADR-101 segment source for the cancel window — same seam as the
-	// cycle path, window-ended at the cancel instant. The interval side
-	// reads pre-cancel state (the close-all seal rides the cancel tx,
-	// invisible to the snapshot), which clips identically to
+	// cycle path, window-ended at the cancel instant. The interval read
+	// sees pre-cancel state (the close-all seal rides the cancel tx,
+	// invisible to this read), which clips identically to
 	// [periodStart, canceledAt] — open intervals end at the window edge
 	// either way.
-	segsByItem, err := e.windowSegments(ctx, sub, changesByItem, periodStart, canceledAt)
+	segsByItem, err := e.windowSegments(ctx, sub, periodStart, canceledAt)
 	if err != nil {
 		return nil, 0, fmt.Errorf("resolve segments on cancel: %w", err)
-	}
-	for _, c := range itemChanges {
-		for _, pid := range []string{c.FromPlanID, c.ToPlanID} {
-			if pid == "" {
-				continue
-			}
-			if _, ok := plans[pid]; ok {
-				continue
-			}
-			pl, err := e.pricing.GetPlan(ctx, sub.TenantID, pid)
-			if err != nil {
-				// Fail-loud parity with buildLineItems: a segment whose
-				// plan can't be hydrated would otherwise be silently
-				// DROPPED downstream (the seg loop skips unknown plans)
-				// — underbilling the final invoice with no signal.
-				return nil, 0, fmt.Errorf("get segment plan %s on cancel: %w", pid, err)
-			}
-			plans[pid] = pl
-		}
 	}
 	for _, segs := range segsByItem {
 		for _, seg := range segs {

@@ -461,6 +461,7 @@ func TestRunCycle_TaxErrorAbortsBeforeInvoiceAndCycleAdvance(t *testing.T) {
 	// Deliberately do NOT call wireBaseTax — the tax provider resolver is
 	// left unwired so ApplyTaxToLineItems returns an error.
 	engine := NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, fakeClk)
+	engine.SetIntervalReader(subs)
 
 	count, errs := engine.RunCycle(context.Background(), 50)
 
