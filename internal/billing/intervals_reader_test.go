@@ -73,56 +73,6 @@ func TestIntervalSegmentsByItem_ClipsAndDrops(t *testing.T) {
 	}
 }
 
-func TestClassifyDivergence(t *testing.T) {
-	t1 := irPS.Add(14 * time.Hour) // same UTC calendar day as irPS
-	nextDay := irPS.AddDate(0, 0, 3)
-
-	// Catch-up shape: legacy bills a full window for a LIVE item whose
-	// interval lifetime is entirely outside it.
-	if c := classifyDivergence([]baseSegment{seg(irPS, irPE, "a", 1)}, nil, true, true, irPS, irPE, time.UTC); c != divergenceCatchupLifetime {
-		t.Fatalf("catchup class: got %s", c)
-	}
-	// Same shape but NO interval rows on a LIVE item → writer bug.
-	if c := classifyDivergence([]baseSegment{seg(irPS, irPE, "a", 1)}, nil, false, true, irPS, irPE, time.UTC); c != divergenceUnexplained {
-		t.Fatalf("live item with missing rows must be unexplained: got %s", c)
-	}
-	// No rows on a NON-live item: the pre-0102 hard-delete residue —
-	// legacy bills a phantom for a row that no longer exists.
-	if c := classifyDivergence([]baseSegment{seg(irPS, irPE, "a", 1)}, nil, false, false, irPS, irPE, time.UTC); c != divergenceHardDeletedResidue {
-		t.Fatalf("hard-deleted residue: got %s", c)
-	}
-	// 0102→0129 remove-gap residue: legacy blind to a pre-window add
-	// sealed INSIDE the window.
-	stubEnd := irPS.Add(12 * time.Hour)
-	if c := classifyDivergence(nil, []baseSegment{seg(irPS, stubEnd, "a", 1)}, true, false, irPS, irPE, time.UTC); c != divergenceRemoveGapResidue {
-		t.Fatalf("remove-gap residue: got %s", c)
-	}
-	// A spurious interval running to the window END is not that class.
-	if c := classifyDivergence(nil, []baseSegment{seg(irPS, irPE, "a", 1)}, true, false, irPS, irPE, time.UTC); c != divergenceUnexplained {
-		t.Fatalf("open-to-window-end with no legacy view must stay unexplained: got %s", c)
-	}
-	// TZ clamp-miss: intervals clamped to window start at write time,
-	// legacy (current TZ) sees a different calendar day and won't clamp.
-	legacy := []baseSegment{seg(nextDay, irPE, "a", 1)}
-	shadow := []baseSegment{seg(irPS, irPE, "a", 1)}
-	if c := classifyDivergence(legacy, shadow, true, true, irPS, irPE, time.UTC); c != divergenceTZClampMiss {
-		t.Fatalf("tz clamp-miss (interval clamped): got %s", c)
-	}
-	// Mirror: legacy clamps now (same calendar day in current TZ) but
-	// the write-time TZ didn't.
-	legacy = []baseSegment{seg(irPS, irPE, "a", 1)}
-	shadow = []baseSegment{seg(t1, irPE, "a", 1)}
-	if c := classifyDivergence(legacy, shadow, true, true, irPS, irPE, time.UTC); c != divergenceTZClampMiss {
-		t.Fatalf("tz clamp-miss (legacy clamped): got %s", c)
-	}
-	// Quantity mismatch is never allowlisted.
-	legacy = []baseSegment{seg(irPS, irPE, "a", 1)}
-	shadow = []baseSegment{seg(irPS, irPE, "a", 2)}
-	if c := classifyDivergence(legacy, shadow, true, true, irPS, irPE, time.UTC); c != divergenceUnexplained {
-		t.Fatalf("qty mismatch must be unexplained: got %s", c)
-	}
-}
-
 func TestSetIntervalReader_Validation(t *testing.T) {
 	e := &Engine{}
 	mustPanic := func(fn func()) {
@@ -134,8 +84,7 @@ func TestSetIntervalReader_Validation(t *testing.T) {
 		}()
 		fn()
 	}
-	mustPanic(func() { e.SetIntervalReader(nil, "banana") })
-	mustPanic(func() { e.SetIntervalReader(nil, IntervalReaderOn) })
-	// nil + off is the narrow-test shape and must be fine.
-	e.SetIntervalReader(nil, IntervalReaderOff)
+	// billing_intervals is the ONLY segment source (Phase 4) — a nil
+	// snapshotter can never be a legitimate configuration.
+	mustPanic(func() { e.SetIntervalReader(nil) })
 }

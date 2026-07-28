@@ -153,11 +153,25 @@ intervals intersecting the current period forward are ever billed).
    inside the comparator on every close.
 4. **Remove** interpretation; the flag dies in the same PR (a lying
    'off' value violates the doc-doesn't-lie bar).
-   **DEFERRED with trigger** (2026-07-27): the dormant legacy side is
-   the rollback net and the comparator's other half — it costs nothing
-   to keep while it stays silent. Trigger to execute Phase 4: one soak
-   period (a release cycle or the first DP onboarding, whichever
-   comes first) with zero unexplained divergence.
+   **EXECUTED 2026-07-28** (trigger amended by the owner: pre-launch,
+   local-only, the soak evidence was already in — zero unexplained
+   divergences across the 140/140 cutover sweep, the two-mode corpus on
+   every PR since #635, and every dev cycle close in between; and the
+   dual-reader tax was real, since every billing change had to keep two
+   readers in agreement). The legacy fact-log interpretation
+   (`itemBaseSegments`), the shadow comparator + allowlist classifier,
+   the one-statement UNION snapshot, and the
+   `VELOX_BILLING_INTERVALS_READER` modes are deleted; the reader is a
+   dumb interval×window intersection over `ListItemIntervals`, keeping
+   the loud missing-interval invariant. A set env var now logs a boot
+   WARN naming the removal (never silently ignored). The corpus test
+   pins GOLDEN line fingerprints captured under the two-mode gate; the
+   TZ-clamp and catch-up allowlist tests became truth-side behavioral
+   assertions (a later TZ change cannot re-interpret a write-time open;
+   an item added after the window never bills it). Deliberate
+   consequence accepted while pre-launch: there is no revert-to-legacy
+   kill switch — a writer bug is fixed forward, guarded by the DB
+   exclusion constraints, the golden corpus, and the invariant.
 
 ## Consequences
 

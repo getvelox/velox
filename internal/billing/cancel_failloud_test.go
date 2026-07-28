@@ -46,26 +46,25 @@ func cancelFailLoudFixture() (domain.Subscription, *mockPricing, *mockUsage, *mo
 	return sub, pricing, &mockUsage{totals: map[string]int64{"mtr_api": 500}}, &mockInvoices{}
 }
 
-// TestBillFinalOnImmediateCancel_ChangeLogReadFailsLoud pins fail-loud parity
-// with the cycle builder (2026-07-10 design review): pre-fix the change-log
-// read error was swallowed (`itemChanges, _ :=`), so a transient DB failure
-// silently billed a changed sub's FINAL invoice as one full-window line at the
-// current plan's rate — mis-billing with no operator signal. The cancel bill
-// must fail instead (the operator's cancel retries).
-func TestBillFinalOnImmediateCancel_ChangeLogReadFailsLoud(t *testing.T) {
+// TestBillFinalOnImmediateCancel_IntervalReadFailsLoud pins fail-loud parity
+// with the cycle builder: a transient failure reading billing_intervals must
+// fail the cancel bill (the operator's cancel retries) — never silently
+// single-line the final invoice at the current plan's rate.
+func TestBillFinalOnImmediateCancel_IntervalReadFailsLoud(t *testing.T) {
 	sub, pricing, usage, invoices := cancelFailLoudFixture()
-	subs := &mockSubs{itemChangesErr: errors.New("db blip")}
+	subs := &mockSubs{intervalsErr: errors.New("db blip")}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
+	engine.SetIntervalReader(subs)
 
 	_, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 	if err == nil {
-		t.Fatal("change-log read failure must fail the cancel bill, not silently single-line it")
+		t.Fatal("interval read failure must fail the cancel bill, not silently single-line it")
 	}
-	if !strings.Contains(err.Error(), "list item changes on cancel") {
+	if !strings.Contains(err.Error(), "billing-intervals read") {
 		t.Errorf("error should name the failed read, got %v", err)
 	}
 	if len(invoices.invoices) != 0 {
-		t.Errorf("no invoice may be created on a failed change-log read, got %d", len(invoices.invoices))
+		t.Errorf("no invoice may be created on a failed interval read, got %d", len(invoices.invoices))
 	}
 }
 
@@ -75,14 +74,16 @@ func TestBillFinalOnImmediateCancel_ChangeLogReadFailsLoud(t *testing.T) {
 // plans) — underbilling the final invoice with no signal. It must error.
 func TestBillFinalOnImmediateCancel_SegmentPlanLookupFailsLoud(t *testing.T) {
 	sub, pricing, usage, invoices := cancelFailLoudFixture()
-	// A mid-period plan change whose from-plan is NOT in the pricing mock:
+	// A pre-swap interval whose plan is NOT in the pricing mock:
 	// hydration hits mockPricing.GetPlan's "plan not found".
-	subs := &mockSubs{itemChanges: []domain.SubscriptionItemChange{{
-		SubscriptionID: "sub_1", SubscriptionItemID: "si_1", ChangeType: "plan",
-		FromPlanID: "pln_gone", ToPlanID: "pln_api",
-		ChangedAt: time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC),
-	}}}
+	swapAt := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
+	subs := &mockSubs{intervals: []domain.ItemInterval{
+		{SubscriptionItemID: "si_1", PlanID: "pln_gone", Quantity: 1,
+			StartsAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), EndsAt: &swapAt},
+		{SubscriptionItemID: "si_1", PlanID: "pln_api", Quantity: 1, StartsAt: swapAt},
+	}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
+	engine.SetIntervalReader(subs)
 
 	_, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 	if err == nil {

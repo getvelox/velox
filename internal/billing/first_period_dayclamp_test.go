@@ -62,136 +62,6 @@ func creationAddRow(changedAt time.Time, planID string, qty int64) domain.Subscr
 	}
 }
 
-// TestItemBaseSegments_DayGradeAddClamp pins the clamp's exact scope:
-// an 'add' on the period-start calendar day (tenant TZ) exists from
-// periodStart; everything else keeps instant-precise boundaries.
-func TestItemBaseSegments_DayGradeAddClamp(t *testing.T) {
-	ist := mustLoc(t, "Asia/Kolkata")
-	ny := mustLoc(t, "America/New_York")
-	item := &domain.SubscriptionItem{ID: "it_1", PlanID: "pln_1", Quantity: 1}
-
-	// DST spring-forward first period in America/New_York: Mar 8 2026
-	// 00:00 EST → Apr 8 2026 00:00 EDT. The add at 21:05 EDT is Mar 9
-	// in UTC — calendar-day identity in loc must still clamp it.
-	nyPeriodStart := time.Date(2026, 3, 8, 5, 0, 0, 0, time.UTC)
-	nyPeriodEnd := time.Date(2026, 4, 8, 4, 0, 0, 0, time.UTC)
-	nyAdd := time.Date(2026, 3, 9, 1, 5, 0, 0, time.UTC) // Mar 8 21:05 EDT
-
-	// Mid-day period start (threshold reset / ADR-091 seam shape): the
-	// clamp must target periodStart ITSELF, never the day's midnight.
-	seamStart := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
-	seamEnd := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
-
-	cases := []struct {
-		name    string
-		item    *domain.SubscriptionItem
-		changes []domain.SubscriptionItemChange
-		start   time.Time
-		end     time.Time
-		loc     *time.Location
-		want    []baseSegment
-	}{
-		{
-			name: "creation add on the period-start day clamps to periodStart",
-			item: item,
-			changes: []domain.SubscriptionItemChange{
-				creationAddRow(istCreatedAt, "pln_1", 1),
-			},
-			start: istPeriodStart, end: istPeriodEnd, loc: ist,
-			want: []baseSegment{{start: istPeriodStart, end: istPeriodEnd, planID: "pln_1", quantity: 1}},
-		},
-		{
-			name: "add on a LATER day keeps the instant boundary (FLOW B20 pin)",
-			item: item,
-			changes: []domain.SubscriptionItemChange{
-				creationAddRow(time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC), "pln_1", 1),
-			},
-			start: istPeriodStart, end: istPeriodEnd, loc: ist,
-			want: []baseSegment{{start: time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC), end: istPeriodEnd, planID: "pln_1", quantity: 1}},
-		},
-		{
-			name: "add just AFTER the first day's midnight is not clamped",
-			item: item,
-			changes: []domain.SubscriptionItemChange{
-				// Jul 27 00:05 IST — five minutes into day 2.
-				creationAddRow(time.Date(2026, 7, 26, 18, 35, 0, 0, time.UTC), "pln_1", 1),
-			},
-			start: istPeriodStart, end: istPeriodEnd, loc: ist,
-			want: []baseSegment{{start: time.Date(2026, 7, 26, 18, 35, 0, 0, time.UTC), end: istPeriodEnd, planID: "pln_1", quantity: 1}},
-		},
-		{
-			name: "plan change on the first day is NOT clamped (instant-precise per ADR-012 Consequences)",
-			item: &domain.SubscriptionItem{ID: "it_1", PlanID: "pln_b", Quantity: 1},
-			changes: []domain.SubscriptionItemChange{{
-				ID: "vlx_sic_pl", TenantID: "t1", SubscriptionID: "sub_1",
-				SubscriptionItemID: "it_1", ChangeType: "plan",
-				FromPlanID: "pln_a", FromQuantity: 1,
-				ToPlanID: "pln_b", ToQuantity: 1, ChangedAt: istCreatedAt,
-			}},
-			start: istPeriodStart, end: istPeriodEnd, loc: ist,
-			want: []baseSegment{
-				{start: istPeriodStart, end: istCreatedAt, planID: "pln_a", quantity: 1},
-				{start: istCreatedAt, end: istPeriodEnd, planID: "pln_b", quantity: 1},
-			},
-		},
-		{
-			name: "same-first-day add then remove spans [periodStart, remove]",
-			item: nil, // hard-deleted item, Pass 2 shape
-			changes: []domain.SubscriptionItemChange{
-				creationAddRow(time.Date(2026, 7, 26, 3, 30, 0, 0, time.UTC), "pln_1", 1), // 09:00 IST
-				{
-					ID: "vlx_sic_rm", TenantID: "t1", SubscriptionID: "sub_1",
-					SubscriptionItemID: "it_1", ChangeType: "remove",
-					FromPlanID: "pln_1", FromQuantity: 1,
-					ChangedAt: time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC), // 15:00 IST
-				},
-			},
-			start: istPeriodStart, end: istPeriodEnd, loc: ist,
-			want: []baseSegment{{start: istPeriodStart, end: time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC), planID: "pln_1", quantity: 1}},
-		},
-		{
-			name: "mid-day periodStart: clamp targets periodStart itself, not the day's midnight",
-			item: item,
-			changes: []domain.SubscriptionItemChange{
-				creationAddRow(time.Date(2026, 7, 26, 14, 0, 0, 0, time.UTC), "pln_1", 1),
-			},
-			start: seamStart, end: seamEnd, loc: time.UTC,
-			want: []baseSegment{{start: seamStart, end: seamEnd, planID: "pln_1", quantity: 1}},
-		},
-		{
-			name: "DST spring-forward day clamps via calendar-day identity across the UTC date boundary",
-			item: item,
-			changes: []domain.SubscriptionItemChange{
-				creationAddRow(nyAdd, "pln_1", 1),
-			},
-			start: nyPeriodStart, end: nyPeriodEnd, loc: ny,
-			want: []baseSegment{{start: nyPeriodStart, end: nyPeriodEnd, planID: "pln_1", quantity: 1}},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := itemBaseSegments(tc.item, tc.changes, tc.start, tc.end, tc.loc)
-			if len(got) != len(tc.want) {
-				t.Fatalf("segments: got %d, want %d: %+v", len(got), len(tc.want), got)
-			}
-			for i := range got {
-				if !got[i].start.Equal(tc.want[i].start) || !got[i].end.Equal(tc.want[i].end) ||
-					got[i].planID != tc.want[i].planID || got[i].quantity != tc.want[i].quantity {
-					t.Errorf("segment %d: got {%s → %s %s q%d}, want {%s → %s %s q%d}",
-						i, got[i].start, got[i].end, got[i].planID, got[i].quantity,
-						tc.want[i].start, tc.want[i].end, tc.want[i].planID, tc.want[i].quantity)
-				}
-			}
-		})
-	}
-}
-
-// TestRunCycle_FirstPeriod_CreationAddRow_BillsFullBase is the I1
-// fixture end-to-end at the mock layer: the trigger's creation 'add'
-// row sits INSIDE the backward-snapped first period and must NOT
-// prorate it. Pre-fix this billed 2806 ("prorated 30/31 days");
-// reverting the clamp in itemBaseSegments fails this test.
 func TestRunCycle_FirstPeriod_CreationAddRow_BillsFullBase(t *testing.T) {
 	periodStart, periodEnd := istPeriodStart, istPeriodEnd
 
@@ -292,8 +162,7 @@ func TestRunCycle_FirstPeriod_CreationAddRow_BillsFullBase(t *testing.T) {
 // grade (ADR-012): the signup day counts whole → 1/31 of $29 = $0.94.
 func TestBillFinalOnImmediateCancel_FirstPeriod_SameDayCancel(t *testing.T) {
 	periodStart, periodEnd := istPeriodStart, istPeriodEnd
-	createdAt := time.Date(2026, 7, 26, 3, 30, 0, 0, time.UTC) // 09:00 IST
-	cancelAt := time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC)  // 15:00 IST
+	cancelAt := time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC) // 15:00 IST (created 09:00 IST the same day)
 
 	sub := domain.Subscription{
 		ID: "sub_1", TenantID: "t1", CustomerID: "cus_1", Code: "same-day",
@@ -307,12 +176,13 @@ func TestBillFinalOnImmediateCancel_FirstPeriod_SameDayCancel(t *testing.T) {
 		CanceledAt:                &cancelAt,
 	}
 
+	// Post-ADR-101-Phase-4 the day-grade decision is the WRITER's: the
+	// creation-day add opened the interval at periodStart, so the cancel
+	// window [periodStart, cancelAt] bills the one consumed signup day.
+	// mockSubs synthesizes exactly that open interval from the item.
 	subs := &mockSubs{
-		subs:         map[string]domain.Subscription{},
+		subs:         map[string]domain.Subscription{"sub_1": sub},
 		cycleUpdated: make(map[string]bool),
-		itemChanges: []domain.SubscriptionItemChange{
-			creationAddRow(createdAt, "pln_i1", 1),
-		},
 	}
 	pricing := &mockPricing{
 		plans: map[string]domain.Plan{

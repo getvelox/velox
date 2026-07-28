@@ -276,6 +276,15 @@ func TestBillSubscription_LoopsUntilCaughtUp(t *testing.T) {
 
 func wireBaseTax(e *Engine) *Engine {
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
+	// billing_intervals is the only segment source (ADR-101 Phase 4):
+	// when the fixture's SubscriptionReader doubles as the snapshotter
+	// (mockSubs does), wire it — mockSubs synthesizes a full-lifetime
+	// open interval per item unless the test seeds explicit rows.
+	if e.intervalSnap == nil {
+		if snap, ok := e.subs.(IntervalSnapshotter); ok {
+			e.SetIntervalReader(snap)
+		}
+	}
 	// Collect-pipeline collaborators are REQUIRED post-#442 — the old
 	// charger/paymentSetups/noPMNotifier nil guards are deleted, so any
 	// fixture whose flow reaches collectAfterFinalize needs them wired.
@@ -326,6 +335,15 @@ type mockSubs struct {
 	// trigger would have produced (migration 0029).
 	itemChanges    []domain.SubscriptionItemChange
 	itemChangesErr error
+	// intervals feeds ListItemIntervals — the ADR-101 Phase-4 segment
+	// source. Segment-aware tests seed the policy-applied lifetimes the
+	// interval WRITERS would have recorded (day-grade already decided:
+	// a creation-day add opens at periodStart, a mid-period change
+	// seals and reopens at its instant). Tests whose sub has items but
+	// no seeded intervals get the writer-bug refusal — seed
+	// defaultIntervals() or explicit rows.
+	intervals    []domain.ItemInterval
+	intervalsErr error
 	// updateBillingCycleErr, when set, makes UpdateBillingCycle fail — used to
 	// drive the idempotent-skip heal path's loud-fail (a failed watermark
 	// advance must surface, not be swallowed).
@@ -531,6 +549,31 @@ func (m *mockSubs) ApplyDuePendingItemPlansAtomic(_ context.Context, _, id strin
 		it.PendingPlanEffectiveAt = nil
 		s.Items[i] = it
 		applied = append(applied, it)
+		// Mirror the ADR-101 interval writer: seal the old plan's
+		// lifetime at the swap instant and reopen under the new plan,
+		// so the closing window bills the OUTGOING plan. Materialize
+		// the default full-lifetime rows first when this fixture was
+		// relying on synthesis.
+		if m.intervals == nil {
+			for _, di := range s.Items {
+				pid, qty := di.PlanID, di.Quantity
+				if di.ID == it.ID {
+					pid = oldPlan // pre-swap state for the swapped item
+				}
+				m.intervals = append(m.intervals, domain.ItemInterval{
+					SubscriptionItemID: di.ID, PlanID: pid, Quantity: qty,
+				})
+			}
+		}
+		sealAt := now
+		for j := range m.intervals {
+			if m.intervals[j].SubscriptionItemID == it.ID && m.intervals[j].EndsAt == nil {
+				m.intervals[j].EndsAt = &sealAt
+			}
+		}
+		m.intervals = append(m.intervals, domain.ItemInterval{
+			SubscriptionItemID: it.ID, PlanID: it.PlanID, Quantity: it.Quantity, StartsAt: sealAt,
+		})
 		// Mirror the DB trigger from migration 0029: the UPDATE on
 		// subscription_items emits a 'plan' change row so segment-
 		// aware billing sees the boundary swap.
@@ -562,6 +605,31 @@ func (m *mockSubs) ListWithThresholds(_ context.Context, _ bool, _ string, _ int
 	// returns the configured candidate set). Returning empty here keeps
 	// existing tests compatible without exercising the threshold path.
 	return nil, nil
+}
+
+func (m *mockSubs) ListItemIntervals(_ context.Context, _, subscriptionID string) ([]domain.ItemInterval, error) {
+	// Single-sub fixtures: seeded rows all belong to the queried sub
+	// (ItemInterval carries no subscription id — the store scopes it).
+	if m.intervalsErr != nil {
+		return nil, m.intervalsErr
+	}
+	if m.intervals != nil {
+		return m.intervals, nil
+	}
+	// Default: one open interval per live item, from the beginning of
+	// time — clips to any window as a full-window segment, exactly the
+	// real writers' state for an item that existed before the window
+	// with no mutations. No policy is reimplemented here; tests that
+	// exercise mid-window mutations seed explicit interval rows.
+	var out []domain.ItemInterval
+	if sub, ok := m.subs[subscriptionID]; ok {
+		for _, it := range sub.Items {
+			out = append(out, domain.ItemInterval{
+				SubscriptionItemID: it.ID, PlanID: it.PlanID, Quantity: it.Quantity,
+			})
+		}
+	}
+	return out, nil
 }
 
 func (m *mockSubs) ListItemChangesInPeriod(_ context.Context, _, subscriptionID string, periodStart, periodEnd time.Time) ([]domain.SubscriptionItemChange, error) {
@@ -3705,18 +3773,13 @@ func TestRunCycle_SegmentAware_SkipsInAdvanceSegment(t *testing.T) {
 			},
 		},
 		cycleUpdated: make(map[string]bool),
-		itemChanges: []domain.SubscriptionItemChange{{
-			ID:                 "vlx_sic_1",
-			TenantID:           "t1",
-			SubscriptionID:     "sub_1",
-			SubscriptionItemID: "it_1",
-			ChangeType:         "plan",
-			FromPlanID:         "pln_a_advance",
-			ToPlanID:           "pln_b_arrears",
-			FromQuantity:       1,
-			ToQuantity:         1,
-			ChangedAt:          swapAt,
-		}},
+		// The ADR-101 interval writer's state after the day-15 swap:
+		// the in_advance plan's lifetime sealed at the swap instant,
+		// the in_arrears successor open from it.
+		intervals: []domain.ItemInterval{
+			{SubscriptionItemID: "it_1", PlanID: "pln_a_advance", Quantity: 1, EndsAt: &swapAt},
+			{SubscriptionItemID: "it_1", PlanID: "pln_b_arrears", Quantity: 1, StartsAt: swapAt},
+		},
 	}
 
 	pricing := &mockPricing{
@@ -3781,20 +3844,12 @@ func TestRunCycle_SegmentAware_InArrears_MidPeriodPlanChange(t *testing.T) {
 			},
 		},
 		cycleUpdated: make(map[string]bool),
-		// Seed the change row that the DB trigger would have emitted
-		// at the immediate plan swap on day 15.
-		itemChanges: []domain.SubscriptionItemChange{{
-			ID:                 "vlx_sic_1",
-			TenantID:           "t1",
-			SubscriptionID:     "sub_1",
-			SubscriptionItemID: "it_1",
-			ChangeType:         "plan",
-			FromPlanID:         "pln_a",
-			ToPlanID:           "pln_b",
-			FromQuantity:       1,
-			ToQuantity:         1,
-			ChangedAt:          changeAt,
-		}},
+		// The ADR-101 interval writer's state after the immediate
+		// day-15 swap: pln_a sealed at the change instant, pln_b open.
+		intervals: []domain.ItemInterval{
+			{SubscriptionItemID: "it_1", PlanID: "pln_a", Quantity: 1, EndsAt: &changeAt},
+			{SubscriptionItemID: "it_1", PlanID: "pln_b", Quantity: 1, StartsAt: changeAt},
+		},
 	}
 
 	pricing := &mockPricing{
@@ -3876,18 +3931,12 @@ func TestRunCycle_SegmentAware_UsageMetersDifferPerSegment(t *testing.T) {
 			},
 		},
 		cycleUpdated: make(map[string]bool),
-		itemChanges: []domain.SubscriptionItemChange{{
-			ID:                 "vlx_sic_1",
-			TenantID:           "t1",
-			SubscriptionID:     "sub_1",
-			SubscriptionItemID: "it_1",
-			ChangeType:         "plan",
-			FromPlanID:         "pln_a",
-			ToPlanID:           "pln_b",
-			FromQuantity:       1,
-			ToQuantity:         1,
-			ChangedAt:          changeAt,
-		}},
+		// The ADR-101 interval writer's state after the immediate
+		// day-15 swap: pln_a sealed at the change instant, pln_b open.
+		intervals: []domain.ItemInterval{
+			{SubscriptionItemID: "it_1", PlanID: "pln_a", Quantity: 1, EndsAt: &changeAt},
+			{SubscriptionItemID: "it_1", PlanID: "pln_b", Quantity: 1, StartsAt: changeAt},
+		},
 	}
 
 	pricing := &mockPricing{

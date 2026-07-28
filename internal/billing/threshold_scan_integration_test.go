@@ -81,6 +81,7 @@ func newThresholdFixture(t *testing.T, name string) *thresholdFixture {
 		&invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, nil,
 	)
+	engine.SetIntervalReader(subStore)
 	// Production wires a tax resolver; engine fails loudly without
 	// one (no silent zero-tax fallback). NoneProvider is the
 	// minimal wiring for tests that don't exercise tax behavior.
@@ -153,6 +154,15 @@ func newThresholdFixture(t *testing.T, name string) *thresholdFixture {
 	`, itemID, tenantID, subID, plan.ID, now)
 	if err != nil {
 		t.Fatalf("insert sub item: %v", err)
+	}
+	// Raw-SQL fixture bypasses the ADR-101 interval writer — mirror it:
+	// the item's billable lifetime opens at the cycle start.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO billing_intervals (tenant_id, subscription_id, subscription_item_id, plan_id, quantity, starts_at, source)
+		VALUES ($1, $2, $3, $4, 1, $5, 'create')
+	`, tenantID, subID, itemID, plan.ID, cycleStart)
+	if err != nil {
+		t.Fatalf("insert billing interval: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit sub: %v", err)
@@ -700,6 +710,12 @@ func (f *thresholdFixture) seedThresholdFleet(t *testing.T, ctx context.Context,
 		`, itemID, f.tenantID, subID, plan.ID, now); err != nil {
 			t.Fatalf("insert fleet item %d: %v", i, err)
 		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO billing_intervals (tenant_id, subscription_id, subscription_item_id, plan_id, quantity, starts_at, source)
+			VALUES ($1, $2, $3, $4, 1, $5, 'create')
+		`, f.tenantID, subID, itemID, plan.ID, f.cycleStart); err != nil {
+			t.Fatalf("insert fleet interval %d: %v", i, err)
+		}
 		ids = append(ids, subID)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1101,6 +1117,12 @@ func TestThresholdCycle_DeferredMax_FullWindowOnce(t *testing.T) {
 		`, fmt.Sprintf("vlx_si_dmax_%d", i), f.tenantID, subID, plan.ID, f.cycleStart); err != nil {
 			t.Fatalf("insert item %d: %v", i, err)
 		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO billing_intervals (tenant_id, subscription_id, subscription_item_id, plan_id, quantity, starts_at, source)
+			VALUES ($1, $2, $3, $4, 1, $5, 'create')
+		`, f.tenantID, subID, fmt.Sprintf("vlx_si_dmax_%d", i), plan.ID, f.cycleStart); err != nil {
+			t.Fatalf("insert interval %d: %v", i, err)
+		}
 		if err := tx.Commit(); err != nil {
 			t.Fatalf("commit %d: %v", i, err)
 		}
@@ -1279,6 +1301,12 @@ func TestImmediateCancel_AfterThresholdFire_NoDoubleBill(t *testing.T) {
 		VALUES ('vlx_si_cancel_fire', $1, $2, $3, 1, '{}'::jsonb, $4, $4)
 	`, f.tenantID, subID, plan.ID, f.cycleStart); err != nil {
 		t.Fatalf("insert item: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO billing_intervals (tenant_id, subscription_id, subscription_item_id, plan_id, quantity, starts_at, source)
+		VALUES ($1, $2, 'vlx_si_cancel_fire', $3, 1, $4, 'create')
+	`, f.tenantID, subID, plan.ID, f.cycleStart); err != nil {
+		t.Fatalf("insert interval: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)

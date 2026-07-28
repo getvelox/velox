@@ -350,6 +350,7 @@ func TestFullBillingCycle_E2E(t *testing.T) {
 		&invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
 	)
+	engine.SetIntervalReader(subStore)
 	// Production engine always has a tax resolver wired; the
 	// engine fails loudly without one (ApplyTaxToLineItems → error).
 	// Test harness wires NoneProvider explicitly so the integration
@@ -518,6 +519,7 @@ func TestBillTiming_InAdvance_E2E(t *testing.T) {
 		&invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
 	)
+	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 	engine.SetCreditGranter(creditSvc)
@@ -730,6 +732,7 @@ func TestBillOnCancel_UnpaidPrebillRelief_E2E(t *testing.T) {
 			&invoiceStoreAdapter{invoiceStore},
 			nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
 		)
+		e.SetIntervalReader(subStore)
 		e.SetTaxProviderResolver(tax.NewResolver(nil))
 		e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 		e.SetCreditGranter(creditSvc)

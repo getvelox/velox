@@ -90,6 +90,7 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 		&invoiceStoreAdapter{invoiceStore},
 		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
 	)
+	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 
@@ -180,6 +181,7 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 		&pricingStoreAdapter{pricing.NewPostgresStore(db)}, &invoiceStoreAdapter{invoiceStore},
 		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodEnd.Add(time.Nanosecond)),
 	)
+	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 
@@ -262,6 +264,7 @@ func TestRunCycleForTenant_BillsOnlyCallerLivemode(t *testing.T) {
 		&pricingStoreAdapter{pricing.NewPostgresStore(db)}, &invoiceStoreAdapter{invoiceStore},
 		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodEnd.Add(time.Nanosecond)),
 	)
+	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 

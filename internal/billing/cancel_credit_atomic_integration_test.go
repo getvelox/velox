@@ -115,6 +115,7 @@ func TestCancelCredit_DraftFailure_RealTxRollsBackCancel(t *testing.T) {
 		&pricingStoreAdapter{pricingStore}, &invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
 	)
+	e.SetIntervalReader(subStore)
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
 	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 	e.SetCreditGranter(creditSvc)
@@ -221,6 +222,7 @@ func TestCancelCredit_PaidInAdvance_DraftAtomicAndReconcilerRecovers(t *testing.
 		&pricingStoreAdapter{pricingStore}, &invoiceStoreAdapter{invoiceStore},
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
 	)
+	e.SetIntervalReader(subStore)
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
 	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 	e.SetCreditGranter(creditSvc)

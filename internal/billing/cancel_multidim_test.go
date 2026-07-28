@@ -79,7 +79,7 @@ func TestBillFinalOnImmediateCancel_MultiDimMeterBilled(t *testing.T) {
 	}
 	invoices := &mockInvoices{}
 
-	engine := wireBaseTax(NewEngine(&mockSubs{}, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
+	engine := wireBaseTax(NewEngine(&mockSubs{subs: map[string]domain.Subscription{sub.ID: sub}}, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
 	inv, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 	if err != nil {
@@ -163,7 +163,7 @@ func TestBillFinalOnImmediateCancel_SingleRuleMeterStillBilled(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{"mtr_api": 500}}
 	invoices := &mockInvoices{}
 
-	engine := wireBaseTax(NewEngine(&mockSubs{}, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
+	engine := wireBaseTax(NewEngine(&mockSubs{subs: map[string]domain.Subscription{sub.ID: sub}}, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
 	inv, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 	if err != nil {
@@ -253,7 +253,7 @@ func TestBillFinalOnImmediateCancel_UsageCapApplied(t *testing.T) {
 	}
 	invoices := &mockInvoices{}
 
-	engine := wireBaseTax(NewEngine(&mockSubs{}, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
+	engine := wireBaseTax(NewEngine(&mockSubs{subs: map[string]domain.Subscription{sub.ID: sub}}, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
 	inv, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 	if err != nil {
@@ -317,7 +317,7 @@ func TestBillFinalOnImmediateCancel_NetTermsFallback30(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{"mtr_api": 500}}
 	invoices := &mockInvoices{}
 
-	engine := wireBaseTax(NewEngine(&mockSubs{}, usage, pricing, invoices, nil, &zeroTermsSettings{}, nil, nil, billingTestClock()))
+	engine := wireBaseTax(NewEngine(&mockSubs{subs: map[string]domain.Subscription{sub.ID: sub}}, usage, pricing, invoices, nil, &zeroTermsSettings{}, nil, nil, billingTestClock()))
 
 	inv, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 	if err != nil {

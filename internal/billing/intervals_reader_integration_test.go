@@ -22,16 +22,16 @@ import (
 	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
-// ADR-101 Phase 2/3 corpus gate: every walked mutation shape must bill
-// IDENTICALLY under the legacy fact-log interpretation (mode shadow)
-// and the billing_intervals reader (mode on), with the shadow
-// comparator reporting zero unexplained divergence in both. The two
-// known-divergence classes (catch-up lifetime, org-TZ clamp-miss) get
-// their own tests asserting the classifier catches them AND the
-// interval side is the more-correct one.
+// ADR-101 Phase 4 corpus gate: billing_intervals is the ONLY segment
+// source, so every walked mutation shape asserts its invoice lines
+// against GOLDEN fingerprints — captured from the two-mode parity gate
+// that ran on every PR between cutover (#635) and Phase 4, where the
+// interval reader billed line-for-line identically to the legacy
+// interpretation across this exact corpus. A writer or reader
+// regression changes a line and fails the golden.
 //
 // Usage lines derive from the same per-item segments the base fee
-// bills from, so base-line parity here covers the usage windows
+// bills from, so base-line coverage here covers the usage windows
 // structurally; the corpus keeps meters out to stay deterministic.
 
 var parityPS = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
@@ -96,7 +96,7 @@ func (f *parityFixture) activeSub(t *testing.T, code string, at time.Time, items
 	return sub
 }
 
-func (f *parityFixture) engine(t *testing.T, mode string, now time.Time) *billing.Engine {
+func (f *parityFixture) engine(t *testing.T, now time.Time) *billing.Engine {
 	t.Helper()
 	e := billing.NewEngine(
 		&subStoreAdapter{f.subs},
@@ -107,12 +107,13 @@ func (f *parityFixture) engine(t *testing.T, mode string, now time.Time) *billin
 	)
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
 	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	e.SetIntervalReader(f.subs, mode)
+	e.SetIntervalReader(f.subs)
 	return e
 }
 
-// lineFingerprint is the cross-mode comparison unit: everything about a
-// base-fee line except IDs and invoice linkage.
+// lineFingerprint is the golden unit: everything about a base-fee line
+// except IDs and invoice linkage. Plan codes are per-scenario constants
+// so the fingerprints are stable across runs.
 func lineFingerprint(li domain.InvoiceLineItem) string {
 	ps, pe := "-", "-"
 	if li.BillingPeriodStart != nil {
@@ -147,30 +148,39 @@ func (f *parityFixture) invoiceLines(t *testing.T, subID string) []string {
 	return out
 }
 
-// parityScenario builds one mutation shape and returns the sub to bill.
-// cancelDay != 0 routes through BillOnCancel instead of the cycle close.
-type parityScenario struct {
+// intervalScenario builds one mutation shape and pins its expected
+// invoice lines. cancelDay != 0 routes through BillOnCancel instead of
+// the cycle close.
+type intervalScenario struct {
 	name      string
 	cancelDay int
 	build     func(t *testing.T, f *parityFixture) domain.Subscription
+	want      []string
 }
 
-func parityCorpus() []parityScenario {
+func intervalCorpus() []intervalScenario {
 	day := func(n int) time.Time { return parityPS.AddDate(0, 0, n) }
-	return []parityScenario{
-		{name: "full-period", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+	return []intervalScenario{
+		{name: "full-period", want: []string{
+			"base_fee|fp - base fee (qty 2)|2|6200|2026-05-01T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			p := f.plan(t, "fp", 3100)
 			return f.activeSub(t, "sub-fp", parityPS, domain.SubscriptionItem{PlanID: p.ID, Quantity: 2})
 		}},
-		{name: "creation-day-clamp", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "creation-day-clamp", want: []string{
+			"base_fee|cd - base fee (qty 1)|1|2900|2026-05-01T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			// Created 14:00 on the period-start day: the stored period
-			// start is the day-snapped midnight, the 'add' fact row is
-			// 14:00 — legacy clamps at read, intervals opened at the
-			// stored start at write.
+			// start is the day-snapped midnight; the interval writer
+			// opened the lifetime at the stored start (write-time
+			// day-grade), so the first period bills the FULL base.
 			p := f.plan(t, "cd", 2900)
 			return f.activeSub(t, "sub-cd", parityPS.Add(14*time.Hour), domain.SubscriptionItem{PlanID: p.ID, Quantity: 1})
 		}},
-		{name: "mid-period-add", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "mid-period-add", want: []string{
+			"base_fee|ma-a - base fee (qty 1)|1|3100|2026-05-01T00:00:00Z|2026-06-01T00:00:00Z",
+			"base_fee|ma-b - base fee (qty 1, prorated 21/31 days)|1|4200|2026-05-11T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			pA := f.plan(t, "ma-a", 3100)
 			pB := f.plan(t, "ma-b", 6200)
 			sub := f.activeSub(t, "sub-ma", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 1})
@@ -179,7 +189,10 @@ func parityCorpus() []parityScenario {
 			}
 			return sub
 		}},
-		{name: "quantity-change", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "quantity-change", want: []string{
+			"base_fee|qc - base fee (qty 1, prorated 8/31 days)|1|800|2026-05-01T00:00:00Z|2026-05-09T00:00:00Z",
+			"base_fee|qc - base fee (qty 5, prorated 23/31 days)|5|11500|2026-05-09T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			p := f.plan(t, "qc", 3100)
 			sub := f.activeSub(t, "sub-qc", parityPS, domain.SubscriptionItem{PlanID: p.ID, Quantity: 1})
 			if _, err := f.subs.UpdateItemQuantity(clock.WithEffectiveNow(f.ctx, day(8)), f.tenantID, sub.Items[0].ID, 5); err != nil {
@@ -187,7 +200,10 @@ func parityCorpus() []parityScenario {
 			}
 			return sub
 		}},
-		{name: "plan-swap-immediate", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "plan-swap-immediate", want: []string{
+			"base_fee|ps-a - base fee (qty 1, prorated 12/31 days)|1|1200|2026-05-01T00:00:00Z|2026-05-13T00:00:00Z",
+			"base_fee|ps-b - base fee (qty 1, prorated 19/31 days)|1|5700|2026-05-13T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			pA := f.plan(t, "ps-a", 3100)
 			pB := f.plan(t, "ps-b", 9300)
 			sub := f.activeSub(t, "sub-ps", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 1})
@@ -196,7 +212,9 @@ func parityCorpus() []parityScenario {
 			}
 			return sub
 		}},
-		{name: "scheduled-swap-at-boundary", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "scheduled-swap-at-boundary", want: []string{
+			"base_fee|ss-a - base fee (qty 1)|1|3100|2026-05-01T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			pA := f.plan(t, "ss-a", 3100)
 			pB := f.plan(t, "ss-b", 9300)
 			sub := f.activeSub(t, "sub-ss", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 1})
@@ -205,7 +223,10 @@ func parityCorpus() []parityScenario {
 			}
 			return sub
 		}},
-		{name: "remove-mid-period", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "remove-mid-period", want: []string{
+			"base_fee|rm-a - base fee (qty 1)|1|3100|2026-05-01T00:00:00Z|2026-06-01T00:00:00Z",
+			"base_fee|rm-b - base fee (qty 1, prorated 15/31 days)|1|3000|2026-05-01T00:00:00Z|2026-05-16T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			pA := f.plan(t, "rm-a", 3100)
 			pB := f.plan(t, "rm-b", 6200)
 			sub := f.activeSub(t, "sub-rm", parityPS,
@@ -216,10 +237,13 @@ func parityCorpus() []parityScenario {
 			}
 			return sub
 		}},
-		{name: "same-instant-add-and-swap", build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "same-instant-add-and-swap", want: []string{
+			"base_fee|si-a - base fee (qty 1)|1|3100|2026-05-01T00:00:00Z|2026-06-01T00:00:00Z",
+			"base_fee|si-c - base fee (qty 1, prorated 25/31 days)|1|7500|2026-05-07T00:00:00Z|2026-06-01T00:00:00Z",
+		}, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			// A frozen sim clock lands an add and a plan swap on ONE
 			// instant — the shape that exposed the id-order tie bug on
-			// real data. Both readers must bill the POST-swap plan.
+			// real data. The reader must bill the POST-swap plan.
 			pA := f.plan(t, "si-a", 3100)
 			pB := f.plan(t, "si-b", 6200)
 			pC := f.plan(t, "si-c", 9300)
@@ -234,7 +258,10 @@ func parityCorpus() []parityScenario {
 			}
 			return sub
 		}},
-		{name: "cancel-mid-period", cancelDay: 20, build: func(t *testing.T, f *parityFixture) domain.Subscription {
+		{name: "cancel-mid-period", want: []string{
+			"base_fee|cx-a - base fee (qty 2, prorated 9/31 days)|2|1800|2026-05-01T00:00:00Z|2026-05-10T00:00:00Z",
+			"base_fee|cx-a - base fee (qty 3, prorated 11/31 days)|3|3300|2026-05-10T00:00:00Z|2026-05-21T00:00:00Z",
+		}, cancelDay: 20, build: func(t *testing.T, f *parityFixture) domain.Subscription {
 			pA := f.plan(t, "cx-a", 3100)
 			sub := f.activeSub(t, "sub-cx", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 2})
 			if _, err := f.subs.UpdateItemQuantity(clock.WithEffectiveNow(f.ctx, day(9)), f.tenantID, sub.Items[0].ID, 3); err != nil {
@@ -245,11 +272,11 @@ func parityCorpus() []parityScenario {
 	}
 }
 
-// runParityScenario executes one shape under one mode and returns the
-// sub's sorted line fingerprints.
-func runParityScenario(t *testing.T, db *postgres.DB, sc parityScenario, mode string) (lines []string, allowlisted, unexplained uint64) {
+// runIntervalScenario executes one shape and returns the sub's sorted
+// line fingerprints.
+func runIntervalScenario(t *testing.T, db *postgres.DB, sc intervalScenario) []string {
 	t.Helper()
-	f := newParityFixture(t, db, sc.name+"-"+mode)
+	f := newParityFixture(t, db, sc.name)
 	sub := sc.build(t, f)
 
 	if sc.cancelDay > 0 {
@@ -258,107 +285,79 @@ func runParityScenario(t *testing.T, db *postgres.DB, sc parityScenario, mode st
 		if err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
-		eng := f.engine(t, mode, at.Add(time.Minute))
+		eng := f.engine(t, at.Add(time.Minute))
 		// The in_arrears final-on-cancel invoice (the segment-walk path).
 		if _, err := eng.BillFinalOnImmediateCancel(f.ctx, canceled); err != nil {
-			t.Fatalf("bill final on cancel (%s): %v", mode, err)
+			t.Fatalf("bill final on cancel: %v", err)
 		}
-		_, al, un := eng.ShadowParityStats()
-		return f.invoiceLines(t, sub.ID), al, un
+		return f.invoiceLines(t, sub.ID)
 	}
 
-	eng := f.engine(t, mode, parityPE.Add(time.Nanosecond))
+	eng := f.engine(t, parityPE.Add(time.Nanosecond))
 	count, errs := eng.RunCycleForTenant(f.ctx, f.tenantID, 50)
 	if len(errs) > 0 {
-		t.Fatalf("cycle close (%s): %v", mode, errs)
+		t.Fatalf("cycle close: %v", errs)
 	}
 	if count == 0 {
-		t.Fatalf("cycle close (%s): no invoice generated", mode)
+		t.Fatal("cycle close: no invoice generated")
 	}
-	_, al, un := eng.ShadowParityStats()
-	return f.invoiceLines(t, sub.ID), al, un
+	return f.invoiceLines(t, sub.ID)
 }
 
-// TestIntervalParity_Corpus is the ADR-101 CI hard gate: for every
-// corpus shape, (a) the comparator reports zero unexplained divergence
-// in both modes, and (b) the invoices billed by mode=shadow (legacy
-// math) and mode=on (interval reader) are line-for-line identical.
-func TestIntervalParity_Corpus(t *testing.T) {
+// TestIntervalReader_Corpus is the ADR-101 CI hard gate post-Phase-4:
+// each corpus shape's invoice lines must match the pinned goldens.
+func TestIntervalReader_Corpus(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	for _, sc := range parityCorpus() {
+	for _, sc := range intervalCorpus() {
 		t.Run(sc.name, func(t *testing.T) {
-			legacyLines, alS, unS := runParityScenario(t, db, sc, billing.IntervalReaderShadow)
-			intervalLines, alO, unO := runParityScenario(t, db, sc, billing.IntervalReaderOn)
-			if unS != 0 || unO != 0 {
-				t.Fatalf("unexplained divergence: shadow=%d on=%d", unS, unO)
-			}
-			if alS != 0 || alO != 0 {
-				t.Fatalf("no corpus shape should hit an allowlist class: shadow=%d on=%d", alS, alO)
-			}
-			if strings.Join(legacyLines, "\n") != strings.Join(intervalLines, "\n") {
-				t.Fatalf("mode=shadow and mode=on billed differently:\nlegacy:\n%s\nintervals:\n%s",
-					strings.Join(legacyLines, "\n"), strings.Join(intervalLines, "\n"))
-			}
-			if len(legacyLines) == 0 {
+			got := runIntervalScenario(t, db, sc)
+			if len(got) == 0 {
 				t.Fatal("scenario produced no lines — corpus shape is not exercising billing")
+			}
+			if len(sc.want) == 0 {
+				t.Fatalf("golden missing for %s — captured lines:\n%s", sc.name, strings.Join(got, "\n"))
+			}
+			if strings.Join(got, "\n") != strings.Join(sc.want, "\n") {
+				t.Fatalf("lines diverge from golden:\ngot:\n%s\nwant:\n%s",
+					strings.Join(got, "\n"), strings.Join(sc.want, "\n"))
 			}
 		})
 	}
 }
 
-// TestIntervalParity_CatchupLifetimeAllowlisted: an item added AFTER
-// the closing window (engine-down catch-up interleave) is billed for
-// the full window by the legacy walk — a registered bug — while its
-// interval lifetime correctly starts later. The comparator must
-// classify (not scream), and the interval reader must NOT bill the
-// phantom line.
-func TestIntervalParity_CatchupLifetimeAllowlisted(t *testing.T) {
+// TestIntervalReader_CatchupLifetimeOutsideWindow: an item added AFTER
+// the closing window (engine-down catch-up interleave) must NOT be
+// billed for that window — its interval lifetime starts later. This is
+// the shape the legacy fact-log walk got wrong (billed the phantom
+// full window); the interval reader fixes it structurally.
+func TestIntervalReader_CatchupLifetimeOutsideWindow(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-
-	build := func(f *parityFixture) (domain.Subscription, domain.Plan) {
-		pA := f.plan(t, "cu-a", 3100)
-		pB := f.plan(t, "cu-b", 770000) // loud in any line it appears on
-		sub := f.activeSub(t, "sub-cu", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 1})
-		if _, err := f.subs.AddItem(clock.WithEffectiveNow(f.ctx, parityPE.AddDate(0, 0, 2)), f.tenantID,
-			domain.SubscriptionItem{SubscriptionID: sub.ID, PlanID: pB.ID, Quantity: 1}); err != nil {
-			t.Fatalf("late add: %v", err)
-		}
-		return sub, pB
+	f := newParityFixture(t, db, "cu")
+	pA := f.plan(t, "cu-a", 3100)
+	pB := f.plan(t, "cu-b", 770000) // loud in any line it appears on
+	sub := f.activeSub(t, "sub-cu", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 1})
+	if _, err := f.subs.AddItem(clock.WithEffectiveNow(f.ctx, parityPE.AddDate(0, 0, 2)), f.tenantID,
+		domain.SubscriptionItem{SubscriptionID: sub.ID, PlanID: pB.ID, Quantity: 1}); err != nil {
+		t.Fatalf("late add: %v", err)
 	}
 
-	// Shadow: legacy bills the phantom full-window line (current
-	// behavior preserved), comparator classifies it as the known class.
-	fS := newParityFixture(t, db, "cu-shadow")
-	subS, pBS := build(fS)
-	engS := fS.engine(t, billing.IntervalReaderShadow, parityPE.Add(time.Nanosecond))
-	if _, errs := engS.RunCycleForTenant(fS.ctx, fS.tenantID, 50); len(errs) > 0 {
-		t.Fatalf("shadow close: %v", errs)
+	eng := f.engine(t, parityPE.Add(time.Nanosecond))
+	if _, errs := eng.RunCycleForTenant(f.ctx, f.tenantID, 50); len(errs) > 0 {
+		t.Fatalf("close: %v", errs)
 	}
-	_, alS, unS := engS.ShadowParityStats()
-	if unS != 0 || alS == 0 {
-		t.Fatalf("catch-up shape must be allowlisted, not unexplained: allowlisted=%d unexplained=%d", alS, unS)
+	lines := f.invoiceLines(t, sub.ID)
+	if strings.Contains(strings.Join(lines, "\n"), pB.Name) {
+		t.Fatalf("reader must not bill an item added after the window: %v", lines)
 	}
-	if lines := fS.invoiceLines(t, subS.ID); !strings.Contains(strings.Join(lines, "\n"), pBS.Name) {
-		t.Fatalf("shadow mode must preserve legacy behavior (phantom line present): %v", lines)
-	}
-
-	// On: the interval reader bills only what existed in the window.
-	fO := newParityFixture(t, db, "cu-on")
-	subO, pBO := build(fO)
-	engO := fO.engine(t, billing.IntervalReaderOn, parityPE.Add(time.Nanosecond))
-	if _, errs := engO.RunCycleForTenant(fO.ctx, fO.tenantID, 50); len(errs) > 0 {
-		t.Fatalf("on close: %v", errs)
-	}
-	if lines := fO.invoiceLines(t, subO.ID); strings.Contains(strings.Join(lines, "\n"), pBO.Name) {
-		t.Fatalf("interval reader must not bill an item added after the window: %v", lines)
+	if !strings.Contains(strings.Join(lines, "\n"), pA.Name) {
+		t.Fatalf("the in-window item must still bill: %v", lines)
 	}
 }
 
-// TestIntervalParity_MissingIntervalRowsLoud: reader mode "on" refuses
-// to bill an active item that has NO interval rows at all (writer bug
-// = silent zero forever); shadow mode records it as unexplained but
-// keeps billing legacy.
-func TestIntervalParity_MissingIntervalRowsLoud(t *testing.T) {
+// TestIntervalReader_MissingIntervalRowsLoud: the reader refuses to
+// bill an active item that has NO interval rows at all — that is a
+// writer bug, and silence would bill the item zero forever.
+func TestIntervalReader_MissingIntervalRowsLoud(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	f := newParityFixture(t, db, "missing")
 	p := f.plan(t, "mi", 3100)
@@ -376,46 +375,22 @@ func TestIntervalParity_MissingIntervalRowsLoud(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	engS := f.engine(t, billing.IntervalReaderShadow, parityPE.Add(time.Nanosecond))
-	if _, errs := engS.RunCycleForTenant(f.ctx, f.tenantID, 50); len(errs) > 0 {
-		t.Fatalf("shadow mode must keep billing on missing rows: %v", errs)
-	}
-	_, _, un := engS.ShadowParityStats()
-	if un == 0 {
-		t.Fatal("missing interval rows must count as unexplained divergence in shadow mode")
-	}
-
-	// Fresh sub, same corruption, reader on: the close must fail loud.
-	f2 := newParityFixture(t, db, "missing-on")
-	p2 := f2.plan(t, "mi2", 3100)
-	sub2 := f2.activeSub(t, "sub-mi2", parityPS, domain.SubscriptionItem{PlanID: p2.ID, Quantity: 1})
-	tx2, err := db.BeginTx(f2.ctx, postgres.TxTenant, f2.tenantID)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer postgres.Rollback(tx2)
-	if _, err := tx2.ExecContext(f2.ctx, `DELETE FROM billing_intervals WHERE subscription_id = $1`, sub2.ID); err != nil {
-		t.Fatalf("wipe: %v", err)
-	}
-	if err := tx2.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	engO := f2.engine(t, billing.IntervalReaderOn, parityPE.Add(time.Nanosecond))
-	_, errs := engO.RunCycleForTenant(f2.ctx, f2.tenantID, 50)
+	eng := f.engine(t, parityPE.Add(time.Nanosecond))
+	_, errs := eng.RunCycleForTenant(f.ctx, f.tenantID, 50)
 	if len(errs) == 0 {
-		t.Fatal("reader mode on must fail loud on an active item with no interval rows")
+		t.Fatal("the reader must fail loud on an active item with no interval rows")
 	}
 	if !strings.Contains(fmt.Sprint(errs), "no interval rows") {
 		t.Fatalf("error must name the missing-interval invariant: %v", errs)
 	}
 }
 
-// TestIntervalParity_TZClampMissAllowlisted: the tenant timezone
-// changes AFTER an add was clamped at write time — the legacy reader
-// re-evaluates the calendar day in the NEW zone and disagrees. The
-// write-time decision is the correct one (ADR-101's structural fix);
-// the comparator classifies instead of screaming.
-func TestIntervalParity_TZClampMissAllowlisted(t *testing.T) {
+// TestIntervalReader_TZChangeDoesNotReinterpret: the day-grade decision
+// was made ONCE at write time in the tenant TZ that existed then; a
+// later TZ change must not re-render it (the org-TZ clamp-miss class
+// ADR-101 §Context names — the legacy read-time walk re-evaluated the
+// calendar day in the NEW zone and disagreed with itself).
+func TestIntervalReader_TZChangeDoesNotReinterpret(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	f := newParityFixture(t, db, "tz")
 	settings := tenant.NewSettingsStore(db)
@@ -437,9 +412,9 @@ func TestIntervalParity_TZClampMissAllowlisted(t *testing.T) {
 	pB := f.plan(t, "tz-b", 6200)
 	sub := f.activeSub(t, "sub-tz", parityPS, domain.SubscriptionItem{PlanID: pA.ID, Quantity: 1})
 	// 2026-05-01 20:00 UTC is 2026-05-02 01:30 in Kolkata — NOT the
-	// period-start calendar day there, so the write does not clamp; in
-	// UTC (the later zone) it IS the same day, so the legacy read
-	// clamps. Write-time truth: open at the raw instant.
+	// period-start calendar day there, so the write did NOT clamp: the
+	// interval opens at the raw instant. Flipping the tenant to UTC
+	// (where it IS the same day) must not change what bills.
 	addAt := parityPS.Add(20 * time.Hour)
 	if _, err := f.subs.AddItem(clock.WithEffectiveNow(f.ctx, addAt), f.tenantID,
 		domain.SubscriptionItem{SubscriptionID: sub.ID, PlanID: pB.ID, Quantity: 1}); err != nil {
@@ -447,12 +422,17 @@ func TestIntervalParity_TZClampMissAllowlisted(t *testing.T) {
 	}
 	setTZ("UTC")
 
-	eng := f.engine(t, billing.IntervalReaderShadow, parityPE.Add(time.Nanosecond))
+	eng := f.engine(t, parityPE.Add(time.Nanosecond))
 	if _, errs := eng.RunCycleForTenant(f.ctx, f.tenantID, 50); len(errs) > 0 {
 		t.Fatalf("close: %v", errs)
 	}
-	_, al, un := eng.ShadowParityStats()
-	if un != 0 || al == 0 {
-		t.Fatalf("tz clamp-miss must be allowlisted, not unexplained: allowlisted=%d unexplained=%d", al, un)
+	joined := strings.Join(f.invoiceLines(t, sub.ID), "\n")
+	// The pB line's period starts at the write-time instant, not a
+	// re-clamped parityPS.
+	if !strings.Contains(joined, addAt.UTC().Format(time.RFC3339)) {
+		t.Fatalf("pB must bill from the write-time open instant %s (no TZ reinterpretation):\n%s", addAt.UTC().Format(time.RFC3339), joined)
+	}
+	if strings.Contains(joined, "tz-b|1|6200|"+parityPS.UTC().Format(time.RFC3339)) {
+		t.Fatalf("pB billed a full window — the later TZ change re-clamped the open:\n%s", joined)
 	}
 }
