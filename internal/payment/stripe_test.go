@@ -62,9 +62,9 @@ type mockInvoiceUpdater struct {
 	// chargeAttempts records every ADR-102 attempt-fact write (chokepoint
 	// insert + settle-path upserts), in call order.
 	chargeAttempts []domain.InvoiceChargeAttempt
-	invoices    map[string]domain.Invoice
-	byPI        map[string]string // PI ID -> invoice ID
-	failNotedPI map[string]string // invoice ID -> PI whose failure notifications fired
+	invoices       map[string]domain.Invoice
+	byPI           map[string]string // PI ID -> invoice ID
+	failNotedPI    map[string]string // invoice ID -> PI whose failure notifications fired
 	// cardEventEnqueues counts payment.succeeded enqueues — mirrors the real
 	// store enqueuing payment.succeeded IN-TX, gated on the transition (so a
 	// concurrent redelivery increments it once, not twice).

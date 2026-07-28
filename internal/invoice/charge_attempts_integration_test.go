@@ -133,7 +133,7 @@ func TestRecordChargeAttempt_UpsertContract(t *testing.T) {
 	}
 
 	// Empty-PI attempts insert-only: two PI-create failures = two rows.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := store.RecordChargeAttempt(ctx, tenantID, domain.InvoiceChargeAttempt{
 			InvoiceID: inv.ID, Trigger: domain.ChargeTriggerAutoCharge,
 			Outcome: domain.ChargeAttemptUnknown, ProviderReason: "network timeout creating PaymentIntent",

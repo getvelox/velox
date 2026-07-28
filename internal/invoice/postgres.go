@@ -3275,7 +3275,7 @@ func (s *PostgresStore) ListChargeAttemptsByInvoice(ctx context.Context, tenantI
 	if err != nil {
 		return nil, fmt.Errorf("list charge attempts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []domain.InvoiceChargeAttempt
 	for rows.Next() {
