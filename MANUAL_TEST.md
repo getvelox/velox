@@ -1186,13 +1186,13 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 - [ ] **Duplicate charge is loud:** simulate a second different-PI success on a paid invoice (Stripe CLI resend with a new PI) → invoice shows the Critical "second payment succeeded" banner naming both PIs; `payment.duplicate_charge` fires; same-PI redeliveries stay silent.
 - [x] **Post-payment settle poll (ADR-067 companion):** pay via the hosted page → on the `?paid=1` redirect the page shows "Processing your payment…" with NO Pay button, then flips to Paid within a few seconds without a manual refresh. Simulate a failed charge → red "Payment didn't complete — your card was not charged" banner and Pay returns. Stall the webhook >3 min → amber "taking longer than usual — you will not be charged twice" copy, Pay still hidden. *(walked 2026-07-28 by killing `stripe listen` before paying: NIM-000265 showed the green Processing interim with no Pay button, then the amber "Confirmation is taking longer than usual — you will not be charged twice" copy after the 3-min poll cap; restarting the forwarder + `stripe events resend` settled it to paid. Failed-charge leg on NIM-000266: red banner + Pay returned.)*
 
-- [ ] Draft invoice has no `public_token`. Finalize → token minted (`vlx_pinv_` + 64 hex).
+- [x] Draft invoice has no `public_token`. Finalize → token minted (`vlx_pinv_` + 64 hex). *(walked 2026-07-28 on VLX-000018: the draft's create response carries public_token=null; finalize mints `vlx_pinv_` + exactly 64 lowercase hex.)*
 - [ ] Detail page: **Copy Link** button. **Rotate** typed-confirm dialog (type `ROTATE`). Buttons hidden on draft.
 
 ### Public render (open in incognito)
 - [x] Loads without login. Header: tenant logo + company_name + support_url. Optional 3px accent bar. *(walked 2026-07-27.)*
 - [x] Invoice meta: number (mono), amount due (large tabular), due date. *(walked 2026-07-27.)*
-- [ ] Bill-to + From columns. Line-items table with tabular numerals.
+- [x] Bill-to + From columns. Line-items table with tabular numerals. *(walked 2026-07-28 on the same page: Bill-to and From columns render, line items in a table with tabular numerals, totals block beneath.)*
 - [ ] Totals: subtotal, optional discount, optional tax with rate, reverse-charge **or tax-exempt** notice if applicable (`Tax-exempt — <reason>` for an exempt customer; previously dropped on the hosted page), total, amount paid, **Amount due** bold.
 - [x] **Pay {amount}** primary button (brand_color). **Download PDF** secondary. *(walked 2026-07-27.)*
 - [x] Footer: "Secured by Stripe" + "Powered by Velox Billing". *(walked 2026-07-27.)*
@@ -1207,14 +1207,14 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 - [x] **Interactive decline suppresses email (ADR-023)**: Pay with `4000 0000 0000 0002` (decline) → invoice goes to `payment_status=failed` → activity timeline shows the lifecycle row "Payment failed" but NO "Payment-failed email sent" row (customer was watching). Mailpit shows zero new emails. Auto-charge decline (e.g. dunning retry) still emails — only the interactive flow suppresses. *(walked 2026-07-28 on NIM-000266: `payment_intent.payment_failed` delivered, `payment_status=failed`, Mailpit count unchanged. Timeline: the failure renders as "Payment recovery started" with the decline cause subline (dunning-start-cause fix + uniform-title revision, 2026-07-28) and the PI folded on; no email row appears, which is the ADR-023 assertion.)*
 
 ### Variants
-- [ ] Voided invoice → "Voided on {date}" banner, no Pay, PDF works.
-- [ ] Draft invoice URL → 404.
+- [x] Voided invoice → "Voided on {date}" banner, no Pay, PDF works. *(walked 2026-07-28 on VLX-000018: banner "Voided on Aug 20, 2026 — this invoice is no longer owed.", zero buttons (no Pay), and the PDF still serves through the public token — HTTP 200, application/pdf, 34.5 KB. FOUND + FIXED while walking: the totals block still labelled the surviving figure "Amount due" on a voided (and uncollectible) invoice — amount_due_cents survives those transitions by design, so the page told a customer they owed money we had stopped collecting. Now reads "Invoice amount", matching the same-day fix on the payment-update page.)*
+- [x] Draft invoice URL → 404. *(walked 2026-07-28: a well-formed but unminted token on the public route returns HTTP 404 — no distinction leaked between "draft" and "never existed".)*
 - [x] Rotated → old URL 404, new works. *(walked 2026-07-26 via rotate-public-token: old 404, new 200.)*
 
 ### Security
 - [x] Public JSON has no `tenant_id, subscription_id, tax_id, stripe_*_id`. *(walked 2026-07-26 — clean at both envelope and invoice levels; payload carries livemode:false for the test-mode banner.)*
 - [x] 61+ req/min same IP → 429 with `Retry-After`. *(walked 2026-07-26 with Redis up: 60 pass, then 429 + `Retry-After: 60`. The earlier "fails open, no warning" note was wrong on both counts: with Redis down the boot WARN "redis not reachable — general/hosted rate limiters FAIL CLOSED in production…" fires, dev fail-open is the deliberate OWASP-anchored split, and production fails CLOSED — router.go documents the design.)*
-- [ ] Operator `POST /v1/invoices/{id}/rotate-public-token` requires `PermInvoiceWrite`.
+- [x] Operator `POST /v1/invoices/{id}/rotate-public-token` requires `PermInvoiceWrite`. *(walked 2026-07-28 on VLX-000018: a **publishable** key (the type that holds no tenant-wide scopes) gets 403 `forbidden` — "insufficient permissions: this key type does not have invoice:write access" — while the operator session rotates the token to a fresh vlx_pinv_. NOTE for future walks: Velox permissions are TYPE-derived, not per-key — an `api-keys` create body carrying a `permissions` array is silently ignored, and the type field is `key_type` (a `type` key silently yields a full secret key). Testing an authorization gate therefore requires choosing the right key TYPE.)*
 
 ## FLOW I11: `create_preview`
 

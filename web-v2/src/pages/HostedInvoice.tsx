@@ -581,8 +581,18 @@ export default function HostedInvoicePage() {
                     </dd>
                   </div>
                 )}
+                {/* amount_due_cents survives a void / write-off by design —
+                    those transitions reverse COLLECTION, they don't rewrite
+                    the figure. Labelling it "Amount due" on a closed invoice
+                    tells the customer they owe money we've stopped
+                    collecting; name it for what it is instead (same fix as
+                    the payment-update page, 2026-07-28). */}
                 <div className="flex justify-between pt-2 border-t font-semibold">
-                  <dt className="text-foreground">Amount due</dt>
+                  <dt className="text-foreground">
+                    {invoice.status === 'voided' || invoice.status === 'uncollectible'
+                      ? 'Invoice amount'
+                      : 'Amount due'}
+                  </dt>
                   <dd className="text-foreground tabular-nums">
                     {formatCents(invoice.amount_due_cents, invoice.currency)}
                   </dd>
