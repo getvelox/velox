@@ -27,8 +27,12 @@ func (c *countingDunningStarter) StartDunning(_ context.Context, _, _, _ string,
 // manually" ERROR per declined invoice.
 func TestStartDunningWithRetry_SkipsInvalidState(t *testing.T) {
 	d := &countingDunningStarter{err: errs.InvalidState("dunning not configured — no policy for tenant")}
-	if err := startDunningWithRetry(context.Background(), d, "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCausePaymentFailed); err != nil {
+	started, err := startDunningWithRetry(context.Background(), d, "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCausePaymentFailed)
+	if err != nil {
 		t.Fatalf("InvalidState is a deliberate skip → want nil, got %v", err)
+	}
+	if started {
+		t.Fatal("a deliberate skip must report started=false — the caller logs 'dunning started' off this (I5 dunning-disabled walk)")
 	}
 	if d.calls != 1 {
 		t.Fatalf("calls = %d, want 1 (a deliberate skip must NOT retry)", d.calls)
@@ -40,7 +44,7 @@ func TestStartDunningWithRetry_SkipsInvalidState(t *testing.T) {
 // attempt and then propagates (fail loud).
 func TestStartDunningWithRetry_RetriesTransient(t *testing.T) {
 	d := &countingDunningStarter{err: errors.New("db down")}
-	if err := startDunningWithRetry(context.Background(), d, "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCausePaymentFailed); err == nil {
+	if _, err := startDunningWithRetry(context.Background(), d, "t1", "inv_1", "cus_1", time.Time{}, domain.DunningCausePaymentFailed); err == nil {
 		t.Fatal("a transient error must propagate after retries, got nil")
 	}
 	if d.calls != 3 {
