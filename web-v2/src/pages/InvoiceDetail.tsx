@@ -146,6 +146,7 @@ const LANE_LABELS: Record<string, string> = {
   emails: 'customer notifications',
   stripe: 'payment events',
   dunning: 'payment recovery',
+  audit: 'action history',
 }
 const laneLabel = (lane: string): string => LANE_LABELS[lane] ?? lane
 

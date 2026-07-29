@@ -59,6 +59,19 @@ type PaymentSetupGetter interface {
 	GetPaymentSetup(ctx context.Context, tenantID, customerID string) (domain.CustomerPaymentSetup, error)
 }
 
+// AuditStampFetcher returns the audit entries for one invoice — the
+// wall-clock record of its operator/engine transitions. The timeline
+// uses it as READ-TIME enrichment (ADR-104 Invariant A, corrected
+// twice): lifecycle rows are derived from invoice state columns, whose
+// stamps follow the entity's calendar (ADR-030), so their real-world
+// moment lives only in the audit log. Joining it here is the
+// subscription timeline's model applied to the invoice page — exact
+// keys (action + the frozen-vocabulary metadata discriminator), never
+// a time-window match. Consumer-defined; backed by audit.Logger.Query.
+type AuditStampFetcher interface {
+	ListByInvoice(ctx context.Context, tenantID, invoiceID string) ([]domain.AuditEntry, error)
+}
+
 // NoPaymentMethodNotifier emails the customer a payment-update link when a
 // finalized invoice can't be auto-charged because no payment method is on
 // file. Structurally identical to the billing engine's notifier of the same
@@ -201,6 +214,7 @@ type Handler struct {
 	refundIssuer    RefundIssuer
 	auditLogger     auditWriter
 	noPMNotifier    NoPaymentMethodNotifier
+	auditStamps     AuditStampFetcher
 }
 
 // auditWriter is the narrow audit-write interface the invoice handler uses.
@@ -245,6 +259,9 @@ func NewHandler(svc *Service, customers CustomerGetter, settings SettingsGetter,
 func (h *Handler) SetEmailSender(sender EmailSender) {
 	h.emailSender = sender
 }
+
+// SetAuditStamps wires the timeline's audit enrichment (ADR-104).
+func (h *Handler) SetAuditStamps(f AuditStampFetcher) { h.auditStamps = f }
 
 // SetNoPaymentMethodNotifier wires the customer-notification dispatcher
 // used when a manually-finalized invoice can't be auto-charged (no PM on
@@ -1332,6 +1349,43 @@ func dunningEventRank(eventType domain.DunningEventType) int {
 	}
 }
 
+// lifecycleRecordedStamps joins an invoice's audit entries to the
+// lifecycle event types they transition (ADR-104 Invariant A, corrected
+// boundary №2). EXACT keys only: the top-level action for
+// create/finalize/void, the frozen-vocabulary metadata discriminator for
+// the two update-flavored transitions (ADR-090 froze the action set, so
+// mark-uncollectible and record-payment ride action=update). Earliest
+// row wins — each transition happens once, and Query returns
+// newest-first, so the walk runs backwards. A transition with no audit
+// row is simply absent: its timeline row renders bare, honest for
+// pre-audit history.
+func lifecycleRecordedStamps(entries []domain.AuditEntry) map[string]string {
+	out := map[string]string{}
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		key := ""
+		switch e.Action {
+		case domain.AuditActionCreate:
+			key = "invoice.created"
+		case domain.AuditActionFinalize:
+			key = "invoice.finalized"
+		case domain.AuditActionVoid:
+			key = "invoice.voided"
+		case domain.AuditActionUpdate:
+			switch e.Metadata["action"] {
+			case "marked_uncollectible":
+				key = "invoice.marked_uncollectible"
+			case "payment_recorded":
+				key = "invoice.paid"
+			}
+		}
+		if key != "" && out[key] == "" {
+			out[key] = e.CreatedAt.Format(time.RFC3339)
+		}
+	}
+	return out
+}
+
 // sortInvoiceTimeline orders events by their full-precision source
 // instant, breaking true same-instant ties by causal rank, and residual
 // ties by insertion order (SliceStable; callers append sources oldest-
@@ -1435,6 +1489,20 @@ func renderChargeAttempts(events []timelineEvent, attempts []domain.InvoiceCharg
 		case domain.ChargeAttemptFailed, domain.ChargeAttemptUnknown:
 		case domain.ChargeAttemptSucceeded:
 			if inv.PaidAt != nil {
+				// The paid lifecycle row owns this success's story — and
+				// this attempt owns its WALL moment (a webhook settle
+				// writes no operator audit row, so the attempt's
+				// occurred_at is the only real-world stamp the paid row
+				// can honestly carry; ADR-104 Invariant A). Lift it when
+				// the audit join left the row bare.
+				if a.SimEffectiveAt != nil {
+					for i := range events {
+						if events[i].EventType == "invoice.paid" && events[i].Source == "lifecycle" && events[i].RecordedAt == "" {
+							events[i].RecordedAt = a.OccurredAt.Format(time.RFC3339)
+							break
+						}
+					}
+				}
 				continue
 			}
 		default: // pending
@@ -1815,6 +1883,34 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 
 	var events []timelineEvent
 
+	// lifecycle rows come from the invoice row itself (a failure there
+	// 500s above); side lanes degrade LOUDLY instead: named in `degraded`,
+	// logged, and bannered by the UI. `truncated` discloses the one capped
+	// lane (credit notes, CreditNoteLaneCap). Declared up here because the
+	// audit-stamp join below is the first fallible lane.
+	degraded := []string{}
+	truncated := false
+	degrade := func(lane string, err error) {
+		degraded = append(degraded, lane)
+		slog.ErrorContext(r.Context(), "payment timeline: lane degraded", "lane", lane, "invoice_id", inv.ID, "error", err)
+	}
+
+	// Wall-clock stamps for the lifecycle rows (ADR-104 Invariant A,
+	// corrected boundary №2 — operator nudge, same afternoon as the CN
+	// one): lifecycle rows derive from invoice state columns whose stamps
+	// follow the entity's calendar, so their real-world moment lives only
+	// in the audit log. Exact-keyed join; earliest row wins; a missing
+	// entry leaves the row bare — honest for pre-audit history. Fetch
+	// failure degrades the lane like every other source.
+	lifecycleRecorded := map[string]string{}
+	if isSimulated && h.auditStamps != nil {
+		if entries, err := h.auditStamps.ListByInvoice(r.Context(), tenantID, inv.ID); err != nil {
+			degrade("audit", err)
+		} else {
+			lifecycleRecorded = lifecycleRecordedStamps(entries)
+		}
+	}
+
 	// Lifecycle events synthesised from invoice columns. Without these,
 	// freshly-finalized invoices that haven't seen a Stripe charge yet
 	// render an empty timeline — operators have no chronology to read.
@@ -1830,6 +1926,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 		Status:      "succeeded",
 		Description: "Invoice created",
 		IsSimulated: isSimulated,
+		RecordedAt:  lifecycleRecorded["invoice.created"],
 	})
 	if inv.IssuedAt != nil {
 		amt := inv.AmountDueCents
@@ -1842,6 +1939,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 			EventType:   "invoice.finalized",
 			Status:      "succeeded",
 			Description: "Invoice finalized",
+			RecordedAt:  lifecycleRecorded["invoice.finalized"],
 			AmountCents: &amt,
 			Currency:    inv.Currency,
 			IsSimulated: isSimulated,
@@ -1862,6 +1960,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 			EventType:   "invoice.voided",
 			Status:      "canceled",
 			Description: "Invoice voided",
+			RecordedAt:  lifecycleRecorded["invoice.voided"],
 			IsSimulated: isSimulated,
 		})
 	}
@@ -1875,6 +1974,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 			EventType:   "invoice.marked_uncollectible",
 			Status:      "canceled",
 			Description: "Marked uncollectible — written off as bad debt",
+			RecordedAt:  lifecycleRecorded["invoice.marked_uncollectible"],
 			IsSimulated: isSimulated,
 		})
 	}
@@ -1897,6 +1997,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 			Source:      "lifecycle",
 			EventType:   "invoice.paid",
 			Status:      "succeeded",
+			RecordedAt:  lifecycleRecorded["invoice.paid"],
 			Description: desc,
 			AmountCents: &amt,
 			Currency:    inv.Currency,
@@ -1909,16 +2010,6 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// side-lane fetch failure used to be swallowed (`if err == nil`) — the
 	// lane silently vanished, and a timeline missing its dunning rows is
 	// indistinguishable from an invoice that never saw dunning. The core
-	// lifecycle rows come from the invoice row itself (a failure there
-	// 500s above); side lanes degrade LOUDLY instead: named in `degraded`,
-	// logged, and bannered by the UI. `truncated` discloses the one capped
-	// lane (credit notes, CreditNoteLaneCap).
-	degraded := []string{}
-	truncated := false
-	degrade := func(lane string, err error) {
-		degraded = append(degraded, lane)
-		slog.ErrorContext(r.Context(), "payment timeline: lane degraded", "lane", lane, "invoice_id", inv.ID, "error", err)
-	}
 
 	// Credit-note chronology rows. The settlement waterfall on the page
 	// already shows credit notes channel-by-channel; these rows give the

@@ -131,12 +131,21 @@ Invariants, each mechanized or asserted in MANUAL_TEST:
   calendars when they differ** (emails 0163, attempts 0162, credit
   notes + dunning events 0164 — `recorded_at` stamped `now()` at
   INSERT); rows *derived from entity state columns* (the lifecycle
-  rows) carry the entity's dates with the audit log as their wall
-  record — per-transition shadow columns remain the rejected
-  audit-duplication class. If walks show the same confusion on
-  operator-driven lifecycle transitions (void / uncollectible /
-  offline-pay on a parked clock), the named path is read-time audit
-  enrichment (the subscription timeline's model), not shadows. Known
+  rows) get their wall stamp by **read-time audit enrichment** — the
+  named path, delivered the same day after the operator nudged on
+  manual invoice actions: the timeline joins the invoice's audit
+  entries by EXACT key (top-level action for create/finalize/void; the
+  ADR-090 frozen-vocabulary `metadata.action` discriminator for
+  mark-uncollectible and record-payment, which ride `action=update`),
+  earliest row wins, and the card-settle paid row — which has no
+  operator audit row — lifts `occurred_at` from the succeeded charge
+  attempt it already folds in. Per-transition shadow columns remain the
+  rejected audit-duplication class; enrichment failure degrades the
+  lane loudly ("action history"), and a transition with no audit row
+  renders bare — honest for pre-audit history. Known bounded edge: the
+  audit query caps at 100 newest rows, so a pathological invoice with
+  >100 audit entries loses its oldest stamps (renders bare, never
+  wrong). Known
   residuals accepted: credit-grant rows on the customer page (not a
   timeline surface) and pre-0164 rows (NULL `recorded_at`, no subline,
   no backfill).
