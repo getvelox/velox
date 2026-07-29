@@ -11,13 +11,22 @@ import (
 	"github.com/sagarsuperuser/velox/internal/testutil"
 )
 
-// teardownKeepAllowlist names tables that carry a customer_id column but are
+// teardownKeepAllowlist names tables that carry a customer_id (or
+// test_clock_id — ADR-104 widened the discovery) column but are
 // DELIBERATELY not torn down when a test clock is deleted, each with the written
 // reason. A clock-scoped row left in one of these must be provably inert — no
 // wall-clock plane may ever read it by customer — or it re-opens the leak class
 // ADR-086 (Design B) closes. A stale entry (table gone, or no longer carrying
 // customer_id) fails the test so the list can't rot.
 var teardownKeepAllowlist = map[string]string{
+	// audit_log is the teardown design's NAMED survivor (ADR-086: "NOT torn
+	// down (survivors): the audit log") — forensics must outlive the
+	// simulation they describe, and its created_at is wall-clock always
+	// (ADR-030). Its test_clock_id column is enrichment on rows that
+	// already happened; no wall-clock billing plane reads audit rows to
+	// act, so a surviving row is inert by construction. Discovered by the
+	// test_clock_id widening (ADR-104), not newly exempted behavior.
+	"audit_log": "documented ADR-086 survivor; forensic, wall-clock, never actioned by billing planes",
 	// coupons is a tenant-level catalog object, not a customer-owned row. Its
 	// customer_id is a nullable, FK-less "restrict to this customer" target on a
 	// feature that is CUT pre-launch (ADR-039 — the credit ledger is the discount
@@ -46,8 +55,10 @@ func teardownTables() map[string]bool {
 // design (ADR-086, Design B) stands on: a test clock's simulated data must be
 // torn down COMPLETELY, so every table that can hold a clock-scoped row must be
 // either deleted by the teardown or an explicit, reasoned survivor. It
-// discovers customer-scoped tables from information_schema — no hand-kept list —
-// so a NEW customer-owned table added later fails CI until it is classified.
+// discovers clock-scoped tables from information_schema — any table carrying a
+// customer_id OR a test_clock_id column (ADR-104 added the latter class:
+// email_outbox anchors rows to a clock directly, with no customer_id) — so a
+// NEW clock-owned table added later fails CI until it is classified.
 // This is precisely the guard that would have caught the two real gaps found
 // while building the teardown: customer_discounts missing from the delete set,
 // and customer_payment_setups (a table that had been dropped).
@@ -68,8 +79,9 @@ func TestTeardownCoversEverySimulatedTable(t *testing.T) {
 		JOIN information_schema.tables tb
 		  ON tb.table_schema = c.table_schema AND tb.table_name = c.table_name
 		WHERE c.table_schema = 'public'
-		  AND c.column_name  = 'customer_id'
+		  AND c.column_name IN ('customer_id', 'test_clock_id')
 		  AND tb.table_type  = 'BASE TABLE'
+		  AND c.table_name  <> 'test_clocks'
 		ORDER BY c.table_name`)
 	if err != nil {
 		t.Fatalf("discover customer_id tables: %v", err)
@@ -90,7 +102,7 @@ func TestTeardownCoversEverySimulatedTable(t *testing.T) {
 		if _, ok := teardownKeepAllowlist[name]; ok {
 			continue
 		}
-		t.Errorf("table %q has a customer_id column but is neither torn down by a clock "+
+		t.Errorf("table %q has a customer_id or test_clock_id column but is neither torn down by a clock "+
 			"delete nor in teardownKeepAllowlist — a clock-scoped row would survive "+
 			"teardown and leak into a wall-clock plane. Add a child-first DELETE to "+
 			"clockTeardownStatements, or allowlist it with a reason.", name)
@@ -102,7 +114,7 @@ func TestTeardownCoversEverySimulatedTable(t *testing.T) {
 	for name := range teardownKeepAllowlist {
 		if !seen[name] {
 			t.Errorf("teardownKeepAllowlist has %q, but no such table carries a customer_id "+
-				"column anymore — remove the stale exemption.", name)
+				"or test_clock_id column anymore — remove the stale exemption.", name)
 		}
 	}
 }

@@ -293,20 +293,15 @@ export default function InvoiceDetailPage() {
   // payment events that structurally never appear on a live invoice
   // (2026-07-28 review). So: the whole external lane is gated on
   // is_simulated.
-  const isExternalRow = (e: typeof timeline[number]) =>
-    !!invoice?.is_simulated &&
-    (e.source === 'email' ||
-      e.source === 'stripe' ||
-      ((e.source === 'credit_note' || e.source === 'payment') && !e.is_simulated))
-  const billingTimeline = timeline.filter(e => !isExternalRow(e))
-  const externalTimeline = timeline.filter(isExternalRow)
-  // Constant identity (2026-07-28 design review): the card previously
-  // renamed itself between "Notifications" (emails only) and "Real-time
-  // activity" (payment rows present) — same slot, two names, and one
-  // invoice could flip over its life as folds consumed rows. A card
-  // that renames itself reads as two features; one honest name covers
-  // both contents.
-  const externalLaneTitle = 'Real-time activity'
+  // ONE lane (ADR-104). Every row's primary timestamp is on the
+  // invoice's own calendar — simulated when clock-pinned, since every
+  // fact is anchored at write time (outbox sim anchor for emails,
+  // ADR-102 dual stamps for attempts, entity-derived stamps for the
+  // rest). Rows whose two calendars differ carry recorded_at and render
+  // a "Recorded <wall>" subline (operator contract, Invariant A) — the
+  // second "Real-time activity" card this replaced was a residue of
+  // emails lacking a billing anchor, not a design.
+  const billingTimeline = timeline
 
   // Payment-method snapshot serves two purposes on this page:
   //   1. The success-state card on paid invoices (brand •••• last4).
@@ -1252,7 +1247,7 @@ export default function InvoiceDetailPage() {
             <div className="relative">
               {billingTimeline.map((event, i) => {
                 return (
-                <div key={`${event.source}:${event.event_type}:${event.timestamp}:${event.payment_intent_id ?? ''}`} className="flex gap-4 pb-2 last:pb-0">
+                <div key={event.id ?? `${event.source}:${event.event_type}:${event.timestamp}:${event.payment_intent_id ?? ''}`} className="flex gap-4 pb-2 last:pb-0">
                   <div className="flex flex-col items-center">
                     <div className={cn(
                       'w-2.5 h-2.5 rounded-full mt-1.5',
@@ -1284,72 +1279,20 @@ export default function InvoiceDetailPage() {
                         after {event.attempt_count} retry attempt{event.attempt_count === 1 ? '' : 's'}
                       </p>
                     )}
+                    {/* Operator contract, Invariant A: a row whose primary
+                        timestamp is on the invoice's simulated calendar but
+                        which also touched the real world (emails, charges)
+                        shows the real instant too. One word product-wide —
+                        "Recorded" — matching the subscription timeline. */}
+                    {event.recorded_at && (
+                      <p className="text-xs text-muted-foreground/70 mt-0.5">
+                        Recorded {formatDateTime(event.recorded_at)}
+                      </p>
+                    )}
                   </div>
                 </div>
                 )
               })}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Real-time lane — wall-clock external events (customer emails;
-          Stripe payment outcomes on a simulated invoice) kept out of the
-          (possibly simulated) billing Activity above so a real-time row
-          doesn't sort by its wall-clock instant and land before the
-          simulated event that triggered it. No simulated badge here: these
-          timestamps are genuinely wall-clock. */}
-      {externalTimeline.length > 0 && invoice.status !== 'draft' && (
-        <Card className={cn('mt-6', invoice.status === 'voided' && 'opacity-60')}>
-          <CardHeader>
-            <CardTitle className="text-sm">{externalLaneTitle}</CardTitle>
-            {/* One scannable line for WHY this lane is separate, then an
-                actionable pointer instead of a sentence about one. */}
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Real times — not the test clock's dates.
-            </p>
-            {invoice.customer_id && (
-              <Link
-                to={`/customers/${invoice.customer_id}`}
-                className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground mt-0.5 inline-block"
-              >
-                Payment reminders on the customer page →
-              </Link>
-            )}
-          </CardHeader>
-          <CardContent>
-            <div className="relative">
-              {externalTimeline.map((event, i) => (
-                <div key={`${event.source}:${event.event_type}:${event.timestamp}:${event.payment_intent_id ?? ''}`} className="flex gap-4 pb-2 last:pb-0">
-                  <div className="flex flex-col items-center">
-                    <div className={cn(
-                      'w-2.5 h-2.5 rounded-full mt-1.5',
-                      event.status === 'succeeded' ? 'bg-emerald-500' :
-                      event.status === 'failed' || event.status === 'canceled' ? 'bg-destructive' :
-                      'bg-muted-foreground/40',
-                    )} />
-                    {i < externalTimeline.length - 1 && <div className="w-px flex-1 bg-border mt-1" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-foreground">{event.description}</p>
-                      <span className="text-xs text-muted-foreground ml-4 whitespace-nowrap">{formatDateTime(event.timestamp)}</span>
-                    </div>
-                    {event.error && (event.status === 'failed' || event.status === 'canceled') && (
-                      <p className="text-xs text-destructive mt-0.5">{event.error}</p>
-                    )}
-                    {event.amount_cents != null && event.amount_cents > 0 && (
-                      <p className="text-xs text-muted-foreground mt-0.5">{formatCents(event.amount_cents, invoice.currency)}</p>
-                    )}
-                    {/* Sub-line (e.g. "Customer notified by email" folded onto a
-                        standalone Stripe failure) — the billing lane renders this;
-                        the external lane must too or the detail silently vanishes. */}
-                    {event.detail && (
-                      <p className="text-xs text-muted-foreground mt-0.5">{event.detail}</p>
-                    )}
-                  </div>
-                </div>
-              ))}
             </div>
           </CardContent>
         </Card>

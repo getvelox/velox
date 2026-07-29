@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 )
 
@@ -32,6 +33,12 @@ type OutboxRow struct {
 	// (ListByInvoice/ListByCustomer/GetByID); the dispatcher's claim
 	// path leaves it zero — dispatch never reads it.
 	DeliveryState string
+	// SimEffectiveAt / TestClockID are the billing-axis anchor (ADR-104):
+	// the simulated instant that CAUSED this send, stamped at enqueue from
+	// the bound ctx. Nil for unbound enqueues (live-mode mail) — the two
+	// calendars coincide. CreatedAt stays the real-world dispatch record.
+	SimEffectiveAt *time.Time
+	TestClockID    string
 }
 
 // outbox row statuses.
@@ -169,10 +176,25 @@ func (s *OutboxStore) Enqueue(ctx context.Context, tx *sql.Tx, tenantID, emailTy
 	}
 
 	id := postgres.NewID("vlx_emob")
+	// Billing-axis anchor (ADR-104): record WHICH simulated instant caused
+	// this send, read from the bound ctx at the only moment the fact exists.
+	// Every invoice-caused enqueue site already binds (settle → receipt,
+	// finalize/sweeps → setup-link, catchup → reminders, operator actions →
+	// bindForInvoice), so this single chokepoint anchors them all; unbound
+	// ctx (live-mode mail, password resets, invites) records NULL — the two
+	// calendars coincide and there is nothing to say. created_at stays SQL
+	// now() on purpose: it is the real-world dispatch record (the
+	// "Recorded …" subline), not the story position.
+	var simAt any
+	var clockID any
+	if sim, ok := clock.SimOf(ctx); ok {
+		simAt = sim.At.UTC()
+		clockID = sim.TestClockID
+	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO email_outbox (id, tenant_id, email_type, payload, status, attempts, next_attempt_at)
-		VALUES ($1, $2, $3, $4, 'pending', 0, now())
-	`, id, tenantID, emailType, payloadJSON)
+		INSERT INTO email_outbox (id, tenant_id, email_type, payload, status, attempts, next_attempt_at, sim_effective_at, test_clock_id)
+		VALUES ($1, $2, $3, $4, 'pending', 0, now(), $5, $6)
+	`, id, tenantID, emailType, payloadJSON, simAt, clockID)
 	if err != nil {
 		return "", fmt.Errorf("email outbox: insert: %w", err)
 	}
@@ -554,7 +576,7 @@ func (s *OutboxStore) ListByInvoice(ctx context.Context, tenantID, invoiceNumber
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, tenant_id, livemode, email_type, payload, status, attempts,
 		       next_attempt_at, COALESCE(last_error,''), created_at, dispatched_at,
-		       delivery_state
+		       delivery_state, sim_effective_at, COALESCE(test_clock_id,'')
 		FROM email_outbox
 		WHERE email_type IN ('invoice', 'payment_receipt', 'payment_failed',
 		                     'payment_setup_request', 'dunning_warning',
@@ -571,11 +593,15 @@ func (s *OutboxStore) ListByInvoice(ctx context.Context, tenantID, invoiceNumber
 	for rows.Next() {
 		var r OutboxRow
 		var payload []byte
-		var dispatchedAt sql.NullTime
+		var dispatchedAt, simAt sql.NullTime
 		if err := rows.Scan(&r.ID, &r.TenantID, &r.Livemode, &r.EmailType, &payload, &r.Status,
 			&r.Attempts, &r.NextAttemptAt, &r.LastError, &r.CreatedAt, &dispatchedAt,
-			&r.DeliveryState); err != nil {
+			&r.DeliveryState, &simAt, &r.TestClockID); err != nil {
 			return nil, err
+		}
+		if simAt.Valid {
+			t := simAt.Time
+			r.SimEffectiveAt = &t
 		}
 		if err := json.Unmarshal(payload, &r.Payload); err != nil {
 			return nil, fmt.Errorf("decode payload for %s: %w", r.ID, err)

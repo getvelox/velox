@@ -988,6 +988,10 @@ export interface LineItem {
 }
 
 export interface TimelineEvent {
+  // Stable per-row key from the backend (outbox/attempt/dunning/CN row
+  // ids; deterministic synthetics for lifecycle rows). Composite
+  // timestamp keys collided once same-instant rows existed (ADR-104).
+  id?: string
   timestamp: string
   // 'audit' is emitted by the subscription timeline (T0-18); invoice
   // timeline keeps 'stripe' and 'dunning'. Kept as a string union so the
@@ -1035,6 +1039,12 @@ export interface TimelineEvent {
   // primary timestamp — mirrors the AuditLog page chip pattern.
   sim_effective_at?: string
   test_clock_id?: string
+  // Invoice timeline (ADR-104): the REAL-WORLD instant of a row whose
+  // primary `timestamp` is on the entity's simulated calendar — rendered
+  // as a muted "Recorded <wall>" subline (operator contract, Invariant A:
+  // any row whose two calendars differ shows both). Absent when the
+  // calendars coincide.
+  recorded_at?: string
 }
 
 export interface CreditBalance {

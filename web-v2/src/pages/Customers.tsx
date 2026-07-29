@@ -502,16 +502,16 @@ export default function CustomersPage() {
                       <FormLabel>Pin to test clock <span className="text-muted-foreground">(optional)</span></FormLabel>
                       <Select value={field.value ?? ''} onValueChange={(v) => field.onChange(v ?? '')}>
                         <SelectTrigger className="w-full">
-                          <SelectValue placeholder="No test clock — use wall clock">
+                          <SelectValue placeholder="No test clock — bills in real time">
                             {(value: string) => {
-                              if (!value) return 'No test clock — use wall clock'
+                              if (!value) return 'No test clock — bills in real time'
                               const c = clocks.find(c => c.id === value)
                               return c ? (c.name || c.id) : value
                             }}
                           </SelectValue>
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="">No test clock — use wall clock</SelectItem>
+                          <SelectItem value="">No test clock — bills in real time</SelectItem>
                           {clocks.map(c => (
                             <SelectItem key={c.id} value={c.id}>
                               {c.name || c.id}

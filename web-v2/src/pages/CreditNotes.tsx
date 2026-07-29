@@ -437,7 +437,7 @@ export default function CreditNotesPage() {
                         <TableCell>
                           <span className="inline-flex items-center gap-2">
                             <p className="text-sm font-medium text-foreground">{note.credit_note_number}</p>
-                            {note.is_simulated && <SimulatedBadge title="Dates on this credit note are simulated test-clock time, not wall-clock" />}
+                            {note.is_simulated && <SimulatedBadge title="Dates on this credit note follow its test clock's calendar, not today's date" />}
                           </span>
                           <p className="text-xs text-muted-foreground mt-0.5">{channelLabel}</p>
                         </TableCell>

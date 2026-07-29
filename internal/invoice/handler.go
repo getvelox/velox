@@ -118,6 +118,10 @@ type EmailEventLister interface {
 // EmailEventRow is the timeline-friendly view of an email_outbox row.
 // Trimmed to the fields the timeline renderer needs.
 type EmailEventRow struct {
+	// ID is the outbox row id — the timeline's stable per-row key
+	// (same-instant rows on a frozen clock made composite timestamp
+	// keys collide).
+	ID        string
 	EmailType string
 	Status    string // pending / dispatched / failed / skipped
 	// DeliveryState is the provider-confirmed outcome layered over
@@ -131,6 +135,11 @@ type EmailEventRow struct {
 	// attempt it warns about (payload attempt_number = run.AttemptCount
 	// at send time). 0 for non-dunning types and legacy rows.
 	AttemptNumber int
+	// SimEffectiveAt is the billing-axis anchor stamped at enqueue
+	// (ADR-104): the simulated instant that caused the send. Nil for
+	// live-mode mail and for legacy rows enqueued before the anchor
+	// existed — those render at their wall stamp.
+	SimEffectiveAt *time.Time
 }
 
 // RefundIssuer issues a direct refund on a paid invoice. Concretely this
@@ -502,7 +511,11 @@ func (h *Handler) finalize(w http.ResponseWriter, r *http.Request) {
 	// NOT email the invoice. Operators can still send it explicitly via
 	// POST /{id}/send.
 
-	inv = h.collectAtFinalize(r.Context(), tenantID, inv)
+	// Bind before the post-finalize side effects (ADR-030 / ADR-104): the
+	// service bound ctx for the finalize WRITE, but this call runs on the
+	// handler's raw ctx, so the setup-link email it may enqueue was
+	// stamped with no billing anchor and fell off the invoice's calendar.
+	inv = h.collectAtFinalize(h.svc.bindForInvoice(r.Context(), tenantID, inv.ID), tenantID, inv)
 
 	respond.JSON(w, r, http.StatusOK, inv)
 }
@@ -747,7 +760,10 @@ func (h *Handler) resendSetupLink(w http.ResponseWriter, r *http.Request) {
 	}
 	// The TRUE cause: an operator clicked Resend. The row used to say
 	// "finalize_no_pm" — a finalize that never ran.
-	outcome, err := h.noPMNotifier.NotifyNoPaymentMethod(r.Context(), tenantID, inv, "operator_resend")
+	// Operator entry point on a clock-pinned entity — bind so the resent
+	// setup-link email carries the invoice's billing anchor (ADR-030).
+	resendCtx := h.svc.bindForInvoice(r.Context(), tenantID, inv.ID)
+	outcome, err := h.noPMNotifier.NotifyNoPaymentMethod(resendCtx, tenantID, inv, "operator_resend")
 	if err != nil {
 		respond.FromError(w, r, err, "invoice")
 		return
@@ -940,8 +956,14 @@ func (h *Handler) sendEmail(w http.ResponseWriter, r *http.Request) {
 		respond.InternalError(w, r)
 		return
 	}
+	// Operator entry point on a clock-pinned entity (ADR-030): bind once
+	// here so the enqueued email carries the invoice's billing anchor and
+	// lands on the invoice's own calendar (ADR-104). Without this the row
+	// enqueues unanchored and sorts by real send time — the exact gap the
+	// 2026-07-29 walk caught after the anchor shipped.
+	ctx := h.svc.bindForInvoice(r.Context(), tenantID, inv.ID)
 
-	cc, err := resolveSendCC(r.Context(), h.customers, tenantID, inv.CustomerID, body.Email, body.AdditionalEmails)
+	cc, err := resolveSendCC(ctx, h.customers, tenantID, inv.CustomerID, body.Email, body.AdditionalEmails)
 	if err != nil {
 		respond.FromError(w, r, err, "invoice_email")
 		return
@@ -951,9 +973,9 @@ func (h *Handler) sendEmail(w http.ResponseWriter, r *http.Request) {
 	// this path previously hand-rolled a THINNER context (no buyer
 	// address/tax id, no credit notes), so the emailed document diverged
 	// from the downloaded one.
-	bt, ci, cnInfos := BuildPDFContext(r.Context(), h.customers, h.settings, h.creditNotes, tenantID, &inv)
+	bt, ci, cnInfos := BuildPDFContext(ctx, h.customers, h.settings, h.creditNotes, tenantID, &inv)
 
-	pdfBytes, err := RenderPDF(r.Context(), inv, items, bt, cnInfos, ci)
+	pdfBytes, err := RenderPDF(ctx, inv, items, bt, cnInfos, ci)
 	if err != nil {
 		respond.InternalError(w, r)
 		return
@@ -962,7 +984,7 @@ func (h *Handler) sendEmail(w http.ResponseWriter, r *http.Request) {
 	// AmountDueCents, not Total: the email template labels this figure
 	// "Amount due", and credits/partial payments make the two differ —
 	// telling a customer they owe the pre-credit total is wrong.
-	if err := h.emailSender.SendInvoice(r.Context(), tenantID, body.Email, cc, bt.Name, inv.InvoiceNumber, inv.AmountDueCents, inv.Currency, pdfBytes, inv.PublicToken); err != nil {
+	if err := h.emailSender.SendInvoice(ctx, tenantID, body.Email, cc, bt.Name, inv.InvoiceNumber, inv.AmountDueCents, inv.Currency, pdfBytes, inv.PublicToken); err != nil {
 		// Sanitize at the boundary — SMTP errors / outbox-store errors
 		// would otherwise leak to the operator toast. ADR-026.
 		respond.FromError(w, r, err, "invoice_email")
@@ -1333,6 +1355,12 @@ type timelineEvent struct {
 	// resolve) legitimately shares one instant, and source-major
 	// insertion rendered "Marked uncollectible" above the escalation
 	// that caused it. See sortInvoiceTimeline.
+	// ID is a stable per-row key for the SPA. Source rows use their own
+	// row id (outbox id, attempt id, dunning event id, credit-note id);
+	// synthesized lifecycle rows derive a deterministic one from the
+	// invoice id + kind. Composite timestamp keys collided the moment
+	// rows shared a frozen-clock instant (ADR-104).
+	ID              string `json:"id"`
 	Source          string `json:"source"` // "stripe" / "dunning" / "lifecycle" / "email" / "credit_note"
 	EventType       string `json:"event_type"`
 	Status          string `json:"status"`
@@ -1351,15 +1379,20 @@ type timelineEvent struct {
 	// "after 3 retry attempts" on the same row in the dunning-
 	// recovered case). Empty = no sub-line. ADR-020.
 	Detail string `json:"detail,omitempty"`
-	// IsSimulated marks events whose timestamp is in the simulated-
-	// time domain (the owning sub is pinned to a test clock and this
-	// event was produced by an engine-driven path — lifecycle, dunning).
-	// Wall-clock-sourced events (stripe webhooks, email dispatcher,
-	// operator audit actions) stay false even on a clock-pinned sub
-	// because their timestamps reflect when they were actually
-	// processed, not the simulated cycle they belong to.
+	// IsSimulated marks events whose PRIMARY timestamp is on the
+	// entity's simulated calendar. Post-ADR-104 every row type on a
+	// clock-pinned invoice is anchored there at write time (lifecycle,
+	// dunning, attempts, credit notes, and emails via the outbox
+	// anchor); false only on live-mode invoices and on legacy rows
+	// written before their anchor existed.
 	// SPA reads this flag directly — no client-side heuristic.
 	IsSimulated bool `json:"is_simulated,omitempty"`
+	// RecordedAt is the REAL-WORLD instant of a row whose primary
+	// timestamp is simulated — the operator contract's Invariant A
+	// ("any row whose two calendars differ shows both"). Rendered as a
+	// muted "Recorded <wall>" subline, mirroring the subscription
+	// timeline. Empty when the calendars coincide.
+	RecordedAt string `json:"recorded_at,omitempty"`
 }
 
 func piFromEventMetadata(meta map[string]any) string {
@@ -1439,14 +1472,17 @@ func renderChargeAttempts(events []timelineEvent, attempts []domain.InvoiceCharg
 	return events
 }
 
-// chargeAttemptRow renders one attempt fact. Simulated attempts carry
-// their billing-axis instant (Activity lane); wall attempts keep their
-// wall-clock stamp and the SPA routes them with the other wall rows.
+// chargeAttemptRow renders one attempt fact. A simulated attempt's
+// PRIMARY position is its billing-axis instant, with the wall instant
+// kept as RecordedAt (Invariant A); an unanchored attempt keeps its
+// wall stamp — same fallback as legacy emails (ADR-104).
 func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelineEvent {
 	ts := a.OccurredAt
 	sim := false
+	recorded := ""
 	if a.SimEffectiveAt != nil {
 		ts = *a.SimEffectiveAt
+		recorded = a.OccurredAt.Format(time.RFC3339)
 		sim = true
 	}
 	desc, status := "Payment failed", "failed"
@@ -1462,6 +1498,7 @@ func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelin
 		amtPtr = &amt
 	}
 	return timelineEvent{
+		ID:              "attempt:" + a.ID,
 		Timestamp:       ts.Format(time.RFC3339),
 		sortAt:          ts,
 		tieRank:         rankChargeAttempt,
@@ -1474,6 +1511,7 @@ func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelin
 		Currency:        inv.Currency,
 		PaymentIntentID: a.StripePaymentIntentID,
 		IsSimulated:     sim,
+		RecordedAt:      recorded,
 	}
 }
 
@@ -1562,6 +1600,27 @@ var relevantDunningEvents = map[string]bool{
 	"retry_attempted": true,
 	"resolved":        true,
 	"escalated":       true,
+}
+
+// emailRowInstant resolves an email row's position on the timeline
+// (ADR-104). The PRIMARY instant is the billing instant that caused the
+// send — the outbox anchor stamped at enqueue from bound ctx; rankEmail
+// then places the row after the money event it announces, since a
+// notification is only ever an effect. The real-world send instant
+// (dispatched_at once the relay took it, enqueue time until then)
+// survives as `recorded` — the operator contract's Invariant A: a row
+// whose two calendars differ shows both. Legacy rows without an anchor
+// keep their wall stamp — misplaced but honest; inferring an anchor at
+// read time is the heuristic the no-heuristic-proxies rule bans.
+func emailRowInstant(evt EmailEventRow) (ts time.Time, recorded string, sim bool) {
+	wall := evt.CreatedAt
+	if evt.DispatchedAt != nil {
+		wall = *evt.DispatchedAt
+	}
+	if evt.SimEffectiveAt != nil {
+		return *evt.SimEffectiveAt, wall.Format(time.RFC3339), true
+	}
+	return wall, "", false
 }
 
 // describeEmailEvent maps an email_outbox row to a timeline-friendly
@@ -1762,6 +1821,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// Mirrors Stripe's "Invoice activity" section which always anchors
 	// on Created → Finalized regardless of payment progress.
 	events = append(events, timelineEvent{
+		ID:          "lifecycle:created:" + inv.ID,
 		Timestamp:   inv.CreatedAt.Format(time.RFC3339),
 		sortAt:      inv.CreatedAt,
 		tieRank:     rankInvoiceCreated,
@@ -1774,6 +1834,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	if inv.IssuedAt != nil {
 		amt := inv.AmountDueCents
 		events = append(events, timelineEvent{
+			ID:          "lifecycle:finalized:" + inv.ID,
 			Timestamp:   inv.IssuedAt.Format(time.RFC3339),
 			sortAt:      *inv.IssuedAt,
 			tieRank:     rankInvoiceFinalized,
@@ -1793,6 +1854,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// invoice header and the InvoiceAttention banner's `DueBy` line.)
 	if inv.VoidedAt != nil {
 		events = append(events, timelineEvent{
+			ID:          "lifecycle:voided:" + inv.ID,
 			Timestamp:   inv.VoidedAt.Format(time.RFC3339),
 			sortAt:      *inv.VoidedAt,
 			tieRank:     rankLifecycleTerminal,
@@ -1805,6 +1867,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	if inv.UncollectibleAt != nil {
 		events = append(events, timelineEvent{
+			ID:          "lifecycle:uncollectible:" + inv.ID,
 			Timestamp:   inv.UncollectibleAt.Format(time.RFC3339),
 			sortAt:      *inv.UncollectibleAt,
 			tieRank:     rankLifecycleTerminal,
@@ -1827,6 +1890,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 			detail = "Recorded by an operator — cheque, wire, or other out-of-band payment"
 		}
 		events = append(events, timelineEvent{
+			ID:          "lifecycle:paid:" + inv.ID,
 			Timestamp:   inv.PaidAt.Format(time.RFC3339),
 			sortAt:      *inv.PaidAt,
 			tieRank:     rankLifecycleTerminal,
@@ -1899,6 +1963,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					detail = cn.CreditNoteNumber + " — " + cn.Reason
 				}
 				events = append(events, timelineEvent{
+					ID:          "cn:" + cn.ID,
 					Timestamp:   cn.IssuedAt.Format(time.RFC3339),
 					sortAt:      *cn.IssuedAt,
 					tieRank:     rankCreditNote,
@@ -1966,13 +2031,9 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				if desc == "" {
 					continue
 				}
-				// Use dispatched_at when the row was actually delivered
-				// so the timeline reflects send-time, not enqueue-time.
-				ts := evt.CreatedAt
-				if evt.DispatchedAt != nil {
-					ts = *evt.DispatchedAt
-				}
+				ts, recorded, sim := emailRowInstant(evt)
 				events = append(events, timelineEvent{
+					ID:          "email:" + evt.ID,
 					Timestamp:   ts.Format(time.RFC3339),
 					sortAt:      ts,
 					tieRank:     rankEmail,
@@ -1981,6 +2042,8 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					Status:      status,
 					Description: desc,
 					Error:       evt.LastError,
+					IsSimulated: sim,
+					RecordedAt:  recorded,
 				})
 			}
 		}
@@ -2082,6 +2145,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					events = append(events, timelineEvent{
+						ID:           "dunning:" + evt.ID,
 						Timestamp:    evt.CreatedAt.Format(time.RFC3339),
 						sortAt:       evt.CreatedAt,
 						tieRank:      dunningEventRank(evt.EventType),

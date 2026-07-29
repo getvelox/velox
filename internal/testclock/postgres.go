@@ -167,6 +167,13 @@ var clockTeardownStatements = []string{
 	`DELETE FROM payment_methods             WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
 	`DELETE FROM customer_portal_sessions    WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
 	`DELETE FROM customer_portal_magic_links WHERE customer_id IN (SELECT id FROM customers WHERE test_clock_id = $1)`,
+	// Clock-anchored emails (ADR-104): outbox rows carry the clock id
+	// directly (their invoices are keyed by number in jsonb, not FK, so the
+	// invoice-graph deletes can't reach them). A surviving row would keep a
+	// deleted simulation's email visible on the customer page and on any
+	// re-used invoice number — the "simulation must be fully disposable"
+	// half of the operator contract.
+	`DELETE FROM email_outbox WHERE test_clock_id = $1`,
 	// The customers themselves LAST (before the clock): customers.test_clock_id
 	// is ON DELETE SET NULL, so deleting the clock first would silently detach
 	// every customer and leak the whole set.

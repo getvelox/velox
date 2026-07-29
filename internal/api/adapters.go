@@ -633,14 +633,16 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 		// stamp attempt_number for pairing with retry rows.
 		attempt, _ := r.Payload["attempt_number"].(float64)
 		out = append(out, invoice.EmailEventRow{
-			EmailType:     r.EmailType,
-			Status:        r.Status,
-			DeliveryState: r.DeliveryState,
-			CreatedAt:     r.CreatedAt,
-			DispatchedAt:  r.DispatchedAt,
-			LastError:     r.LastError,
-			To:            to,
-			AttemptNumber: int(attempt),
+			ID:             r.ID,
+			EmailType:      r.EmailType,
+			Status:         r.Status,
+			DeliveryState:  r.DeliveryState,
+			CreatedAt:      r.CreatedAt,
+			DispatchedAt:   r.DispatchedAt,
+			LastError:      r.LastError,
+			To:             to,
+			AttemptNumber:  int(attempt),
+			SimEffectiveAt: r.SimEffectiveAt,
 		})
 	}
 	return out, nil
