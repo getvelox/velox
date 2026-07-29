@@ -146,3 +146,39 @@ func TestEmailRowInstant(t *testing.T) {
 		}
 	})
 }
+
+// TestLifecycleRecordedStamps pins the audit→lifecycle join (ADR-104
+// Invariant A, corrected boundary №2 — operator nudge, same day as the
+// credit-note one). Exact keys, frozen-vocabulary discriminators for the
+// update-flavored transitions, earliest-row-wins on duplicates, unknown
+// actions ignored.
+func TestLifecycleRecordedStamps(t *testing.T) {
+	at := func(h int) time.Time { return time.Date(2026, 7, 29, h, 0, 0, 0, time.UTC) }
+	// Query order is newest-first — build the list that way.
+	entries := []domain.AuditEntry{
+		{Action: "update", Metadata: map[string]any{"action": "payment_recorded"}, CreatedAt: at(16)},
+		{Action: "update", Metadata: map[string]any{"action": "marked_uncollectible"}, CreatedAt: at(15)},
+		{Action: "send", CreatedAt: at(14)}, // not a transition — ignored
+		{Action: "update", Metadata: map[string]any{"action": "line_item_added"}, CreatedAt: at(13)}, // other update flavor — ignored
+		{Action: "void", CreatedAt: at(12)},
+		{Action: "finalize", CreatedAt: at(11)},
+		{Action: "finalize", CreatedAt: at(10)}, // duplicate: EARLIEST (10:00) must win
+		{Action: "create", CreatedAt: at(9)},
+	}
+	got := lifecycleRecordedStamps(entries)
+	want := map[string]string{
+		"invoice.created":              at(9).Format(time.RFC3339),
+		"invoice.finalized":            at(10).Format(time.RFC3339),
+		"invoice.voided":               at(12).Format(time.RFC3339),
+		"invoice.marked_uncollectible": at(15).Format(time.RFC3339),
+		"invoice.paid":                 at(16).Format(time.RFC3339),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stamp count = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s = %q, want %q", k, got[k], w)
+		}
+	}
+}

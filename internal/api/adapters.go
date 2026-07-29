@@ -549,6 +549,30 @@ func (a *invoiceUncollectibleAdapter) MarkUncollectible(ctx context.Context, ten
 	return err
 }
 
+// invoiceAuditStampsAdapter bridges audit.Logger.Query → invoice.AuditStampFetcher
+// (ADR-104: the timeline's read-time wall-stamp enrichment for lifecycle rows).
+// Narrow on purpose: one resource's entries, capped — an invoice's audit trail
+// is dozens of rows at most, and the join only consumes the transition actions.
+type invoiceAuditStampsAdapter struct {
+	logger *audit.Logger
+}
+
+func (a *invoiceAuditStampsAdapter) ListByInvoice(ctx context.Context, tenantID, invoiceID string) ([]domain.AuditEntry, error) {
+	// 100 is Query's hard cap (it CLAMPS above that — asking for more
+	// would be a silent fallback). Newest-first: an invoice with >100
+	// audit rows would lose its OLDEST entries — exactly the transition
+	// stamps the join wants — so such a row renders bare rather than
+	// wrong. Accepted: reaching 100 audit rows on one invoice means ~90
+	// operator sends/exports; revisit with an Action-filtered query if a
+	// real invoice ever gets there.
+	entries, _, err := a.logger.Query(ctx, tenantID, audit.QueryFilter{
+		ResourceType: "invoice",
+		ResourceID:   invoiceID,
+		Limit:        100,
+	})
+	return entries, err
+}
+
 // dunningTimelineAdapter bridges dunning.Store → invoice.DunningTimelineFetcher.
 type dunningTimelineAdapter struct {
 	store *dunning.PostgresStore
