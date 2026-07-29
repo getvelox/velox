@@ -31,7 +31,7 @@ const cnReadCols = `id, tenant_id, invoice_id, customer_id, credit_note_number,
 	currency, issued_at, voided_at, refund_status, COALESCE(stripe_refund_id,''),
 	COALESCE(tax_transaction_id,''), is_simulated, issue_pending,
 	tax_reversal_pending, commit_retired_cents,
-	metadata, created_at, updated_at`
+	metadata, created_at, updated_at, recorded_at`
 
 // cnScanDest returns Scan destinations in cnReadCols order. metaJSON is the
 // raw metadata bytes the caller unmarshals into cn.Metadata after Scan.
@@ -43,7 +43,7 @@ func cnScanDest(cn *domain.CreditNote, metaJSON *[]byte) []any {
 		&cn.Currency, &cn.IssuedAt, &cn.VoidedAt, &cn.RefundStatus, &cn.StripeRefundID,
 		&cn.TaxTransactionID, &cn.IsSimulated, &cn.IssuePending,
 		&cn.TaxReversalPending, &cn.CommitRetiredCents,
-		metaJSON, &cn.CreatedAt, &cn.UpdatedAt,
+		metaJSON, &cn.CreatedAt, &cn.UpdatedAt, &cn.RecordedAt,
 	}
 }
 
@@ -337,8 +337,8 @@ func (s *PostgresStore) insertCreditNoteTx(ctx context.Context, tx *sql.Tx, tena
 		INSERT INTO credit_notes (id, tenant_id, invoice_id, customer_id, credit_note_number,
 			status, reason, subtotal_cents, tax_amount_cents, total_cents,
 			refund_amount_cents, credit_amount_cents, out_of_band_amount_cents,
-			currency, refund_status, is_simulated, issue_pending, commit_retired_cents, metadata, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$20)
+			currency, refund_status, is_simulated, issue_pending, commit_retired_cents, metadata, created_at, updated_at, recorded_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$20,now())
 		RETURNING `+cnReadCols,
 		id, tenantID, cn.InvoiceID, cn.CustomerID, cn.CreditNoteNumber,
 		cn.Status, cn.Reason, cn.SubtotalCents, cn.TaxAmountCents, cn.TotalCents,

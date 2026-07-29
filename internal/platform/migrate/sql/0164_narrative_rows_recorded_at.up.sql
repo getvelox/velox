@@ -1,0 +1,22 @@
+-- 0164: credit_notes + invoice_dunning_events gain recorded_at — the
+-- real-world instant the row entered the system (ADR-104 Invariant A,
+-- boundary corrected).
+--
+-- ADR-030's fix made these rows' created_at simulated on clock-pinned
+-- entities (the entity's calendar decides), which was right — but it
+-- left them with NO wall stamp at all, so the timeline could not honor
+-- Invariant A ("any row whose two calendars differ shows both"). Found
+-- live within hours of ADR-104 shipping: an operator issued a credit
+-- note on a frozen-clock invoice and watched it land mid-timeline dated
+-- Jun 1 2027, the only row among its neighbors with no "Recorded …"
+-- subline — precisely because emails and charge attempts carry a wall
+-- stamp and these two INSERT-backed row types didn't.
+--
+-- recorded_at = SQL now() at INSERT: a write-time fact needing no ctx,
+-- correct in both modes (on live entities it simply ≈ created_at and
+-- the subline never renders). Nullable, NO backfill: rows created
+-- before this migration genuinely have no recorded wall instant, and
+-- inventing one would be a weaker fact wearing the same name (the
+-- ADR-103/0163 precedent).
+ALTER TABLE credit_notes ADD COLUMN recorded_at TIMESTAMPTZ;
+ALTER TABLE invoice_dunning_events ADD COLUMN recorded_at TIMESTAMPTZ;

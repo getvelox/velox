@@ -120,7 +120,26 @@ Invariants, each mechanized or asserted in MANUAL_TEST:
 
 - **A — no orphan dates:** any row whose two calendars differ shows
   both (`Recorded` subline). Cross-surface comparisons always reconcile
-  on-screen.
+  on-screen. *Amendment 2026-07-29, hours after shipping:* the original
+  text carved out credit notes as "story-only financial documents"
+  (wall record delegated to the audit log). The first real operator
+  disproved it the same afternoon: a CN issued on a frozen-clock
+  invoice landed mid-timeline dated Jun 1 2027 — the only row among
+  Recorded-bearing neighbors with no subline, which reads as missing
+  information, not as a document convention. The corrected boundary is
+  a CLASS rule: **every INSERT-backed narrative row shows both
+  calendars when they differ** (emails 0163, attempts 0162, credit
+  notes + dunning events 0164 — `recorded_at` stamped `now()` at
+  INSERT); rows *derived from entity state columns* (the lifecycle
+  rows) carry the entity's dates with the audit log as their wall
+  record — per-transition shadow columns remain the rejected
+  audit-duplication class. If walks show the same confusion on
+  operator-driven lifecycle transitions (void / uncollectible /
+  offline-pay on a parked clock), the named path is read-time audit
+  enrichment (the subscription timeline's model), not shadows. Known
+  residuals accepted: credit-grant rows on the customer page (not a
+  timeline surface) and pre-0164 rows (NULL `recorded_at`, no subline,
+  no backfill).
 - **B — confusion is quarantined to the sandbox:** dual dates,
   sublines, badges, banners exist only in test mode. Live mode is one
   calendar and zero simulation vocabulary.
