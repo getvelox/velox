@@ -80,11 +80,38 @@ Mechanically:
    as well as `customer_id` ones, so the next clock-anchored table
    cannot slip through unclassified.
 
-Ordering is guaranteed at three levels, unchanged in mechanism:
-full-precision `sortAt` → declared causal ladder (`tieRank`) → stable
-insertion order. The golden test pins the degenerate case: an invoice
-whose entire life happens at one frozen instant renders
-created → finalized → attempt → paid → credit note → email.
+Ordering is guaranteed at four levels (the fourth added by the
+2026-07-29 **reality amendment**, operator-directed: "match how a
+wall-clock invoice would behave as closely as possible"):
+
+1. full-precision `sortAt` (story instant — display stays monotonic,
+   anchored settles keep their contracted positions);
+2. **the real sequence** — within one story-instant group, rows order
+   by their recorded stamps, so a frozen-clock invoice reads exactly
+   like a wall-clock one whose displayed dates coincide. Gated on
+   GROUP COMPLETENESS: only when every row in the group carries a
+   stamp. A partially-stamped group (pre-0162/0163/0164 rows; engine
+   cycle invoices, which write no create/finalize audit rows) would
+   let bare rows FABRICATE a sequence against stamped ones, so those
+   groups keep the ladder — correct-but-canonical, never wrong. This
+   became possible only after the day's three stamp fixes made
+   recorded instants universal for operator-driven rows; it is the
+   operator's own wall-insertion instinct, adopted at the one level
+   where it is sound (the objections that killed wall-PRIMARY ordering
+   — no cross-table key for same-tx rows, non-monotonic display on
+   late webhooks — are answered here by the tx-tie ladder fallback and
+   by story time staying primary);
+3. the declared causal ladder (`tieRank`) — now the tie-break for
+   same-tx stamps, bare-row groups, and legacy data;
+4. stable insertion order.
+
+The golden tests pin both regimes: an all-bare one-instant life renders
+the ladder (created → finalized → attempt → paid → credit note →
+email), an all-stamped one renders the true action sequence even when
+it contradicts the ladder, one bare row gates its group back, and
+cross-instant order ignores recorded time entirely. Known nuance,
+documented not hidden: a draft-then-issued credit note's stamp is its
+ENTRY moment, not issuance (identical in the dominant one-click flow).
 
 ## The operator contract
 
