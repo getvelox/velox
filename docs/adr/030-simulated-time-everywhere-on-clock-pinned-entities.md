@@ -425,3 +425,58 @@ wall-tick recovery still stamps outcomes at the simulated instant; the one
 disjointness bruise — a failed settle enrolling dunning at the wall tick —
 is bounded, because the created run only ever ADVANCES during a clock
 Advance (the dunning sweep is gated).
+
+## Amendment 2026-07-29 — credit notes: the entity's clock decides, not the actor's
+
+Found by walking FLOW I13 on a clock-pinned invoice: an engine-issued
+clawback credit note landed on the simulated axis while an operator's
+credit note **on the same invoice** landed on wall-clock, dated five
+weeks *before* the invoice it credited.
+
+Two causes, both now closed:
+
+1. `creditnote.Service` held **no `clock.Resolver` at all**. Only the
+   catchup path bound time (it is handed `frozen_time` explicitly), so
+   every operator entry point — Create, Issue, Void, CreateRefund,
+   RetryRefund, CreateAndIssueCommitRelief — stamped wall-clock onto rows
+   owned by a clock-pinned invoice. Precisely the scaling failure this
+   ADR's Context section predicted: *"every new code path is one forgotten
+   resolver call away from re-introducing the bug."*
+
+2. `buildCreditNote` encoded the opposite rule in a comment —
+   *"Operator HTTP issuance is always wall-clock"* — as
+   `IsSimulated: input.IsSimulated && inv.IsSimulated`, with a unit test
+   pinning it. That belief has no basis in this ADR: the **audit log is
+   the sole always-wall-clock carve-out**, and the decision table lists
+   CreditGrant and every clock-pinned `created_at` as simulated.
+
+**Rule:** `IsSimulated: inv.IsSimulated`. A credit note is a financial
+document in the invoice's timeline, not a record of a click. The clock
+belongs to the entity, not to whoever acted on it.
+
+**Nothing forensic is lost**, which is the load-bearing point. The
+`credit_note.issued` audit row still carries wall-clock `created_at`,
+`actor_type=user`, and `metadata.sim_effective_at` + `test_clock_id` —
+verified live. The old rule was not buying forensics; it was duplicating
+the audit log's job on the financial document and paying for it with an
+incoherent one.
+
+**Operator-visible consequences of the old rule** (all observed, not
+theorised): a credit note dated before its own invoice; the two halves of
+one downgrade-then-credit sequence rendered five weeks apart in opposite
+directions; a row displaying the test clock's date sitting under the
+"Real times — not the test clock's dates" caption; and — the sharp edge —
+`is_simulated=false` meant the row would **survive the ADR-086 teardown**
+that deletes a clock's data, stranding a credit note against a deleted
+invoice plus a ledger grant on a real customer balance.
+
+One deliberate consequence: operator credit notes on simulated invoices
+now join engine ones in the refund-retry queue's `is_simulated = false`
+exclusion (*"test-clock CNs aren't an operator obligation"*). That
+removes an asymmetry rather than creating one — previously two identical
+credit notes on the same simulated invoice were treated differently based
+on who created them.
+
+Regression: `TestOperatorCreditNote_StampsSimulatedTime` (mutation-verified)
+plus an unpinned negative; `TestCreate_IsSimulated`'s middle case amended
+from "operator HTTP issue → wall-clock" to "→ simulated".
