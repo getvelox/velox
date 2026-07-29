@@ -438,7 +438,16 @@ export default function HostedInvoicePage() {
                 </h2>
               </div>
               <div className="text-right">
-                <p className="text-xs text-muted-foreground uppercase tracking-wider">Amount Due</p>
+                {/* Second label for the same figure — the totals block below
+                    is the other. #651 renamed that one for closed invoices
+                    but left this header saying "Amount Due", so a voided
+                    invoice still led with money owed in the largest type on
+                    the page. Same rule, both places. */}
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                  {invoice.status === 'voided' || invoice.status === 'uncollectible'
+                    ? 'Invoice amount'
+                    : 'Amount Due'}
+                </p>
                 <p className="text-2xl font-semibold text-foreground tabular-nums">
                   {formatCents(invoice.amount_due_cents, invoice.currency)}
                 </p>
