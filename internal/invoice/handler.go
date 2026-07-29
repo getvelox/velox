@@ -1986,8 +1986,14 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 		// synthetic out_of_band: payment-intent id — surface them as what
 		// they are instead of rendering identically to a card payment.
 		if strings.HasPrefix(inv.StripePaymentIntentID, "out_of_band:") {
-			desc = "Payment recorded (offline)"
-			detail = "Recorded by an operator — cheque, wire, or other out-of-band payment"
+			// One word, one sense (operator-ambiguity tiebreaker,
+			// 2026-07-29): this row once said "recorded" three ways —
+			// title, agent line, timestamp label. The timestamp label
+			// owns the word product-wide (Invariant C), so the title
+			// states the FACT (payment received out of band) and the
+			// agent line uses "entered".
+			desc = "Payment received (offline)"
+			detail = "Entered by an operator — cheque, wire, or other out-of-band payment"
 		}
 		events = append(events, timelineEvent{
 			ID:          "lifecycle:paid:" + inv.ID,

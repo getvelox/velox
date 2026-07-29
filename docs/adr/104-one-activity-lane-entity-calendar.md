@@ -154,16 +154,16 @@ Invariants, each mechanized or asserted in MANUAL_TEST:
   calendar and zero simulation vocabulary.
 - **C — one word:** the real-world stamp is always **"Recorded"**,
   product-wide — the subscription timeline's existing vocabulary, which
-  this aligns to; "Sent" never labels a wall stamp. *Known collision
-  (found in the 2026-07-29 walk, judged acceptable):* "record" is also
-  the product's verb for manually entering an out-of-band payment
-  ("Record Payment", "Payment recorded (offline)", "Recorded by an
-  operator — cheque, wire"). The two are distinguishable by grammar and
-  position — the stamp is always a bare `Recorded <timestamp>` subline,
-  the payment sense always takes an agent or parenthetical — and
-  changing the timeline word would break alignment with the
-  subscription surface, which is the stronger consistency. Revisit if
-  an operator ever reads one as the other.
+  this aligns to; "Sent" never labels a wall stamp. *Collision found in the
+  2026-07-29 walk and RESOLVED the same day* (operator-ambiguity
+  tiebreaker: known ambiguity gets removed, not documented): the
+  offline-payment row once used "recorded" in three senses — title,
+  agent line, timestamp label. Renamed to "Payment received (offline)"
+  + "Entered by an operator …", so on timeline rows the timestamp
+  label is the word's only sense. The action *name* ("Record payment",
+  a button verb on a different surface) keeps its natural-language
+  meaning — cause ("Record…") and effect ("Payment received …") read
+  as a sentence, not a collision.
 - **Vocabulary gate:** `internal/arch/operator_vocabulary_test.go`
   fails CI on "wall-clock" / "Real-time activity" / the negation
   caption in operator-facing web-v2 source (comments exempt). Its first
