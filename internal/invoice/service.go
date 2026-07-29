@@ -1787,8 +1787,21 @@ func (s *Service) RetryPendingTax(ctx context.Context, batch int) (int, []error)
 	if s.taxRetrier == nil {
 		return 0, nil
 	}
-	codes := []string{"provider_outage", "unknown"}
-	const maxAttempts = 8
+	// The scan filter comes from the DECLARED single source
+	// (domain.TaxRetryableErrorCodes — its doc comment says exactly
+	// that), never a hand-rolled copy. The previous hardcoded list
+	// here silently dropped provider_not_configured: the banner
+	// promised "calculation will retry on the next scheduler tick"
+	// (classified via the same domain list) while the queue never
+	// contained the row — the ADR-019 post-connect flush was the only
+	// thing papering over it, and a missed flush stranded the invoice
+	// forever. Found live 2026-07-29: two scratch invoices sat through
+	// twelve 5-minute ticks at retry_count=0. Retrying
+	// provider_not_configured is pre-flight (no Stripe call, no
+	// quota), and the connect-flush has no attempt cap, so exhaustion
+	// never strands a late connect.
+	codes := domain.TaxRetryableErrorCodes()
+	maxAttempts := domain.MaxTaxRetryAttempts
 	// Reconciler runs once per mode in the scheduler tick — pull
 	// the mode off ctx and filter the SQL scan so this tick only
 	// processes its own partition's invoices. Without the filter,
@@ -1894,8 +1907,10 @@ func (s *Service) RetryPendingTaxForClock(ctx context.Context, tenantID, clockID
 	if s.taxRetrier == nil {
 		return 0, nil
 	}
-	codes := []string{"provider_outage", "unknown"}
-	const maxAttempts = 8
+	// Same single source as the wall cron above — the catchup scan had
+	// the identical hand-rolled list with the identical drift.
+	codes := domain.TaxRetryableErrorCodes()
+	maxAttempts := domain.MaxTaxRetryAttempts
 	stuck, err := s.store.ListPendingTaxRetryForClock(ctx, tenantID, clockID, codes, maxAttempts, batch)
 	if err != nil {
 		return 0, []error{fmt.Errorf("list pending tax retries for clock %s: %w", clockID, err)}
