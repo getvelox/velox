@@ -503,7 +503,7 @@ export default function AuditLogPage() {
                   operator expand the row to find that out defeats the point. */}
                               {sim.simEffectiveAt && (
                                 <span
-                                  title={`Operator clicked at wall-clock ${formatDateTime(entry.created_at)}; the clock stood at simulated ${formatDateTime(sim.simEffectiveAt)}${sim.testClockID ? ` on test clock ${sim.testClockID}` : ''}`}
+                                  title={`Operator clicked at ${formatDateTime(entry.created_at)} (real time); the clock stood at simulated ${formatDateTime(sim.simEffectiveAt)}${sim.testClockID ? ` on test clock ${sim.testClockID}` : ''}`}
                                   className="inline-flex shrink-0 items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-800 dark:text-amber-300 ml-2"
                                 >
                                   Simulated

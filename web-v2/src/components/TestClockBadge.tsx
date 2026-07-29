@@ -61,7 +61,7 @@ export function TestClockBadge({
 // inside row <Link>s). See ADR-030 / feedback_no_heuristic_proxies.
 export function SimulatedBadge({
   className = '',
-  title = 'Dates on this invoice are simulated test-clock time, not wall-clock',
+  title = "Dates on this invoice follow its test clock's calendar, not today's date",
 }: {
   className?: string
   title?: string

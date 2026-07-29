@@ -54,9 +54,9 @@ export function TestClockBanner({ testClockId }: { testClockId: string }) {
           <>
             <span className="font-medium">Test clock deleted.</span>{' '}
             This record was attached to a test clock that has since been
-            deleted. Some dates below carry the simulated timestamps from
-            when the clock was active — they do not reflect wall-clock
-            time.
+            deleted. Some dates below carry simulated timestamps from when
+            the clock was active — they follow the clock's calendar, not
+            today's date.
           </>
         ) : (
           <>
@@ -64,15 +64,17 @@ export function TestClockBanner({ testClockId }: { testClockId: string }) {
             {clock ? (
               <>
                 Currently at <span className="font-mono font-medium">{formatDateTime(clock.frozen_time)}</span>.
-                Some dates on this page reflect simulated time, not wall-clock —
-                rows produced during a clock-advance (finalize, dunning runs,
-                retries) carry the simulated timestamp.
+                Dates on this page follow the clock's calendar — rows produced
+                during a clock advance (finalize, dunning runs, retries) carry
+                the simulated timestamp, with any real-world moment shown as a
+                "Recorded" line beneath.
               </>
             ) : (
               <>
-                Some dates on this page reflect simulated time, not wall-clock —
-                rows produced during a clock-advance (finalize, dunning runs,
-                retries) carry the simulated timestamp.
+                Dates on this page follow the clock's calendar — rows produced
+                during a clock advance (finalize, dunning runs, retries) carry
+                the simulated timestamp, with any real-world moment shown as a
+                "Recorded" line beneath.
               </>
             )}
           </>

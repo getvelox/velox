@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/email"
+	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/testutil"
 )
@@ -618,4 +619,81 @@ func resetEmailDue(db *postgres.DB, id string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// TestEmailOutbox_Enqueue_StampsBillingAnchor pins the ADR-104 write-time
+// anchor: an enqueue under a bound simulated ctx records WHICH billing
+// instant caused the send (sim_effective_at + test_clock_id), and an
+// unbound enqueue records NULL for both — a fact ("no clock was bound"),
+// never inferred later. This single chokepoint is what lets the invoice
+// timeline position emails on the entity's calendar.
+func TestEmailOutbox_Enqueue_StampsBillingAnchor(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	baseCtx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	defer cancel()
+
+	tenantID := testutil.CreateTestTenant(t, db, "Email Outbox Anchor")
+	store := email.NewOutboxStore(db)
+	frozen := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+
+	readAnchor := func(t *testing.T, id string) (simAt sql.NullTime, clockID sql.NullString) {
+		t.Helper()
+		tx, err := db.BeginTx(baseCtx, postgres.TxTenant, tenantID)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer postgres.Rollback(tx)
+		if err := tx.QueryRowContext(baseCtx,
+			`SELECT sim_effective_at, test_clock_id FROM email_outbox WHERE id = $1`, id,
+		).Scan(&simAt, &clockID); err != nil {
+			t.Fatalf("read anchor: %v", err)
+		}
+		return simAt, clockID
+	}
+
+	t.Run("bound ctx → anchor recorded", func(t *testing.T) {
+		ctx := clock.WithSim(baseCtx, clock.Sim{At: frozen, TestClockID: "vlx_tclk_anchor"})
+		id, err := store.EnqueueStandalone(ctx, tenantID, email.TypePaymentReceipt, map[string]any{
+			"to": "c@example.com", "invoice_number": "VLX-000042",
+		})
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		simAt, clockID := readAnchor(t, id)
+		if !simAt.Valid || !simAt.Time.Equal(frozen) {
+			t.Errorf("sim_effective_at = %v, want the frozen instant %s", simAt, frozen)
+		}
+		if !clockID.Valid || clockID.String != "vlx_tclk_anchor" {
+			t.Errorf("test_clock_id = %v, want vlx_tclk_anchor", clockID)
+		}
+	})
+
+	t.Run("unbound ctx → both NULL (live-mode mail)", func(t *testing.T) {
+		id, err := store.EnqueueStandalone(baseCtx, tenantID, email.TypePaymentReceipt, map[string]any{
+			"to": "c@example.com", "invoice_number": "VLX-000043",
+		})
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		simAt, clockID := readAnchor(t, id)
+		if simAt.Valid || clockID.Valid {
+			t.Errorf("unbound enqueue must record NULL anchor, got sim=%v clock=%v — the calendars coincide and a fake anchor would be a read-path lie", simAt, clockID)
+		}
+	})
+
+	t.Run("ListByInvoice surfaces the anchor", func(t *testing.T) {
+		rows, err := store.ListByInvoice(baseCtx, tenantID, "VLX-000042")
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rows))
+		}
+		if rows[0].SimEffectiveAt == nil || !rows[0].SimEffectiveAt.Equal(frozen) {
+			t.Errorf("SimEffectiveAt = %v, want %s", rows[0].SimEffectiveAt, frozen)
+		}
+		if rows[0].TestClockID != "vlx_tclk_anchor" {
+			t.Errorf("TestClockID = %q, want vlx_tclk_anchor", rows[0].TestClockID)
+		}
+	})
 }

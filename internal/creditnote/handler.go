@@ -454,15 +454,21 @@ func (h *Handler) sendEmail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	bt, ci, orig := h.assemblePDFContext(r.Context(), tenantID, cn)
-	pdfBytes, err := RenderPDF(r.Context(), cn, items, orig, bt, ci)
+	// Operator entry point on a clock-pinned entity (ADR-030): bind from
+	// the SOURCE INVOICE — the same rule the credit note's own timestamps
+	// follow — so the enqueued email carries the invoice's billing anchor
+	// (ADR-104) instead of enqueuing unanchored.
+	ctx := h.svc.bindForInvoice(r.Context(), tenantID, cn.InvoiceID)
+
+	bt, ci, orig := h.assemblePDFContext(ctx, tenantID, cn)
+	pdfBytes, err := RenderPDF(ctx, cn, items, orig, bt, ci)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "render credit note pdf for email", "credit_note_id", id, "error", err)
+		slog.ErrorContext(ctx, "render credit note pdf for email", "credit_note_id", id, "error", err)
 		respond.InternalError(w, r)
 		return
 	}
 
-	if err := h.emailSender.SendCreditNote(r.Context(), tenantID, body.Email, cc,
+	if err := h.emailSender.SendCreditNote(ctx, tenantID, body.Email, cc,
 		bt.Name, cn.CreditNoteNumber, orig.Number, cn.TotalCents, cn.Currency, pdfBytes); err != nil {
 		respond.FromError(w, r, err, "credit_note_email")
 		return
