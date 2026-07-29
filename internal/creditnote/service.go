@@ -184,16 +184,6 @@ type CreateInput struct {
 	// explicit *_cents fields directly.
 	RefundType string `json:"refund_type,omitempty"`
 	AutoIssue  bool   `json:"auto_issue"` // create + issue atomically
-	// IsSimulated marks this issuance as running in the invoice's
-	// (possibly simulated) time domain — set true by the engine clawback
-	// path, which issues under the clock-pinned sub's bound effective-now.
-	// Vestigial since 2026-07-29: buildCreditNote now derives is_simulated
-	// from the SOURCE INVOICE alone, because the operator entry points bind
-	// the invoice's clock too (ADR-030). Kept because engine callers still
-	// set it and it documents intent, but it no longer gates the flag — a
-	// simulated invoice yields a simulated credit note whoever asked for it.
-	// NOT a JSON/API field — callers set it in Go.
-	IsSimulated bool `json:"-"`
 	// IssuePending marks an AUTO-ISSUE clawback draft (migration 0121): created
 	// in-tx with a subscription downgrade/removal/qty-decrease via a tx-accepting
 	// create, then issued post-commit. If Issue() never runs (crash in the
@@ -442,10 +432,6 @@ func (s *Service) CreateAndIssueAdjustment(ctx context.Context, tenantID, invoic
 			Quantity:        1,
 			UnitAmountCents: grossCents,
 		}},
-		// Engine-issued under the clock-pinned sub's bound effective-now —
-		// so issued_at is in the invoice's (possibly simulated) time domain.
-		// ANDed with inv.IsSimulated in buildCreditNote.
-		IsSimulated:  true,
 		IssuePending: true,
 	}, nil)
 	if err != nil {
@@ -472,8 +458,6 @@ func (s *Service) CreateAdjustmentDraftTx(ctx context.Context, tx *sql.Tx, tenan
 			Quantity:        1,
 			UnitAmountCents: grossCents,
 		}},
-		// Engine-issued under the clock-pinned sub's bound effective-now.
-		IsSimulated:  true,
 		IssuePending: true,
 	}, tx)
 }

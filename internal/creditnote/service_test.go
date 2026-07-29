@@ -439,6 +439,12 @@ func TestCreate_IsSimulated(t *testing.T) {
 	}
 	line := []CreditLineInput{{Description: "adj", Quantity: 1, UnitAmountCents: 1000}}
 
+	// The rule is one line: the SOURCE INVOICE's pin decides. Corrected
+	// 2026-07-29 — this used to also gate on a CreateInput.IsSimulated flag,
+	// i.e. "operator HTTP issuance is always wall-clock", which contradicted
+	// ADR-030 (audit log is its only always-wall-clock carve-out) and produced
+	// credit notes dated before the invoices they credited. That input field is
+	// now deleted, so the actor cannot influence the flag at all.
 	cases := []struct {
 		name      string
 		invoice   domain.Invoice
@@ -446,20 +452,13 @@ func TestCreate_IsSimulated(t *testing.T) {
 		wantSimul bool
 	}{
 		{"engine clawback on simulated invoice → simulated",
-			mk("inv_sim", true), CreateInput{InvoiceID: "inv_sim", Reason: "subscription_downgrade", Lines: line, IsSimulated: true}, true},
-		// Corrected 2026-07-29. This case asserted "operator HTTP issue on a
-		// simulated invoice → wall-clock", which contradicted ADR-030: bind
-		// effective-now at EVERY operator entry point on a clock-pinned
-		// entity, with credit notes and their CreditGrant rows listed as
-		// simulated-when-pinned; the audit log is the sole always-wall-clock
-		// carve-out. The old rule produced a credit note dated weeks before
-		// the invoice it credited, and left it invisible to ADR-086 teardown.
-		// The clock belongs to the entity, not to whoever acted on it — so
-		// input.IsSimulated no longer gates the flag.
-		{"operator HTTP issue on simulated invoice → simulated",
-			mk("inv_sim2", true), CreateInput{InvoiceID: "inv_sim2", Reason: "billing error", Lines: line, IsSimulated: false}, true},
+			mk("inv_sim", true), CreateInput{InvoiceID: "inv_sim", Reason: "subscription_downgrade", Lines: line}, true},
+		{"operator issue on the SAME simulated invoice → simulated too",
+			mk("inv_sim2", true), CreateInput{InvoiceID: "inv_sim2", Reason: "billing error", Lines: line}, true},
 		{"engine clawback on a non-simulated invoice → wall-clock",
-			mk("inv_real", false), CreateInput{InvoiceID: "inv_real", Reason: "subscription_downgrade", Lines: line, IsSimulated: true}, false},
+			mk("inv_real", false), CreateInput{InvoiceID: "inv_real", Reason: "subscription_downgrade", Lines: line}, false},
+		{"operator issue on a non-simulated invoice → wall-clock",
+			mk("inv_real2", false), CreateInput{InvoiceID: "inv_real2", Reason: "billing error", Lines: line}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
