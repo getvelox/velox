@@ -122,8 +122,17 @@ function subMeta(sub: Subscription): string {
   if (sub.status === 'trialing' && sub.trial_end_at) {
     return `Trial ends ${formatDate(sub.trial_end_at)}`
   }
-  if (sub.cancel_at_period_end && sub.cancel_at) {
-    return `Cancels ${formatDate(sub.cancel_at)}`
+  // A scheduled cancel must beat the "Renews …" arm below, and the guard
+  // has to hold for the COMMON shape: cancelling at period end sets
+  // cancel_at_period_end + cancel_effective_at but leaves cancel_at unset
+  // (that one is only for an explicit future-dated cancel). Requiring
+  // cancel_at meant this branch never fired for a period-end cancel, so a
+  // subscription that stops on Sep 1 advertised "Renews Sep 1".
+  // cancel_effective_at is the backend's authoritative answer (ADR-069) and
+  // is what SubscriptionDetail's timeline already uses.
+  const cancelAt = sub.cancel_at_period_end || sub.cancel_at ? sub.cancel_effective_at || sub.cancel_at : null
+  if (cancelAt) {
+    return `Cancels ${formatDate(cancelAt)}`
   }
   if (sub.status === 'past_due' && sub.next_billing_at) {
     return `Past due · retry ${formatDate(sub.next_billing_at)}`

@@ -719,9 +719,24 @@ export default function SubscriptionDetailPage() {
                       muted secondary line for completeness. */}
                   <p className="text-sm text-muted-foreground">Billing cycle</p>
                   <p className="text-lg font-semibold text-foreground mt-1">
-                    {sub.current_billing_period_end
-                      ? `Renews ${formatDate(sub.current_billing_period_end)}`
-                      : '\u2014'}
+                    {/* A scheduled cancel has to win here for the same
+                        reason it replaces "Next Billing" in the timeline
+                        bar above: renewal is exactly what won't happen.
+                        Pre-fix this row said "Renews <date>" on the very
+                        date the bar said "Cancels <date>" \u2014 one page
+                        stating both outcomes for one date. Uses the
+                        backend's authoritative cancel_effective_at
+                        (ADR-069), matching the bar. */}
+                    {(() => {
+                      const cancelAt =
+                        sub.cancel_at_period_end || sub.cancel_at
+                          ? sub.cancel_effective_at || sub.cancel_at || sub.current_billing_period_end
+                          : null
+                      if (cancelAt) return `Cancels ${formatDate(cancelAt)}`
+                      return sub.current_billing_period_end
+                        ? `Renews ${formatDate(sub.current_billing_period_end)}`
+                        : '\u2014'
+                    })()}
                   </p>
                   {sub.current_billing_period_start && sub.current_billing_period_end && (
                     <p className="text-xs text-muted-foreground mt-0.5">
@@ -945,10 +960,22 @@ export default function SubscriptionDetailPage() {
                 </span>
               </div>
             )}
+            {/* Third surface that has to respect a scheduled cancel — the
+                timeline bar and the Billing-cycle summary are the other two.
+                All three keyed off the period end alone, so one page could
+                say "Cancels Sep 1" and "Renews on Sep 1" at the same time. */}
             {sub.status !== 'trialing' && sub.status !== 'canceled' && sub.current_billing_period_end && (
               <div className="flex items-center justify-between px-6 py-3">
-                <span className="text-sm text-muted-foreground w-40 shrink-0">Renews on</span>
-                <span className="text-sm text-foreground">{formatDate(sub.current_billing_period_end)}</span>
+                <span className="text-sm text-muted-foreground w-40 shrink-0">
+                  {sub.cancel_at_period_end || sub.cancel_at ? 'Cancels on' : 'Renews on'}
+                </span>
+                <span className="text-sm text-foreground">
+                  {formatDate(
+                    sub.cancel_at_period_end || sub.cancel_at
+                      ? sub.cancel_effective_at || sub.cancel_at || sub.current_billing_period_end
+                      : sub.current_billing_period_end,
+                  )}
+                </span>
               </div>
             )}
             {/* A trial canceled at trial end never billed its "first paid
