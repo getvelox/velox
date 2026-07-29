@@ -93,6 +93,7 @@ type Service struct {
 	numbers  NumberGenerator
 	taxRev   TaxReverser
 	audit    AuditEmitter
+	resolver clock.Resolver
 }
 
 // AuditEmitter is the narrow in-tx audit seam (ADR-090). Issue() emits the
@@ -113,6 +114,34 @@ func NewService(store Store, invoices InvoiceReader, refunder Refunder, credits 
 // SetAuditLogger wires in-tx audit emission for Issue()/relief (ADR-090).
 // Optional — nil skips emission (unit-test fakes).
 func (s *Service) SetAuditLogger(a AuditEmitter) { s.audit = a }
+
+// SetResolver wires the ADR-030 time provider. Without it every operator
+// entry point here stamps WALL-CLOCK time onto rows that belong to a
+// clock-pinned invoice — the exact leak ADR-030 exists to close ("bind
+// effective-now at every operator entry point on a clock-pinned entity";
+// credit notes and their CreditGrant ledger rows are named as simulated-when-
+// pinned in its table).
+//
+// The engine-driven clawback paths were already correct because their CALLERS
+// bind (billOnePeriod's in-band downgrade, and RetryPendingClawbackIssueForClock
+// which is handed frozen_time explicitly). Only the operator-initiated entry
+// points were unbound, which is why an engine clawback landed on the simulated
+// axis while an operator credit note on the SAME invoice landed on wall-clock —
+// dated weeks before the invoice it credits.
+func (s *Service) SetResolver(r clock.Resolver) { s.resolver = r }
+
+// bindForInvoice pins ctx to the source invoice's effective-now, so every
+// clock.Now(ctx) below — the credit_note row, its line items, the credit-ledger
+// grant, amount_due relief — lands in the invoice's own time domain. Mirrors
+// invoice.Service.bindForInvoice. Unresolvable pin or unwired resolver leaves
+// ctx untouched (wall-clock), which is correct for a non-simulated invoice.
+func (s *Service) bindForInvoice(ctx context.Context, tenantID, invoiceID string) context.Context {
+	if s.resolver == nil || invoiceID == "" {
+		return ctx
+	}
+	bound, _ := clock.BindEffectiveNow(ctx, s.resolver, clock.Pin{TenantID: tenantID, InvoiceID: invoiceID})
+	return bound
+}
 
 // SetNumberGenerator sets the sequential number generator (breaks circular dep).
 func (s *Service) SetNumberGenerator(ng NumberGenerator) {
@@ -158,10 +187,12 @@ type CreateInput struct {
 	// IsSimulated marks this issuance as running in the invoice's
 	// (possibly simulated) time domain — set true by the engine clawback
 	// path, which issues under the clock-pinned sub's bound effective-now.
-	// The operator HTTP path leaves it false (it never binds a clock, so
-	// issued_at is wall-clock). buildCreditNote ANDs it with the invoice's
-	// own is_simulated, so an engine CN on a non-simulated invoice still
-	// resolves to false. NOT a JSON/API field — callers set it in Go.
+	// Vestigial since 2026-07-29: buildCreditNote now derives is_simulated
+	// from the SOURCE INVOICE alone, because the operator entry points bind
+	// the invoice's clock too (ADR-030). Kept because engine callers still
+	// set it and it documents intent, but it no longer gates the flag — a
+	// simulated invoice yields a simulated credit note whoever asked for it.
+	// NOT a JSON/API field — callers set it in Go.
 	IsSimulated bool `json:"-"`
 	// IssuePending marks an AUTO-ISSUE clawback draft (migration 0121): created
 	// in-tx with a subscription downgrade/removal/qty-decrease via a tx-accepting
@@ -181,6 +212,10 @@ type CreditLineInput struct {
 }
 
 func (s *Service) Create(ctx context.Context, tenantID string, input CreateInput) (domain.CreditNote, error) {
+	// ADR-030: pin ctx to the source invoice's clock before anything is
+	// written, so a credit note against a clock-pinned invoice is stamped in
+	// that invoice's own time domain rather than wall-clock.
+	ctx = s.bindForInvoice(ctx, tenantID, input.InvoiceID)
 	// In-flight payment gate. An OPERATOR credit note must not reduce an
 	// invoice's amount_due while its payment is in flight (processing/unknown):
 	// at settle, MarkPaid records amount_paid off the now-lower amount_due
@@ -722,10 +757,20 @@ func (s *Service) buildCreditNote(ctx context.Context, tenantID string, input Cr
 		OutOfBandAmountCents: outOfBandAmount,
 		Currency:             inv.Currency,
 		RefundStatus:         domain.RefundNone,
-		// Simulated iff issued under the invoice's bound clock (engine path,
-		// input.IsSimulated) AND the invoice itself is simulated. Operator
-		// HTTP issuance (input.IsSimulated=false) is always wall-clock.
-		IsSimulated: input.IsSimulated && inv.IsSimulated,
+		// Simulated iff the SOURCE INVOICE is — the clock belongs to the
+		// entity, not to whoever acted on it. This used to also require
+		// input.IsSimulated, i.e. "operator HTTP issuance is always
+		// wall-clock", which contradicted ADR-030: its only always-wall-clock
+		// carve-out is the audit log, and its table names credit notes and
+		// their CreditGrant rows as simulated-when-pinned.
+		//
+		// The old rule produced a row stamped in simulated time (once the
+		// entry points bound ctx) but flagged is_simulated=false — so it
+		// rendered in the "Real times — not the test clock's dates" lane while
+		// displaying the test clock's date, stayed visible to wall-clock
+		// reconcilers that skip simulated rows, and would survive the ADR-086
+		// teardown that deletes a clock's data.
+		IsSimulated: inv.IsSimulated,
 		// IssuePending: an auto-issue clawback draft to be issued post-commit and
 		// retried by the reconciler if Issue() fails (migration 0121). Only the
 		// in-tx clawback create (CreateAdjustmentDraftTx) sets this.
@@ -798,6 +843,9 @@ func (s *Service) CreateAndIssueCommitRelief(ctx context.Context, tenantID strin
 	if s.credits == nil {
 		return domain.CreditNote{}, fmt.Errorf("credit granter not wired (call SetCreditGranter)")
 	}
+
+	// ADR-030: relief rows belong to the source invoice's time domain.
+	ctx = s.bindForInvoice(ctx, tenantID, input.InvoiceID)
 
 	inv, err := s.invoices.Get(ctx, tenantID, input.InvoiceID)
 	if err != nil {
@@ -982,6 +1030,10 @@ func (s *Service) CreateAndIssueCommitRelief(ctx context.Context, tenantID strin
 			CommitRetiredCents:   r,
 			Currency:             inv.Currency,
 			RefundStatus:         domain.RefundNone,
+			// Same rule as buildCreditNote: the source invoice's pin decides.
+			// This path never set the flag at all, so a commit-relief note on a
+			// clock-pinned invoice was left unflagged.
+			IsSimulated: inv.IsSimulated,
 		}
 		line := domain.CreditNoteLineItem{
 			Description:     fmt.Sprintf("Commit relief — retired %d of %d commit credits", r, granted),
@@ -1070,6 +1122,9 @@ func (s *Service) CreateRefund(ctx context.Context, tenantID string, input Refun
 	if strings.TrimSpace(input.Reason) == "" {
 		return domain.CreditNote{}, errs.Required("reason")
 	}
+
+	// ADR-030: refund rows belong to the source invoice's time domain.
+	ctx = s.bindForInvoice(ctx, tenantID, input.InvoiceID)
 
 	inv, err := s.invoices.Get(ctx, tenantID, input.InvoiceID)
 	if err != nil {
@@ -1189,6 +1244,11 @@ func (s *Service) Issue(ctx context.Context, tenantID, id string) (domain.Credit
 	if cn.Status != domain.CreditNoteDraft {
 		return domain.CreditNote{}, errs.InvalidState("can only issue draft credit notes")
 	}
+	// ADR-030: Issue is where the money moves (ledger grant / amount_due
+	// relief / tax reversal), so it must run in the source invoice's time
+	// domain. Bound here rather than at the top because the invoice id comes
+	// off the credit note we just loaded.
+	ctx = s.bindForInvoice(ctx, tenantID, cn.InvoiceID)
 
 	// Read the source invoice BEFORE the CAS so the two source-state gates below
 	// can decide whether to issue at all without claiming the transition.
@@ -1511,6 +1571,8 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	if err != nil {
 		return domain.CreditNote{}, err
 	}
+	// ADR-030: same time domain as the credit note being retried.
+	ctx = s.bindForInvoice(ctx, tenantID, cn.InvoiceID)
 	if cn.Status != domain.CreditNoteIssued {
 		return domain.CreditNote{}, errs.InvalidState(fmt.Sprintf(
 			"can only retry refund on issued credit notes (current status: %s)", cn.Status))
@@ -1655,6 +1717,8 @@ func (s *Service) Void(ctx context.Context, tenantID, id string) (domain.CreditN
 	if err != nil {
 		return domain.CreditNote{}, err
 	}
+	// ADR-030: the void's updated_at belongs to the invoice's time domain.
+	ctx = s.bindForInvoice(ctx, tenantID, cn.InvoiceID)
 	if cn.Status == domain.CreditNoteVoided {
 		return domain.CreditNote{}, errs.InvalidState("credit note is already voided")
 	}

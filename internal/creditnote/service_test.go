@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/errs"
+	"github.com/sagarsuperuser/velox/internal/platform/clock"
 )
 
 type memStore struct {
@@ -28,10 +29,14 @@ func newMemStore() *memStore {
 	}
 }
 
-func (m *memStore) Create(_ context.Context, tenantID string, cn domain.CreditNote) (domain.CreditNote, error) {
+func (m *memStore) Create(ctx context.Context, tenantID string, cn domain.CreditNote) (domain.CreditNote, error) {
 	cn.ID = fmt.Sprintf("vlx_cn_%d", len(m.notes)+1)
 	cn.TenantID = tenantID
-	cn.CreatedAt = time.Now().UTC()
+	// Mirrors the real Postgres store, which reads clock.Now(ctx) so a
+	// clock-pinned write lands in simulated time (ADR-030 rule 3). A fake that
+	// hardcodes time.Now() would silently pass a binding test that the real
+	// store would fail.
+	cn.CreatedAt = clock.Now(ctx)
 	cn.UpdatedAt = cn.CreatedAt
 	m.notes[cn.ID] = cn
 	return cn, nil
@@ -188,7 +193,7 @@ func (m *memStore) TransitionStatusAudited(ctx context.Context, tenantID, id str
 	return won, nil
 }
 
-func (m *memStore) TransitionStatus(_ context.Context, tenantID, id string, from, to domain.CreditNoteStatus) (bool, error) {
+func (m *memStore) TransitionStatus(ctx context.Context, tenantID, id string, from, to domain.CreditNoteStatus) (bool, error) {
 	cn, ok := m.notes[id]
 	if !ok || cn.TenantID != tenantID {
 		return false, errs.ErrNotFound
@@ -197,7 +202,7 @@ func (m *memStore) TransitionStatus(_ context.Context, tenantID, id string, from
 		return false, nil // lost the CAS — already transitioned
 	}
 	cn.Status = to
-	now := time.Now().UTC()
+	now := clock.Now(ctx)
 	if to == domain.CreditNoteIssued {
 		cn.IssuedAt = &now
 	}
@@ -442,8 +447,17 @@ func TestCreate_IsSimulated(t *testing.T) {
 	}{
 		{"engine clawback on simulated invoice → simulated",
 			mk("inv_sim", true), CreateInput{InvoiceID: "inv_sim", Reason: "subscription_downgrade", Lines: line, IsSimulated: true}, true},
-		{"operator HTTP issue on simulated invoice → wall-clock",
-			mk("inv_sim2", true), CreateInput{InvoiceID: "inv_sim2", Reason: "billing error", Lines: line, IsSimulated: false}, false},
+		// Corrected 2026-07-29. This case asserted "operator HTTP issue on a
+		// simulated invoice → wall-clock", which contradicted ADR-030: bind
+		// effective-now at EVERY operator entry point on a clock-pinned
+		// entity, with credit notes and their CreditGrant rows listed as
+		// simulated-when-pinned; the audit log is the sole always-wall-clock
+		// carve-out. The old rule produced a credit note dated weeks before
+		// the invoice it credited, and left it invisible to ADR-086 teardown.
+		// The clock belongs to the entity, not to whoever acted on it — so
+		// input.IsSimulated no longer gates the flag.
+		{"operator HTTP issue on simulated invoice → simulated",
+			mk("inv_sim2", true), CreateInput{InvoiceID: "inv_sim2", Reason: "billing error", Lines: line, IsSimulated: false}, true},
 		{"engine clawback on a non-simulated invoice → wall-clock",
 			mk("inv_real", false), CreateInput{InvoiceID: "inv_real", Reason: "subscription_downgrade", Lines: line, IsSimulated: true}, false},
 	}
@@ -1189,5 +1203,85 @@ func TestCreate_LinesCommitWithHeader(t *testing.T) {
 	}
 	if sum != cn.TotalCents || cn.TotalCents != 5000 {
 		t.Errorf("Σ line amounts %d vs CN total %d, want both 5000 (gross lines sum to Credit Total)", sum, cn.TotalCents)
+	}
+}
+
+// simResolver pins every invoice to a fixed simulated instant, standing in for
+// the billing engine's clock.Resolver.
+type simResolver struct{ at time.Time }
+
+func (r *simResolver) SimForCustomer(context.Context, string, string) (clock.Sim, error) {
+	return clock.Sim{}, errs.ErrNotFound
+}
+func (r *simResolver) SimForSubscription(context.Context, string, string) (clock.Sim, error) {
+	return clock.Sim{}, errs.ErrNotFound
+}
+func (r *simResolver) SimForInvoice(_ context.Context, _, _ string) (clock.Sim, error) {
+	return clock.Sim{At: r.at, TestClockID: "vlx_tclk_test"}, nil
+}
+
+// TestOperatorCreditNote_StampsSimulatedTime pins ADR-030 on the operator
+// credit-note path: "bind effective-now at every operator entry point on a
+// clock-pinned entity", with credit notes and their CreditGrant rows named as
+// simulated-when-pinned.
+//
+// Pre-fix, creditnote.Service held no resolver at all, so only the ENGINE's
+// clawback landed on the simulated axis (its callers bind) while an operator
+// credit note on the same invoice was stamped wall-clock — producing a credit
+// note dated weeks BEFORE the invoice it credits, and a ledger grant the
+// clock-scoped catchup scans compare against frozen_time.
+func TestOperatorCreditNote_StampsSimulatedTime(t *testing.T) {
+	simAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	store := newMemStore()
+	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{
+		"inv_sim": {
+			ID: "inv_sim", TenantID: "t1", CustomerID: "cus_1",
+			Status: domain.InvoiceFinalized, Currency: "USD",
+			TotalAmountCents: 10000, AmountDueCents: 10000,
+		},
+	}}
+	svc := NewService(store, invoices, nil)
+	svc.SetNumberGenerator(&fakeCNNumbers{})
+	svc.SetResolver(&simResolver{at: simAt})
+
+	cn, err := svc.Create(context.Background(), "t1", CreateInput{
+		InvoiceID: "inv_sim",
+		Reason:    "Goodwill credit",
+		Lines:     []CreditLineInput{{Description: "adjustment", Quantity: 1, UnitAmountCents: 500}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !cn.CreatedAt.Equal(simAt) {
+		t.Errorf("created_at = %s, want the invoice's simulated instant %s — an operator credit note on a clock-pinned invoice must not be stamped wall-clock", cn.CreatedAt, simAt)
+	}
+}
+
+// TestOperatorCreditNote_UnpinnedStaysWallClock is the negative: with no
+// simulated pin the bind is a no-op and the row keeps wall-clock time.
+func TestOperatorCreditNote_UnpinnedStaysWallClock(t *testing.T) {
+	store := newMemStore()
+	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{
+		"inv_real": {
+			ID: "inv_real", TenantID: "t1", CustomerID: "cus_1",
+			Status: domain.InvoiceFinalized, Currency: "USD",
+			TotalAmountCents: 10000, AmountDueCents: 10000,
+		},
+	}}
+	svc := NewService(store, invoices, nil)
+	svc.SetNumberGenerator(&fakeCNNumbers{})
+	// No resolver wired at all — the unpinned production shape.
+
+	before := time.Now().UTC().Add(-time.Minute)
+	cn, err := svc.Create(context.Background(), "t1", CreateInput{
+		InvoiceID: "inv_real",
+		Reason:    "Goodwill credit",
+		Lines:     []CreditLineInput{{Description: "adjustment", Quantity: 1, UnitAmountCents: 500}},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if cn.CreatedAt.Before(before) {
+		t.Errorf("created_at = %s, want wall-clock (>= %s) on a non-simulated invoice", cn.CreatedAt, before)
 	}
 }

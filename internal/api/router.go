@@ -1002,6 +1002,13 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// but no-op.
 	creditNoteSvc.SetTaxReverser(engine)
 
+	// ADR-030 time provider. Operator credit-note entry points (Create, Issue,
+	// Void, refund, commit-relief) were the one family still stamping
+	// wall-clock onto rows owned by a clock-pinned invoice — an operator credit
+	// note could be dated weeks BEFORE the invoice it credits. The engine's own
+	// clawback paths were already correct because their callers bind.
+	creditNoteSvc.SetResolver(engine)
+
 	// Proration invoices now share the billing engine's tax resolution path so
 	// plan upgrades aren't silently tax-free. The adapter translates between
 	// billing.TaxApplication and subscription.ProrationTaxResult.
