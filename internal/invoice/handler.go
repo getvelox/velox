@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1349,6 +1350,15 @@ func dunningEventRank(eventType domain.DunningEventType) int {
 	}
 }
 
+// rfc3339OrEmpty serializes a wall stamp for the Recorded subline;
+// zero (unknown) renders nothing.
+func rfc3339OrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
 // lifecycleRecordedStamps joins an invoice's audit entries to the
 // lifecycle event types they transition (ADR-104 Invariant A, corrected
 // boundary №2). EXACT keys only: the top-level action for
@@ -1359,8 +1369,8 @@ func dunningEventRank(eventType domain.DunningEventType) int {
 // newest-first, so the walk runs backwards. A transition with no audit
 // row is simply absent: its timeline row renders bare, honest for
 // pre-audit history.
-func lifecycleRecordedStamps(entries []domain.AuditEntry) map[string]string {
-	out := map[string]string{}
+func lifecycleRecordedStamps(entries []domain.AuditEntry) map[string]time.Time {
+	out := map[string]time.Time{}
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		key := ""
@@ -1379,8 +1389,8 @@ func lifecycleRecordedStamps(entries []domain.AuditEntry) map[string]string {
 				key = "invoice.paid"
 			}
 		}
-		if key != "" && out[key] == "" {
-			out[key] = e.CreatedAt.Format(time.RFC3339)
+		if key != "" && out[key].IsZero() {
+			out[key] = e.CreatedAt
 		}
 	}
 	return out
@@ -1396,6 +1406,40 @@ func sortInvoiceTimeline(events []timelineEvent) {
 	timeline.SortStable(events,
 		func(e timelineEvent) time.Time { return e.sortAt },
 		func(a, b timelineEvent) bool { return a.tieRank < b.tieRank })
+
+	// Reality pass (ADR-104 ordering amendment, 2026-07-29): within one
+	// story-instant group, order by the REAL sequence — the recorded
+	// stamps — so a frozen-clock invoice reads exactly like a wall-clock
+	// one whose displayed dates happen to coincide. Gated on GROUP
+	// COMPLETENESS: only when every row in the group carries a recorded
+	// stamp. A partially-stamped group is legacy data (pre-0162/0163/0164
+	// rows, or an engine path with no audit row), and placing bare rows
+	// against stamped ones would FABRICATE a sequence — those groups keep
+	// the causal ladder above, which is correct-but-canonical, never
+	// wrong. Equal recorded stamps (same-tx rows share Postgres's
+	// tx-stable now()) fall back to the ladder inside the group; the
+	// pre-pass ordering makes SliceStable's preserved order exactly
+	// ladder-then-insertion.
+	for lo := 0; lo < len(events); {
+		hi := lo + 1
+		for hi < len(events) && events[hi].sortAt.Equal(events[lo].sortAt) {
+			hi++
+		}
+		complete := true
+		for i := lo; i < hi; i++ {
+			if events[i].recordedSort.IsZero() {
+				complete = false
+				break
+			}
+		}
+		if complete && hi-lo > 1 {
+			group := events[lo:hi]
+			sort.SliceStable(group, func(a, b int) bool {
+				return group[a].recordedSort.Before(group[b].recordedSort)
+			})
+		}
+		lo = hi
+	}
 }
 
 type timelineEvent struct {
@@ -1426,6 +1470,14 @@ type timelineEvent struct {
 	AttemptCount    int    `json:"attempt_count,omitempty"`
 	sortAt          time.Time
 	tieRank         int
+	// recordedSort is the row's real-world instant as a sortable value
+	// (zero when unknown). Within one story-instant group the timeline
+	// orders by it — but ONLY when every row in the group has one (the
+	// group-completeness gate): a partially-stamped group is legacy data,
+	// and any placement of its bare rows against stamped ones fabricates
+	// a sequence, so those groups keep the causal ladder. See
+	// sortInvoiceTimeline.
+	recordedSort time.Time
 	// Detail is a sub-line rendered beneath the row's main
 	// description. Used today on invoice.paid for the payment
 	// instrument ("via Visa •••• 4242"); generic enough that
@@ -1499,6 +1551,7 @@ func renderChargeAttempts(events []timelineEvent, attempts []domain.InvoiceCharg
 					for i := range events {
 						if events[i].EventType == "invoice.paid" && events[i].Source == "lifecycle" && events[i].RecordedAt == "" {
 							events[i].RecordedAt = a.OccurredAt.Format(time.RFC3339)
+							events[i].recordedSort = a.OccurredAt
 							break
 						}
 					}
@@ -1547,10 +1600,10 @@ func renderChargeAttempts(events []timelineEvent, attempts []domain.InvoiceCharg
 func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelineEvent {
 	ts := a.OccurredAt
 	sim := false
-	recorded := ""
+	var recorded time.Time
 	if a.SimEffectiveAt != nil {
 		ts = *a.SimEffectiveAt
-		recorded = a.OccurredAt.Format(time.RFC3339)
+		recorded = a.OccurredAt
 		sim = true
 	}
 	desc, status := "Payment failed", "failed"
@@ -1579,7 +1632,8 @@ func chargeAttemptRow(a domain.InvoiceChargeAttempt, inv domain.Invoice) timelin
 		Currency:        inv.Currency,
 		PaymentIntentID: a.StripePaymentIntentID,
 		IsSimulated:     sim,
-		RecordedAt:      recorded,
+		RecordedAt:      rfc3339OrEmpty(recorded),
+		recordedSort:    recorded,
 	}
 }
 
@@ -1680,15 +1734,15 @@ var relevantDunningEvents = map[string]bool{
 // whose two calendars differ shows both. Legacy rows without an anchor
 // keep their wall stamp — misplaced but honest; inferring an anchor at
 // read time is the heuristic the no-heuristic-proxies rule bans.
-func emailRowInstant(evt EmailEventRow) (ts time.Time, recorded string, sim bool) {
+func emailRowInstant(evt EmailEventRow) (ts time.Time, recorded time.Time, sim bool) {
 	wall := evt.CreatedAt
 	if evt.DispatchedAt != nil {
 		wall = *evt.DispatchedAt
 	}
 	if evt.SimEffectiveAt != nil {
-		return *evt.SimEffectiveAt, wall.Format(time.RFC3339), true
+		return *evt.SimEffectiveAt, wall, true
 	}
-	return wall, "", false
+	return wall, time.Time{}, false
 }
 
 // describeEmailEvent maps an email_outbox row to a timeline-friendly
@@ -1902,7 +1956,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// in the audit log. Exact-keyed join; earliest row wins; a missing
 	// entry leaves the row bare — honest for pre-audit history. Fetch
 	// failure degrades the lane like every other source.
-	lifecycleRecorded := map[string]string{}
+	lifecycleRecorded := map[string]time.Time{}
 	if isSimulated && h.auditStamps != nil {
 		if entries, err := h.auditStamps.ListByInvoice(r.Context(), tenantID, inv.ID); err != nil {
 			degrade("audit", err)
@@ -1917,32 +1971,34 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// Mirrors Stripe's "Invoice activity" section which always anchors
 	// on Created → Finalized regardless of payment progress.
 	events = append(events, timelineEvent{
-		ID:          "lifecycle:created:" + inv.ID,
-		Timestamp:   inv.CreatedAt.Format(time.RFC3339),
-		sortAt:      inv.CreatedAt,
-		tieRank:     rankInvoiceCreated,
-		Source:      "lifecycle",
-		EventType:   "invoice.created",
-		Status:      "succeeded",
-		Description: "Invoice created",
-		IsSimulated: isSimulated,
-		RecordedAt:  lifecycleRecorded["invoice.created"],
+		ID:           "lifecycle:created:" + inv.ID,
+		Timestamp:    inv.CreatedAt.Format(time.RFC3339),
+		sortAt:       inv.CreatedAt,
+		tieRank:      rankInvoiceCreated,
+		Source:       "lifecycle",
+		EventType:    "invoice.created",
+		Status:       "succeeded",
+		Description:  "Invoice created",
+		IsSimulated:  isSimulated,
+		RecordedAt:   rfc3339OrEmpty(lifecycleRecorded["invoice.created"]),
+		recordedSort: lifecycleRecorded["invoice.created"],
 	})
 	if inv.IssuedAt != nil {
 		amt := inv.AmountDueCents
 		events = append(events, timelineEvent{
-			ID:          "lifecycle:finalized:" + inv.ID,
-			Timestamp:   inv.IssuedAt.Format(time.RFC3339),
-			sortAt:      *inv.IssuedAt,
-			tieRank:     rankInvoiceFinalized,
-			Source:      "lifecycle",
-			EventType:   "invoice.finalized",
-			Status:      "succeeded",
-			Description: "Invoice finalized",
-			RecordedAt:  lifecycleRecorded["invoice.finalized"],
-			AmountCents: &amt,
-			Currency:    inv.Currency,
-			IsSimulated: isSimulated,
+			ID:           "lifecycle:finalized:" + inv.ID,
+			Timestamp:    inv.IssuedAt.Format(time.RFC3339),
+			sortAt:       *inv.IssuedAt,
+			tieRank:      rankInvoiceFinalized,
+			Source:       "lifecycle",
+			EventType:    "invoice.finalized",
+			Status:       "succeeded",
+			Description:  "Invoice finalized",
+			RecordedAt:   rfc3339OrEmpty(lifecycleRecorded["invoice.finalized"]),
+			recordedSort: lifecycleRecorded["invoice.finalized"],
+			AmountCents:  &amt,
+			Currency:     inv.Currency,
+			IsSimulated:  isSimulated,
 		})
 	}
 	// (Removed: synthetic "Payment deadline" event keyed off due_at.
@@ -1952,30 +2008,32 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// invoice header and the InvoiceAttention banner's `DueBy` line.)
 	if inv.VoidedAt != nil {
 		events = append(events, timelineEvent{
-			ID:          "lifecycle:voided:" + inv.ID,
-			Timestamp:   inv.VoidedAt.Format(time.RFC3339),
-			sortAt:      *inv.VoidedAt,
-			tieRank:     rankLifecycleTerminal,
-			Source:      "lifecycle",
-			EventType:   "invoice.voided",
-			Status:      "canceled",
-			Description: "Invoice voided",
-			RecordedAt:  lifecycleRecorded["invoice.voided"],
-			IsSimulated: isSimulated,
+			ID:           "lifecycle:voided:" + inv.ID,
+			Timestamp:    inv.VoidedAt.Format(time.RFC3339),
+			sortAt:       *inv.VoidedAt,
+			tieRank:      rankLifecycleTerminal,
+			Source:       "lifecycle",
+			EventType:    "invoice.voided",
+			Status:       "canceled",
+			Description:  "Invoice voided",
+			RecordedAt:   rfc3339OrEmpty(lifecycleRecorded["invoice.voided"]),
+			recordedSort: lifecycleRecorded["invoice.voided"],
+			IsSimulated:  isSimulated,
 		})
 	}
 	if inv.UncollectibleAt != nil {
 		events = append(events, timelineEvent{
-			ID:          "lifecycle:uncollectible:" + inv.ID,
-			Timestamp:   inv.UncollectibleAt.Format(time.RFC3339),
-			sortAt:      *inv.UncollectibleAt,
-			tieRank:     rankLifecycleTerminal,
-			Source:      "lifecycle",
-			EventType:   "invoice.marked_uncollectible",
-			Status:      "canceled",
-			Description: "Marked uncollectible — written off as bad debt",
-			RecordedAt:  lifecycleRecorded["invoice.marked_uncollectible"],
-			IsSimulated: isSimulated,
+			ID:           "lifecycle:uncollectible:" + inv.ID,
+			Timestamp:    inv.UncollectibleAt.Format(time.RFC3339),
+			sortAt:       *inv.UncollectibleAt,
+			tieRank:      rankLifecycleTerminal,
+			Source:       "lifecycle",
+			EventType:    "invoice.marked_uncollectible",
+			Status:       "canceled",
+			Description:  "Marked uncollectible — written off as bad debt",
+			RecordedAt:   rfc3339OrEmpty(lifecycleRecorded["invoice.marked_uncollectible"]),
+			recordedSort: lifecycleRecorded["invoice.marked_uncollectible"],
+			IsSimulated:  isSimulated,
 		})
 	}
 	if inv.PaidAt != nil {
@@ -1996,19 +2054,20 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 			detail = "Entered by an operator — cheque, wire, or other out-of-band payment"
 		}
 		events = append(events, timelineEvent{
-			ID:          "lifecycle:paid:" + inv.ID,
-			Timestamp:   inv.PaidAt.Format(time.RFC3339),
-			sortAt:      *inv.PaidAt,
-			tieRank:     rankLifecycleTerminal,
-			Source:      "lifecycle",
-			EventType:   "invoice.paid",
-			Status:      "succeeded",
-			RecordedAt:  lifecycleRecorded["invoice.paid"],
-			Description: desc,
-			AmountCents: &amt,
-			Currency:    inv.Currency,
-			Detail:      detail,
-			IsSimulated: isSimulated,
+			ID:           "lifecycle:paid:" + inv.ID,
+			Timestamp:    inv.PaidAt.Format(time.RFC3339),
+			sortAt:       *inv.PaidAt,
+			tieRank:      rankLifecycleTerminal,
+			Source:       "lifecycle",
+			EventType:    "invoice.paid",
+			Status:       "succeeded",
+			RecordedAt:   rfc3339OrEmpty(lifecycleRecorded["invoice.paid"]),
+			recordedSort: lifecycleRecorded["invoice.paid"],
+			Description:  desc,
+			AmountCents:  &amt,
+			Currency:     inv.Currency,
+			Detail:       detail,
+			IsSimulated:  isSimulated,
 		})
 	}
 
@@ -2064,24 +2123,25 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				// calendar, so its real-world insert instant renders as
 				// the same "Recorded" subline emails and attempts carry.
 				// Nil RecordedAt (pre-0164 rows) → no subline, honestly.
-				cnRecorded := ""
+				var cnRecorded time.Time
 				if cn.IsSimulated && cn.RecordedAt != nil {
-					cnRecorded = cn.RecordedAt.Format(time.RFC3339)
+					cnRecorded = *cn.RecordedAt
 				}
 				events = append(events, timelineEvent{
-					ID:          "cn:" + cn.ID,
-					Timestamp:   cn.IssuedAt.Format(time.RFC3339),
-					sortAt:      *cn.IssuedAt,
-					tieRank:     rankCreditNote,
-					Source:      "credit_note",
-					RecordedAt:  cnRecorded,
-					EventType:   "credit_note.issued",
-					Status:      "succeeded",
-					Description: desc,
-					AmountCents: &total,
-					Currency:    cn.Currency,
-					Detail:      detail,
-					IsSimulated: cn.IsSimulated,
+					ID:           "cn:" + cn.ID,
+					Timestamp:    cn.IssuedAt.Format(time.RFC3339),
+					sortAt:       *cn.IssuedAt,
+					tieRank:      rankCreditNote,
+					Source:       "credit_note",
+					RecordedAt:   rfc3339OrEmpty(cnRecorded),
+					recordedSort: cnRecorded,
+					EventType:    "credit_note.issued",
+					Status:       "succeeded",
+					Description:  desc,
+					AmountCents:  &total,
+					Currency:     cn.Currency,
+					Detail:       detail,
+					IsSimulated:  cn.IsSimulated,
 				})
 			}
 		}
@@ -2140,17 +2200,18 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				}
 				ts, recorded, sim := emailRowInstant(evt)
 				events = append(events, timelineEvent{
-					ID:          "email:" + evt.ID,
-					Timestamp:   ts.Format(time.RFC3339),
-					sortAt:      ts,
-					tieRank:     rankEmail,
-					Source:      "email",
-					EventType:   "email." + evt.EmailType,
-					Status:      status,
-					Description: desc,
-					Error:       evt.LastError,
-					IsSimulated: sim,
-					RecordedAt:  recorded,
+					ID:           "email:" + evt.ID,
+					Timestamp:    ts.Format(time.RFC3339),
+					sortAt:       ts,
+					tieRank:      rankEmail,
+					Source:       "email",
+					EventType:    "email." + evt.EmailType,
+					Status:       status,
+					Description:  desc,
+					Error:        evt.LastError,
+					IsSimulated:  sim,
+					RecordedAt:   rfc3339OrEmpty(recorded),
+					recordedSort: recorded,
 				})
 			}
 		}
@@ -2251,9 +2312,9 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 					}
-					dunRecorded := ""
+					var dunRecorded time.Time
 					if isSimulated && evt.RecordedAt != nil {
-						dunRecorded = evt.RecordedAt.Format(time.RFC3339)
+						dunRecorded = *evt.RecordedAt
 					}
 					events = append(events, timelineEvent{
 						ID:           "dunning:" + evt.ID,
@@ -2261,7 +2322,8 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 						sortAt:       evt.CreatedAt,
 						tieRank:      dunningEventRank(evt.EventType),
 						Source:       "dunning",
-						RecordedAt:   dunRecorded,
+						RecordedAt:   rfc3339OrEmpty(dunRecorded),
+						recordedSort: dunRecorded,
 						EventType:    string(evt.EventType),
 						Status:       status,
 						Description:  desc,
