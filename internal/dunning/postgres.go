@@ -690,8 +690,8 @@ func (s *PostgresStore) CreateEvent(ctx context.Context, tenantID string, event 
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO invoice_dunning_events (id, run_id, tenant_id, invoice_id,
-			event_type, state, reason, attempt_count, metadata, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			event_type, state, reason, attempt_count, metadata, created_at, recorded_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
 	`, id, event.RunID, tenantID, event.InvoiceID, event.EventType, event.State,
 		postgres.NullableString(event.Reason), event.AttemptCount, metaJSON, createdAt)
 	if err != nil {
@@ -715,7 +715,7 @@ func (s *PostgresStore) ListEvents(ctx context.Context, tenantID, runID string) 
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, run_id, tenant_id, invoice_id, event_type, state,
-			COALESCE(reason,''), attempt_count, metadata, created_at
+			COALESCE(reason,''), attempt_count, metadata, created_at, recorded_at
 		FROM invoice_dunning_events WHERE run_id = $1
 		ORDER BY created_at ASC, id ASC
 	`, runID)
@@ -729,7 +729,7 @@ func (s *PostgresStore) ListEvents(ctx context.Context, tenantID, runID string) 
 		var e domain.InvoiceDunningEvent
 		var metaJSON []byte
 		if err := rows.Scan(&e.ID, &e.RunID, &e.TenantID, &e.InvoiceID,
-			&e.EventType, &e.State, &e.Reason, &e.AttemptCount, &metaJSON, &e.CreatedAt); err != nil {
+			&e.EventType, &e.State, &e.Reason, &e.AttemptCount, &metaJSON, &e.CreatedAt, &e.RecordedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(metaJSON, &e.Metadata)

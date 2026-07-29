@@ -84,7 +84,13 @@ type CreditNote struct {
 	TaxReversalPending bool           `json:"tax_reversal_pending"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
 	CreatedAt          time.Time      `json:"created_at"`
-	UpdatedAt          time.Time      `json:"updated_at"`
+	// RecordedAt is the real-world instant this row was INSERTed (ADR-104
+	// Invariant A): CreatedAt follows the entity's calendar (simulated when
+	// clock-pinned, ADR-030), so without this the row had no wall stamp at
+	// all and the timeline couldn't show both calendars. Nil on rows
+	// created before migration 0164 — never backfilled.
+	RecordedAt *time.Time `json:"recorded_at,omitempty"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 type CreditNoteLineItem struct {

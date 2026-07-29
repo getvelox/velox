@@ -184,4 +184,8 @@ type InvoiceDunningEvent struct {
 	AttemptCount int              `json:"attempt_count"`
 	Metadata     map[string]any   `json:"metadata,omitempty"`
 	CreatedAt    time.Time        `json:"created_at"`
+	// RecordedAt is the real-world INSERT instant (ADR-104 Invariant A):
+	// CreatedAt follows the entity's calendar (simulated during catchup,
+	// ADR-030), so this is the row's only wall stamp. Nil pre-0164.
+	RecordedAt *time.Time `json:"recorded_at,omitempty"`
 }

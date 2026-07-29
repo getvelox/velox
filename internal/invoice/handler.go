@@ -1962,12 +1962,22 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				if cn.Reason != "" {
 					detail = cn.CreditNoteNumber + " — " + cn.Reason
 				}
+				// Invariant A (boundary corrected post-walk): a credit
+				// note on a clock-pinned invoice is dated on the entity's
+				// calendar, so its real-world insert instant renders as
+				// the same "Recorded" subline emails and attempts carry.
+				// Nil RecordedAt (pre-0164 rows) → no subline, honestly.
+				cnRecorded := ""
+				if cn.IsSimulated && cn.RecordedAt != nil {
+					cnRecorded = cn.RecordedAt.Format(time.RFC3339)
+				}
 				events = append(events, timelineEvent{
 					ID:          "cn:" + cn.ID,
 					Timestamp:   cn.IssuedAt.Format(time.RFC3339),
 					sortAt:      *cn.IssuedAt,
 					tieRank:     rankCreditNote,
 					Source:      "credit_note",
+					RecordedAt:  cnRecorded,
 					EventType:   "credit_note.issued",
 					Status:      "succeeded",
 					Description: desc,
@@ -2144,12 +2154,17 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 					}
+					dunRecorded := ""
+					if isSimulated && evt.RecordedAt != nil {
+						dunRecorded = evt.RecordedAt.Format(time.RFC3339)
+					}
 					events = append(events, timelineEvent{
 						ID:           "dunning:" + evt.ID,
 						Timestamp:    evt.CreatedAt.Format(time.RFC3339),
 						sortAt:       evt.CreatedAt,
 						tieRank:      dunningEventRank(evt.EventType),
 						Source:       "dunning",
+						RecordedAt:   dunRecorded,
 						EventType:    string(evt.EventType),
 						Status:       status,
 						Description:  desc,
