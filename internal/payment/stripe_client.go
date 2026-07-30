@@ -37,6 +37,12 @@ type PaymentError struct {
 	DeclineCode     string // non-empty for card declines (card_declined, insufficient_funds, etc.)
 	PaymentIntentID string // set when Stripe returned a PI object alongside the error
 	Unknown         bool
+	// NotConfigured marks the one error raised BEFORE any request is built:
+	// the tenant has no credentials for this mode. It is neither a rejection
+	// nor an ambiguous outcome — nothing was attempted. Callers that record an
+	// outcome must not treat it as either, or a tenant with unconnected Stripe
+	// gets a ledger full of "the provider refused" for calls never made.
+	NotConfigured bool
 }
 
 func (e *PaymentError) Error() string { return e.Message }
@@ -49,6 +55,12 @@ func (e *PaymentError) Error() string { return e.Message }
 // possible success as a failure, which is how a refund that actually happened
 // gets recorded as "failed".
 func (e *PaymentError) AmbiguousOutcome() bool { return e.Unknown }
+
+// ProviderReached reports whether the request actually got to the provider.
+// False means no call was made at all (no credentials for this mode), so the
+// error carries NO information about the money — it must not be recorded as a
+// rejection, and it must not be recorded as an ambiguous outcome either.
+func (e *PaymentError) ProviderReached() bool { return !e.NotConfigured }
 
 // OperatorSafeMessage implements respond.SafeMessageError so the
 // boundary sanitizer (respond.FromError) surfaces a curated message
@@ -161,7 +173,7 @@ func classifyStripeError(err error) *PaymentError {
 // (live or test) for which the tenant has not connected credentials. Surfaces
 // as an explicit PaymentError rather than a nil deref so operators get an
 // actionable signal ("connect Stripe under Settings → Payments").
-var ErrStripeNotConfigured = &PaymentError{Message: "stripe not configured for this mode"}
+var ErrStripeNotConfigured = &PaymentError{Message: "stripe not configured for this mode", NotConfigured: true}
 
 // LiveStripeClient wraps the Stripe SDK for PaymentIntent operations. Despite
 // the "Live" in the name, it handles both live and test modes — it selects

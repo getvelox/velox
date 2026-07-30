@@ -10,6 +10,7 @@ import (
 
 	"errors"
 	"github.com/sagarsuperuser/velox/internal/audit"
+	"github.com/sagarsuperuser/velox/internal/auth"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/errs"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
@@ -559,7 +560,34 @@ type ambiguousOutcome interface {
 	error
 }
 
-const refundRecoveryCoolOff = 5 * time.Minute
+// providerReach distinguishes "the provider refused" from "we never got to the
+// provider". Only the former is evidence about the money.
+type providerReach interface {
+	ProviderReached() bool
+	error
+}
+
+// mentionsAlreadyRefunded detects the one provider rejection that proves the
+// money DID move. Matching on the message is a heuristic and is used only to
+// AVOID asserting a false failure — never to assert a success — so its failure
+// mode is leaving a row in flight, not misreporting money.
+func mentionsAlreadyRefunded(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "already been refunded") || strings.Contains(m, "already_refunded")
+}
+
+const (
+	refundRecoveryCoolOff = 5 * time.Minute
+
+	// refundReplayTTL mirrors the charge path's bound and exists for the same
+	// reason: a provider retains idempotency keys for a limited window ("at
+	// least 24 hours" at Stripe), and replaying a key past it does NOT return
+	// the original refund — it issues a SECOND one. Re-driving forever would
+	// eventually refund the customer twice, which is the mirror image of a
+	// double charge (found by adversarial review, 2026-07-30). Past the window
+	// the row stops being swept and waits for a human.
+	refundReplayTTL = 12 * time.Hour
+)
 
 // RetryPendingRefunds resolves refunds whose OUTCOME was never learned — the
 // ambiguous provider error (timeout / 5xx / network, where the money may
@@ -591,6 +619,16 @@ func (s *Service) RetryPendingRefunds(ctx context.Context, batch int) (int, []er
 	var errsOut []error
 	resolved := 0
 	for _, cn := range stranded {
+		// Bind the row's tenant. The sweep lists CROSS-TENANT, but the provider
+		// client resolves its credentials from ctx — without this every call
+		// short-circuits to "not configured", which this loop would then have
+		// recorded as a definite rejection, marking every stranded refund
+		// failed. That is the very lie this sweep exists to end, applied
+		// automatically and at scale (found by adversarial review, 2026-07-30;
+		// missed by the unit tests because they inject the refunder directly and
+		// never exercise ctx-based client resolution).
+		ctx := auth.WithTenantID(ctx, cn.TenantID)
+
 		inv, err := s.invoices.Get(ctx, cn.TenantID, cn.InvoiceID)
 		if err != nil {
 			errsOut = append(errsOut, fmt.Errorf("get invoice for stranded refund %s: %w", cn.ID, err))
@@ -603,11 +641,47 @@ func (s *Service) RetryPendingRefunds(ctx context.Context, batch int) (int, []er
 			continue
 		}
 
+		// Past the replay window a re-drive would create a SECOND refund rather
+		// than return the original. Stop sweeping and say so loudly; the row
+		// keeps its 'pending' status, which is still the honest one.
+		attemptedAt := cn.UpdatedAt
+		if cn.IssuedAt != nil {
+			attemptedAt = *cn.IssuedAt
+		}
+		if time.Since(attemptedAt) >= refundReplayTTL {
+			slog.ErrorContext(ctx, "CRITICAL: a refund's outcome was never learned and its idempotency key is now older than the replay window — re-driving it could refund the customer a second time. Resolve it against the provider dashboard by hand",
+				"credit_note_id", cn.ID, "tenant_id", cn.TenantID,
+				"idempotency_key", fmt.Sprintf("velox_cn_%s", cn.ID),
+				"refund_amount_cents", cn.RefundAmountCents, "attempted_at", attemptedAt)
+			continue
+		}
+
 		// The SAME key Issue() and RetryRefund() use. Stripe dedups against it.
 		refundID, refStatus, rerr := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, fmt.Sprintf("velox_cn_%s", cn.ID))
 		if rerr != nil {
+			// Never reached the provider (no credentials for this mode)? Then
+			// the error says nothing about the money. Skip — do not record an
+			// outcome, do not burn the row.
+			var reach providerReach
+			if errors.As(rerr, &reach) && !reach.ProviderReached() {
+				errsOut = append(errsOut, fmt.Errorf("refund %s: provider not reachable for this tenant/mode: %w", cn.ID, rerr))
+				continue
+			}
 			var amb ambiguousOutcome
 			if errors.As(rerr, &amb) && !amb.AmbiguousOutcome() {
+				// A definite rejection means the provider refused THIS request —
+				// but not every refusal means no refund exists. "This charge has
+				// already been refunded" is a rejection whose whole content is
+				// that the money DID go back; recording 'failed' there states the
+				// opposite of what the provider just told us (found by
+				// adversarial review, 2026-07-30). Treat it as the settled fact
+				// it is and leave the row for the webhook to name, rather than
+				// asserting a failure.
+				if mentionsAlreadyRefunded(rerr.Error()) {
+					slog.WarnContext(ctx, "provider reports this charge is already refunded — leaving the credit note in flight for the refund webhook rather than recording a failure",
+						"credit_note_id", cn.ID, "error", rerr)
+					continue
+				}
 				// DEFINITE rejection — no refund exists. Record it so the row
 				// stops being swept and an operator sees the real reason.
 				if perr := s.store.UpdateRefundStatus(ctx, cn.TenantID, cn.ID, domain.RefundFailed, ""); perr != nil {

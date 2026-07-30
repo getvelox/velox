@@ -17,12 +17,22 @@ type ambiguousErr struct{ msg string }
 
 func (e ambiguousErr) Error() string          { return e.msg }
 func (e ambiguousErr) AmbiguousOutcome() bool { return true }
+func (e ambiguousErr) ProviderReached() bool  { return true }
+
+// unreachedErr models an error raised BEFORE any request is built — no
+// credentials for this mode. Neither a rejection nor an ambiguous outcome.
+type unreachedErr struct{ msg string }
+
+func (e unreachedErr) Error() string          { return e.msg }
+func (e unreachedErr) AmbiguousOutcome() bool { return false }
+func (e unreachedErr) ProviderReached() bool  { return false }
 
 // definiteErr is a provider REJECTION — no refund exists.
 type definiteErr struct{ msg string }
 
 func (e definiteErr) Error() string          { return e.msg }
 func (e definiteErr) AmbiguousOutcome() bool { return false }
+func (e definiteErr) ProviderReached() bool  { return true }
 
 // keyRecordingRefunder models the property recovery depends on: Stripe dedups
 // by idempotency key, so the SAME key always yields the SAME refund. A fake
@@ -121,7 +131,7 @@ func TestRetryPendingRefunds_LeavesADefiniteFailureAlone(t *testing.T) {
 		"inv_1": {ID: "inv_1", TenantID: "t1", StripePaymentIntentID: "pi_1", PaymentStatus: domain.PaymentSucceeded},
 	}}
 	refunder := newKeyRecordingRefunder()
-	refunder.failWith = definiteErr{msg: "charge_already_refunded"}
+	refunder.failWith = definiteErr{msg: "invalid_request: this charge cannot be refunded"}
 
 	svc := NewService(store, invoices, refunder)
 	if _, errs := svc.RetryPendingRefunds(context.Background(), 10); len(errs) > 0 {
@@ -136,6 +146,79 @@ func TestRetryPendingRefunds_LeavesADefiniteFailureAlone(t *testing.T) {
 	}
 	if len(refunder.keys) != 1 {
 		t.Fatalf("a definitely-failed refund was re-driven %d times; it must be swept exactly once", len(refunder.keys))
+	}
+}
+
+// TestRetryPendingRefunds_AlreadyRefundedIsNotAFailure: not every provider
+// rejection means no refund exists. "This charge has already been refunded" is
+// a rejection whose entire content is that the money DID go back — recording
+// 'failed' there states the opposite of what the provider just said, and would
+// have been recorded automatically on every sweep tick (found by adversarial
+// review, 2026-07-30; the original test used this very message as its example
+// of a definite failure).
+func TestRetryPendingRefunds_AlreadyRefundedIsNotAFailure(t *testing.T) {
+	store := newMemStore()
+	cn := seedRefundCN(t, store, domain.RefundPending, "")
+	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{
+		"inv_1": {ID: "inv_1", TenantID: "t1", StripePaymentIntentID: "pi_1", PaymentStatus: domain.PaymentSucceeded},
+	}}
+	refunder := newKeyRecordingRefunder()
+	refunder.failWith = definiteErr{msg: "Charge ch_123 has already been refunded."}
+
+	svc := NewService(store, invoices, refunder)
+	if _, errs := svc.RetryPendingRefunds(context.Background(), 10); len(errs) > 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if got := store.notes[cn.ID].RefundStatus; got == domain.RefundFailed {
+		t.Fatal("recorded 'failed' for a charge the provider says is ALREADY REFUNDED — the exact opposite of the money's state")
+	}
+}
+
+// TestRetryPendingRefunds_SkipsWhenTheProviderWasNeverReached: an error raised
+// before any request is built (no credentials for this mode) says nothing about
+// the money. Recording a failure from it would mark every stranded refund
+// failed for a tenant whose Stripe is simply not connected.
+func TestRetryPendingRefunds_SkipsWhenTheProviderWasNeverReached(t *testing.T) {
+	store := newMemStore()
+	cn := seedRefundCN(t, store, domain.RefundPending, "")
+	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{
+		"inv_1": {ID: "inv_1", TenantID: "t1", StripePaymentIntentID: "pi_1", PaymentStatus: domain.PaymentSucceeded},
+	}}
+	refunder := newKeyRecordingRefunder()
+	refunder.failWith = unreachedErr{msg: "stripe not configured for this mode"}
+
+	svc := NewService(store, invoices, refunder)
+	if _, errs := svc.RetryPendingRefunds(context.Background(), 10); len(errs) == 0 {
+		t.Fatal("an unreachable provider must surface as an error, not pass silently")
+	}
+	if got := store.notes[cn.ID].RefundStatus; got != domain.RefundPending {
+		t.Fatalf("status moved to %s on an error from a provider we never reached", got)
+	}
+}
+
+// TestRetryPendingRefunds_StopsPastTheReplayWindow: a provider retains
+// idempotency keys for a limited window. Past it, re-driving does NOT return
+// the original refund — it issues a SECOND one, refunding the customer twice.
+func TestRetryPendingRefunds_StopsPastTheReplayWindow(t *testing.T) {
+	store := newMemStore()
+	cn := seedRefundCN(t, store, domain.RefundPending, "")
+	old := time.Now().UTC().Add(-refundReplayTTL - time.Hour)
+	note := store.notes[cn.ID]
+	note.IssuedAt = &old
+	note.UpdatedAt = old
+	store.notes[cn.ID] = note
+
+	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{
+		"inv_1": {ID: "inv_1", TenantID: "t1", StripePaymentIntentID: "pi_1", PaymentStatus: domain.PaymentSucceeded},
+	}}
+	refunder := newKeyRecordingRefunder()
+
+	svc := NewService(store, invoices, refunder)
+	if _, errs := svc.RetryPendingRefunds(context.Background(), 10); len(errs) > 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if len(refunder.keys) != 0 {
+		t.Fatalf("an expired key was re-driven (%v) — past the retention window that creates a SECOND refund", refunder.keys)
 	}
 }
 

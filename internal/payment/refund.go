@@ -64,6 +64,12 @@ func NewStripeRefunder(clients *StripeClients) *StripeRefunder {
 // whose terminal outcome (succeeded/failed) lands later via a refund webhook —
 // so the caller must record what Stripe actually said, not a blanket success.
 func (r *StripeRefunder) CreateRefund(ctx context.Context, paymentIntentID string, amountCents int64, idempotencyKey string) (string, domain.RefundStatus, error) {
+	// ForCtx resolves credentials from the TENANT bound on ctx. A background
+	// sweep that lists cross-tenant must bind each row's tenant before calling,
+	// or every call lands here — and a caller that reads this as "the provider
+	// refused" will record a failure for a request never made (found by
+	// adversarial review, 2026-07-30). ErrStripeNotConfigured carries
+	// NotConfigured=true precisely so that misreading is refusable.
 	sc := r.clients.ForCtx(ctx)
 	if sc == nil {
 		return "", "", ErrStripeNotConfigured
