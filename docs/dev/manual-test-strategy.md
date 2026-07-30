@@ -25,7 +25,9 @@ Three corollaries that decide almost every judgement call:
    demonstration, not a test.
 2. **Assert the consequence, not the call.** `200 OK` is not a passing money
    test. The row, the balance, the provider's own record, and the operator's
-   screen are the assertions.
+   screen are the assertions. This does **not** mean "ignore the code" — see §2:
+   observation decides whether behaviour is right, reading explains why and where
+   the fix goes, and some defects are invisible to observation entirely.
 3. **When the doc and the code disagree, that is a finding — always.** One of
    them is wrong and you now know something nobody knew this morning. Never
    silently "fix" the doc to match observed behavior without deciding which was
@@ -58,9 +60,75 @@ outcome, not a consolation prize.
 
 ---
 
-## 2. The technique catalogue
+## 2. Triangulation — doc, code, system
 
-### 2.1 Control vs treatment — *the highest-yield technique*
+The §0 stance ("evidence, not execution") is easy to misread as "only trust what
+you can see on screen." That is half the discipline and, alone, it is weak. The
+full rule:
+
+> **The doc says X. The code says Y. The system does Z. Any disagreement between
+> the three is a finding — and code is a source of HYPOTHESES, never of PROOF.**
+
+This clause exists because a question exposed the imbalance: the original catalogue
+below leans observational, with code-reading appearing only as §3.6. Every bug FLOW C
+found was *observed* — and every one of them was *diagnosed by reading*.
+
+### Code is never evidence that behaviour is correct
+
+The tax-reconciler bug (#661) is the cautionary case: `TaxRetryableErrorCodes()`
+**declared itself** the single source and listed three codes; the operator banner
+classified from it and promised a retry; both scan call sites hardcoded a shorter
+list. Reading either the declaration or the banner yields a confident **false
+pass**. Only the observation settled it — twelve consecutive ticks with
+`retry_count` still 0.
+
+### …but reading is what turns an observation into a fix
+
+| Bug | Observation alone | Reading gave |
+|---|---|---|
+| Tax scan (#661) | "banner promises a retry, nothing happens" — could be timing | the divergence: declared source vs two hardcoded call sites |
+| Expiry floor (#666) | "the picker shows the wrong month" | root cause — the customer list was scoped to balance-holders, so a FIRST grant missed; enabled a cache-shared fix with no extra request |
+| Clawback drop (#671) | "no credit note exists" | the two-way/three-way split, *and* that `IsInFlight`'s own contract said "refuse or **defer**", *and* that defer was already built end to end |
+
+The last row is the expensive one. Without reading, the plausible fix was to
+**block the downgrade** while a charge is in flight — wrong, because a bank-debit
+source can be in flight for days, so that blocks a customer's plan change the
+whole time. The code said the correct answer already existed.
+
+### Some defects have no observable output at all
+
+```go
+if reduceBy <= 0 { return nil, nil }   // no row, no error, no log
+```
+
+Unobservable by construction. Findable by reading — or by constructing the exact
+adversarial state, which you only know to construct *because* you read it.
+
+### And reading prevents phantom bug reports
+
+In FLOW C alone, **four** separate "nothing happened" observations were correct
+behaviour: the dunning badge, the tax scan, the clawback scan and the
+refund-attention filter all carry `AND is_simulated = false` (ADR-086
+sim-gating). Without reading the predicate, each looks like a bug. Before
+reporting *any* "nothing happened", find the predicate and check whether nothing
+was supposed to happen.
+
+### The three disagreement flavours, each seen in FLOW C
+
+- **doc vs code** — the clawback box described an ordering the test it cited does
+  not cover (so the box was written from intent, not observation);
+- **code vs code** — a self-declared single source contradicted by its own call
+  sites;
+- **code vs system** — a comment describing a guard that was not running on the
+  most common path.
+
+Each is a finding. Deciding *which* artifact is wrong is the work: fix UI up, not
+doc down — and never quietly edit a doc to match observed behaviour without
+deciding whether the behaviour was right.
+
+## 3. The technique catalogue
+
+### 3.1 Control vs treatment — *the highest-yield technique*
 
 Build **two fixtures identical in every respect but one variable**, run the same
 action on both, and diff the outcome. This does two jobs at once: it isolates
@@ -77,7 +145,7 @@ wrong.
 Use it whenever you suspect a branch. It converts "something's off" into a
 one-line diagnosis.
 
-### 2.2 Negative controls — prove the mechanism *discriminates*
+### 3.2 Negative controls — prove the mechanism *discriminates*
 
 An always-on check is indistinguishable from a working check until you feed it
 the case it must **not** fire on.
@@ -91,7 +159,7 @@ the case it must **not** fire on.
 
 Rule: every guard box needs its "and it does nothing when it shouldn't" twin.
 
-### 2.3 Provider-side verification — leave the building
+### 3.3 Provider-side verification — leave the building
 
 For anything involving an external system, the local row is a *claim*. Go ask
 the provider.
@@ -104,7 +172,7 @@ the provider.
 Applies to: refunds, charges, Checkout sessions (`open` vs `expired` — how the
 StopCollection bug was proven), tax transactions, webhook delivery.
 
-### 2.4 Exact-number fixtures — never approximate the interesting case
+### 3.4 Exact-number fixtures — never approximate the interesting case
 
 Build the fixture to the numbers that make the distinction *visible*. Rounding
 "close enough" hides exactly the bug the box was written for.
@@ -115,7 +183,7 @@ Build the fixture to the numbers that make the distinction *visible*. Rounding
 > and the total would have coincided and the assertion would have proven
 > nothing.
 
-### 2.5 Mutation verification — test the test
+### 3.5 Mutation verification — test the test
 
 After a test passes, **break the code it guards and watch it fail**. A test that
 never failed is a test whose subject you have not identified.
@@ -126,7 +194,7 @@ never failed is a test whose subject you have not identified.
 
 Non-negotiable for any test shipped alongside a money-path fix.
 
-### 2.6 Declared-source vs call-site audit
+### 3.6 Declared-source vs call-site audit
 
 When something declares itself the single source of truth, **grep every
 consumer** and check they actually read it. Prose cannot enforce this.
@@ -141,7 +209,7 @@ Generalise the fix: make the test **derive its fixtures from the source** (one
 stuck row per declared code), so the next divergence fails whichever entry it
 drops.
 
-### 2.7 First-use / cold-path bias
+### 3.7 First-use / cold-path bias
 
 Test the **first** time, the **empty** state, and the **new** entity — guards are
 most often absent exactly where the happy path is most common.
@@ -152,7 +220,7 @@ most often absent exactly where the happy path is most common.
 > guard was missing in its most common case, under a comment describing a
 > protection that wasn't running.
 
-### 2.8 Adversarial state — the states no happy path produces
+### 3.8 Adversarial state — the states no happy path produces
 
 Some states are only reachable by force, and the box should say so. Forcing them
 with `psql` is legitimate **when no product flow can produce them** — an
@@ -163,7 +231,7 @@ Always restore and re-assert the positive half afterwards: `processing` → 409,
 then reset → the same action succeeds. A guard proven only in the blocking
 direction might just be broken.
 
-### 2.9 Degenerate & same-instant states
+### 3.9 Degenerate & same-instant states
 
 Ask "what does this do when everything happens at once, or when the collection
 is empty, or when there is exactly one?" On a frozen clock, *every* row shares
@@ -172,7 +240,7 @@ an instant — so same-instant behavior isn't an edge case, it's the common case
 > **Drove:** the ADR-104 ordering work. The golden test is an invoice whose
 > entire life happens at one frozen instant.
 
-### 2.10 Time-based observation — some proofs only accrue
+### 3.10 Time-based observation — some proofs only accrue
 
 A backoff ladder, a lease expiry, a delivery verdict arriving days later: these
 cannot be asserted at t=0. Arm the fixture, record what you expect and when, and
@@ -182,7 +250,7 @@ come back. Say so in the box rather than claiming the untested rungs.
 > across a real afternoon, with the 8-attempt exhaustion box left explicitly
 > armed for ~7 days later.
 
-### 2.11 Re-derive the blocker
+### 3.11 Re-derive the blocker
 
 A "blocked" note is a claim with an expiry date. Re-derive it before trusting it.
 
@@ -191,7 +259,7 @@ A "blocked" note is a claim with an expiry date. Re-derive it before trusting it
 > provider selected but never connected), and the real schedule was days not
 > hours. Walking past that stale note is what found the #661 money bug.
 
-### 2.12 Cross-surface reconciliation
+### 3.12 Cross-surface reconciliation
 
 The same fact rendered on two screens must agree, and the operator must be able
 to reconcile them **without leaving the page**.
@@ -201,7 +269,7 @@ to reconcile them **without leaving the page**.
 
 ---
 
-## 3. The per-box protocol
+## 4. The per-box protocol
 
 For each box, in order. Steps 4 and 7 are the ones most often skipped.
 
@@ -210,18 +278,18 @@ For each box, in order. Steps 4 and 7 are the ones most often skipped.
 2. **Predict the outcome before acting.** A surprise is only informative if you
    had an expectation.
 3. **Exercise the real path** — dashboard for UI claims, API for contract
-   claims. `psql` only per §2.8.
+   claims. `psql` only per §3.8.
 4. **Screenshot the interactive state and LOOK at it.** Open dropdowns, dialogs
    mid-interaction, long-content and empty states. Text assertions cannot see
    layout.
 5. **Assert the consequence** in the DB *and* at the provider *and* on screen.
 6. **Run the negative control.**
 7. **Apply the design lens** — and record the verdict either way.
-8. **Record evidence in the box** (§5), including anything you could *not* prove.
+8. **Record evidence in the box** (§6), including anything you could *not* prove.
 
 ---
 
-## 4. Fixture strategy
+## 5. Fixture strategy
 
 - **One purpose-built tenant per campaign.** Aggregate surfaces (stat cards,
   badges, lists) can only be *asserted* when the tenant's contents are fully
@@ -239,7 +307,7 @@ For each box, in order. Steps 4 and 7 are the ones most often skipped.
 
 ---
 
-## 5. Evidence standard for an annotation
+## 6. Evidence standard for an annotation
 
 A walked box carries **what was observed**, not "works". Minimum:
 
@@ -256,7 +324,7 @@ described as proven is the rot this discipline exists to prevent.
 
 ---
 
-## 6. Stopping rules
+## 7. Stopping rules
 
 - **Automate** concurrency, money invariants, and any bug class that has now
   bitten twice. Three drifts of one class ⇒ mechanise a gate.
@@ -269,7 +337,7 @@ described as proven is the rot this discipline exists to prevent.
 
 ---
 
-## 7. Anti-patterns (all committed in this campaign, by me)
+## 8. Anti-patterns (all committed in this campaign, by me)
 
 | Anti-pattern | What it cost |
 |---|---|
@@ -282,7 +350,7 @@ described as proven is the rot this discipline exists to prevent.
 
 ---
 
-## 8. Consolidated from
+## 9. Consolidated from
 
 This doc supersedes the scattered guidance in these memories, which now point
 here: manual-test currency · prefer-real-flow-over-DB · walkthrough
