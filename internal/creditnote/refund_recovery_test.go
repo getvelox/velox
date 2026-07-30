@@ -215,7 +215,7 @@ func TestIssueRefund_AmbiguousOutcomeIsNotRecordedAsFailed(t *testing.T) {
 		{"definite", definiteErr{msg: "invalid_request"}, domain.RefundFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var status domain.RefundStatus = domain.RefundFailed
+			status := domain.RefundFailed
 			var amb interface {
 				AmbiguousOutcome() bool
 				error
