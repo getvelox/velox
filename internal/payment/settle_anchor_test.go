@@ -24,6 +24,7 @@ func TestChargeInvoice_SimBoundCtx_AnchorsPaidAtAndPIMetadata(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	s := NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	s.SetChargeIntents(newMemChargeIntents())
 
 	if _, err := s.ChargeInvoice(ctx, "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err != nil {
 		t.Fatalf("ChargeInvoice: %v", err)
@@ -46,6 +47,7 @@ func TestChargeInvoice_WallCtx_NoAnchor(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	s := NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	s.SetChargeIntents(newMemChargeIntents())
 
 	before := time.Now().UTC()
 	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err != nil {
@@ -86,6 +88,7 @@ func TestSettleSucceeded_CtxAnchorBeatsBindTime(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	s.SetChargeIntents(newMemChargeIntents())
 
 	ctx := withSettleAnchor(context.Background(), contracted)
 	if err := s.SettleSucceeded(ctx, "t1", invoices.invoices["inv_1"], "pi_wh", 5000, SourceWebhook); err != nil {

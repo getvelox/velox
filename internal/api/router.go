@@ -465,6 +465,13 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// healthy card PI settles in seconds) while resolving a genuinely-dropped
 	// webhook within ~one extra tick.
 	paymentReconciler.SetSettler(stripeAdapter)
+	// ADR-106: one ledger, two consumers. The charge path writes an intent
+	// BEFORE calling Stripe (fail-closed — an unwired store means no charges,
+	// never unrecorded ones), and the reconciler both recovers open intents and
+	// refuses to settle an ambiguous invoice failed while one is outstanding.
+	chargeIntentStore := payment.NewChargeIntentStore(db)
+	stripeAdapter.SetChargeIntents(chargeIntentStore)
+	paymentReconciler.SetChargeIntents(chargeIntentStore)
 	paymentReconciler.SetProcessingReconcileAfter(30 * time.Minute)
 	// Engine isn't constructed yet at this point — paymentReconciler's
 	// resolver is wired below at line ~640 alongside dunningSvc and

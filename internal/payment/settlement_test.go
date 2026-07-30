@@ -39,6 +39,7 @@ func TestSettleSucceeded_ResolvesDunningRun(t *testing.T) {
 	invoices.byPI["pi_abc"] = "inv_1"
 	resolver := &recordingDunningResolver{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetDunningResolver(resolver)
 
 	if err := s.SettleSucceeded(context.Background(), "t1", invoices.invoices["inv_1"], "pi_abc", 0, SourceWebhook); err != nil {
@@ -67,6 +68,7 @@ func TestSettleSucceeded_ResolverErrorDoesNotFailSettle(t *testing.T) {
 	invoices.byPI["pi_abc"] = "inv_1"
 	resolver := &recordingDunningResolver{err: errors.New("dunning store blip")}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetDunningResolver(resolver)
 
 	if err := s.SettleSucceeded(context.Background(), "t1", invoices.invoices["inv_1"], "pi_abc", 0, SourceWebhook); err != nil {
@@ -139,6 +141,7 @@ func TestSettleSucceeded_ConcurrentRedeliveryFiresSideEffectsOnce(t *testing.T) 
 	events := &recordingEventDispatcher{}
 	email := &recordingReceiptEmail{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetEventDispatcher(events)
 	s.SetEmailReceipt(email, staticCustomerEmail{})
 
@@ -180,6 +183,8 @@ func TestSettleSucceeded_MarksPaidFromAnySource(t *testing.T) {
 
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
 
+	s.SetChargeIntents(newMemChargeIntents())
+
 	// Call as the reconciler would (not via the webhook).
 	if err := s.SettleSucceeded(context.Background(), "t1", invoices.invoices["inv_1"], "pi_abc", 0, SourceReconciler); err != nil {
 		t.Fatalf("SettleSucceeded: %v", err)
@@ -215,6 +220,7 @@ func TestSettleFailed_ConcurrentRedeliveryFiresSideEffectsOnce(t *testing.T) {
 	failedEmail := &recordingFailedEmail{}
 	dunning := &recordingDunningStarter{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetEventDispatcher(events)
 	s.SetEmailPaymentFailed(failedEmail, staticCustomerEmail{})
 
@@ -264,6 +270,7 @@ func TestSettleFailed_InlinePresetThenWebhookStillNotifiesOnce(t *testing.T) {
 	failedEmail := &recordingFailedEmail{}
 	dunning := &recordingDunningStarter{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetEventDispatcher(events)
 	s.SetEmailPaymentFailed(failedEmail, staticCustomerEmail{})
 
@@ -291,6 +298,7 @@ func TestSettleFailed_NewRetryPIFiresAgain(t *testing.T) {
 	events := &recordingEventDispatcher{}
 	dunning := &recordingDunningStarter{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetEventDispatcher(events)
 
 	// First failure (pi_a), then a retry's failure on a fresh PI (pi_b).
@@ -316,6 +324,8 @@ func TestSettleFailed_FiresDunningFromAnySource(t *testing.T) {
 	dunning := &recordingDunningStarter{}
 
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
+
+	s.SetChargeIntents(newMemChargeIntents())
 
 	// A reconciler-style direct call (suppressCustomerEmail=false): this is the
 	// convergence Phase 2 depends on — the primitive fires dunning regardless
@@ -348,6 +358,8 @@ func TestSettleFailed_OutOfOrderGuardLivesInPrimitive(t *testing.T) {
 	dunning := &recordingDunningStarter{}
 
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
+
+	s.SetChargeIntents(newMemChargeIntents())
 
 	// A stale failure for an already-paid invoice, arriving via ANY source,
 	// must be a no-op — the guard lives in the primitive, so every settler
@@ -429,6 +441,7 @@ func TestSettleSucceeded_ReceiptEnqueueFirstPostCommit_AndDetachedFromCancel(t *
 
 	seq := &callSequencer{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetEmailReceipt(sequencedReceiptEmail{seq}, staticCustomerEmail{})
 	s.SetCardFetcher(sequencedCardFetcher{seq})
 	s.SetDunningResolver(sequencedDunningResolver{seq})
@@ -474,6 +487,7 @@ func TestSettleFailed_EmailEnqueueBeforeDunningStart(t *testing.T) {
 		seq = &callSequencer{}
 		dunning = &mockDunningStarter{seq: seq}
 		s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
+		s.SetChargeIntents(newMemChargeIntents())
 		s.SetEmailPaymentFailed(sequencedFailedEmail{seq}, staticCustomerEmail{})
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -530,6 +544,7 @@ func TestStopCollection_ExpiresSessionsBeforeCancelingPI(t *testing.T) {
 	// checkout-owned PIs.
 	client := &mockStripeClient{}
 	s := NewStripe(client, newMockInvoiceUpdater(), newMockWebhookStore(), nil, &recordingDunningStarter{})
+	s.SetChargeIntents(newMemChargeIntents())
 
 	// No checkout-session store wired (narrow fixture): StopCollection must
 	// still attempt the PI cancel and must not panic.

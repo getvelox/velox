@@ -64,6 +64,11 @@ func (f *fakePaymentReconciler) Run(ctx context.Context, b int) (int, []error) {
 	return f.sweep.run(ctx, b)
 }
 
+func (f *fakePaymentReconciler) RecoverChargeIntents(ctx context.Context, b int) (int, []error) {
+	*f.order = append(*f.order, "charge_intent")
+	return f.sweep.run(ctx, b)
+}
+
 // TestScheduler_ReconcilerOrder is the load-bearing guard: the recovery sweeps
 // MUST run in this exact order (payment_unknown + tax before auto-charge), or a
 // freshly-finalized invoice's finalize-time auto-charge can slip a tick. A
@@ -82,8 +87,11 @@ func TestScheduler_ReconcilerOrder(t *testing.T) {
 	for _, r := range s.reconcilers() {
 		got = append(got, r.Name())
 	}
+	// charge_intent runs FIRST — it names PaymentIntents payment_unknown cannot
+	// see, and payment_unknown is the sweep that would otherwise settle those
+	// invoices failed and free a retry to double-charge (ADR-106).
 	// dunning_backfill runs LAST — an order-independent backstop on already-failed invoices.
-	want := []string{"payment_unknown", "tax_retry", "tax_commit", "tax_reversal", "clawback_issue", "cn_tax_reversal", "dunning_backfill"}
+	want := []string{"charge_intent", "payment_unknown", "tax_retry", "tax_commit", "tax_reversal", "clawback_issue", "cn_tax_reversal", "dunning_backfill"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("reconciler order:\n got %v\nwant %v", got, want)
 	}

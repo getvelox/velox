@@ -69,6 +69,10 @@ type Reconciler struct {
 	olderThanProcessing time.Duration
 	now                 func() time.Time // injectable for tests
 	breaker             *breaker.Breaker // optional; skip reconcile ticks when breaker is open
+	// chargeIntents is the ADR-106 ledger. It powers RecoverChargeIntents AND
+	// gates the empty-PI give-up below. Nil disables both together, which is
+	// the only coherent pairing: with no ledger there is no intent to defer to.
+	chargeIntents ChargeIntentLedger
 	// settler routes recovered terminals through the shared settlement
 	// primitive so they fire the full side-effects (dunning/event/email).
 	// Nil-tolerant: see Settler.
@@ -186,10 +190,34 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 	ctx = auth.WithTenantID(ctx, inv.TenantID)
 
 	if inv.StripePaymentIntentID == "" {
-		// No PI ID to query (an 'unknown' invoice whose ambiguous charge error
-		// carried no PI). Settle failed so dunning/operator can decide; a safe
-		// retry generates a new PI.
-		slog.Warn("reconcile: no PI to query, settling failed",
+		// No PI id to query. This branch USED to settle failed and comment that
+		// "a safe retry generates a new PI" — which was the bug: settling failed
+		// bumps charge_attempt_seq, freeing the next retry to open a SECOND
+		// PaymentIntent beside one that may be live at Stripe right now.
+		//
+		// The charge-intent ledger (ADR-106) owns this case: it recorded the
+		// attempt before the call and can replay its key to learn the id. So
+		// defer whenever an attempt is unresolved. The predicate is
+		// "not resolved", NOT "open" — a needs_review intent is precisely the
+		// case where the outcome is unknown, and it must keep blocking.
+		if r.chargeIntents != nil {
+			unresolved, err := r.chargeIntents.HasUnresolved(ctx, inv.TenantID, inv.ID)
+			if err != nil {
+				// Fail CLOSED: an unreadable ledger is not evidence that no
+				// attempt is outstanding, and this write is irreversible.
+				return false, fmt.Errorf("check unresolved charge intent before settling failed: %w", err)
+			}
+			if unresolved {
+				slog.WarnContext(ctx, "reconcile: no PI to query, but a charge attempt is still unresolved — leaving it to the charge-intent recovery sweep rather than settling failed",
+					"invoice_id", inv.ID, "tenant_id", inv.TenantID)
+				return false, nil
+			}
+		}
+		// Reachable only for invoices that were already 'unknown' with no
+		// intent row when ADR-106 shipped (no backfill, by the
+		// no-speculative-backfill rule). WARN names it so it is visible if it
+		// ever fires in a world where every attempt should have a ledger row.
+		slog.WarnContext(ctx, "reconcile: no PI to query and no charge intent recorded (pre-ADR-106 invoice) — settling failed",
 			"invoice_id", inv.ID, "tenant_id", inv.TenantID)
 		return r.settle(ctx, inv, "", 0, false, "unknown outcome: no payment_intent_id to reconcile", terminalFailed)
 	}

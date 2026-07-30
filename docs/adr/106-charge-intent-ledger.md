@@ -1,0 +1,194 @@
+# ADR-106: Record the charge attempt before calling Stripe
+
+**Status:** Accepted
+**Date:** 2026-07-30
+**Amends:** [ADR-105](105-charge-idempotency-key-seed.md) — its deferred residual
+is closed here rather than by ADR-062's obligation queue, and its "mutable
+params in the key" rejected-alternative is corrected to describe what ships.
+**Builds on:** ADR-049 (payment reconciler), ADR-068 (checkout-session claim
+ledger — the pattern this is the second instance of), ADR-102 (charge attempt
+facts), ADR-105 (attempt-counter key seed).
+
+## Context
+
+ADR-105 fixed *which* idempotency key we send. One residual survived it, and no
+key scheme can fix it, because the problem is not the key:
+
+> Stripe can create a PaymentIntent that Velox never learns the name of.
+
+Two ways in, neither exotic:
+
+- the process dies between `CreatePaymentIntent` returning and the outcome
+  write landing (a **timeout** does this without any crash — it is the commonest
+  ambiguous outcome);
+- the call returns an ambiguous error carrying no PaymentIntent id.
+
+The invoice is then left with no `stripe_payment_intent_id`, and
+`payment.reconcileOne` cannot query what it cannot name. Its empty-PI branch
+settled the invoice **failed** — with the comment *"a safe retry generates a new
+PI"* — which bumps `charge_attempt_seq`, which frees the next retry to open a
+**second PaymentIntent beside one that may be live and charging right now**.
+
+That is the same double charge ADR-105 closed, reached through a different door.
+
+## Decision
+
+**Record the attempt before the effect** (playbook class E: record-before-effect
++ requeryable state). `charge_intents` (migration 0166) is committed *before*
+`CreatePaymentIntent` and stores the exact `Idempotency-Key` header plus every
+parameter needed to re-issue the identical request.
+
+### Recovery is idempotent replay, not search
+
+The load-bearing fact, verified against Stripe's documented contract and against
+our own client code before this was designed:
+
+> "Stripe's idempotency works by saving the resulting status code and body of
+> the first request made for any given idempotency key... Subsequent requests
+> with the same key return the same result."
+
+So the recovery sweep re-issues the stored request under the stored key and is
+handed the **original** PaymentIntent. Verified in code that this arrives as an
+ordinary success rather than an error: `LiveStripeClient.CreatePaymentIntent`
+has no replay branch and no header inspection — it returns `pi.ID`
+indistinguishably from a fresh create.
+
+Two outcomes, both safe, and there is no third:
+
+| Stripe's state | Replay returns | Why it is safe |
+|---|---|---|
+| holds a saved result for the key | the original PaymentIntent (or a cached decline, which still names it) | it cannot create a second — that is what the key prevents |
+| holds nothing (the request never began execution) | a newly created PaymentIntent | the one charge we always intended, and step 4 re-proved it is still owed |
+
+Consequences worth stating plainly: **zero new Stripe client methods** (replay
+is `CreatePaymentIntent`, truth is `GetPaymentIntent` — both already exist), and
+**zero new `invoice.Store` methods**, because the store lives in
+`internal/payment` beside its structural twin `checkout_sessions_store.go`.
+
+### The guarantee is structural, not procedural
+
+Two partial unique indexes carry it:
+
+- `(tenant_id, idempotency_key)` — two initiators at the same
+  `charge_attempt_seq` compute the same key, converge on one row, and send one
+  key; Stripe returns one PaymentIntent to both.
+- `(tenant_id, invoice_id) WHERE state <> 'resolved'` — while any attempt is
+  unresolved, a second one **cannot be recorded**; and since the pre-call write
+  is fail-closed, what cannot be recorded cannot be made.
+
+The predicate is `<> 'resolved'`, **not** `= 'open'`. A `needs_review` row is
+precisely the case where nobody knows whether a PaymentIntent is live — the last
+state in which starting another charge would be safe. Keying the index on
+`'open'` would turn the quarantine into the double-charge trigger.
+
+### The counterpart half: the give-up write must be gated
+
+Recovery alone is pointless. `payment_unknown` runs every tick and would settle
+the invoice failed seconds after recovery quarantined it, un-quarantining it and
+bumping the seq. So `reconcileOne`'s empty-PI branch now defers whenever an
+unresolved intent exists, and **fails closed** if the ledger is unreadable — an
+unreadable ledger is not evidence that no attempt is outstanding, and the write
+it guards is irreversible.
+
+The two halves ship together or not at all: the guard without recovery strands
+invoices; recovery without the guard is undone a tick later.
+
+### A fourth reconciler eligibility shape
+
+`reconciler_driver.go` documents the shapes a recovery sweep's predicate may
+take. This is a new one, and stronger than the existing three:
+
+> **0. PRE-EFFECT MARKER** — committed strictly before the effect can occur,
+> with the effect unreachable unless that commit succeeded (fail-closed).
+> Marker-absent implies effect-*impossible*, not merely effect-simultaneous.
+
+`charge_intent` is the only instance.
+
+### Corrections carried in the same change
+
+- **The exported key function was lying.** `stripe_client.go` appended
+  `_<PaymentMethodID>` to the key *after* `ChargeIdempotencyKey` returned it
+  (since ADR-053/#281), so the "single source" returned a string Stripe never
+  received — the operator ERROR added in #678 named an unsearchable key, and
+  exact replay was impossible. The suffix moved into the exported function;
+  wire-value-preserving.
+- **ADR-105 listed "mutable params in the key" as a rejected alternative** while
+  the payment-method half had shipped a month earlier. Amended: it is what
+  ships, and the ledger — not the key shape — is what stops a swapped card from
+  opening a second PaymentIntent.
+- **The customer-facing checkout path guarded only `processing`.**
+  `IsInFlight()` has always meant processing **or unknown**, so a customer could
+  click Pay on an invoice with a live ambiguous attempt. Now guarded on both,
+  plus on an unresolved intent — the same double charge by a customer-facing
+  route.
+
+## Consequences
+
+**A deliberate liveness cost.** An invoice whose attempt cannot be resolved
+stays at `payment_status='unknown'` instead of being settled failed. No money
+moves (it is excluded from every charge-claim predicate), but **no dunning
+starts either**, and a human must act. Stuck-and-loud beats
+silently-double-charged. The quarantine ERROR names the idempotency key, and
+Stripe's dashboard is searchable by it.
+
+**An operator exit already exists**, verified rather than assumed: re-sending
+the event from the Stripe dashboard settles the invoice, because
+`handlePaymentSucceeded` falls back to `metadata["velox_invoice_id"]`. The
+sweep's adoption step then closes the intent with no API call.
+
+**Replay is time-bounded.** Stripe retains keys "at least 24 hours"; replaying
+past that would mint a second PaymentIntent — the exact bug. Recovery refuses
+beyond a 12h TTL (a deliberate 2× margin under a documented floor) and
+quarantines instead.
+
+## Residuals, each with a trigger
+
+- **Stripe cached a non-2xx for the key** — replay is inert forever and can
+  never name the PaymentIntent. Ends at `needs_review`. Closing it needs a
+  `PaymentIntents.List` tier filtered on `metadata.velox_invoice_id`, exact
+  rather than heuristic because at most one attempt per invoice is unresolved.
+  *Trigger: the first `needs_review` row, or production cutover.*
+- **Attempts older than the replay TTL** are never auto-recovered, by
+  construction. *Same trigger.*
+- **No in-product "attach this PaymentIntent" action** for a quarantined row —
+  the exit is the Stripe dashboard. *Trigger: the second `needs_review` row, or
+  the first design partner.*
+- **Invoices already `unknown` with no PI at deploy** have no intent row, so the
+  legacy settle-failed branch still applies to them. Acceptable at 0 customers;
+  no backfill (no-speculative-backfill rule). The WARN naming the legacy path is
+  the tripwire.
+- **Refunds are untouched** — `StripeRefunder` sits off the `StripeClient`
+  interface, is not breaker-wrapped, and passes an empty idempotency key, so
+  stripe-go generates a random one per attempt. Same orphan class, different
+  money path. *Trigger: first refund-path ambiguity, or production cutover.*
+- **The seq-coupling CI scanner reads one file** (`internal/invoice/postgres.go`),
+  so a PI-stamping UPDATE added elsewhere stays unenforced. *Trigger: the first
+  such write outside that file.*
+
+## Alternatives considered
+
+**Extend `invoice_charge_attempts` instead of a new table.** Rejected on
+identity: that table's identity *is* the PaymentIntent id (unique index on it,
+and its upsert returns early when the id is empty), while a pre-call row by
+definition has none. Extending means two competing identities on one table plus
+hand-written fold logic when a webhook inserts the PI-keyed twin first. The
+separate table gets that merge free — recovery calls the existing
+`RecordChargeAttempt`, whose upsert on the PI id merges with any webhook twin,
+preserving ADR-103's one-row-per-attempt invariant with no new code. It is also
+a *fact* table (ADR-103 made it the sole display owner of timeline payment
+rows); an intent is an operational record with a lifecycle, one state of which
+is legitimately *deleted*.
+
+**Route this through ADR-062's obligation queue.** Rejected, siding with the
+code comment that already says payment state-syncs will never migrate there:
+an intent records a *request whose truth lives at Stripe*, not a local
+obligation to be drained.
+
+**Bump the seq at claim time** so each attempt has its own key. Breaks the
+crash case directly — a crash after the bump presents a different key and mints
+a second PaymentIntent. Recovering that needs two counters (attempted vs
+resolved): a state machine to avoid one table.
+
+**Search Stripe by metadata on every ambiguous outcome.** Viable and closes the
+cached-error residual, but adds a client method and a round-trip on a rare path.
+Deferred to the trigger above rather than built speculatively.

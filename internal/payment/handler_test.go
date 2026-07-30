@@ -83,6 +83,8 @@ func TestWebhookHandler_SuccessfulPayment(t *testing.T) {
 	webhooks := newMockWebhookStoreHandler()
 
 	stripeAdapter := NewStripe(nil, invoices, webhooks, nil)
+
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	secret := "whsec_handler_test"
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
 		"vlx_spc_abc": {ID: "vlx_spc_abc", TenantID: "t1", Livemode: true, WebhookSecret: secret},
@@ -142,6 +144,7 @@ func TestWebhookHandler_SuccessfulPayment(t *testing.T) {
 // and then dropped the event permanently).
 func TestWebhookHandler_OversizedBodyIs413NotSignatureFailure(t *testing.T) {
 	stripeAdapter := NewStripe(nil, newMockInvoiceUpdaterH(), newMockWebhookStoreHandler(), nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	secret := "whsec_size_test"
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
 		"vlx_spc_abc": {ID: "vlx_spc_abc", TenantID: "t1", Livemode: true, WebhookSecret: secret},
@@ -178,6 +181,7 @@ func TestWebhookHandler_OversizedBodyIs413NotSignatureFailure(t *testing.T) {
 
 func TestWebhookHandler_NoVeloxMetadata(t *testing.T) {
 	stripeAdapter := NewStripe(nil, newMockInvoiceUpdaterH(), newMockWebhookStoreHandler(), nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	secret := "whsec_foreign_test"
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
 		"vlx_spc_abc": {ID: "vlx_spc_abc", TenantID: "t1", Livemode: true, WebhookSecret: secret},
@@ -224,6 +228,7 @@ func TestWebhookHandler_NoVeloxMetadata(t *testing.T) {
 // from the SetupIntent's `customer` field and attaches the PM.
 func TestWebhookHandler_SetupIntentEmptyMetadata_StillAttaches(t *testing.T) {
 	stripeAdapter := NewStripe(nil, newMockInvoiceUpdaterH(), newMockWebhookStoreHandler(), nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripeAdapter.SetPaymentMethodAttacher(attacher)
 	stripeAdapter.SetCustomerResolver(&recordingCustomerResolver{wantStripeID: "cus_stripe_99", veloxID: "cus_local_7"})
@@ -272,6 +277,7 @@ func TestWebhookHandler_SetupIntentEmptyMetadata_StillAttaches(t *testing.T) {
 
 func TestWebhookHandler_UnknownEndpoint404(t *testing.T) {
 	stripeAdapter := NewStripe(nil, newMockInvoiceUpdaterH(), newMockWebhookStoreHandler(), nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{}}
 	handler := NewHandler(stripeAdapter, resolver)
 
@@ -288,6 +294,7 @@ func TestWebhookHandler_UnknownEndpoint404(t *testing.T) {
 
 func TestWebhookHandler_SignatureRequired(t *testing.T) {
 	stripeAdapter := NewStripe(nil, newMockInvoiceUpdaterH(), newMockWebhookStoreHandler(), nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
 		"vlx_spc_abc": {ID: "vlx_spc_abc", TenantID: "t1", Livemode: true, WebhookSecret: "whsec_real"},
 	}}
@@ -307,6 +314,7 @@ func TestWebhookHandler_TenantMismatchRejects(t *testing.T) {
 	// Accepting this would let a misconfigured tenant write webhook events
 	// into another tenant's data space.
 	stripeAdapter := NewStripe(nil, newMockInvoiceUpdaterH(), newMockWebhookStoreHandler(), nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	secret := "whsec_mismatch"
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
 		"vlx_spc_abc": {ID: "vlx_spc_abc", TenantID: "t1", Livemode: true, WebhookSecret: secret},
@@ -357,6 +365,7 @@ func TestWebhookHandler_TransientFailureRedelivers(t *testing.T) {
 
 	webhooks := newMockWebhookStoreHandler()
 	stripeAdapter := NewStripe(nil, invoices, webhooks, nil)
+	stripeAdapter.SetChargeIntents(newMemChargeIntents())
 	secret := "whsec_transient_test"
 	resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
 		"vlx_spc_abc": {ID: "vlx_spc_abc", TenantID: "t1", Livemode: true, WebhookSecret: secret},

@@ -91,7 +91,22 @@ func (s *CheckoutSessionStore) ClaimOpenAudited(ctx context.Context, tenantID, i
 	if status != "finalized" || amountDue <= 0 {
 		return CheckoutClaim{}, false, ErrInvoiceNotPayable
 	}
-	if paymentStatus == "processing" {
+	// IsInFlight semantics, not just 'processing' (domain.InvoicePaymentStatus.
+	// IsInFlight): 'unknown' means a PaymentIntent MAY be live and charging, so
+	// minting a checkout session on top of it is the same double charge by a
+	// customer-facing route. ADR-106 also blocks while a charge intent is
+	// unresolved, which covers the window before any status was recorded.
+	if paymentStatus == "processing" || paymentStatus == "unknown" {
+		return CheckoutClaim{}, false, ErrChargeInFlight
+	}
+	var attemptOutstanding bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM charge_intents
+			WHERE tenant_id = $1 AND invoice_id = $2 AND state <> 'resolved')
+	`, tenantID, invoiceID).Scan(&attemptOutstanding); err != nil {
+		return CheckoutClaim{}, false, fmt.Errorf("charge intent re-check: %w", err)
+	}
+	if attemptOutstanding {
 		return CheckoutClaim{}, false, ErrChargeInFlight
 	}
 	if amountCents != amountDue {

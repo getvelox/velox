@@ -1876,10 +1876,12 @@ func (s *PostgresStore) createWithLineItemsInTx(ctx context.Context, tx *sql.Tx,
 // the claim rather than being charged stale.
 //
 // Two load-bearing choices:
-//   - updated_at is NOT touched: the Stripe idempotency key derives
-//     from it (payment/stripe.go), and key stability across claim
-//     windows is what makes a re-claimed retry after a stalled leader
-//     converge on the SAME PaymentIntent instead of minting a second.
+//   - updated_at is NOT touched. The original reason — the Stripe
+//     idempotency key was seeded from it — expired with #678 (the seed
+//     is charge_attempt_seq now, which the lease cannot reach). What
+//     remains: the sweep lists ORDER BY updated_at ASC, so a lease that
+//     bumped it would send an invoice to the back of the queue on every
+//     claim, starving an invoice that keeps failing to complete.
 //   - DB-side now() on both sides of the lease comparison: test clocks
 //     freeze simulated time, and a simulated-time lease would never
 //     expire on a frozen clock (the catchup path shares this claim).

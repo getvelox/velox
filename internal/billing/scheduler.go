@@ -102,6 +102,13 @@ type IdempotencyCleaner interface {
 // Stripe for the authoritative PaymentIntent outcome. See payment.Reconciler.
 type PaymentReconciler interface {
 	Run(ctx context.Context, limit int) (int, []error)
+	// RecoverChargeIntents names PaymentIntents whose outcome was lost — the
+	// crash between the Stripe call and the outcome write, and the ambiguous
+	// error carrying no PI id. It replays the attempt's stored idempotency key,
+	// which returns the ORIGINAL PaymentIntent rather than creating a second
+	// one (ADR-106). Must run before Run: Run is the sweep that would otherwise
+	// settle those invoices failed and free a retry to double-charge.
+	RecoverChargeIntents(ctx context.Context, limit int) (int, []error)
 }
 
 // Lock represents a held cluster-wide lock that the holder must release.

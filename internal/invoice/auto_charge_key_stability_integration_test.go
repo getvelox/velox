@@ -21,7 +21,7 @@ func chargeKey(t *testing.T, store *invoice.PostgresStore, ctx context.Context, 
 	if err != nil {
 		t.Fatalf("get invoice: %v", err)
 	}
-	return payment.ChargeIdempotencyKey(inv.ID, inv.ChargeAttemptSeq, "")
+	return payment.ChargeIdempotencyKey(inv.ID, inv.ChargeAttemptSeq, "", "pm_test")
 }
 
 // TestChargeKey_StableUntilAnOutcomeIsRecorded is requirement R1: a charge that

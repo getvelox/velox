@@ -35,6 +35,7 @@ func TestChargeInvoice_SyncSuccessSettlesInline(t *testing.T) {
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	dunning := &recordingDunningStarter{}
 	s := NewStripe(client, invoices, newMockWebhookStore(), nil, dunning)
+	s.SetChargeIntents(newMemChargeIntents())
 
 	got, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test")
 	if err != nil {
@@ -69,6 +70,7 @@ func TestChargeInvoice_ProcessingStaysProcessing(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	s := NewStripe(client, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(newMemChargeIntents())
 
 	got, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test")
 	if err != nil {
@@ -105,6 +107,7 @@ func TestChargeAttemptFacts_RecordedAtChokepoint(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	s := NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	s.SetChargeIntents(newMemChargeIntents())
 	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err == nil {
 		t.Fatal("declined charge must return an error")
 	}
@@ -123,6 +126,7 @@ func TestChargeAttemptFacts_RecordedAtChokepoint(t *testing.T) {
 	invoices = newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = finalizedPendingInvoice()
 	s = NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+	s.SetChargeIntents(newMemChargeIntents())
 	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test"); err != nil {
 		t.Fatalf("ChargeInvoice: %v", err)
 	}
@@ -150,6 +154,7 @@ func TestChargeLease_ReleasedOnDefinitiveOutcomes(t *testing.T) {
 		invoices := newMockInvoiceUpdater()
 		invoices.invoices["inv_1"] = finalizedPendingInvoice()
 		s := NewStripe(client, invoices, newMockWebhookStore(), nil, &recordingDunningStarter{})
+		s.SetChargeIntents(newMemChargeIntents())
 		_, _ = s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test")
 		return invoices
 	}

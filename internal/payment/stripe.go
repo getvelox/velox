@@ -108,7 +108,30 @@ type Stripe struct {
 	checkoutSessions   *CheckoutSessionStore      // optional; claim-ledger truth-sync + settle-time expire (ADR-068)
 	sessionClients     *StripeClients             // optional; raw mode-keyed clients for session expire calls
 	audit              AuditEmitter               // optional; ADR-090 in-tx emission for the checkout-completed PM flip
+	// chargeIntents is REQUIRED, not optional (ADR-106): chargeInvoice refuses
+	// to call Stripe without recording the attempt first, so a nil store means
+	// no charges rather than unrecorded ones. Boot wires it; the nil check in
+	// chargeInvoice fails closed for any construction path that forgets.
+	chargeIntents ChargeIntentRecorder
 }
+
+// ChargeIntentRecorder is the charge path's half of the ADR-106 ledger —
+// consumer-defined and narrow, so the charge path depends on three methods
+// rather than a store type, and tests can substitute an in-memory ledger.
+type ChargeIntentRecorder interface {
+	// Open records the attempt and returns the row owning this invoice's
+	// charge slot — which may be an EARLIER unresolved attempt's.
+	Open(ctx context.Context, in domain.ChargeIntent) (domain.ChargeIntent, error)
+	// Resolve closes an intent once its PaymentIntent is named.
+	Resolve(ctx context.Context, tenantID, id, paymentIntentID string) error
+	// Delete removes an intent for the one case where no call was made.
+	Delete(ctx context.Context, tenantID, id string) error
+}
+
+// SetChargeIntents wires the pre-call charge-intent ledger (ADR-106). Without
+// it every charge fails closed — deliberately: an unrecorded attempt is the
+// exact thing the ledger exists to make impossible.
+func (s *Stripe) SetChargeIntents(store ChargeIntentRecorder) { s.chargeIntents = store }
 
 // AuditEmitter is the narrow in-tx audit seam (ADR-090).
 type AuditEmitter interface {
@@ -469,12 +492,37 @@ func (s *Stripe) ChargeInvoiceForDunningRetry(ctx context.Context, tenantID stri
 // The purpose suffix keeps the finalize-time charge and a dunning retry
 // distinct even at the same seq: they attach different PI metadata, and Stripe
 // answers "same key, different parameters" with a 409.
-func ChargeIdempotencyKey(invoiceID string, chargeAttemptSeq int64, purpose string) string {
+//
+// The paymentMethodID suffix is NOT a design choice made here — it has been on
+// the wire since ADR-053 (#281), appended inside the Stripe client where the
+// exported "single source" could not see it. That made this function's return
+// value a LIE: the operator ERROR naming the key named a string Stripe never
+// received, and no recovery could replay the original request. Composing the
+// whole key here is value-preserving on the wire and makes the returned string
+// the actual Idempotency-Key header. ADR-105's "mutable params in the key"
+// alternative is therefore amended rather than rejected — it is what ships, and
+// ADR-106 explains why the charge-intent ledger, not the key shape, is what
+// prevents a swapped card from opening a second PaymentIntent.
+func ChargeIdempotencyKey(invoiceID string, chargeAttemptSeq int64, purpose, paymentMethodID string) string {
 	key := fmt.Sprintf("velox_inv_%s_%d", invoiceID, chargeAttemptSeq)
 	if purpose != "" {
 		key += "_" + purpose
 	}
+	if paymentMethodID != "" {
+		key += "_" + paymentMethodID
+	}
 	return key
+}
+
+// simEffectiveAt returns the billing-axis instant of an attempt made under a
+// test clock, so a wall-plane recovery can still stamp the contracted instant
+// (ADR-030). Nil on the wall clock.
+func simEffectiveAt(ctx context.Context) *time.Time {
+	if sim, ok := clock.SimOf(ctx); ok {
+		at := sim.At.UTC()
+		return &at
+	}
+	return nil
 }
 
 func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.Invoice, stripeCustomerID, stripePaymentMethodID, purpose string) (domain.Invoice, error) {
@@ -545,7 +593,7 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 	// parameters" with a 409. Surfaced 2026-05-19 from a clock-pinned dunning
 	// workflow. The seq seed does not retire this: it narrows when two calls
 	// share a key, it does not eliminate it.
-	idempotencyKey := ChargeIdempotencyKey(inv.ID, inv.ChargeAttemptSeq, purpose)
+	idempotencyKey := ChargeIdempotencyKey(inv.ID, inv.ChargeAttemptSeq, purpose, stripePaymentMethodID)
 	params := PaymentIntentParams{
 		AmountCents:     inv.AmountDueCents,
 		Currency:        inv.Currency,
@@ -554,6 +602,52 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		Description:     fmt.Sprintf("Invoice %s", inv.InvoiceNumber),
 		IdempotencyKey:  idempotencyKey,
 		Metadata:        metadata,
+	}
+
+	// RECORD BEFORE EFFECT (ADR-106). Committed before Stripe is called, so a
+	// crash or an ambiguous response can never leave a PaymentIntent that
+	// nothing in Velox knows the name of. The row stores the exact key and
+	// params, which is what lets the recovery sweep REPLAY this request and be
+	// handed the original PaymentIntent instead of making a second one.
+	//
+	// FAIL-CLOSED: any error here returns WITHOUT calling Stripe. A charge we
+	// cannot record is a charge we must not make — the whole guarantee rests on
+	// there being no such thing as an unrecorded attempt.
+	if s.chargeIntents == nil {
+		slog.ErrorContext(ctx, "CRITICAL: charge blocked — the charge-intent ledger is not wired, so this attempt could not be recorded before calling Stripe (ADR-106)",
+			"invoice_id", inv.ID, "tenant_id", tenantID)
+		return domain.Invoice{}, fmt.Errorf("charge intent ledger not configured")
+	}
+	intent, ierr := s.chargeIntents.Open(ctx, domain.ChargeIntent{
+		TenantID:              tenantID,
+		InvoiceID:             inv.ID,
+		IdempotencyKey:        idempotencyKey,
+		AmountCents:           params.AmountCents,
+		Currency:              params.Currency,
+		StripeCustomerID:      stripeCustomerID,
+		StripePaymentMethodID: stripePaymentMethodID,
+		Description:           params.Description,
+		Metadata:              metadata,
+		Purpose:               purpose,
+		OccurredAt:            time.Now().UTC(),
+		SimEffectiveAt:        simEffectiveAt(ctx),
+	})
+	if ierr != nil {
+		slog.ErrorContext(ctx, "charge blocked: could not record the attempt before calling Stripe",
+			"invoice_id", inv.ID, "tenant_id", tenantID, "error", ierr)
+		return domain.Invoice{}, ierr
+	}
+	if intent.IdempotencyKey != idempotencyKey {
+		// An EARLIER attempt on this invoice is unresolved under a key we
+		// cannot reuse — the amount changed, the card changed, or a decline was
+		// recorded since. Charging now would open a second PaymentIntent beside
+		// a possibly-live one. Transient sentinel so dunning does not burn an
+		// attempt on a wait.
+		slog.WarnContext(ctx, "charge deferred: an earlier attempt on this invoice is still unresolved",
+			"invoice_id", inv.ID, "tenant_id", tenantID,
+			"unresolved_intent_id", intent.ID, "unresolved_state", string(intent.State),
+			"unresolved_key", intent.IdempotencyKey)
+		return domain.Invoice{}, ErrPaymentTransient
 	}
 
 	var result PaymentIntentResult
@@ -569,6 +663,17 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			// scheduler try again on the next tick once cooldown elapses.
 			// Returning a distinct sentinel lets dunning treat this as a
 			// transient skip rather than ticking attempt_count.
+			//
+			// The breaker collapses before the call runs, so this is the ONE
+			// path where no PaymentIntent can exist. Delete the intent rather
+			// than resolving it: a breaker skip is a transient, not an attempt,
+			// and the invoice must stay immediately chargeable. A failed delete
+			// is logged, not returned — worst case the sweep replays and gets
+			// the PaymentIntent this charge intended anyway.
+			if derr := s.chargeIntents.Delete(ctx, tenantID, intent.ID); derr != nil {
+				slog.WarnContext(ctx, "could not clear charge intent after breaker skip",
+					"invoice_id", inv.ID, "charge_intent_id", intent.ID, "error", derr)
+			}
 			return domain.Invoice{}, ErrPaymentTransient
 		}
 		if out != nil {
@@ -657,6 +762,21 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		}
 		recordChargeAttempt(ctx, s.invoices, tenantID, inv, pe.PaymentIntentID, purpose, attemptOutcome, pe.Message)
 
+		// ADR-106. The PaymentIntent is named, so nothing is lost: close the
+		// intent and let payment_unknown own the outcome from here.
+		//
+		// When it is NOT named, the intent is deliberately LEFT OPEN. That
+		// single omission is the entire recovery hook — it keeps the invoice
+		// quarantined from further charges and hands the sweep the stored key
+		// to replay. Leaving it open is the fix, not an oversight.
+		if pe.PaymentIntentID != "" {
+			if rerr := s.chargeIntents.Resolve(ctx, tenantID, intent.ID, pe.PaymentIntentID); rerr != nil {
+				slog.ErrorContext(ctx, "could not close charge intent after a named outcome — the invoice stays quarantined until the recovery sweep clears it",
+					"invoice_id", inv.ID, "charge_intent_id", intent.ID,
+					"stripe_payment_intent_id", pe.PaymentIntentID, "error", rerr)
+			}
+		}
+
 		// A DEFINITE decline completed the round-trip — no charge is in
 		// flight, so free the lease instead of starving the next
 		// initiator for the 5-minute window (under test-clock catchup,
@@ -718,6 +838,15 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 	// and the sim anchor are recorded by the writer that knows them;
 	// the settle paths only flip the outcome.
 	recordChargeAttempt(ctx, s.invoices, tenantID, inv, result.ID, purpose, domain.ChargeAttemptPending, "")
+
+	// ADR-106: close the intent BEFORE the settle. A crash in the gap leaves
+	// nothing outstanding (correct — the PaymentIntent is named and recorded),
+	// and the settle's own idempotence covers the re-drive.
+	if rerr := s.chargeIntents.Resolve(ctx, tenantID, intent.ID, result.ID); rerr != nil {
+		slog.ErrorContext(ctx, "could not close charge intent after a successful create — the invoice stays quarantined until the recovery sweep clears it",
+			"invoice_id", inv.ID, "charge_intent_id", intent.ID,
+			"stripe_payment_intent_id", result.ID, "error", rerr)
+	}
 
 	// Honor the synchronous confirmation outcome (ADR-049 Phase 3,
 	// discover-then-settle). With Confirm:true + OffSession:true, Stripe

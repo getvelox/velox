@@ -44,6 +44,7 @@ func (f *fakeRefundUpdater) ApplyRefundWebhook(_ context.Context, _, refundID st
 // Refund object and applies the mapped status to the matching credit note.
 func TestHandleWebhook_RefundUpdated_AppliesStatus(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	updater := &fakeRefundUpdater{}
 	stripe.SetRefundStatusUpdater(updater)
 
@@ -69,6 +70,7 @@ func TestHandleWebhook_RefundUpdated_AppliesStatus(t *testing.T) {
 // permanently — no error, no credit-note fabrication.
 func TestHandleWebhook_RefundUpdated_ForeignRefundAcked(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	updater := &fakeRefundUpdater{err: errs.ErrNotFound}
 	stripe.SetRefundStatusUpdater(updater)
 

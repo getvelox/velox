@@ -132,10 +132,15 @@ Stripe's dashboard is searchable by idempotency key, so an operator has a
 route to the live PaymentIntent.
 
 The complete fix is to record the attempt **before** calling Stripe, so
-recovery never depends on the response. That belongs with ADR-062's
-obligation queue rather than a bespoke table, and is deferred with an
-explicit trigger: **before production cutover, or the first report of a
-duplicate charge, whichever comes first.**
+recovery never depends on the response.
+
+> **Closed (2026-07-30) by [ADR-106](106-charge-intent-ledger.md)**, and NOT via
+> ADR-062's obligation queue as this paragraph originally routed it — an intent
+> records a request whose truth lives at Stripe, not a local obligation to
+> drain, which is what `reconciler_driver.go` already says about payment
+> state-syncs. `charge_intents` is committed before the Stripe call and stores
+> the exact key and params, so recovery replays the request and is handed the
+> original PaymentIntent.
 
 **Backfill is a no-op by design.** Existing rows default to 0. Pre-migration
 keys were nanosecond timestamps, which never equal 0, so no in-flight key
@@ -154,6 +159,17 @@ counter-example.
 a param change yields a different key and no 409 — but PI_A is still
 live and unrecorded, so it converts a loud 409 into a silent double
 charge. Strictly worse.
+
+> **Correction (2026-07-30, ADR-106).** This was written without checking the
+> Stripe client layer, where the payment-method id had been appended to the key
+> since ADR-053 (#281). Half of this "rejected" alternative had therefore
+> shipped a month earlier: a swapped card between a crashed attempt and its
+> retry produced a *different* key and a silent second PaymentIntent, exactly as
+> described above. ADR-106 keeps the suffix (moving it into the exported
+> function so the returned string is the real header) and closes the hazard
+> with the charge-intent ledger instead — the invoice is quarantined while an
+> attempt is unresolved, so a swapped card cannot open a second charge no matter
+> what the key says.
 
 **Bump the counter at claim time instead of at outcome time.** Breaks R1
 directly: a crash after the bump but before the outcome means the retry

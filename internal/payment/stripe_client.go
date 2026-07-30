@@ -202,7 +202,12 @@ func (c *LiveStripeClient) CreatePaymentIntent(ctx context.Context, params Payme
 		Confirm:       stripe.Bool(true),
 		OffSession:    stripe.Bool(true),
 		Params: stripe.Params{
-			IdempotencyKey: stripe.String(fmt.Sprintf("%s_%s", params.IdempotencyKey, params.PaymentMethodID)),
+			// The key arrives fully composed — see ChargeIdempotencyKey. It used
+			// to gain a "_<PaymentMethodID>" suffix HERE, which made the
+			// exported key function's return value differ from the bytes on the
+			// wire; recovery cannot replay a request whose key it cannot
+			// reproduce (ADR-106).
+			IdempotencyKey: stripe.String(params.IdempotencyKey),
 			Metadata:       metadata,
 		},
 		Description: stripe.String(params.Description),

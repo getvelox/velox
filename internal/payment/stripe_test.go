@@ -285,6 +285,8 @@ func TestChargeInvoice_Success(t *testing.T) {
 	invoices.invoices["inv_1"] = inv
 
 	stripe := NewStripe(client, invoices, webhooks, nil)
+
+	stripe.SetChargeIntents(newMemChargeIntents())
 	result, err := stripe.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe_abc", "pm_test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -337,6 +339,8 @@ func TestChargeInvoice_RequiresPaymentMethod(t *testing.T) {
 	invoices.invoices["inv_1"] = inv
 
 	stripe := NewStripe(client, invoices, webhooks, nil)
+
+	stripe.SetChargeIntents(newMemChargeIntents())
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe_abc", "")
 	if err == nil {
 		t.Fatal("expected error for empty payment method id, got nil")
@@ -349,6 +353,7 @@ func TestChargeInvoice_RequiresPaymentMethod(t *testing.T) {
 
 func TestChargeInvoice_NotFinalized(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	inv := domain.Invoice{Status: domain.InvoiceDraft, AmountDueCents: 100}
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe", "pm_test")
@@ -359,6 +364,7 @@ func TestChargeInvoice_NotFinalized(t *testing.T) {
 
 func TestChargeInvoice_ZeroAmount(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	inv := domain.Invoice{Status: domain.InvoiceFinalized, AmountDueCents: 0}
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe", "pm_test")
@@ -376,6 +382,8 @@ func TestChargeInvoice_StripeFailure(t *testing.T) {
 	}
 
 	stripe := NewStripe(client, invoices, newMockWebhookStore(), nil)
+
+	stripe.SetChargeIntents(newMemChargeIntents())
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe", "pm_test")
 	if err == nil {
 		t.Fatal("expected error when Stripe fails")
@@ -442,6 +450,7 @@ func TestChargeInvoice_DefiniteFailure_InlineStartsDunning(t *testing.T) {
 
 	dunning := &recordingDunningStarter{}
 	stripe := NewStripe(client, invoices, newMockWebhookStore(), nil, dunning)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test")
 	if err == nil {
@@ -484,6 +493,7 @@ func TestChargeInvoice_UnknownOutcome_NoInlineDunning(t *testing.T) {
 
 	dunning := &recordingDunningStarter{}
 	stripe := NewStripe(client, invoices, newMockWebhookStore(), nil, dunning)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	_, _ = stripe.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe_abc", "pm_test")
 
@@ -511,6 +521,8 @@ func TestChargeInvoice_UnknownOutcome(t *testing.T) {
 	}
 
 	stripe := NewStripe(client, invoices, newMockWebhookStore(), nil)
+
+	stripe.SetChargeIntents(newMemChargeIntents())
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe", "pm_test")
 	if err == nil {
 		t.Fatal("expected error on ambiguous Stripe outcome")
@@ -539,6 +551,8 @@ func TestChargeInvoice_PlainErrorTreatedAsUnknown(t *testing.T) {
 	}
 
 	stripe := NewStripe(client, invoices, newMockWebhookStore(), nil)
+
+	stripe.SetChargeIntents(newMemChargeIntents())
 	_, err := stripe.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_stripe", "pm_test")
 	if err == nil {
 		t.Fatal("expected error")
@@ -559,6 +573,7 @@ func TestHandleWebhook_PaymentSucceeded(t *testing.T) {
 
 	webhooks := newMockWebhookStore()
 	stripe := NewStripe(&mockStripeClient{}, invoices, webhooks, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	err := stripe.HandleWebhook(context.Background(), "t1", domain.StripeWebhookEvent{
 		StripeEventID:   "evt_001",
@@ -591,6 +606,8 @@ func TestHandleWebhook_PaymentFailed(t *testing.T) {
 	invoices.byPI["pi_def"] = "inv_1"
 
 	stripe := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
+
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	err := stripe.HandleWebhook(context.Background(), "t1", domain.StripeWebhookEvent{
 		StripeEventID:   "evt_002",
@@ -639,6 +656,8 @@ func TestHandleWebhook_PaymentFailed_IgnoredForPaidInvoice(t *testing.T) {
 
 			stripe := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
 
+			stripe.SetChargeIntents(newMemChargeIntents())
+
 			err := stripe.HandleWebhook(context.Background(), "t1", domain.StripeWebhookEvent{
 				StripeEventID:   "evt_ooo",
 				EventType:       "payment_intent.payment_failed",
@@ -673,6 +692,7 @@ func TestHandleWebhook_DuplicateEvent(t *testing.T) {
 
 	webhooks := newMockWebhookStore()
 	stripe := NewStripe(&mockStripeClient{}, invoices, webhooks, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	event := domain.StripeWebhookEvent{
 		StripeEventID:   "evt_dup",
@@ -707,6 +727,7 @@ func TestHandleWebhook_DuplicateEvent(t *testing.T) {
 
 func TestHandleWebhook_UnhandledEvent(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	err := stripe.HandleWebhook(context.Background(), "t1", domain.StripeWebhookEvent{
 		StripeEventID: "evt_other",
@@ -738,6 +759,7 @@ func TestHandleWebhook_TransientFailureNotConsumed(t *testing.T) {
 	// Force the audit/dedup insert to fail transiently — stands in for any
 	// retryable error on the persistence path.
 	stripe := NewStripe(&mockStripeClient{}, &transientMarkPaidInvoices{mockInvoiceUpdater: invoices}, webhooks, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	event := domain.StripeWebhookEvent{
 		StripeEventID:   "evt_transient",
@@ -764,6 +786,7 @@ func TestHandleWebhook_TransientFailureNotConsumed(t *testing.T) {
 	}
 	invoices.byPI["pi_transient"] = "inv_1"
 	stripe = NewStripe(&mockStripeClient{}, invoices, webhooks, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	if err := stripe.HandleWebhook(context.Background(), "t1", event); err != nil {
 		t.Fatalf("redelivery should succeed: %v", err)
 	}
@@ -806,6 +829,7 @@ func TestHandleWebhook_PermanentFailureAcked(t *testing.T) {
 	invoices := newMockInvoiceUpdater() // empty — no such invoice
 	webhooks := newMockWebhookStore()
 	stripe := NewStripe(&mockStripeClient{}, invoices, webhooks, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	event := domain.StripeWebhookEvent{
 		StripeEventID:   "evt_orphan",
@@ -846,6 +870,7 @@ func (r *recordingAttacher) AttachForWebhook(ctx context.Context, tenantID, cust
 // from it, and delegate to the configured attacher.
 func TestHandleWebhook_SetupIntentSucceeded(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 
@@ -890,6 +915,7 @@ func TestHandleWebhook_SetupIntentSucceeded(t *testing.T) {
 // self-served card is distinguishable from an operator-added one.
 func TestHandleWebhook_SetupIntent_CustomerActor(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 
@@ -926,6 +952,7 @@ func TestHandleWebhook_SetupIntent_CustomerActor(t *testing.T) {
 // NOT be attributed to the customer.
 func TestHandleWebhook_SetupIntent_OperatorPurposeStaysSystem(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 
@@ -961,6 +988,7 @@ func TestHandleWebhook_SetupIntent_OperatorPurposeStaysSystem(t *testing.T) {
 // setup_intent events should ack silently rather than error.
 func TestHandleWebhook_SetupIntent_NoAttacher(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 
 	err := stripe.HandleWebhook(context.Background(), "tnt_x", domain.StripeWebhookEvent{
 		StripeEventID: "evt_noop",
@@ -985,6 +1013,7 @@ func TestHandleWebhook_SetupIntent_NoAttacher(t *testing.T) {
 func TestHandleWebhook_SetupIntent_UnresolvedCustomerRedelivers(t *testing.T) {
 	store := newMockWebhookStore()
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), store, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 	// Resolver can't place cus_foreign (link not yet written) → NotFound.
@@ -1017,6 +1046,7 @@ func TestHandleWebhook_SetupIntent_UnresolvedCustomerRedelivers(t *testing.T) {
 func TestHandleWebhook_SetupIntent_NoPaymentMethodAcks(t *testing.T) {
 	store := newMockWebhookStore()
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), store, nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 
@@ -1065,6 +1095,7 @@ func (r *recordingCustomerResolver) CustomerIDByStripeID(_ context.Context, _ /*
 // velox customer, and still attach the PM.
 func TestHandleWebhook_SetupIntent_ResolvesCustomerByStripeID(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 	resolver := &recordingCustomerResolver{wantStripeID: "cus_stripe_99", veloxID: "cus_local_7"}
@@ -1106,6 +1137,7 @@ func TestHandleWebhook_SetupIntent_ResolvesCustomerByStripeID(t *testing.T) {
 // metadata fast-path is used and the resolver is never consulted.
 func TestHandleWebhook_SetupIntent_MetadataWinsOverResolver(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 	resolver := &recordingCustomerResolver{wantStripeID: "cus_stripe_99", veloxID: "cus_should_not_be_used"}
@@ -1141,6 +1173,7 @@ func TestHandleWebhook_SetupIntent_MetadataWinsOverResolver(t *testing.T) {
 // 5xxs and Stripe redelivers, rather than silently dropping a saved card.
 func TestHandleWebhook_SetupIntent_ResolverTransientErrorRedelivers(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 	resolver := &recordingCustomerResolver{err: errors.New("db unavailable")}
@@ -1165,6 +1198,7 @@ func TestHandleWebhook_SetupIntent_ResolverTransientErrorRedelivers(t *testing.T
 // logged and ack'd; nothing else needs to happen.
 func TestHandleWebhook_SetupIntentFailed(t *testing.T) {
 	stripe := NewStripe(&mockStripeClient{}, newMockInvoiceUpdater(), newMockWebhookStore(), nil)
+	stripe.SetChargeIntents(newMemChargeIntents())
 	attacher := &recordingAttacher{}
 	stripe.SetPaymentMethodAttacher(attacher)
 

@@ -12,9 +12,18 @@ import (
 // (advanced, errs): advanced counts real work done; per-row errs are collected,
 // never abort the batch, and the same item may be handed back next tick.
 //
-// ELIGIBILITY RULE — audited across all seven sweeps 2026-07-30. The predicate
-// must survive the very crash it recovers from, which permits two shapes and
-// forbids a third:
+// ELIGIBILITY RULE — audited across all eight sweeps 2026-07-30. The predicate
+// must survive the very crash it recovers from, which permits three shapes and
+// forbids a fourth:
+//
+//  0. PRE-EFFECT MARKER — committed strictly BEFORE the effect can occur, with
+//     the effect unreachable unless that commit succeeded (fail-closed).
+//     Strictly stronger than (2): marker-absent implies effect-IMPOSSIBLE, not
+//     merely effect-simultaneous, so the sweep can act on the marker's mere
+//     existence. charge_intent is the only instance (ADR-106) — the row is
+//     written before Stripe is called and stores everything needed to replay
+//     the request, which is how an attempt with no PaymentIntent id is
+//     recovered without opening a second one.
 //
 //  1. STRUCTURAL — the missing effect IS the predicate; no marker exists.
 //     tax_commit (has tax_calculation_id, no tax_transaction_id),
@@ -85,6 +94,12 @@ var recordReconcilerSweep = mw.RecordReconcilerSweep
 func (s *Scheduler) reconcilers() []Reconciler {
 	var rs []Reconciler
 	if s.paymentReconciler != nil {
+		// charge_intent runs FIRST: it names PaymentIntents that no other sweep
+		// can see (the attempt whose outcome was lost carries no PI id), and
+		// payment_unknown immediately below is the sweep that would otherwise
+		// settle those invoices failed. Ordering them the other way would let
+		// the give-up run a tick before the recovery that makes it unnecessary.
+		rs = append(rs, reconcilerFunc{"charge_intent", s.paymentReconciler.RecoverChargeIntents})
 		// payment_unknown is a STATE-SYNC against Stripe (3-valued:
 		// succeeded/failed/still-in-flight), NOT a re-drive of a local failed
 		// effect. It rides this driver only for uniform log+metric and will

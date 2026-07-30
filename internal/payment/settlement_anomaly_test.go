@@ -28,6 +28,7 @@ func newAnomalyHarness(inv domain.Invoice) (*Stripe, *mockInvoiceUpdater, *recor
 	events := &recordingEventDispatcher{byType: map[string]int{}}
 	anomalies := &recordingAnomalies{}
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(newMemChargeIntents())
 	s.SetEventDispatcher(events)
 	s.SetAnomalyRecorder(anomalies)
 	return s, invoices, events, anomalies
