@@ -254,10 +254,11 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	}
 }
 
-// runBillingHalf runs the leader-gated half that generates money — invoice
-// issuance, payment reconciliation, auto-charge retries, cleanup sweeps, and
-// reminders. Splitting from dunning lets two replicas divvy up roles instead
-// of one replica monopolising every periodic job.
+// runBillingHalf runs the leader-gated half that generates money — recovery
+// reconcilers, auto-charge retries, invoice issuance, and the state flips the
+// cycle scan depends on (trial expiry, pause auto-resume). Splitting from
+// dunning lets two replicas divvy up roles instead of one replica monopolising
+// every periodic job.
 //
 // Mode fan-out: every mode-scoped step runs once per livemode (live, then
 // test) under its own ctx so downstream TxTenant transactions route to the
@@ -298,10 +299,16 @@ func (s *Scheduler) runBillingHalf(ctx context.Context) {
 	s.runCrossModeCleanup(ctx)
 }
 
-// runBillingCycleForMode runs a single mode's half-cycle (reconcile, retry,
-// bill, expire credits, list approaching-due). Called twice per tick — once
-// with ctx livemode=true, once with livemode=false. Logs are tagged with the
-// mode so operators can distinguish partitions.
+// runBillingCycleForMode runs a single mode's half-cycle, in the step order
+// below: reconcile → auto-charge retry → card-less dunning enrollment →
+// threshold scan → trial expiry → pause auto-resume → bill → expire credits.
+// Called twice per tick — once with ctx livemode=true, once with
+// livemode=false. Logs are tagged with the mode so operators can distinguish
+// partitions.
+//
+// There is NO scheduled "approaching-due"/reminder step here, and never has
+// been: payment reminders are dunning-driven (runDunningHalf) or operator-
+// triggered (AttentionActionSendReminder). The claim was stale prose from #13.
 func (s *Scheduler) runBillingCycleForMode(ctx context.Context, live bool) {
 	// Sanity: the only legitimate caller (runBillingHalf) always wraps ctx
 	// with WithLivemode before calling us. Assert here so a future refactor
