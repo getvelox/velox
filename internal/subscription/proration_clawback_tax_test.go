@@ -362,3 +362,86 @@ func TestUpdateItem_QuantityDecrease_RoutesGrossCreditNote(t *testing.T) {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// TestUpdateItem_Downgrade_InFlightSource_DraftsInsteadOfDroppingCredit is the
+// control/treatment pair that found the 2026-07-30 silent money-drop while
+// walking FLOW C2.
+//
+// Setup is identical in both cases — a PAID in_advance prebill (amount_due = 0)
+// downgraded mid-cycle — and the ONLY difference is the source's payment_status.
+// Pre-fix the treatment produced NO credit note at all: `!= PaymentSucceeded`
+// routed the in-flight source into the unpaid amount_due-reduction branch, which
+// computed min(grossCredit, amount_due) == 0 on an already-paid source and
+// returned nil silently. The item change committed, the customer kept the
+// cheaper plan, and the credit they were owed existed nowhere.
+//
+// Post-fix both produce the clawback; deciding WHEN to issue it belongs to
+// creditnote.Issue (the single chokepoint, which defers on in-flight sources and
+// picks the paid/unpaid channel once the source resolves — ADR-059).
+func TestUpdateItem_Downgrade_InFlightSource_DraftsInsteadOfDroppingCredit(t *testing.T) {
+	// net 2000 credit grossed up by the source's 6600/6000 ratio.
+	const wantGross = int64(2200)
+
+	run := func(t *testing.T, status domain.InvoicePaymentStatus) []cnIssueCall {
+		t.Helper()
+		ctx := clock.WithEffectiveNow(context.Background(), proNow)
+		tenantID := "t1"
+
+		store := newMemStore()
+		subID, itemID := seedSubWithItemAt(t, store, tenantID, "cus_1", "plan_pro", proPeriodStart, proPeriodEnd)
+		svc := NewService(store, nil)
+
+		plans := &plansMock{plans: map[string]domain.Plan{
+			"plan_pro":   {ID: "plan_pro", Name: "Pro", BaseAmountCents: 6000, Currency: "USD", BaseBillTiming: domain.BillInAdvance},
+			"plan_basic": {ID: "plan_basic", Name: "Basic", BaseAmountCents: 2000, Currency: "USD", BaseBillTiming: domain.BillInAdvance},
+		}}
+		// The invoice is PAID — amount_due is 0 — and only its payment_status
+		// varies. That is what makes the unpaid branch a silent no-op.
+		invoices := &invoicesMock{
+			sourceInvoice: domain.Invoice{
+				ID: "src_inv", Status: domain.InvoicePaid, PaymentStatus: status,
+				SubtotalCents: 6000, TaxFacts: domain.TaxFacts{TaxAmountCents: 600},
+				TotalAmountCents: 6600, AmountDueCents: 0,
+			},
+		}
+		cn := &fakeCNIssuer{}
+
+		h := NewHandler(svc)
+		h.SetProrationDeps(plans, invoices, &creditsMock{})
+		h.SetCreditNoteIssuer(cn)
+
+		body, _ := json.Marshal(UpdateItemInput{NewPlanID: "plan_basic", Immediate: true})
+		req := updateItemURL(context.WithValue(ctx, auth.TestTenantIDKey(), tenantID), subID, itemID, body)
+		rr := httptest.NewRecorder()
+		h.updateItem(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200. body=%s", rr.Code, rr.Body.String())
+		}
+		return cn.calls
+	}
+
+	t.Run("control: settled source credits the customer", func(t *testing.T) {
+		calls := run(t, domain.PaymentSucceeded)
+		if len(calls) != 1 || calls[0].gross != wantGross {
+			t.Fatalf("control: got %+v, want exactly one clawback of %d", calls, wantGross)
+		}
+	})
+
+	// The treatment. Both in-flight statuses must behave identically — `unknown`
+	// is as in-flight as `processing` (domain.IsInFlight), and an ambiguous
+	// charge is precisely when under-crediting would be hardest to notice.
+	for _, status := range []domain.InvoicePaymentStatus{domain.PaymentProcessing, domain.PaymentUnknown} {
+		t.Run("treatment: in-flight source ("+string(status)+") still records the owed credit", func(t *testing.T) {
+			calls := run(t, status)
+			if len(calls) != 1 {
+				t.Fatalf("in-flight source produced %d clawbacks, want 1 — the credit the customer is owed must be RECORDED even though issuing it waits for the source to settle (pre-fix this was 0: silently dropped)", len(calls))
+			}
+			if calls[0].gross != wantGross {
+				t.Errorf("in-flight clawback gross: got %d, want %d — must match the settled-source control exactly; a different amount means the funding cap fell back to amount_due (0 on a paid source)", calls[0].gross, wantGross)
+			}
+			if calls[0].invoiceID != "src_inv" {
+				t.Errorf("clawback source: got %q, want %q", calls[0].invoiceID, "src_inv")
+			}
+		})
+	}
+}
