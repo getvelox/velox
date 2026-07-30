@@ -8,11 +8,44 @@ import (
 )
 
 // Reconciler is one recovery sweep: it scans for stuck/failed post-commit
-// effects (eligibility derived from DURABLE STATE — never a marker the sweep
-// itself must have written; see ListPendingCreditNoteTaxReversal for the
-// exemplar) and re-drives each, idempotently, every tick. Reconcile returns
+// effects and re-drives each, idempotently, every tick. Reconcile returns
 // (advanced, errs): advanced counts real work done; per-row errs are collected,
 // never abort the batch, and the same item may be handed back next tick.
+//
+// ELIGIBILITY RULE — audited across all seven sweeps 2026-07-30. The predicate
+// must survive the very crash it recovers from, which permits two shapes and
+// forbids a third:
+//
+//  1. STRUCTURAL — the missing effect IS the predicate; no marker exists.
+//     tax_commit (has tax_calculation_id, no tax_transaction_id),
+//     tax_reversal (voided/uncollectible, tax_transaction_id set,
+//     tax_reversed_at IS NULL), dunning_backfill (finalized+failed with
+//     NOT EXISTS a dunning run). Strongest: nothing had to be written for
+//     the row to become visible.
+//
+//  2. CO-TRANSACTIONAL MARKER — a flag written in the SAME tx as the
+//     obligation it describes, so it cannot be absent while the obligation
+//     exists. clawback_issue's issue_pending is created in-tx with the item
+//     change; tax_retry's tax_status/tax_error_code are set on the invoice
+//     struct before its INSERT. Equivalent safety: partial state is
+//     unreachable, so there is nothing for a backstop to catch.
+//
+//  3. POST-HOC MARKER — written in a separate write AFTER the obligation
+//     committed, so it can fail on its own and strand the row. NOT sufficient
+//     alone; always pair it with a structural branch. There is exactly one
+//     post-hoc case, and it is the exemplar:
+//     ListPendingCreditNoteTaxReversal = tax_reversal_pending OR the
+//     structural over-remit state.
+//
+// Adding a sweep? Say which shape it is. If the honest answer is (3), the
+// structural branch is not optional.
+//
+// Two known bounds, deliberate rather than accidental: the structural branches
+// carry a 24h freshness window (anti-churn + no first-deploy re-reversal burst,
+// #310), so an orphan older than that is not recovered; and payment_unknown
+// keys on a payment_status the CHARGE path must have stamped — a crash before
+// that stamp is recovered by the auto-charge retry's stable Stripe idempotency
+// key instead, not by this sweep.
 //
 // This is the seam the future obligation-queue drainer (ADR-062) plugs into:
 // when the four re-drive sweeps migrate onto the generalised webhook_outbox, the
