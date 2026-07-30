@@ -439,6 +439,25 @@ func (s *Stripe) ChargeInvoiceForDunningRetry(ctx context.Context, tenantID stri
 	return s.chargeInvoice(ctx, tenantID, inv, stripeCustomerID, stripePaymentMethodID, piPurposeDunningRetry)
 }
 
+// ChargeIdempotencyKey is the SINGLE SOURCE for an invoice charge's Stripe
+// idempotency key. Exported so tests derive the key from this function instead
+// of re-typing the format — a test that hardcodes "velox_inv_%s_%d" keeps
+// passing when the real key changes shape, which is the divergence class §3.6
+// of docs/dev/manual-test-strategy.md exists to catch.
+//
+// The updatedAt seed is what makes a crashed leader's retry converge on the
+// SAME PaymentIntent (a crash writes nothing, so updatedAt is unchanged, so
+// Stripe returns the existing PI) while a genuine retry after a recorded
+// failure gets a fresh key. The auto-charge lease deliberately does not write
+// updated_at for exactly this reason — see ClaimAutoCharge.
+func ChargeIdempotencyKey(invoiceID string, updatedAt time.Time, purpose string) string {
+	key := fmt.Sprintf("velox_inv_%s_%d", invoiceID, updatedAt.UnixNano())
+	if purpose != "" {
+		key += "_" + purpose
+	}
+	return key
+}
+
 func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.Invoice, stripeCustomerID, stripePaymentMethodID, purpose string) (domain.Invoice, error) {
 	if inv.Status != domain.InvoiceFinalized {
 		return domain.Invoice{}, fmt.Errorf("can only charge finalized invoices, current status: %s", inv.Status)
@@ -491,7 +510,8 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 	if sim, ok := clock.SimOf(ctx); ok {
 		metadata["velox_anchor_at"] = sim.At.UTC().Format(time.RFC3339Nano)
 	}
-	// Per-attempt idempotency key. inv.UpdatedAt advances every time
+	// Per-attempt idempotency key — see ChargeIdempotencyKey, the single
+	// source. inv.UpdatedAt advances every time
 	// UpdatePayment runs (which happens on every prior failed attempt
 	// recording last_payment_error), so each genuine retry gets a
 	// fresh key — Stripe creates a new PI rather than returning the
@@ -514,10 +534,7 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 	// chargeInvoice/ChargeInvoiceForDunningRetry calls in production
 	// (they sit far enough apart in time for UpdatedAt to drift via
 	// other writes).
-	idempotencyKey := fmt.Sprintf("velox_inv_%s_%d", inv.ID, inv.UpdatedAt.UnixNano())
-	if purpose != "" {
-		idempotencyKey += "_" + purpose
-	}
+	idempotencyKey := ChargeIdempotencyKey(inv.ID, inv.UpdatedAt, purpose)
 	params := PaymentIntentParams{
 		AmountCents:     inv.AmountDueCents,
 		Currency:        inv.Currency,
