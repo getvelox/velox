@@ -111,9 +111,18 @@ Ordered by leverage. A "no" blocks the PR.
    `source_*` partial-unique dedup index OR a same-tx CAS. **Never rely on the
    API header for engine paths** — they carry none.
 2. **Stripe idempotency key is provenance-stable, not a fresh UUID?** Derived
-   from the durable id you dedup on (`velox_inv_<id>_<UpdatedAt>`, `velox_cn_<id>`,
-   `inv_taxrev_<id>`); can't collide across purposes (finalize vs dunning suffix)
-   nor dedup two genuinely-different charges.
+   from the durable id you dedup on (`velox_inv_<id>_<charge_attempt_seq>`,
+   `velox_cn_<id>`, `inv_taxrev_<id>`); can't collide across purposes (finalize
+   vs dunning suffix) nor dedup two genuinely-different charges.
+   **The varying part must be the EVENT you mean, never a proxy for it.** The
+   key answers "same attempt or new attempt?", so it may move only when an
+   attempt outcome is recorded. This gate used to bless `velox_inv_<id>_<UpdatedAt>`;
+   `updated_at` answers the much broader "did anything touch this row?", so
+   every unrelated writer became a participant in the payment protocol and a
+   tax-commit stamp landing in a crash window minted a second PaymentIntent
+   (ADR-105, #678). When a seed is a proxy, ask what writes it that you didn't
+   intend — and if the honest answer is "a whole table's worth of writers",
+   introduce the explicit counter instead.
 3. **Coupled effect classified and placed?** Internal DB write → threaded
    `*sql.Tx` in-tx (ADR-056). External call → `OutboxStore.Enqueue(ctx, tx, …)`
    in the commit tx (ADR-040), or a self-clearing marker column + scheduler sweep.

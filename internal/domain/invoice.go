@@ -233,7 +233,16 @@ type Invoice struct {
 	// collect or the auto-charge retry sweep), checked by the sweep so a no-PM
 	// invoice is emailed exactly once, not per tick (ADR-087 follow-up).
 	NoPMNotifiedAt *time.Time `json:"no_pm_notified_at,omitempty"`
-	PDFObjectKey   string     `json:"-"`
+	// ChargeAttemptSeq seeds the Stripe charge idempotency key
+	// (payment.ChargeIdempotencyKey). It moves ONLY when a charge attempt
+	// outcome is recorded — every UPDATE that stamps stripe_payment_intent_id
+	// bumps it, nothing else touches it. That is what makes a crashed
+	// attempt's retry converge on the SAME PaymentIntent (a crash records no
+	// outcome, so the seq and therefore the key are unchanged) while a retry
+	// after a RECORDED decline gets a fresh one. Internal: never serialised —
+	// it is a payment-protocol detail, not invoice data an operator reads.
+	ChargeAttemptSeq int64  `json:"-"`
+	PDFObjectKey     string `json:"-"`
 	// PublicToken is the hosted-invoice-URL credential (Stripe-parity
 	// hosted_invoice_url). Generated at finalize; drafts have an empty
 	// token. Rotatable via the rotate-public-token endpoint if the URL

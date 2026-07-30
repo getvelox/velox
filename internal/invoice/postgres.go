@@ -199,7 +199,7 @@ const invCols = `id, tenant_id, customer_id, COALESCE(subscription_id,''), invoi
 	COALESCE(public_token_encrypted,''), COALESCE(billing_reason,''), COALESCE(stripe_invoice_id,''),
 	is_simulated, tax_reversed_at,
 	COALESCE(payment_anomaly_kind,''), COALESCE(payment_anomaly_payment_intent_id,''), COALESCE(payment_anomaly_captured_cents,0),
-	COALESCE(billing_timezone,''), no_pm_notified_at`
+	COALESCE(billing_timezone,''), no_pm_notified_at, charge_attempt_seq`
 
 // qualifiedInvCols returns invCols with every column reference prefixed
 // by the given table alias. Used by ADR-029's per-clock queries that
@@ -804,6 +804,7 @@ func (s *PostgresStore) UpdatePayment(ctx context.Context, tenantID, id string, 
 	err = tx.QueryRowContext(ctx, `
 		UPDATE invoices SET payment_status = $1, stripe_payment_intent_id = $2,
 			last_payment_error = $3, paid_at = $4, updated_at = $5,
+			charge_attempt_seq = charge_attempt_seq + 1,
 			auto_charge_pending = CASE WHEN $1 = 'succeeded'
 				THEN FALSE ELSE auto_charge_pending END
 		WHERE id = $6
@@ -893,6 +894,7 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 			stripe_payment_intent_id = $1,
 			last_payment_error = $2,
 			failure_notified_pi = $1,
+			charge_attempt_seq = charge_attempt_seq + 1,
 			updated_at = $3
 		WHERE id = $4
 		RETURNING `+invCols,
@@ -1088,6 +1090,7 @@ func (s *PostgresStore) markPaidReportingTransition(ctx context.Context, tenantI
 			status = 'paid',
 			payment_status = 'succeeded',
 			stripe_payment_intent_id = $1,
+			charge_attempt_seq = charge_attempt_seq + 1,
 			paid_at = $2,
 			amount_paid_cents = amount_due_cents,
 			amount_due_cents = 0,
@@ -2712,7 +2715,7 @@ func (s *PostgresStore) scanInvDest(inv *domain.Invoice) []any {
 		decryptScanner{enc: s.enc, dst: &inv.PublicToken}, (*string)(&inv.BillingReason), &inv.StripeInvoiceID,
 		&inv.IsSimulated, &inv.TaxReversedAt,
 		&inv.PaymentAnomalyKind, &inv.PaymentAnomalyPaymentIntentID, &inv.PaymentAnomalyCapturedCents,
-		&inv.BillingTimezone, &inv.NoPMNotifiedAt,
+		&inv.BillingTimezone, &inv.NoPMNotifiedAt, &inv.ChargeAttemptSeq,
 	}
 }
 
