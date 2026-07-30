@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"errors"
 	"github.com/sagarsuperuser/velox/internal/audit"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/errs"
@@ -541,6 +542,99 @@ func (s *Service) RetryPendingClawbackIssueForClock(ctx context.Context, tenantI
 // to the ctx's livemode. Re-drive is Stripe-idempotent via the per-CN
 // velox_tax_rev_<cn.ID> reference; on success the marker is cleared and the
 // reversal transaction id stamped. Per-row errors are collected, not aborted-on.
+// refundRecoveryCoolOff keeps RetryPendingRefunds a backstop rather than a
+// racer: Issue() performs the refund inline immediately after the credit note
+// commits, so a younger row is mid-flight, not stranded.
+// ambiguousOutcome is the consumer-side view of a provider error whose result
+// could not be determined (timeout, 5xx, dropped connection) — the request may
+// have succeeded. Declared HERE rather than importing the payment package, per
+// the cross-domain rule: this domain depends on a behaviour, not on a peer's
+// error type. *payment.PaymentError satisfies it.
+//
+// The distinction is load-bearing for money: an ambiguous refund recorded as
+// "failed" tells an operator the customer was not refunded when they may have
+// been, and invites a manual second refund.
+type ambiguousOutcome interface {
+	AmbiguousOutcome() bool
+	error
+}
+
+const refundRecoveryCoolOff = 5 * time.Minute
+
+// RetryPendingRefunds resolves refunds whose OUTCOME was never learned — the
+// ambiguous provider error (timeout / 5xx / network, where the money may
+// already have left the account) and the crash between the Stripe call and the
+// status write.
+//
+// Before this sweep the only exit was an operator noticing and clicking Retry,
+// so a credit note could sit reading "refund failed" while the customer had in
+// fact been refunded — a statement about money that the system could not
+// correct on its own.
+//
+// Re-driving is safe by construction: the idempotency key is derived from the
+// credit note id (velox_cn_<id>) and is therefore IDENTICAL on every attempt,
+// so Stripe returns the original refund rather than issuing a second one. That
+// stability is what makes recovery possible here without an intent ledger — the
+// credit-note row already is the durable pre-call record, which is precisely
+// what the charge path lacked before ADR-106.
+func (s *Service) RetryPendingRefunds(ctx context.Context, batch int) (int, []error) {
+	if s.refunder == nil {
+		return 0, nil
+	}
+	livemode := postgres.Livemode(ctx)
+	olderThan := time.Now().UTC().Add(-refundRecoveryCoolOff)
+	stranded, err := s.store.ListRefundsAwaitingProviderID(ctx, olderThan, batch, livemode)
+	if err != nil {
+		return 0, []error{fmt.Errorf("list refunds awaiting provider id: %w", err)}
+	}
+
+	var errsOut []error
+	resolved := 0
+	for _, cn := range stranded {
+		inv, err := s.invoices.Get(ctx, cn.TenantID, cn.InvoiceID)
+		if err != nil {
+			errsOut = append(errsOut, fmt.Errorf("get invoice for stranded refund %s: %w", cn.ID, err))
+			continue
+		}
+		if inv.StripePaymentIntentID == "" {
+			// Nothing to refund against — the invoice was never card-paid, so
+			// this credit note's refund leg is not ours to complete. Leave it
+			// for an operator rather than inventing a provider call.
+			continue
+		}
+
+		// The SAME key Issue() and RetryRefund() use. Stripe dedups against it.
+		refundID, refStatus, rerr := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, fmt.Sprintf("velox_cn_%s", cn.ID))
+		if rerr != nil {
+			var amb ambiguousOutcome
+			if errors.As(rerr, &amb) && !amb.AmbiguousOutcome() {
+				// DEFINITE rejection — no refund exists. Record it so the row
+				// stops being swept and an operator sees the real reason.
+				if perr := s.store.UpdateRefundStatus(ctx, cn.TenantID, cn.ID, domain.RefundFailed, ""); perr != nil {
+					errsOut = append(errsOut, fmt.Errorf("persist definite refund failure for %s: %w", cn.ID, perr))
+					continue
+				}
+				slog.WarnContext(ctx, "stranded refund resolved as a definite failure",
+					"credit_note_id", cn.ID, "error", rerr)
+				resolved++
+				continue
+			}
+			// Still ambiguous — leave it stranded and try again next tick.
+			errsOut = append(errsOut, fmt.Errorf("re-drive refund %s: %w", cn.ID, rerr))
+			continue
+		}
+
+		if err := s.store.UpdateRefundStatus(ctx, cn.TenantID, cn.ID, refStatus, refundID); err != nil {
+			errsOut = append(errsOut, fmt.Errorf("persist recovered refund %s: %w", cn.ID, err))
+			continue
+		}
+		slog.WarnContext(ctx, "recovered a refund whose outcome was never learned — replayed its idempotency key and Stripe returned the original refund",
+			"credit_note_id", cn.ID, "stripe_refund_id", refundID, "refund_status", string(refStatus))
+		resolved++
+	}
+	return resolved, errsOut
+}
+
 func (s *Service) RetryPendingCreditNoteTaxReversal(ctx context.Context, batch int) (int, []error) {
 	if s.taxRev == nil {
 		return 0, nil
@@ -1425,9 +1519,18 @@ func (s *Service) runPostIssueExternalLegs(ctx context.Context, tenantID, id str
 			idempotencyKey := fmt.Sprintf("velox_cn_%s", cn.ID)
 			refundID, refStatus, err := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, idempotencyKey)
 			if err != nil {
-				slog.Warn("stripe refund failed, credit note will be issued with failed refund status",
-					"credit_note_id", cn.ID, "error", err)
+				// Same honesty rule as the retry path: only a DEFINITE provider
+				// rejection is 'failed'. An ambiguous outcome may already have
+				// moved the money, so it is recorded as in-flight and left to
+				// the refund webhook or RetryPendingRefunds, which re-drives
+				// this same stable key and learns the real outcome.
 				cn.RefundStatus = domain.RefundFailed
+				var amb ambiguousOutcome
+				if errors.As(err, &amb) && amb.AmbiguousOutcome() {
+					cn.RefundStatus = domain.RefundPending
+				}
+				slog.Warn("stripe refund did not return an id at issue time",
+					"credit_note_id", cn.ID, "recorded_status", string(cn.RefundStatus), "error", err)
 			} else {
 				cn.StripeRefundID = refundID
 				// Record what Stripe actually said — succeeded OR pending (async).
@@ -1641,9 +1744,22 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 		//
 		// The persist error is LOGGED, never discarded, and the Stripe error stays
 		// primary.
-		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, domain.RefundFailed, cn.StripeRefundID, emit); perr != nil {
-			slog.ErrorContext(ctx, "persist failed refund status after retry",
-				"credit_note_id", id, "error", perr)
+		// Record what is TRUE, which depends on whether the provider actually
+		// rejected the request. An ambiguous outcome (timeout / 5xx / dropped
+		// connection) means the refund MAY have succeeded, so recording
+		// 'failed' would be a false statement about money — and one nothing
+		// would correct, since it also hides the row from the recovery sweep.
+		// 'pending' is the honest state: in flight, outcome unknown. The
+		// refund webhook settles it, and RetryPendingRefunds re-drives the
+		// stable idempotency key to learn the id if no webhook ever arrives.
+		outcome := domain.RefundFailed
+		var amb ambiguousOutcome
+		if errors.As(refundErr, &amb) && amb.AmbiguousOutcome() {
+			outcome = domain.RefundPending
+		}
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, outcome, cn.StripeRefundID, emit); perr != nil {
+			slog.ErrorContext(ctx, "persist refund status after retry",
+				"credit_note_id", id, "outcome", string(outcome), "error", perr)
 		}
 		return domain.CreditNote{}, fmt.Errorf("stripe refund retry: %w", refundErr)
 	}

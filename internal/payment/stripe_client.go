@@ -41,6 +41,15 @@ type PaymentError struct {
 
 func (e *PaymentError) Error() string { return e.Message }
 
+// AmbiguousOutcome reports whether the request's outcome could not be
+// determined — the provider may have processed it. Exposed as BEHAVIOUR rather
+// than a field so peer domains can branch on it through a locally-declared
+// interface, without importing this package (the cross-domain rule in
+// CLAUDE.md). A caller that cannot tell ambiguous from definite must treat a
+// possible success as a failure, which is how a refund that actually happened
+// gets recorded as "failed".
+func (e *PaymentError) AmbiguousOutcome() bool { return e.Unknown }
+
 // OperatorSafeMessage implements respond.SafeMessageError so the
 // boundary sanitizer (respond.FromError) surfaces a curated message
 // instead of falling through to "Internal error". For card declines

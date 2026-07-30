@@ -802,6 +802,68 @@ func (s *PostgresStore) SetTaxReversalPending(ctx context.Context, tenantID, id 
 // branch is unbounded (a known owed reversal is never aged out). Re-reversal is
 // Stripe-idempotent via the per-CN velox_tax_rev_<cn.ID> reference, so any
 // overlap between (a) and (b), or with the inline attempt, dedups to one.
+// ListRefundsAwaitingProviderID returns issued credit notes that owe a card
+// refund but carry NO Stripe refund id — "we asked for money to go back to the
+// customer and we do not know whether it did."
+//
+// Eligibility is PURELY STRUCTURAL (the reconciler driver's shape 1): the
+// missing effect IS the predicate, so nothing had to be written for the row to
+// become visible. That matters because the two states it recovers are reached
+// by DIFFERENT failures:
+//
+//   - the refund call returned an ambiguous error (timeout / 5xx / network), so
+//     the money may already have left the account, and
+//   - the process died between the Stripe call and the status write, so no
+//     marker exists at all.
+//
+// A marker-based predicate would catch only the first. Re-driving is safe
+// because the refund's idempotency key is derived from the credit note id and
+// is therefore stable across every retry: Stripe returns the ORIGINAL refund
+// rather than issuing a second one.
+//
+// The cool-off keeps this a backstop — Issue() performs the refund inline
+// immediately after the credit note commits, so a row younger than the window
+// is simply mid-flight, not stranded. is_simulated is excluded per ADR-086,
+// like every sibling sweep.
+func (s *PostgresStore) ListRefundsAwaitingProviderID(ctx context.Context, olderThan time.Time, batch int, livemode bool) ([]domain.CreditNote, error) {
+	if batch <= 0 {
+		batch = 50
+	}
+	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+
+	rows, err := tx.QueryContext(ctx, `SELECT `+cnReadCols+`
+		FROM credit_notes
+		WHERE livemode = $1
+		  AND status = 'issued'
+		  AND is_simulated = false
+		  AND refund_amount_cents > 0
+		  AND COALESCE(stripe_refund_id, '') = ''
+		  AND refund_status <> 'failed'
+		  AND updated_at < $2
+		ORDER BY updated_at ASC
+		LIMIT $3`, livemode, olderThan, batch)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var notes []domain.CreditNote
+	for rows.Next() {
+		var cn domain.CreditNote
+		var metaJSON []byte
+		if err := rows.Scan(cnScanDest(&cn, &metaJSON)...); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metaJSON, &cn.Metadata)
+		notes = append(notes, cn)
+	}
+	return notes, rows.Err()
+}
+
 func (s *PostgresStore) ListPendingCreditNoteTaxReversal(ctx context.Context, batch int, livemode bool) ([]domain.CreditNote, error) {
 	if batch <= 0 {
 		batch = 50

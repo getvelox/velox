@@ -103,6 +103,10 @@ func (s *Scheduler) reconcilers() []Reconciler {
 		rs = append(rs,
 			reconcilerFunc{"clawback_issue", s.clawbackRetrier.RetryPendingClawbackIssue},
 			reconcilerFunc{"cn_tax_reversal", s.clawbackRetrier.RetryPendingCreditNoteTaxReversal},
+			// refund_recovery is shape 1 (STRUCTURAL): an issued credit note
+			// owing a refund with no provider id IS the predicate, so it also
+			// catches the crash that happened before any status was written.
+			reconcilerFunc{"refund_recovery", s.clawbackRetrier.RetryPendingRefunds},
 		)
 	}
 	if s.engine != nil {

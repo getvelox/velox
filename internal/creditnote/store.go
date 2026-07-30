@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
+	"time"
 )
 
 type Store interface {
@@ -45,6 +46,11 @@ type Store interface {
 	// post-commit upstream tax reversal failed (tax_reversal_pending),
 	// cross-tenant + scoped by livemode, for RetryPendingCreditNoteTaxReversal.
 	ListPendingCreditNoteTaxReversal(ctx context.Context, batch int, livemode bool) ([]domain.CreditNote, error)
+	// ListRefundsAwaitingProviderID returns issued credit notes that owe a card
+	// refund but carry no Stripe refund id — the outcome was never learned.
+	// Purely structural eligibility, so it catches both the ambiguous provider
+	// error and the crash before any status write.
+	ListRefundsAwaitingProviderID(ctx context.Context, olderThan time.Time, batch int, livemode bool) ([]domain.CreditNote, error)
 	// BeginTx opens the RLS-scoped coordinator tx Issue() owns (ADR-056/061):
 	// the draft→issued CAS and the internal money effect commit together.
 	BeginTx(ctx context.Context, tenantID string) (*sql.Tx, error)

@@ -61,6 +61,13 @@ type ClawbackRetrier interface {
 	// finalized/paid invoice by an issued credit note. Implemented by
 	// *creditnote.Service.
 	RetryPendingCreditNoteTaxReversal(ctx context.Context, batch int) (int, []error)
+	// RetryPendingRefunds resolves refunds whose outcome was never learned —
+	// an ambiguous provider error, or a crash before the status write. Without
+	// it the only exit was an operator clicking Retry, so a credit note could
+	// sit reading "refund failed" while the customer had in fact been refunded.
+	// Safe to re-drive: the refund idempotency key is derived from the credit
+	// note id, so Stripe returns the ORIGINAL refund rather than a second one.
+	RetryPendingRefunds(ctx context.Context, batch int) (int, []error)
 }
 
 // TrialExpirer is the narrow hook the scheduler uses to flip

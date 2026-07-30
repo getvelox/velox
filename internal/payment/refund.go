@@ -77,7 +77,16 @@ func (r *StripeRefunder) CreateRefund(ctx context.Context, paymentIntentID strin
 	}
 	ref, err := sc.V1Refunds.Create(ctx, params)
 	if err != nil {
-		return "", "", fmt.Errorf("stripe refund: %s", stripeErrorMessage(err))
+		// WRAP, never flatten. This used to return
+		// fmt.Errorf("stripe refund: %s", stripeErrorMessage(err)), which
+		// destroyed the *PaymentError and with it the one bit that decides what
+		// the caller may honestly record: whether the outcome is AMBIGUOUS (the
+		// refund may already have happened) or a DEFINITE rejection. Every
+		// caller therefore treated a timeout like a decline and wrote
+		// refund_status='failed' — telling an operator the customer was not
+		// refunded when the money may have left the account, and inviting a
+		// manual second refund.
+		return "", "", fmt.Errorf("stripe refund: %w", classifyStripeError(err))
 	}
 
 	return ref.ID, mapStripeRefundStatus(string(ref.Status)), nil

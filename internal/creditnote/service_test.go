@@ -348,6 +348,32 @@ func (m *memStore) SetTaxReversalPending(_ context.Context, tenantID, id string,
 	return nil
 }
 
+// ListRefundsAwaitingProviderID mirrors the real store's STRUCTURAL predicate:
+// an issued credit note owing a refund with no provider id. A fake that
+// returned everything (or nothing) would make the recovery tests meaningless.
+func (m *memStore) ListRefundsAwaitingProviderID(_ context.Context, olderThan time.Time, batch int, _ bool) ([]domain.CreditNote, error) {
+	var out []domain.CreditNote
+	for _, cn := range m.notes {
+		if cn.Status != domain.CreditNoteIssued || cn.IsSimulated {
+			continue
+		}
+		if cn.RefundAmountCents <= 0 || cn.StripeRefundID != "" {
+			continue
+		}
+		if cn.RefundStatus == domain.RefundFailed {
+			continue
+		}
+		if !cn.UpdatedAt.Before(olderThan) {
+			continue
+		}
+		out = append(out, cn)
+		if batch > 0 && len(out) >= batch {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) ListPendingCreditNoteTaxReversal(_ context.Context, _ int, _ bool) ([]domain.CreditNote, error) {
 	var out []domain.CreditNote
 	for _, cn := range m.notes {

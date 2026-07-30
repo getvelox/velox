@@ -54,6 +54,11 @@ func (f *fakeClawbackRetrier) RetryPendingCreditNoteTaxReversal(ctx context.Cont
 	return f.cnRev.run(ctx, b)
 }
 
+func (f *fakeClawbackRetrier) RetryPendingRefunds(ctx context.Context, b int) (int, []error) {
+	*f.order = append(*f.order, "refund_recovery")
+	return f.cnRev.run(ctx, b)
+}
+
 type fakePaymentReconciler struct {
 	sweep fakeSweep
 	order *[]string
@@ -83,7 +88,11 @@ func TestScheduler_ReconcilerOrder(t *testing.T) {
 		got = append(got, r.Name())
 	}
 	// dunning_backfill runs LAST — an order-independent backstop on already-failed invoices.
-	want := []string{"payment_unknown", "tax_retry", "tax_commit", "tax_reversal", "clawback_issue", "cn_tax_reversal", "dunning_backfill"}
+	// refund_recovery is shape 1 (STRUCTURAL): an issued credit note owing a
+	// refund with no provider id IS the predicate, so it also catches a crash
+	// that happened before any status was written.
+	// dunning_backfill runs LAST — an order-independent backstop on already-failed invoices.
+	want := []string{"payment_unknown", "tax_retry", "tax_commit", "tax_reversal", "clawback_issue", "cn_tax_reversal", "refund_recovery", "dunning_backfill"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("reconciler order:\n got %v\nwant %v", got, want)
 	}
