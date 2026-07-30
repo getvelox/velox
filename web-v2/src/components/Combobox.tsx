@@ -32,6 +32,11 @@ interface ComboboxProps {
   // rows past the page cap are unfindable no matter what the user types.
   onSearchChange?: (search: string) => void
   serverFiltered?: boolean
+  // Let the popup grow past the trigger (up to 32rem, still clamped by the
+  // viewport) for pickers with long labels that are NOT inside a dialog.
+  // Default false: popup == trigger, which is the only width that is
+  // guaranteed contained wherever the trigger sits. See the Popup style.
+  growToFit?: boolean
 }
 
 // Searchable dropdown built on cmdk, mounted through Base UI's Popover
@@ -54,6 +59,7 @@ export function Combobox({
   renderSelected,
   onSearchChange,
   serverFiltered,
+  growToFit,
 }: ComboboxProps) {
   const [open, setOpen] = React.useState(false)
   const anchorRef = React.useRef<HTMLDivElement>(null)
@@ -135,14 +141,26 @@ export function Combobox({
           className="isolate z-50 outline-none"
         >
           <PopoverPrimitive.Popup
-            // min-width matches the trigger; grow up to 32rem for long labels
-            // (e.g. "America/Los_Angeles (UTC-08:00)") but never past the
-            // viewport. max-height is bounded by the room Base UI measured on
-            // whichever side it flipped to, so the list scrolls instead of
-            // overflowing — and the Portal means no ancestor can clip it.
+            // Width MATCHES THE TRIGGER exactly (found 2026-07-30 walking the
+            // Change Plan dialog): the popup used to grow to 32rem bounded only
+            // by `--available-width`, which is room to the VIEWPORT — not to the
+            // dialog the trigger usually lives in. So inside any dialog narrower
+            // than 32rem the list spilled past both dialog edges and covered the
+            // controls beneath it, while STILL truncating a long option label.
+            // Growing bought nothing there and looked broken, so the safe shape
+            // is the predictable one (shadcn/Radix Select do the same): popup ==
+            // trigger, labels truncate with the full text in a title tooltip.
+            // `growToFit` opts a NON-dialog combobox back into growing, and is
+            // still clamped by --available-width.
+            //
+            // max-height stays bounded by the room Base UI measured on whichever
+            // side it flipped to, so the list scrolls instead of overflowing —
+            // and the Portal means no ancestor can clip it.
             style={{
               minWidth: 'var(--anchor-width)',
-              maxWidth: 'min(32rem, var(--available-width))',
+              maxWidth: growToFit
+                ? 'min(32rem, var(--available-width))'
+                : 'var(--anchor-width)',
               maxHeight: 'var(--available-height)',
             }}
             className={cn(
@@ -173,7 +191,10 @@ export function Combobox({
                       keywords={[opt.value, ...(opt.keywords ?? [])]}
                       onSelect={() => handleSelect(opt.value)}
                     >
-                      <span className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                      {/* Truncation honesty (2026-07-30): the popup is trigger-
+                          width, so long labels DO clip — the full value must stay
+                          reachable rather than being silently lost to an ellipsis. */}
+                      <span className="flex items-center gap-2 min-w-0 flex-1 truncate" title={opt.label}>
                         {opt.prefix}
                         <span className="truncate">{opt.label}</span>
                       </span>
