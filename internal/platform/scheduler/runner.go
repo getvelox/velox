@@ -1,6 +1,9 @@
 // Package scheduler hosts the standard tick-loop runner used by every
-// background worker in Velox: billing scheduler, email outbox, webhook
-// outbox, webhook retry, billing-alert evaluator, etc.
+// ticker-driven background worker in Velox. There are exactly four, and
+// `grep -rn "scheduler.Run("` is the authoritative list: billing (1h prod /
+// 5m local), webhook_outbox (2s), email_outbox (5s), webhook_retry (30s).
+// The test-clock catchup worker is queue-driven, not ticker-driven, so it
+// does not use this runner.
 //
 // Before this helper, every worker hand-rolled the same select-on-
 // ticker loop. Five copies started drifting (some logged a heartbeat,
