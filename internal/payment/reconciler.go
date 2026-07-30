@@ -31,6 +31,10 @@ type ReconcileInvoiceStore interface {
 	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
 	UpdatePayment(ctx context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error)
 	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
+	// RecordChargeAttempt persists the ADR-102 attempt fact. A RECOVERED
+	// attempt is as real as an inline one; without it the attempt is missing
+	// from the invoice timeline entirely.
+	RecordChargeAttempt(ctx context.Context, tenantID string, a domain.InvoiceChargeAttempt) error
 }
 
 // Settler is the shared payment-settlement primitive (ADR-049): it owns the

@@ -183,6 +183,40 @@ and `sim_effective_at` was written but never read, while the migration, the
 domain type and the tests all asserted it anchored the settle (ADR-030) — it now
 does.
 
+### A second round, after the first fixes
+
+The eight fixes above were themselves reviewed (131 agents, dismissal requiring
+UNANIMOUS refutation after the first round's majority vote was observed
+DISMISSING defects other dimensions confirmed). They had introduced more:
+
+- **A definite rejection with no PaymentIntent bricked the invoice.** Stripe
+  refusing outright — a detached card, no credentials — proves nothing was
+  created, so quarantining protects against nothing. But the failure write
+  rotates the key, the stricter guard then refused every later attempt,
+  recovery reproduced the same rejection until it quarantined, and quarantine's
+  only exit is adopting a PaymentIntent that will never exist. Permanently
+  uncollectible AND un-write-off-able, with dunning spinning silently forever
+  because the deferral wrapped `ErrPaymentTransient`, which rewinds the attempt
+  count. Now: a definite rejection CLOSES the intent, recovery closes on a
+  reproduced rejection, and a quarantined deferral is no longer transient so
+  dunning can escalate.
+- **Quarantined rows starved the sweep.** They never advance `updated_at`, so in
+  a `LIMIT`ed queue ordered by it they became permanent head-of-line blockers —
+  one row of starvation per quarantine. Ordering now ranks open rows first.
+- **The two fixes cancelled out.** The replay TTL measured the intent ROW's age
+  while the partial key index deliberately permits a NEW row under an OLD key,
+  so a re-attempt reset the clock and re-authorised a key the provider had
+  already forgotten. `occurred_at` now inherits the key's first use.
+- **The delete guard was half-closed.** The creator flag proves nobody else
+  *created* the row, not that nobody else has since picked it up; a breaker skip
+  could still erase a marker recovery was working from.
+- **Fix 2 had no test.** The in-memory ledger kept the pre-fix predicate, so the
+  quarantine-exit fix had no executing coverage anywhere and reverting it broke
+  nothing. The fake now mirrors the SQL, and the predicate has a real-Postgres
+  test of its own.
+- **Recovery never recorded the ADR-102 attempt fact** — which this document
+  asserted it did, so a recovered attempt was invisible on the invoice timeline.
+
 ## Residuals, each with a trigger
 
 - **Stripe cached a non-2xx for the key** — replay is inert forever and can

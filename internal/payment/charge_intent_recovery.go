@@ -183,6 +183,17 @@ func (r *Reconciler) recoverOne(ctx context.Context, ci domain.ChargeIntent) (bo
 			// A cached decline still NAMES the PaymentIntent, which is all we
 			// need — the settle below reads its real status from Stripe.
 			piID = pe.PaymentIntentID
+		} else if errors.As(err, &pe) && !pe.Unknown && pe.PaymentIntentID == "" {
+			// The replay reproduced a DEFINITE rejection with no PaymentIntent —
+			// positive proof nothing exists at the provider. Close the intent
+			// rather than burning attempts toward a quarantine whose only exit
+			// is adopting a PaymentIntent that will never be created.
+			if cerr := r.chargeIntents.Resolve(ctx, ci.TenantID, ci.ID, ""); cerr != nil {
+				return false, fmt.Errorf("close charge intent after a definite rejection: %w", cerr)
+			}
+			slog.InfoContext(ctx, "charge intent closed — the replay was refused outright, so no PaymentIntent was ever created",
+				"invoice_id", ci.InvoiceID, "charge_intent_id", ci.ID, "error", pe.Message)
+			return true, nil
 		} else if errors.Is(err, breaker.ErrOpen) {
 			// The breaker collapses BEFORE the call runs, so no attempt was made
 			// — refund the budget. Without this, a Stripe outage burns every
@@ -229,6 +240,29 @@ func (r *Reconciler) recoverOne(ctx context.Context, ci domain.ChargeIntent) (bo
 	if _, err := r.invoices.UpdatePayment(ctx, ci.TenantID, ci.InvoiceID,
 		domain.PaymentProcessing, piID, "", nil); err != nil {
 		return false, fmt.Errorf("stamp recovered payment intent: %w", err)
+	}
+
+	// (6b) Record the ADR-102 charge-attempt FACT. A recovered attempt is as
+	// real as an inline one, and without this it would be missing from the
+	// invoice timeline entirely — ADR-106 claimed this happened when it did not
+	// (found by adversarial review, 2026-07-30). The store upserts on
+	// (tenant, payment_intent_id), so it merges for free with any row a webhook
+	// already inserted, preserving ADR-103's one-row-per-attempt invariant.
+	attempt := domain.InvoiceChargeAttempt{
+		InvoiceID:             ci.InvoiceID,
+		StripePaymentIntentID: piID,
+		Trigger:               domain.ChargeTriggerAutoCharge,
+		Outcome:               domain.ChargeAttemptPending,
+		AmountCents:           ci.AmountCents,
+		OccurredAt:            ci.OccurredAt,
+		SimEffectiveAt:        ci.SimEffectiveAt,
+	}
+	if ci.Purpose == piPurposeDunningRetry {
+		attempt.Trigger = domain.ChargeTriggerDunningRetry
+	}
+	if err := r.invoices.RecordChargeAttempt(ctx, ci.TenantID, attempt); err != nil {
+		slog.WarnContext(ctx, "recovered attempt stamped, but its timeline fact could not be recorded",
+			"invoice_id", ci.InvoiceID, "stripe_payment_intent_id", piID, "error", err)
 	}
 
 	// (7) Close the intent — the attempt now has a name, so the quarantine has

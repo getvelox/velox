@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -71,14 +72,25 @@ func (m *memChargeIntents) ListOpen(_ context.Context, olderThan time.Time, limi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []domain.ChargeIntent
+	// MUST mirror the real store's predicate (state <> 'resolved'), not the
+	// pre-fix one. While this filtered on 'open' the quarantine-exit fix had no
+	// executing coverage at all, and reverting that fix broke nothing — the fake
+	// silently asserted the behaviour the fix removed (found by adversarial
+	// review, 2026-07-30).
 	for _, r := range m.rows {
-		if r.State == domain.ChargeIntentOpen && r.UpdatedAt.Before(olderThan) {
+		if r.State != domain.ChargeIntentResolved && r.UpdatedAt.Before(olderThan) {
 			out = append(out, *r)
 		}
 		if limit > 0 && len(out) >= limit {
 			break
 		}
 	}
+	// Open before quarantined, as the SQL orders it: a quarantined row's
+	// updated_at never advances, so it would otherwise permanently head the
+	// queue.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].State == domain.ChargeIntentOpen && out[j].State != domain.ChargeIntentOpen
+	})
 	return out, nil
 }
 

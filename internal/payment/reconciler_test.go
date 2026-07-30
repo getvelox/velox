@@ -48,6 +48,10 @@ func (m *mockReconcileStore) UpdatePayment(_ context.Context, _, id string, ps d
 	return *inv, nil
 }
 
+func (m *mockReconcileStore) RecordChargeAttempt(_ context.Context, _ string, _ domain.InvoiceChargeAttempt) error {
+	return nil
+}
+
 func (m *mockReconcileStore) MarkPaid(_ context.Context, _, id string, piID string, paidAt time.Time) (domain.Invoice, error) {
 	inv, ok := m.byID[id]
 	if !ok {

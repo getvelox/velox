@@ -180,6 +180,93 @@ func TestChargeIntent_ResolvedFreesTheInvoice(t *testing.T) {
 	}
 }
 
+// TestChargeIntent_SweepListsQuarantinedRowsAndRanksOpenFirst pins the sweep's
+// SQL predicate and ordering directly, because the unit tests exercise only the
+// in-memory ledger — which had silently kept the PRE-FIX predicate, leaving the
+// quarantine-exit fix with no executing coverage anywhere.
+//
+// Two properties: a quarantined row must be LISTED (or its adoption exit can
+// never run), and it must never OUTRANK an open one. A quarantined row's
+// updated_at never advances, so under a pure updated_at ordering it would
+// permanently head a LIMITed queue and starve every recoverable attempt.
+func TestChargeIntent_SweepListsQuarantinedRowsAndRanksOpenFirst(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Charge Intent Sweep Order")
+	store := payment.NewChargeIntentStore(db)
+
+	// The quarantined row is OLDER, so updated_at alone would put it first.
+	oldInv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-OLD")
+	old, _, err := store.Open(ctx, intentFor(tenantID, oldInv.ID, "key_old"))
+	if err != nil {
+		t.Fatalf("open old: %v", err)
+	}
+	if err := store.MarkNeedsReview(ctx, tenantID, old.ID, "unresolvable"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+
+	newInv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-NEW")
+	fresh, _, err := store.Open(ctx, intentFor(tenantID, newInv.ID, "key_new"))
+	if err != nil {
+		t.Fatalf("open new: %v", err)
+	}
+
+	rows, err := store.ListOpen(ctx, time.Now().UTC().Add(time.Minute), 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want both rows listed (a quarantined row must stay visible for its adoption exit), got %d", len(rows))
+	}
+	if rows[0].ID != fresh.ID {
+		t.Fatalf("the quarantined row outranked the open one — it never advances updated_at, so it would permanently head a LIMITed queue and starve recoverable work")
+	}
+
+	// And with a batch of one, the recoverable row is still the one returned.
+	head, err := store.ListOpen(ctx, time.Now().UTC().Add(time.Minute), 1)
+	if err != nil {
+		t.Fatalf("list head: %v", err)
+	}
+	if len(head) != 1 || head[0].ID != fresh.ID {
+		t.Fatalf("a single-row batch returned the quarantined row — every tick would do no useful work")
+	}
+}
+
+// TestChargeIntent_KeyAgeSurvivesAReAttempt pins the interaction between two
+// fixes that would otherwise cancel out. Re-attempting under a recurring key is
+// permitted (the key index is partial), but the replay TTL measures
+// occurred_at — so a fresh row carrying an OLD key would reset the clock and
+// re-authorise a key the provider has already forgotten.
+func TestChargeIntent_KeyAgeSurvivesAReAttempt(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Charge Intent Key Age")
+	inv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-KEYAGE")
+	store := payment.NewChargeIntentStore(db)
+
+	in := intentFor(tenantID, inv.ID, "velox_inv_recurring")
+	in.OccurredAt = time.Now().UTC().Add(-20 * time.Hour) // the key's first use
+	first, _, err := store.Open(ctx, in)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.Resolve(ctx, tenantID, first.ID, "pi_1"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// A later attempt recomputes the SAME key (the settle failed, so the seq
+	// never moved) and would otherwise stamp occurred_at = now.
+	again := intentFor(tenantID, inv.ID, "velox_inv_recurring")
+	again.OccurredAt = time.Now().UTC()
+	row, _, err := store.Open(ctx, again)
+	if err != nil {
+		t.Fatalf("re-attempt: %v", err)
+	}
+	if time.Since(row.OccurredAt) < 19*time.Hour {
+		t.Fatalf("occurred_at reset to %v on a re-attempt under a recurring key — the replay TTL would re-authorise a key the provider has already forgotten", row.OccurredAt)
+	}
+}
+
 // TestChargeIntent_RefusesWhileAPaymentIsAlreadyInFlight closes the gap the
 // review found in the payability re-check: it read payment_status and then
 // ignored it. That matters most for invoices predating this ledger — they have

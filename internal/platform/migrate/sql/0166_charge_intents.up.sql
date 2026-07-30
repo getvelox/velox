@@ -52,9 +52,13 @@ CREATE TABLE charge_intents (
     -- open         → a request may be in flight at Stripe; the invoice is
     --                quarantined from further charges until it resolves.
     -- resolved     → the PaymentIntent is named (or provably never created).
-    -- needs_review → auto-recovery gave up; an operator must look. Deliberately
-    --                NOT swept: it must keep blocking, because "we do not know"
-    --                is precisely when a second charge must not be opened.
+    -- needs_review → auto-recovery gave up; an operator must look. Still LISTED
+    --                by the sweep, but only for the adoption check — never
+    --                replayed. Listing it is what gives quarantine an exit at
+    --                all; replaying it is what quarantine exists to prevent.
+    --                It keeps blocking new charges throughout, because "we do
+    --                not know" is precisely when a second charge must not be
+    --                opened.
     state       TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'resolved', 'needs_review')),
     stripe_payment_intent_id TEXT NOT NULL DEFAULT '',
     recovery_attempts INT NOT NULL DEFAULT 0,
@@ -99,11 +103,14 @@ CREATE UNIQUE INDEX charge_intents_one_unresolved
     ON charge_intents (tenant_id, invoice_id)
     WHERE state <> 'resolved';
 
--- Partial so the sweep index stays small: resolved rows are the overwhelming
--- majority and needs_review rows are deliberately not auto-swept.
+-- Partial so the sweep index stays small — resolved rows are the overwhelming
+-- majority. The predicate MATCHES the sweep's query (state <> 'resolved'):
+-- quarantined rows are listed too, because their only exit is the sweep's
+-- adoption step. An index on state='open' would silently stop serving the query
+-- the moment quarantined rows became visible to it.
 CREATE INDEX charge_intents_sweep
-    ON charge_intents (livemode, updated_at)
-    WHERE state = 'open';
+    ON charge_intents (livemode, state, updated_at)
+    WHERE state <> 'resolved';
 
 -- An unresolved row that cannot be replayed is WORSE than no row: it looks
 -- recoverable to the sweep and is unresolvable in fact. Refuse it at write time

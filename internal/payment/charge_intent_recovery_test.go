@@ -131,7 +131,8 @@ func TestChargeIntent_AmbiguousOutcomeRecoversToTheSamePaymentIntent(t *testing.
 
 	// Age it past the cool-off and recover.
 	ledger.rows[open[0].ID].UpdatedAt = time.Now().UTC().Add(-2 * chargeIntentCoolOff)
-	rec := NewReconciler(client, &recoveryInvoiceStore{mock: invoices}, time.Second)
+	store := &recoveryInvoiceStore{mock: invoices}
+	rec := NewReconciler(client, store, time.Second)
 	rec.SetChargeIntents(ledger)
 
 	n, errs := rec.RecoverChargeIntents(context.Background(), 10)
@@ -151,6 +152,15 @@ func TestChargeIntent_AmbiguousOutcomeRecoversToTheSamePaymentIntent(t *testing.
 	}
 	if st := ledger.get(open[0].ID).State; st != domain.ChargeIntentResolved {
 		t.Fatalf("intent state after recovery = %s, want resolved", st)
+	}
+	// A recovered attempt is as real as an inline one: without the ADR-102 fact
+	// it is missing from the invoice timeline entirely, and ADR-106 claimed this
+	// happened when it did not.
+	if len(store.attempts) != 1 {
+		t.Fatalf("recovery recorded %d charge-attempt facts, want 1 — the attempt would be invisible on the timeline", len(store.attempts))
+	}
+	if store.attempts[0].StripePaymentIntentID != client.minted[0] {
+		t.Fatalf("the recorded fact names %q, want the recovered PaymentIntent %q", store.attempts[0].StripePaymentIntentID, client.minted[0])
 	}
 }
 
@@ -413,11 +423,75 @@ func TestChargeIntent_QuarantineBlocksTheChargePathUnderTheSAMEKey(t *testing.T)
 	if !errors.Is(err, ErrChargeAttemptInFlight) {
 		t.Errorf("want ErrChargeAttemptInFlight so the operator gets a 409, got %v", err)
 	}
-	if !errors.Is(err, ErrPaymentTransient) {
-		t.Errorf("want ErrPaymentTransient so dunning does not burn an attempt on a wait, got %v", err)
+	// And it must NOT be transient. Dunning maps ErrPaymentTransient to a skip
+	// that REWINDS the attempt count, so a quarantined invoice would spin every
+	// tick forever without ever exhausting — uncollectible, un-escalatable and
+	// silent. Quarantine needs a human, which is the opposite of a wait.
+	if errors.Is(err, ErrPaymentTransient) {
+		t.Error("a QUARANTINED attempt was reported as a transient wait — dunning will rewind its attempt count every tick and never escalate")
 	}
 	if got := client.mintedCount(); got != before {
 		t.Fatalf("Stripe was called over a quarantined attempt (%d -> %d) — with an expired key that creates a SECOND PaymentIntent", before, got)
+	}
+}
+
+// TestChargeIntent_OpenIntentDefersAsATransientWait is the counterpart: while
+// an attempt is genuinely OPEN, the deferral IS a wait, so it must stay
+// transient or dunning burns a retry attempt on an invoice nobody has failed to
+// charge yet.
+func TestChargeIntent_OpenIntentDefersAsATransientWait(t *testing.T) {
+	client := newIdempotentStripe()
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	ledger := newMemChargeIntents()
+
+	s := NewStripe(client, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(ledger)
+
+	client.dropResponse = true
+	_, _ = s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_x", "pm_x")
+
+	// A different card ⇒ a different key ⇒ deferral against an OPEN intent.
+	inv := invoices.invoices["inv_1"]
+	inv.PaymentStatus = domain.PaymentPending
+	_, err := s.ChargeInvoice(context.Background(), "t1", inv, "cus_x", "pm_OTHER")
+	if !errors.Is(err, ErrPaymentTransient) {
+		t.Errorf("deferring behind an OPEN attempt must be transient so dunning does not burn a retry, got %v", err)
+	}
+	if !errors.Is(err, ErrChargeAttemptInFlight) {
+		t.Errorf("want ErrChargeAttemptInFlight for an honest 409, got %v", err)
+	}
+}
+
+// TestChargeIntent_DefiniteRejectionClosesTheIntent: a provider refusing the
+// request outright is proof that no PaymentIntent was created, so the invoice
+// must NOT be quarantined. Leaving it open bricked the invoice: the failure
+// write rotates the key, the guard then refuses every later attempt, recovery
+// reproduces the same rejection until it quarantines, and quarantine's only
+// exit is adopting a PaymentIntent that will never exist.
+func TestChargeIntent_DefiniteRejectionClosesTheIntent(t *testing.T) {
+	client := newIdempotentStripe()
+	client.failNext = &PaymentError{Message: "No such PaymentMethod: pm_x", Unknown: false}
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	ledger := newMemChargeIntents()
+
+	s := NewStripe(client, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(ledger)
+
+	if _, err := s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_x", "pm_x"); err == nil {
+		t.Fatal("a rejected charge must return an error")
+	}
+	rows := ledger.all()
+	if len(rows) != 1 {
+		t.Fatalf("want 1 intent, got %d", len(rows))
+	}
+	if rows[0].State != domain.ChargeIntentResolved {
+		t.Fatalf("a definite rejection left the intent %s — nothing was created, so quarantining protects against nothing and the invoice becomes permanently unchargeable", rows[0].State)
+	}
+	unresolved, _ := ledger.HasUnresolved(context.Background(), "t1", "inv_1")
+	if unresolved {
+		t.Fatal("the invoice is still blocked after a rejection that created no PaymentIntent")
 	}
 }
 
@@ -528,10 +602,106 @@ func TestChargeIntent_RecoveryDoesNotClobberAnInvoiceSettledMidReplay(t *testing
 	}
 }
 
+// TestChargeIntent_QuarantineRegainsAnExitAndIsNotReplayed covers fix 2, which
+// until now had NO executing coverage: the in-memory ledger still filtered
+// state=='open', so the sweep never saw a quarantined row in any test and
+// reverting the fix broke nothing.
+//
+// Two properties, and they pull against each other: a quarantined row must be
+// VISIBLE to the sweep (or its documented operator exit — re-send the event,
+// the webhook settles the invoice, adoption closes the intent — can never run),
+// and it must never be REPLAYED (replaying is what the quarantine exists to
+// prevent).
+func TestChargeIntent_QuarantineRegainsAnExitAndIsNotReplayed(t *testing.T) {
+	client := newIdempotentStripe()
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	ledger := newMemChargeIntents()
+
+	seeded, _, err := ledger.Open(context.Background(), domain.ChargeIntent{
+		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "velox_inv_inv_1_0_pm_x",
+		AmountCents: invoices.invoices["inv_1"].AmountDueCents, Currency: "USD",
+		StripeCustomerID: "cus_x", StripePaymentMethodID: "pm_x", OccurredAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := ledger.MarkNeedsReview(context.Background(), "t1", seeded.ID, "unresolvable"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	ledger.rows[seeded.ID].UpdatedAt = time.Now().UTC().Add(-2 * chargeIntentCoolOff)
+
+	rec := NewReconciler(client, &recoveryInvoiceStore{mock: invoices}, time.Second)
+	rec.SetChargeIntents(ledger)
+
+	// Pass 1: no PaymentIntent known yet — visible, but never replayed.
+	if _, errs := rec.RecoverChargeIntents(context.Background(), 10); len(errs) > 0 {
+		t.Fatalf("pass 1: %v", errs)
+	}
+	if got := client.mintedCount(); got != 0 {
+		t.Fatalf("a quarantined intent was REPLAYED (%d provider calls) — past the key's retention that creates a second PaymentIntent", got)
+	}
+	if ledger.get(seeded.ID).RecoveryAttempts != 0 {
+		t.Error("a quarantined row burned a recovery attempt without doing any work")
+	}
+
+	// Pass 2: the operator re-sends the event, the webhook settles the invoice,
+	// and adoption must now close the intent — the exit the ADR documents.
+	inv := invoices.invoices["inv_1"]
+	inv.StripePaymentIntentID = "pi_found_by_operator"
+	invoices.invoices["inv_1"] = inv
+
+	if _, errs := rec.RecoverChargeIntents(context.Background(), 10); len(errs) > 0 {
+		t.Fatalf("pass 2: %v", errs)
+	}
+	if st := ledger.get(seeded.ID).State; st != domain.ChargeIntentResolved {
+		t.Fatalf("quarantine has no exit: state still %s after the PaymentIntent became known", st)
+	}
+	if got := client.mintedCount(); got != 0 {
+		t.Fatalf("adoption made %d provider calls; it must make none", got)
+	}
+}
+
+// TestChargeIntent_BreakerSkipRefundsTheRecoveryBudget covers fix 6, which had
+// no test. A breaker skip provably makes no call, so counting it would let an
+// outage burn every intent's budget and quarantine the whole queue for work
+// that never happened.
+func TestChargeIntent_BreakerSkipRefundsTheRecoveryBudget(t *testing.T) {
+	ledger := newMemChargeIntents()
+	row, _, err := ledger.Open(context.Background(), domain.ChargeIntent{
+		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "k", AmountCents: 100,
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := ledger.BumpRecoveryAttempt(context.Background(), "t1", row.ID); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	if got := ledger.get(row.ID).RecoveryAttempts; got != 1 {
+		t.Fatalf("attempts after bump = %d, want 1", got)
+	}
+	if err := ledger.ReleaseRecoveryAttempt(context.Background(), "t1", row.ID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if got := ledger.get(row.ID).RecoveryAttempts; got != 0 {
+		t.Fatalf("a provably-skipped attempt still counted (attempts=%d) — an outage would quarantine the queue", got)
+	}
+	// Never below zero, or a row could out-run its budget forever.
+	if err := ledger.ReleaseRecoveryAttempt(context.Background(), "t1", row.ID); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+	if got := ledger.get(row.ID).RecoveryAttempts; got != 0 {
+		t.Fatalf("attempts underflowed to %d", got)
+	}
+}
+
 // recoveryInvoiceStore adapts the charge-path mock to the reconciler's store
 // interface, so recovery can be exercised against the same in-memory invoices
 // the charge wrote to.
-type recoveryInvoiceStore struct{ mock *mockInvoiceUpdater }
+type recoveryInvoiceStore struct {
+	mock     *mockInvoiceUpdater
+	attempts []domain.InvoiceChargeAttempt
+}
 
 func (r *recoveryInvoiceStore) ListUnknownPayments(context.Context, time.Time, int) ([]domain.Invoice, error) {
 	return nil, nil
@@ -543,6 +713,13 @@ func (r *recoveryInvoiceStore) ListProcessingPayments(context.Context, time.Time
 
 func (r *recoveryInvoiceStore) Get(_ context.Context, _, id string) (domain.Invoice, error) {
 	return r.mock.invoices[id], nil
+}
+
+// RecordChargeAttempt captures the ADR-102 fact so a test can assert a
+// recovered attempt actually reaches the timeline.
+func (r *recoveryInvoiceStore) RecordChargeAttempt(_ context.Context, _ string, a domain.InvoiceChargeAttempt) error {
+	r.attempts = append(r.attempts, a)
+	return nil
 }
 
 func (r *recoveryInvoiceStore) MarkPaid(ctx context.Context, tenantID, id, piID string, paidAt time.Time) (domain.Invoice, error) {

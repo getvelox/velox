@@ -116,7 +116,16 @@ func (s *ChargeIntentStore) Open(ctx context.Context, in domain.ChargeIntent) (d
 			id, tenant_id, invoice_id, idempotency_key, amount_cents, currency,
 			stripe_customer_id, stripe_payment_method_id, description, metadata,
 			purpose, occurred_at, sim_effective_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+			-- occurred_at is the KEY's first use, not this row's birth. A
+			-- re-attempt under a recurring key (which fix 3 deliberately
+			-- permits) would otherwise reset the clock and let the replay TTL
+			-- re-authorise a key the provider has already forgotten — the two
+			-- fixes cancelling each other out (found by adversarial review,
+			-- 2026-07-30). Inherit the earliest use of this exact key.
+			COALESCE((SELECT MIN(occurred_at) FROM charge_intents k
+			          WHERE k.tenant_id = $2 AND k.idempotency_key = $4), $12),
+			$13)
 		ON CONFLICT DO NOTHING`,
 		postgres.NewID("vlx_cin"), in.TenantID, in.InvoiceID, in.IdempotencyKey,
 		in.AmountCents, in.Currency, in.StripeCustomerID, in.StripePaymentMethodID,
@@ -181,8 +190,15 @@ func (s *ChargeIntentStore) Delete(ctx context.Context, tenantID, id string) err
 		return err
 	}
 	defer postgres.Rollback(tx)
+	// recovery_attempts = 0 is the other half of the ownership check. The
+	// creator flag proves nobody ELSE created the row, but not that nobody else
+	// has since picked it up: once recovery has touched it, a breaker skip on
+	// the original caller must not erase a marker that sweep is working from
+	// (found by adversarial review, 2026-07-30).
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM charge_intents WHERE id = $1 AND state = 'open'`, id); err != nil {
+		`DELETE FROM charge_intents
+		 WHERE id = $1 AND state = 'open' AND recovery_attempts = 0
+		   AND COALESCE(stripe_payment_intent_id,'') = ''`, id); err != nil {
 		return fmt.Errorf("delete charge intent: %w", err)
 	}
 	return tx.Commit()
@@ -215,10 +231,18 @@ func (s *ChargeIntentStore) ListOpen(ctx context.Context, olderThan time.Time, l
 	}
 	defer postgres.Rollback(tx)
 
+	// ORDER BY state DESC puts 'open' before 'needs_review' (o < r), which is
+	// load-bearing rather than cosmetic. A quarantined row never advances its
+	// updated_at — nothing writes to it — so under a pure updated_at ordering it
+	// becomes the permanent head of a LIMITed queue and starves every
+	// recoverable attempt behind it, one row of starvation per quarantine
+	// (found by adversarial review, 2026-07-30). Quarantined rows still need
+	// listing for their adoption exit, but they must never crowd out work that
+	// can actually be finished.
 	rows, err := tx.QueryContext(ctx, `SELECT `+chargeIntentCols+`
 		FROM charge_intents
 		WHERE state <> 'resolved' AND livemode = $1 AND updated_at < $2
-		ORDER BY updated_at ASC
+		ORDER BY state DESC, updated_at ASC
 		LIMIT $3`, postgres.Livemode(ctx), olderThan, limit)
 	if err != nil {
 		return nil, err

@@ -660,11 +660,20 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			"unresolved_intent_id", intent.ID, "unresolved_state", string(intent.State),
 			"unresolved_key", intent.IdempotencyKey, "attempted_at", intent.OccurredAt,
 			"key_matches", intent.IdempotencyKey == idempotencyKey)
-		// Wraps BOTH sentinels deliberately: ErrChargeAttemptInFlight so the HTTP
-		// boundary answers an operator with an honest 409 instead of a 500, and
-		// ErrPaymentTransient so dunning treats it as a wait rather than burning
-		// a retry attempt on it.
-		return domain.Invoice{}, fmt.Errorf("%w: %w", ErrChargeAttemptInFlight, ErrPaymentTransient)
+		// An OPEN intent is a genuine wait, so wrap BOTH sentinels:
+		// ErrChargeAttemptInFlight so the HTTP boundary answers an operator with
+		// an honest 409 instead of a 500, and ErrPaymentTransient so dunning
+		// treats it as a wait rather than burning a retry attempt.
+		//
+		// A QUARANTINED intent is NOT a wait — it needs a human — so it must not
+		// be transient. Dunning maps ErrPaymentTransient to a skip that REWINDS
+		// the attempt count, so a quarantined invoice would spin every tick
+		// forever without ever exhausting: uncollectible, un-escalatable and
+		// silent (found by adversarial review, 2026-07-30).
+		if intent.State == domain.ChargeIntentOpen {
+			return domain.Invoice{}, fmt.Errorf("%w: %w", ErrChargeAttemptInFlight, ErrPaymentTransient)
+		}
+		return domain.Invoice{}, ErrChargeAttemptInFlight
 	}
 
 	var result PaymentIntentResult
@@ -793,11 +802,37 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		// single omission is the entire recovery hook — it keeps the invoice
 		// quarantined from further charges and hands the sweep the stored key
 		// to replay. Leaving it open is the fix, not an oversight.
-		if pe.PaymentIntentID != "" {
+		//
+		// A DEFINITE rejection with no PaymentIntent id must ALSO close it, and
+		// that omission was the worst defect in the first version of this file.
+		// Stripe refusing the request outright — a detached payment method, an
+		// invalid amount — is positive proof that nothing was created, so
+		// quarantining the invoice protects against nothing. Meanwhile the
+		// failure write bumps charge_attempt_seq, rotating the key, so every
+		// later attempt was refused by the guard above; recovery replayed,
+		// reproduced the same rejection, burned its budget, and quarantined the
+		// row into a state whose only exit is adopting a PaymentIntent that will
+		// never exist. The invoice became permanently uncollectible AND
+		// permanently un-write-off-able, with dunning spinning silently forever
+		// (found by adversarial review, 2026-07-30).
+		//
+		// When the outcome is genuinely AMBIGUOUS and unnamed, the intent is
+		// still deliberately LEFT OPEN. That single omission is the recovery
+		// hook: it keeps the invoice quarantined and hands the sweep the stored
+		// key to replay.
+		switch {
+		case pe.PaymentIntentID != "":
 			if rerr := s.chargeIntents.Resolve(ctx, tenantID, intent.ID, pe.PaymentIntentID); rerr != nil {
 				slog.ErrorContext(ctx, "could not close charge intent after a named outcome — the invoice stays quarantined until the recovery sweep clears it",
 					"invoice_id", inv.ID, "charge_intent_id", intent.ID,
 					"stripe_payment_intent_id", pe.PaymentIntentID, "error", rerr)
+			}
+		case !pe.Unknown:
+			// Covers both a provider rejection and "no credentials for this
+			// mode": in either case the request never became a PaymentIntent.
+			if rerr := s.chargeIntents.Resolve(ctx, tenantID, intent.ID, ""); rerr != nil {
+				slog.ErrorContext(ctx, "could not close charge intent after a definite rejection — the invoice will stay blocked until the recovery sweep clears it",
+					"invoice_id", inv.ID, "charge_intent_id", intent.ID, "error", rerr)
 			}
 		}
 
