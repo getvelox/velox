@@ -35,6 +35,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Combobox } from '@/components/Combobox'
 import { TypedConfirmDialog } from '@/components/TypedConfirmDialog'
 
 import { Loader2, Plus, Trash2 } from 'lucide-react'
@@ -537,27 +538,17 @@ function SetDefaultRuleDialog({
 
         <div>
           <Label className="text-xs uppercase tracking-wide text-muted-foreground">Rating rule</Label>
-          <Select
-            items={latestPerKey(ratingRules).map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
-            value={ratingRuleId}
-            onValueChange={(v) => setRatingRuleId(v ?? '')}
-          >
-            <SelectTrigger className="mt-2 w-full">
-              <SelectValue placeholder="Select rating rule…" />
-            </SelectTrigger>
-            <SelectContent>
-              {ratingRules.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-muted-foreground">No rating rules — create one first.</div>
-              ) : (
-                ratingRules.map(rr => (
-                  <SelectItem key={rr.id} value={rr.id}>
-                    <span className="text-sm">{rr.name}</span>
-                    <span className="text-xs text-muted-foreground ml-2">{rr.mode} · v{rr.version}</span>
-                  </SelectItem>
-                ))
-              )}
-            </SelectContent>
-          </Select>
+          {/* Searchable: rating rules are TENANT DATA and grow unbounded. */}
+          <div className="mt-2">
+            <Combobox
+              value={ratingRuleId}
+              onChange={(v) => setRatingRuleId(v ?? '')}
+              options={latestPerKey(ratingRules).map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
+              placeholder="Select rating rule…"
+              emptyMessage={ratingRules.length === 0 ? 'No rating rules — create one first.' : 'No rule matches that search.'}
+              triggerClassName="w-full"
+            />
+          </div>
         </div>
 
         <DialogFooter className={currentRuleId ? 'sm:justify-between' : undefined}>
@@ -746,27 +737,17 @@ function CreatePricingRuleDialog({
 
           <div>
             <Label className="text-xs uppercase tracking-wide text-muted-foreground">Rating rule</Label>
-            <Select
-              items={latestPerKey(ratingRules).map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
-              value={ratingRuleId}
-              onValueChange={(v) => setRatingRuleId(v ?? '')}
-            >
-              <SelectTrigger className="mt-2 w-full">
-                <SelectValue placeholder="Select rating rule…" />
-              </SelectTrigger>
-              <SelectContent>
-                {ratingRules.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">No rating rules — create one first.</div>
-                ) : (
-                  ratingRules.map(rr => (
-                    <SelectItem key={rr.id} value={rr.id}>
-                      <span className="text-sm">{rr.name}</span>
-                      <span className="text-xs text-muted-foreground ml-2">{rr.mode} · v{rr.version}</span>
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
+            {/* Searchable: rating rules are TENANT DATA and grow unbounded. */}
+            <div className="mt-2">
+              <Combobox
+                value={ratingRuleId}
+                onChange={(v) => setRatingRuleId(v ?? '')}
+                options={latestPerKey(ratingRules).map(rr => ({ value: rr.id, label: `${rr.name} — ${priceRate(rr, meterUnit)} · v${rr.version}` }))}
+                placeholder="Select rating rule…"
+                emptyMessage={ratingRules.length === 0 ? 'No rating rules — create one first.' : 'No rule matches that search.'}
+                triggerClassName="w-full"
+              />
+            </div>
           </div>
         </div>
 

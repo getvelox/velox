@@ -11,9 +11,7 @@ import type { Customer } from '@/lib/api'
 import { applyApiError } from '@/lib/formErrors'
 import { TestClockBadge } from '@/components/TestClockBadge'
 import { useAuth } from '@/contexts/AuthContext'
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
+import { Combobox } from '@/components/Combobox'
 import { downloadServerCSV } from '@/lib/csv'
 import { Layout } from '@/components/Layout'
 import { useSortable, type SortDir } from '@/hooks/useSortable'
@@ -500,25 +498,21 @@ export default function CustomersPage() {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Pin to test clock <span className="text-muted-foreground">(optional)</span></FormLabel>
-                      <Select value={field.value ?? ''} onValueChange={(v) => field.onChange(v ?? '')}>
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder="No test clock — bills in real time">
-                            {(value: string) => {
-                              if (!value) return 'No test clock — bills in real time'
-                              const c = clocks.find(c => c.id === value)
-                              return c ? (c.name || c.id) : value
-                            }}
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="">No test clock — bills in real time</SelectItem>
-                          {clocks.map(c => (
-                            <SelectItem key={c.id} value={c.id}>
-                              {c.name || c.id}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      {/* Searchable: clocks are TENANT DATA and accumulate fast
+                          (a walkthrough session alone can add half a dozen). The
+                          empty-value row stays FIRST so the common "no clock"
+                          choice is never something you have to search for. */}
+                      <Combobox
+                        value={field.value ?? ''}
+                        onChange={(v) => field.onChange(v ?? '')}
+                        options={[
+                          { value: '', label: 'No test clock — bills in real time' },
+                          ...clocks.map(c => ({ value: c.id, label: c.name || c.id })),
+                        ]}
+                        placeholder="No test clock — bills in real time"
+                        emptyMessage="No clock matches that search."
+                        triggerClassName="w-full"
+                      />
                       <FormDescription>
                         Pinned customers run all subscriptions and invoices on the clock's simulated time. Cannot be changed later.
                       </FormDescription>

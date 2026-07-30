@@ -40,6 +40,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Combobox } from '@/components/Combobox'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
@@ -790,20 +791,20 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
           ) : (
             <div>
               <Label>Rating Rule</Label>
-              <Select
-                items={latestPerKey(rules).map(r => ({ value: r.id, label: `${r.name} — ${priceRate(r, form.unit)}` }))}
-                value={form.rating_rule_version_id}
-                onValueChange={v => setForm(f => ({ ...f, rating_rule_version_id: v ?? '' }))}
-              >
-                <SelectTrigger className="w-full mt-1">
-                  <SelectValue placeholder="None (assign later)" />
-                </SelectTrigger>
-                <SelectContent>
-                  {latestPerKey(rules).map(r => (
-                    <SelectItem key={r.id} value={r.id}>{r.name} — {priceRate(r, form.unit)}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {/* Searchable: the option list is TENANT DATA (every price the
+                  tenant defines), so it grows unbounded — a plain Select becomes
+                  an unscannable wall. Fixed enums stay plain Selects. */}
+              <div className="mt-1">
+                <Combobox
+                  value={form.rating_rule_version_id}
+                  onChange={v => setForm(f => ({ ...f, rating_rule_version_id: v ?? '' }))}
+                  options={latestPerKey(rules).map(r => ({ value: r.id, label: `${r.name} — ${priceRate(r, form.unit)}` }))}
+                  placeholder="None (assign later)"
+                  emptyMessage="No price matches that search."
+                  clearable
+                  triggerClassName="w-full"
+                />
+              </div>
             </div>
           )}
 
