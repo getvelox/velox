@@ -55,6 +55,19 @@ Two or more Claude Code sessions may work this repo at the same time. Rules:
 - No Temporal dependency in v1 — simple background goroutine scheduler. Redis used for distributed rate limiting only.
 - Credits use event-sourced ledger (immutable append-only)
 
+## Walking MANUAL_TEST — read the strategy first
+
+Walking a flow (proving behavior) follows
+**[docs/dev/manual-test-strategy.md](docs/dev/manual-test-strategy.md)** — the
+proof-side sibling of the money-path playbook. It carries the five lenses
+(behavior / money / honesty / design / **visual**), the twelve techniques that
+have each caught a real defect here (control-vs-treatment, negative controls,
+provider-side verification, mutation verification, first-use bias, …), the
+per-box protocol, and the evidence standard for an annotation. The one rule
+worth repeating inline: **text/DOM assertions are structurally blind to layout
+bugs — a UI box is not walked until a screenshot of its interactive state has
+been looked at.**
+
 ## Documentation discipline
 
 Every user-visible ship updates the docs that describe it, in the same PR:
