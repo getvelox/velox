@@ -157,10 +157,24 @@ quarantines instead.
   legacy settle-failed branch still applies to them. Acceptable at 0 customers;
   no backfill (no-speculative-backfill rule). The WARN naming the legacy path is
   the tripwire.
-- **Refunds are untouched** — `StripeRefunder` sits off the `StripeClient`
-  interface, is not breaker-wrapped, and passes an empty idempotency key, so
-  stripe-go generates a random one per attempt. Same orphan class, different
-  money path. *Trigger: first refund-path ambiguity, or production cutover.*
+- **Refunds carry a related but DIFFERENT defect.** An earlier draft of this
+  residual claimed refunds "pass an empty idempotency key, so stripe-go
+  generates a random one per attempt", making them the same orphan class.
+  Reading the call sites disproved it, and the correction is recorded here
+  rather than quietly deleted: both callers pass `velox_cn_<credit_note_id>`,
+  which is stable across every retry, so a lost response replays to the ORIGINAL
+  refund. A double refund was never possible there — the credit-note row already
+  is the durable pre-call record that the charge path lacked.
+
+  The real defect is narrower. `CreateRefund` flattens its error with
+  `fmt.Errorf("%s")`, destroying the `*PaymentError` and with it the bit that
+  says whether the outcome was AMBIGUOUS. Every caller therefore treats a
+  timeout like a decline and writes `refund_status='failed'` — telling an
+  operator the customer was not refunded when the money may have left the
+  account, and inviting a manual second refund. Nothing corrects it:
+  `RetryRefund` is an operator HTTP action, not a sweep. *Fixed on its own
+  branch, deliberately separate from this one so it is judged on its own
+  evidence; it amends this residual when it lands.*
 - **The seq-coupling CI scanner reads one file** (`internal/invoice/postgres.go`),
   so a PI-stamping UPDATE added elsewhere stays unenforced. *Trigger: the first
   such write outside that file.*
