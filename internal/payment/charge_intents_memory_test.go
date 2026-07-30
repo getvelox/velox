@@ -25,16 +25,16 @@ func newMemChargeIntents() *memChargeIntents {
 	return &memChargeIntents{rows: map[string]*domain.ChargeIntent{}}
 }
 
-func (m *memChargeIntents) Open(_ context.Context, in domain.ChargeIntent) (domain.ChargeIntent, error) {
+func (m *memChargeIntents) Open(_ context.Context, in domain.ChargeIntent) (domain.ChargeIntent, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.openErr != nil {
-		return domain.ChargeIntent{}, m.openErr
+		return domain.ChargeIntent{}, false, m.openErr
 	}
 	// The one-unresolved-per-invoice index: an existing unresolved row wins.
 	for _, r := range m.rows {
 		if r.InvoiceID == in.InvoiceID && r.TenantID == in.TenantID && r.State != domain.ChargeIntentResolved {
-			return *r, nil
+			return *r, false, nil
 		}
 	}
 	m.nextID++
@@ -45,7 +45,7 @@ func (m *memChargeIntents) Open(_ context.Context, in domain.ChargeIntent) (doma
 		row.OccurredAt = time.Now().UTC()
 	}
 	m.rows[row.ID] = &row
-	return row, nil
+	return row, true, nil
 }
 
 func (m *memChargeIntents) Resolve(_ context.Context, _, id, piID string) error {
@@ -91,6 +91,15 @@ func (m *memChargeIntents) BumpRecoveryAttempt(_ context.Context, _, id string) 
 	}
 	r.RecoveryAttempts++
 	return true, nil
+}
+
+func (m *memChargeIntents) ReleaseRecoveryAttempt(_ context.Context, _, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.rows[id]; ok && r.State == domain.ChargeIntentOpen && r.RecoveryAttempts > 0 {
+		r.RecoveryAttempts--
+	}
+	return nil
 }
 
 func (m *memChargeIntents) MarkNeedsReview(_ context.Context, _, id, reason string) error {

@@ -29,6 +29,10 @@ type idempotentStripe struct {
 	// dropResponse simulates the crash/timeout shape: Stripe DID create the
 	// PaymentIntent and saved the result, but the caller never saw it.
 	dropResponse bool
+	// onCreate fires INSIDE the call, modelling a webhook that settles the
+	// invoice while the request is in flight — the race the step-6 re-read
+	// exists to survive.
+	onCreate func()
 }
 
 func newIdempotentStripe() *idempotentStripe {
@@ -42,6 +46,13 @@ func (f *idempotentStripe) CreatePaymentIntent(_ context.Context, p PaymentInten
 		err := f.failNext
 		f.failNext = nil
 		return PaymentIntentResult{}, err
+	}
+	if f.onCreate != nil {
+		hook := f.onCreate
+		f.onCreate = nil
+		f.mu.Unlock()
+		hook()
+		f.mu.Lock()
 	}
 	id, seen := f.cache[p.IdempotencyKey]
 	if !seen {
@@ -223,7 +234,7 @@ func TestChargeIntent_ReconcilerDefersToAnUnresolvedIntent(t *testing.T) {
 	invoices.invoices["inv_1"] = inv
 
 	ledger := newMemChargeIntents()
-	if _, err := ledger.Open(context.Background(), domain.ChargeIntent{
+	if _, _, err := ledger.Open(context.Background(), domain.ChargeIntent{
 		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "velox_inv_inv_1_0_pm_x",
 		AmountCents: inv.AmountDueCents, Currency: "USD",
 		StripeCustomerID: "cus_x", StripePaymentMethodID: "pm_x",
@@ -326,7 +337,7 @@ func TestChargeIntent_RefusesToReplayAnExpiredKey(t *testing.T) {
 	invoices.invoices["inv_1"] = inv
 
 	ledger := newMemChargeIntents()
-	seeded, err := ledger.Open(context.Background(), domain.ChargeIntent{
+	seeded, _, err := ledger.Open(context.Background(), domain.ChargeIntent{
 		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "velox_inv_inv_1_0_pm_x",
 		AmountCents: inv.AmountDueCents, Currency: "USD",
 		StripeCustomerID: "cus_x", StripePaymentMethodID: "pm_x",
@@ -355,6 +366,165 @@ func TestChargeIntent_RefusesToReplayAnExpiredKey(t *testing.T) {
 	unresolved, _ := ledger.HasUnresolved(context.Background(), "t1", "inv_1")
 	if !unresolved {
 		t.Fatal("a needs_review intent must still block further charges")
+	}
+}
+
+// TestChargeIntent_QuarantineBlocksTheChargePathUnderTheSAMEKey is the
+// regression test for the worst defect the adversarial review found in this
+// design (2026-07-30). The guard checked ONLY key equality — and the key
+// recomputes identically in exactly the dangerous case, because quarantine
+// means no outcome was recorded and therefore charge_attempt_seq never moved.
+//
+// So a quarantined attempt sailed straight through: the operator clicks Collect
+// days later, the same key is re-sent, Stripe has long since expired it, and a
+// SECOND PaymentIntent is created beside one that may have succeeded.
+//
+// The existing quarantine test missed this because it re-opened with a
+// DIFFERENT key, exercising the one branch that already worked.
+func TestChargeIntent_QuarantineBlocksTheChargePathUnderTheSAMEKey(t *testing.T) {
+	client := newIdempotentStripe()
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	ledger := newMemChargeIntents()
+
+	s := NewStripe(client, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(ledger)
+
+	// An attempt reaches Stripe and its outcome is lost, then recovery gives up.
+	client.dropResponse = true
+	_, _ = s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_x", "pm_x")
+	rows := ledger.all()
+	if len(rows) != 1 {
+		t.Fatalf("setup: want 1 intent, got %d", len(rows))
+	}
+	if err := ledger.MarkNeedsReview(context.Background(), "t1", rows[0].ID, "unresolvable"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	before := client.mintedCount()
+
+	// The operator retries. Nothing recorded an outcome, so the key is IDENTICAL
+	// — same invoice, same seq, same payment method.
+	inv := invoices.invoices["inv_1"]
+	inv.PaymentStatus = domain.PaymentPending
+	_, err := s.ChargeInvoice(context.Background(), "t1", inv, "cus_x", "pm_x")
+	if err == nil {
+		t.Fatal("charging over a QUARANTINED attempt must be refused")
+	}
+	if !errors.Is(err, ErrChargeAttemptInFlight) {
+		t.Errorf("want ErrChargeAttemptInFlight so the operator gets a 409, got %v", err)
+	}
+	if !errors.Is(err, ErrPaymentTransient) {
+		t.Errorf("want ErrPaymentTransient so dunning does not burn an attempt on a wait, got %v", err)
+	}
+	if got := client.mintedCount(); got != before {
+		t.Fatalf("Stripe was called over a quarantined attempt (%d -> %d) — with an expired key that creates a SECOND PaymentIntent", before, got)
+	}
+}
+
+// TestChargeIntent_StaleOpenIntentIsNotReSent: past the replay window the same
+// key no longer dedups at Stripe, so re-sending it CREATES a second
+// PaymentIntent. The TTL guarded only the recovery sweep; this path runs far
+// more often and had none.
+func TestChargeIntent_StaleOpenIntentIsNotReSent(t *testing.T) {
+	client := newIdempotentStripe()
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+	ledger := newMemChargeIntents()
+
+	s := NewStripe(client, invoices, newMockWebhookStore(), nil)
+	s.SetChargeIntents(ledger)
+
+	client.dropResponse = true
+	_, _ = s.ChargeInvoice(context.Background(), "t1", invoices.invoices["inv_1"], "cus_x", "pm_x")
+	rows := ledger.all()
+	ledger.rows[rows[0].ID].OccurredAt = time.Now().UTC().Add(-chargeIntentReplayTTL - time.Hour)
+	before := client.mintedCount()
+
+	inv := invoices.invoices["inv_1"]
+	inv.PaymentStatus = domain.PaymentPending
+	if _, err := s.ChargeInvoice(context.Background(), "t1", inv, "cus_x", "pm_x"); err == nil {
+		t.Fatal("re-sending a key past the replay window must be refused")
+	}
+	if got := client.mintedCount(); got != before {
+		t.Fatalf("an expired key was re-sent (%d -> %d PaymentIntents)", before, got)
+	}
+}
+
+// TestChargeIntent_BreakerSkipOnlyDeletesOurOwnRow: two callers computing the
+// same key are handed the SAME row. A caller whose breaker opens must not erase
+// a marker it merely inherited — that is another caller's in-flight attempt, and
+// deleting it re-opens the double charge.
+func TestChargeIntent_BreakerSkipOnlyDeletesOurOwnRow(t *testing.T) {
+	ledger := newMemChargeIntents()
+	first, created, err := ledger.Open(context.Background(), domain.ChargeIntent{
+		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "k", AmountCents: 100,
+	})
+	if err != nil || !created {
+		t.Fatalf("first Open must create: created=%v err=%v", created, err)
+	}
+	second, created2, err := ledger.Open(context.Background(), domain.ChargeIntent{
+		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "k", AmountCents: 100,
+	})
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	if created2 {
+		t.Fatal("the second caller must NOT be told it created the row — it would then delete another attempt's marker on a breaker skip")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("both callers must be handed the same row, got %s and %s", first.ID, second.ID)
+	}
+}
+
+// TestChargeIntent_RecoveryDoesNotClobberAnInvoiceSettledMidReplay: the replay
+// is a network round-trip and a webhook can settle the invoice inside it.
+// UpdatePayment writes paid_at unconditionally, so stamping 'processing' with
+// paidAt=nil over a just-paid invoice would NULL its paid_at and walk a settled
+// invoice backwards into in-flight.
+func TestChargeIntent_RecoveryDoesNotClobberAnInvoiceSettledMidReplay(t *testing.T) {
+	client := newIdempotentStripe()
+	invoices := newMockInvoiceUpdater()
+	invoices.invoices["inv_1"] = finalizedPendingInvoice()
+
+	ledger := newMemChargeIntents()
+	seeded, _, err := ledger.Open(context.Background(), domain.ChargeIntent{
+		TenantID: "t1", InvoiceID: "inv_1", IdempotencyKey: "velox_inv_inv_1_0_pm_x",
+		AmountCents: invoices.invoices["inv_1"].AmountDueCents, Currency: "USD",
+		StripeCustomerID: "cus_x", StripePaymentMethodID: "pm_x",
+		OccurredAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ledger.rows[seeded.ID].UpdatedAt = time.Now().UTC().Add(-2 * chargeIntentCoolOff)
+
+	// The webhook lands INSIDE the replay round-trip — after the sweep's
+	// pre-checks passed, before it stamps.
+	paidAt := time.Now().UTC()
+	client.onCreate = func() {
+		inv := invoices.invoices["inv_1"]
+		inv.PaymentStatus = domain.PaymentSucceeded
+		inv.Status = domain.InvoicePaid
+		inv.PaidAt = &paidAt
+		inv.StripePaymentIntentID = "pi_from_webhook"
+		invoices.invoices["inv_1"] = inv
+	}
+
+	rec := NewReconciler(client, &recoveryInvoiceStore{mock: invoices}, time.Second)
+	rec.SetChargeIntents(ledger)
+	if _, errs := rec.RecoverChargeIntents(context.Background(), 10); len(errs) > 0 {
+		t.Fatalf("recovery errors: %v", errs)
+	}
+
+	got := invoices.invoices["inv_1"]
+	if got.PaidAt == nil {
+		t.Fatal("recovery NULLed paid_at on an invoice settled during its replay")
+	}
+	if got.PaymentStatus != domain.PaymentSucceeded {
+		t.Fatalf("a settled invoice was walked backwards to %s", got.PaymentStatus)
+	}
+	if st := ledger.get(seeded.ID).State; st != domain.ChargeIntentResolved {
+		t.Fatalf("the intent must close when the invoice settled mid-replay, got %s", st)
 	}
 }
 

@@ -81,7 +81,7 @@ func TestChargeIntent_CollisionExactlyOneUnresolved(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			key := "velox_inv_" + inv.ID + "_0_pm_" + string(rune('a'+i))
-			got, err := store.Open(ctx, intentFor(tenantID, inv.ID, key))
+			got, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, key))
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -121,7 +121,7 @@ func TestChargeIntent_QuarantineOutlivesTheOpenState(t *testing.T) {
 	inv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-QUAR")
 	store := payment.NewChargeIntentStore(db)
 
-	first, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_first"))
+	first, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_first"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestChargeIntent_QuarantineOutlivesTheOpenState(t *testing.T) {
 		t.Fatal("a needs_review intent must still count as unresolved — otherwise quarantine unblocks the invoice")
 	}
 
-	got, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_second"))
+	got, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_second"))
 	if err != nil {
 		t.Fatalf("open after quarantine: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestChargeIntent_ResolvedFreesTheInvoice(t *testing.T) {
 	inv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-FREE")
 	store := payment.NewChargeIntentStore(db)
 
-	first, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_one"))
+	first, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_one"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestChargeIntent_ResolvedFreesTheInvoice(t *testing.T) {
 		t.Fatal("a resolved intent must not keep blocking")
 	}
 
-	second, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_two"))
+	second, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_two"))
 	if err != nil {
 		t.Fatalf("open after resolve: %v", err)
 	}
@@ -177,6 +177,71 @@ func TestChargeIntent_ResolvedFreesTheInvoice(t *testing.T) {
 	}
 	if second.IdempotencyKey != "key_two" {
 		t.Fatalf("second attempt key = %q, want its own", second.IdempotencyKey)
+	}
+}
+
+// TestChargeIntent_RefusesWhileAPaymentIsAlreadyInFlight closes the gap the
+// review found in the payability re-check: it read payment_status and then
+// ignored it. That matters most for invoices predating this ledger — they have
+// a PaymentIntent live at Stripe and NO intent row, so the one-unresolved index
+// cannot block them and a second charge would open unopposed.
+func TestChargeIntent_RefusesWhileAPaymentIsAlreadyInFlight(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Charge Intent InFlight")
+	store := payment.NewChargeIntentStore(db)
+	invStore := invoice.NewPostgresStore(db)
+
+	for _, ps := range []domain.InvoicePaymentStatus{domain.PaymentProcessing, domain.PaymentUnknown} {
+		t.Run(string(ps), func(t *testing.T) {
+			inv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-INFLIGHT-"+string(ps))
+			if _, err := invStore.UpdatePayment(ctx, tenantID, inv.ID, ps, "pi_live", "", nil); err != nil {
+				t.Fatalf("set %s: %v", ps, err)
+			}
+			if _, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_"+string(ps))); err == nil {
+				t.Fatalf("opening a charge intent while payment_status=%s must be refused — a PaymentIntent is already live", ps)
+			}
+		})
+	}
+}
+
+// TestChargeIntent_AResolvedRowDoesNotBlockItsKeyForever is the regression for
+// a permanent-block defect the adversarial review found: the key uniqueness
+// index was TOTAL, so once a resolved row held key K, a later attempt that
+// recomputed K could not insert, the read-back (unresolved rows only) found
+// nothing, and the charge was refused forever.
+//
+// K recurs legitimately: charge_attempt_seq moves only when an outcome is
+// RECORDED, so a create that succeeded and whose settle then failed leaves the
+// seq — and therefore the key — unchanged. The mechanism meant to prevent a
+// double charge would have bricked the invoice instead. Re-attempting under a
+// recurring key is safe: Stripe returns the original PaymentIntent for it.
+func TestChargeIntent_AResolvedRowDoesNotBlockItsKeyForever(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Charge Intent Key Reuse")
+	inv := seedChargeableInvoice(t, db, ctx, tenantID, "INV-CIN-REUSE")
+	store := payment.NewChargeIntentStore(db)
+
+	first, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "velox_inv_same_key"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.Resolve(ctx, tenantID, first.ID, "pi_1"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// The settle failed, so the seq never moved and the next attempt computes
+	// the SAME key.
+	again, created, err := store.Open(ctx, intentFor(tenantID, inv.ID, "velox_inv_same_key"))
+	if err != nil {
+		t.Fatalf("re-attempt under a recurring key must be allowed, got: %v", err)
+	}
+	if !created || again.ID == first.ID {
+		t.Fatalf("want a fresh row for the re-attempt (created=%v, id=%s vs %s)", created, again.ID, first.ID)
+	}
+	if again.State != domain.ChargeIntentOpen {
+		t.Fatalf("re-attempt state = %s, want open", again.State)
 	}
 }
 
@@ -195,7 +260,7 @@ func TestChargeIntent_RefusesAnUnpayableInvoice(t *testing.T) {
 	if _, err := invoice.NewPostgresStore(db).MarkPaid(ctx, tenantID, inv.ID, "pi_paid", time.Now().UTC()); err != nil {
 		t.Fatalf("mark paid: %v", err)
 	}
-	if _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_late")); err == nil {
+	if _, _, err := store.Open(ctx, intentFor(tenantID, inv.ID, "key_late")); err == nil {
 		t.Fatal("opening a charge intent on a paid invoice must fail")
 	}
 }

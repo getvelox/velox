@@ -38,6 +38,9 @@ type ChargeIntentLedger interface {
 	BumpRecoveryAttempt(ctx context.Context, tenantID, id string) (bool, error)
 	Resolve(ctx context.Context, tenantID, id, paymentIntentID string) error
 	MarkNeedsReview(ctx context.Context, tenantID, id, reason string) error
+	// ReleaseRecoveryAttempt un-counts an attempt that provably never reached
+	// the provider, so an outage cannot exhaust the budget.
+	ReleaseRecoveryAttempt(ctx context.Context, tenantID, id string) error
 	HasUnresolved(ctx context.Context, tenantID, invoiceID string) (bool, error)
 }
 
@@ -91,15 +94,30 @@ func (r *Reconciler) RecoverChargeIntents(ctx context.Context, limit int) (int, 
 func (r *Reconciler) recoverOne(ctx context.Context, ci domain.ChargeIntent) (bool, error) {
 	ctx = auth.WithTenantID(ctx, ci.TenantID)
 
+	// ADR-030 contracted instant. Recovery runs on the wall plane, but the
+	// attempt it is completing was CONTRACTED at a simulated instant on a
+	// clock-pinned invoice — so the settle must stamp that instant, not the
+	// sweep's now. The column was being written and never read, while the
+	// migration, the domain type and the tests all asserted this anchoring
+	// happened (found by adversarial review, 2026-07-30): the code did not do
+	// what three comments said it did.
+	if ci.SimEffectiveAt != nil {
+		ctx = withSettleAnchor(ctx, *ci.SimEffectiveAt)
+	}
+
 	// (0) Count the attempt BEFORE doing anything that can crash, so a
 	// crash-loop still advances toward needs_review instead of cycling forever.
 	// Losing the CAS means another path already closed the row.
-	won, err := r.chargeIntents.BumpRecoveryAttempt(ctx, ci.TenantID, ci.ID)
-	if err != nil {
-		return false, fmt.Errorf("bump recovery attempt: %w", err)
-	}
-	if !won {
-		return false, nil
+	// A quarantined row is not re-attempted, so it must not be counted either —
+	// and counting it would also refuse the row (the CAS is state='open').
+	if ci.State == domain.ChargeIntentOpen {
+		won, err := r.chargeIntents.BumpRecoveryAttempt(ctx, ci.TenantID, ci.ID)
+		if err != nil {
+			return false, fmt.Errorf("bump recovery attempt: %w", err)
+		}
+		if !won {
+			return false, nil
+		}
 	}
 
 	// (1) Adoption. Something else may have learned the outcome meanwhile — a
@@ -117,6 +135,13 @@ func (r *Reconciler) recoverOne(ctx context.Context, ci domain.ChargeIntent) (bo
 			"invoice_id", ci.InvoiceID, "charge_intent_id", ci.ID,
 			"stripe_payment_intent_id", inv.StripePaymentIntentID)
 		return true, nil
+	}
+
+	// (1b) A QUARANTINED row gets the adoption check above and nothing else. It
+	// is listed solely so that exit exists — replaying it is precisely what must
+	// never happen — so stop here rather than spending a Stripe call.
+	if ci.State == domain.ChargeIntentNeedsReview {
+		return false, nil
 	}
 
 	// (2) Replay TTL. Past Stripe's retention floor a replay would MINT a second
@@ -159,7 +184,16 @@ func (r *Reconciler) recoverOne(ctx context.Context, ci domain.ChargeIntent) (bo
 			// need — the settle below reads its real status from Stripe.
 			piID = pe.PaymentIntentID
 		} else if errors.Is(err, breaker.ErrOpen) {
-			return false, nil // breaker open: stay quiet, retry next tick
+			// The breaker collapses BEFORE the call runs, so no attempt was made
+			// — refund the budget. Without this, a Stripe outage burns every
+			// intent's five attempts in ~25 minutes and quarantines the whole
+			// queue for outages that touched nothing (found by adversarial
+			// review, 2026-07-30).
+			if rerr := r.chargeIntents.ReleaseRecoveryAttempt(ctx, ci.TenantID, ci.ID); rerr != nil {
+				slog.WarnContext(ctx, "could not refund a recovery attempt after a breaker skip",
+					"charge_intent_id", ci.ID, "error", rerr)
+			}
+			return false, nil
 		} else {
 			return false, fmt.Errorf("replay charge: %w", err)
 		}
@@ -172,6 +206,26 @@ func (r *Reconciler) recoverOne(ctx context.Context, ci domain.ChargeIntent) (bo
 	// charge_attempt_seq stays coupled to PI stamping (ADR-105) and no fourth
 	// UPDATE-invoices statement appears. 'processing' is IsInFlight, so every
 	// in-flight mutation guard still applies while the settle resolves.
+	//
+	// RE-READ FIRST. The replay is a network round-trip, and a webhook can settle
+	// the invoice inside it. UpdatePayment writes paid_at unconditionally, so
+	// stamping 'processing' with paidAt=nil over a just-paid invoice would NULL
+	// its paid_at and walk a settled invoice backwards into in-flight (found by
+	// adversarial review, 2026-07-30). If it settled, adopt and stop — the
+	// outcome we went looking for has arrived by another route.
+	fresh, ferr := r.invoices.Get(ctx, ci.TenantID, ci.InvoiceID)
+	if ferr != nil {
+		return false, fmt.Errorf("re-read invoice before stamping recovered intent: %w", ferr)
+	}
+	if !fresh.PaymentStatus.IsInFlight() && fresh.PaymentStatus != domain.PaymentPending {
+		if err := r.chargeIntents.Resolve(ctx, ci.TenantID, ci.ID, piID); err != nil {
+			return false, fmt.Errorf("close charge intent settled under recovery: %w", err)
+		}
+		slog.InfoContext(ctx, "charge intent closed — the invoice settled while its recovery replay was in flight",
+			"invoice_id", ci.InvoiceID, "charge_intent_id", ci.ID,
+			"payment_status", string(fresh.PaymentStatus), "stripe_payment_intent_id", piID)
+		return true, nil
+	}
 	if _, err := r.invoices.UpdatePayment(ctx, ci.TenantID, ci.InvoiceID,
 		domain.PaymentProcessing, piID, "", nil); err != nil {
 		return false, fmt.Errorf("stamp recovered payment intent: %w", err)

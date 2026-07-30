@@ -73,10 +73,10 @@ func scanChargeIntent(row interface{ Scan(...any) error }) (domain.ChargeIntent,
 // got paid. It is a READ of invoices, never an UPDATE — charge_attempt_seq must
 // not move at claim time (ADR-105 rejected that explicitly: a crash after a
 // claim-time bump would present a different key and mint a second PI).
-func (s *ChargeIntentStore) Open(ctx context.Context, in domain.ChargeIntent) (domain.ChargeIntent, error) {
+func (s *ChargeIntentStore) Open(ctx context.Context, in domain.ChargeIntent) (domain.ChargeIntent, bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, in.TenantID)
 	if err != nil {
-		return domain.ChargeIntent{}, err
+		return domain.ChargeIntent{}, false, err
 	}
 	defer postgres.Rollback(tx)
 
@@ -86,24 +86,32 @@ func (s *ChargeIntentStore) Open(ctx context.Context, in domain.ChargeIntent) (d
 		`SELECT status, payment_status, amount_due_cents FROM invoices WHERE id = $1 FOR SHARE`,
 		in.InvoiceID).Scan(&status, &paymentStatus, &amountDue); err != nil {
 		if err == sql.ErrNoRows {
-			return domain.ChargeIntent{}, errs.ErrNotFound
+			return domain.ChargeIntent{}, false, errs.ErrNotFound
 		}
-		return domain.ChargeIntent{}, fmt.Errorf("payable re-check: %w", err)
+		return domain.ChargeIntent{}, false, fmt.Errorf("payable re-check: %w", err)
 	}
 	if status != "finalized" || amountDue <= 0 {
-		return domain.ChargeIntent{}, ErrInvoiceNotPayable
+		return domain.ChargeIntent{}, false, ErrInvoiceNotPayable
+	}
+	// payment_status was read and then ignored (adversarial review, 2026-07-30).
+	// It matters: an invoice already in flight has a PaymentIntent live at
+	// Stripe, and one that predates this ledger has NO intent row — so the
+	// one-unresolved index cannot block it and a second charge would open
+	// unopposed. IsInFlight semantics, matching the checkout guard.
+	if domain.InvoicePaymentStatus(paymentStatus).IsInFlight() {
+		return domain.ChargeIntent{}, false, ErrChargeAttemptInFlight
 	}
 
 	metaJSON, err := json.Marshal(in.Metadata)
 	if err != nil {
-		return domain.ChargeIntent{}, fmt.Errorf("marshal charge intent metadata: %w", err)
+		return domain.ChargeIntent{}, false, fmt.Errorf("marshal charge intent metadata: %w", err)
 	}
 
 	// Untargeted ON CONFLICT DO NOTHING: a conflict is a no-op rather than a
 	// 25P02 abort, so the read-back below runs on THIS transaction. (The
 	// checkout_sessions claim predates this trick and pays for it with a
 	// three-attempt fresh-tx loser protocol.)
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO charge_intents (
 			id, tenant_id, invoice_id, idempotency_key, amount_cents, currency,
 			stripe_customer_id, stripe_payment_method_id, description, metadata,
@@ -114,8 +122,16 @@ func (s *ChargeIntentStore) Open(ctx context.Context, in domain.ChargeIntent) (d
 		in.AmountCents, in.Currency, in.StripeCustomerID, in.StripePaymentMethodID,
 		in.Description, metaJSON, in.Purpose, in.OccurredAt,
 		postgres.NullableTime(in.SimEffectiveAt),
-	); err != nil {
-		return domain.ChargeIntent{}, fmt.Errorf("open charge intent: %w", err)
+	)
+	if err != nil {
+		return domain.ChargeIntent{}, false, fmt.Errorf("open charge intent: %w", err)
+	}
+	// Did WE create the row? Only the creator may delete it on a provably-no-call
+	// skip; a caller handed someone else's in-flight row must never erase their
+	// pre-effect marker (found by adversarial review, 2026-07-30).
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return domain.ChargeIntent{}, false, fmt.Errorf("open charge intent rows: %w", err)
 	}
 
 	// Read back whatever holds the slot — ours or an earlier attempt's.
@@ -126,16 +142,15 @@ func (s *ChargeIntentStore) Open(ctx context.Context, in domain.ChargeIntent) (d
 	held, err := scanChargeIntent(row)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// Unreachable in practice: we just inserted, and only a resolved
-			// row could be absent here. Fail closed rather than charge blind.
-			return domain.ChargeIntent{}, fmt.Errorf("charge intent vanished after insert for invoice %s", in.InvoiceID)
+			// Fail closed rather than charge blind.
+			return domain.ChargeIntent{}, false, fmt.Errorf("charge intent vanished after insert for invoice %s", in.InvoiceID)
 		}
-		return domain.ChargeIntent{}, fmt.Errorf("read back charge intent: %w", err)
+		return domain.ChargeIntent{}, false, fmt.Errorf("read back charge intent: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.ChargeIntent{}, err
+		return domain.ChargeIntent{}, false, err
 	}
-	return held, nil
+	return held, inserted == 1, nil
 }
 
 // Resolve closes an intent, naming the PaymentIntent it produced. CAS on
@@ -177,9 +192,14 @@ func (s *ChargeIntentStore) Delete(ctx context.Context, tenantID, id string) err
 // cross-tenant (TxBypass) and scoped to the ctx livemode, mirroring the
 // payment reconciler's own sweeps.
 //
-// needs_review rows are deliberately excluded: they have stopped being
-// auto-recoverable and must not burn a Stripe call every tick. They keep
-// blocking new charges via the unique index, which is the point.
+// needs_review rows ARE listed, and that is a correction: excluding them made
+// quarantine permanent. The documented operator exit — re-send the event from
+// the Stripe dashboard, the webhook settles the invoice — only closes the intent
+// through the sweep's ADOPTION step, which a filtered-out row never reaches. So
+// the invoice stayed blocked forever with no path back (found by adversarial
+// review, 2026-07-30). The caller compensates by allowing quarantined rows the
+// adoption check ONLY: no replay, no Stripe call, so they still cost nothing per
+// tick while regaining an exit.
 //
 // NOT gated on is_simulated, for the same reason listInflightPayments isn't:
 // PaymentIntent truth lives at Stripe on real time even for clock-pinned
@@ -197,7 +217,7 @@ func (s *ChargeIntentStore) ListOpen(ctx context.Context, olderThan time.Time, l
 
 	rows, err := tx.QueryContext(ctx, `SELECT `+chargeIntentCols+`
 		FROM charge_intents
-		WHERE state = 'open' AND livemode = $1 AND updated_at < $2
+		WHERE state <> 'resolved' AND livemode = $1 AND updated_at < $2
 		ORDER BY updated_at ASC
 		LIMIT $3`, postgres.Livemode(ctx), olderThan, limit)
 	if err != nil {
@@ -241,6 +261,25 @@ func (s *ChargeIntentStore) BumpRecoveryAttempt(ctx context.Context, tenantID, i
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// ReleaseRecoveryAttempt un-counts an attempt that provably never reached
+// Stripe (the circuit breaker short-circuited before the call). Mirrors
+// ReleaseAutoChargeClaim: a skip is not an attempt, and counting it would let
+// an outage exhaust the recovery budget for work that never happened.
+func (s *ChargeIntentStore) ReleaseRecoveryAttempt(ctx context.Context, tenantID, id string) error {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return err
+	}
+	defer postgres.Rollback(tx)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE charge_intents
+		SET recovery_attempts = GREATEST(recovery_attempts - 1, 0)
+		WHERE id = $1 AND state = 'open'`, id); err != nil {
+		return fmt.Errorf("release recovery attempt: %w", err)
+	}
+	return tx.Commit()
 }
 
 // MarkNeedsReview quarantines an intent that automatic recovery cannot resolve.

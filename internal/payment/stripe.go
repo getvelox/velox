@@ -120,8 +120,9 @@ type Stripe struct {
 // rather than a store type, and tests can substitute an in-memory ledger.
 type ChargeIntentRecorder interface {
 	// Open records the attempt and returns the row owning this invoice's
-	// charge slot — which may be an EARLIER unresolved attempt's.
-	Open(ctx context.Context, in domain.ChargeIntent) (domain.ChargeIntent, error)
+	// charge slot — which may be an EARLIER unresolved attempt's — plus whether
+	// THIS call created it. Only the creator may delete it on a skip.
+	Open(ctx context.Context, in domain.ChargeIntent) (domain.ChargeIntent, bool, error)
 	// Resolve closes an intent once its PaymentIntent is named.
 	Resolve(ctx context.Context, tenantID, id, paymentIntentID string) error
 	// Delete removes an intent for the one case where no call was made.
@@ -618,7 +619,7 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			"invoice_id", inv.ID, "tenant_id", tenantID)
 		return domain.Invoice{}, fmt.Errorf("charge intent ledger not configured")
 	}
-	intent, ierr := s.chargeIntents.Open(ctx, domain.ChargeIntent{
+	intent, weCreatedIt, ierr := s.chargeIntents.Open(ctx, domain.ChargeIntent{
 		TenantID:              tenantID,
 		InvoiceID:             inv.ID,
 		IdempotencyKey:        idempotencyKey,
@@ -637,17 +638,33 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			"invoice_id", inv.ID, "tenant_id", tenantID, "error", ierr)
 		return domain.Invoice{}, ierr
 	}
-	if intent.IdempotencyKey != idempotencyKey {
-		// An EARLIER attempt on this invoice is unresolved under a key we
-		// cannot reuse — the amount changed, the card changed, or a decline was
-		// recorded since. Charging now would open a second PaymentIntent beside
-		// a possibly-live one. Transient sentinel so dunning does not burn an
-		// attempt on a wait.
-		slog.WarnContext(ctx, "charge deferred: an earlier attempt on this invoice is still unresolved",
+	// THREE conditions, not one. Key equality alone is not permission to charge:
+	//
+	//   - the key must be OURS, else an earlier attempt is unresolved under a key
+	//     we cannot reuse (the amount or the card changed since);
+	//   - the intent must still be OPEN. A needs_review row means nobody knows
+	//     whether a PaymentIntent is live, which is the last moment to start
+	//     another charge — and the key recomputes IDENTICALLY in exactly that
+	//     case, because quarantine means no outcome was recorded and therefore
+	//     charge_attempt_seq never moved. Checking only the key let a quarantined
+	//     attempt sail straight through (found by adversarial review, 2026-07-30);
+	//   - it must be within the replay window. Past Stripe's key retention the
+	//     same key no longer dedups, so re-sending it CREATES a second
+	//     PaymentIntent. That TTL guarded only the recovery sweep, while this
+	//     path — which runs far more often — had no equivalent.
+	if intent.IdempotencyKey != idempotencyKey ||
+		intent.State != domain.ChargeIntentOpen ||
+		time.Since(intent.OccurredAt) >= chargeIntentReplayTTL {
+		slog.WarnContext(ctx, "charge deferred: an earlier attempt on this invoice is not safe to re-send",
 			"invoice_id", inv.ID, "tenant_id", tenantID,
 			"unresolved_intent_id", intent.ID, "unresolved_state", string(intent.State),
-			"unresolved_key", intent.IdempotencyKey)
-		return domain.Invoice{}, ErrPaymentTransient
+			"unresolved_key", intent.IdempotencyKey, "attempted_at", intent.OccurredAt,
+			"key_matches", intent.IdempotencyKey == idempotencyKey)
+		// Wraps BOTH sentinels deliberately: ErrChargeAttemptInFlight so the HTTP
+		// boundary answers an operator with an honest 409 instead of a 500, and
+		// ErrPaymentTransient so dunning treats it as a wait rather than burning
+		// a retry attempt on it.
+		return domain.Invoice{}, fmt.Errorf("%w: %w", ErrChargeAttemptInFlight, ErrPaymentTransient)
 	}
 
 	var result PaymentIntentResult
@@ -670,9 +687,16 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			// and the invoice must stay immediately chargeable. A failed delete
 			// is logged, not returned — worst case the sweep replays and gets
 			// the PaymentIntent this charge intended anyway.
-			if derr := s.chargeIntents.Delete(ctx, tenantID, intent.ID); derr != nil {
-				slog.WarnContext(ctx, "could not clear charge intent after breaker skip",
-					"invoice_id", inv.ID, "charge_intent_id", intent.ID, "error", derr)
+			// ONLY if we created it. Two callers computing the same key are
+			// handed the SAME row; deleting one we merely inherited would erase
+			// the pre-effect marker of an attempt another caller has in flight,
+			// re-opening the double charge this ledger exists to close (found by
+			// adversarial review, 2026-07-30).
+			if weCreatedIt {
+				if derr := s.chargeIntents.Delete(ctx, tenantID, intent.ID); derr != nil {
+					slog.WarnContext(ctx, "could not clear charge intent after breaker skip",
+						"invoice_id", inv.ID, "charge_intent_id", intent.ID, "error", derr)
+				}
 			}
 			return domain.Invoice{}, ErrPaymentTransient
 		}

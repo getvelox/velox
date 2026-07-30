@@ -141,6 +141,48 @@ past that would mint a second PaymentIntent — the exact bug. Recovery refuses
 beyond a 12h TTL (a deliberate 2× margin under a documented floor) and
 quarantines instead.
 
+## Corrections found by adversarial review before merge
+
+The first implementation of this design shipped four defects that its own
+prose already forbade. They are recorded here rather than silently fixed,
+because each shows a way the design was easy to implement wrongly:
+
+1. **The quarantine did not block the charge path.** The pre-call guard tested
+   idempotency-key equality alone — and the key recomputes *identically* in
+   exactly the dangerous case, since quarantine means no outcome was recorded
+   and therefore `charge_attempt_seq` never moved. A `needs_review` attempt
+   sailed straight through, re-sending a key Stripe had long expired: a second
+   PaymentIntent, which is the bug this ADR exists to prevent. The guard now
+   requires the row to be **ours, still open, and inside the replay window** —
+   and the replay TTL, which had guarded only the sweep, now guards the far
+   busier inline path too.
+
+2. **Quarantine was permanent.** The recovery sweep listed `state = 'open'`, so
+   a `needs_review` row was never revisited — and the documented operator exit
+   (re-send the event; the webhook settles the invoice) closes the intent only
+   through the sweep's *adoption* step. The invoice was blocked forever. The
+   sweep now lists unresolved rows and gives quarantined ones the adoption check
+   **only**: no replay, no Stripe call, no attempt burned.
+
+3. **A resolved row blocked its own key forever.** The key-uniqueness index was
+   total, so once a resolved row held key K, a later attempt recomputing K could
+   not insert, found nothing unresolved to adopt, and was refused permanently. K
+   recurs legitimately — a create that succeeded whose *settle* then failed
+   leaves the seq unmoved. The index is now partial on `state <> 'resolved'`.
+
+4. **A breaker skip could delete another caller's marker.** Two callers with the
+   same key are handed the same row; the one whose breaker opened deleted it,
+   erasing a pre-effect marker for an attempt still in flight. `Open` now reports
+   whether *this* caller created the row, and only the creator may delete it.
+
+Three smaller ones, same source: recovery stamped `processing` with
+`paidAt=nil` without re-reading, so a webhook settling the invoice mid-replay
+had its `paid_at` NULLed; a circuit-breaker skip burned a recovery attempt
+though it provably made no call, letting an outage quarantine the whole queue;
+and `sim_effective_at` was written but never read, while the migration, the
+domain type and the tests all asserted it anchored the settle (ADR-030) — it now
+does.
+
 ## Residuals, each with a trigger
 
 - **Stripe cached a non-2xx for the key** — replay is inert forever and can

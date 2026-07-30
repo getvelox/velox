@@ -73,8 +73,20 @@ CREATE TABLE charge_intents (
 -- Identity is Stripe's own dedup primitive. Two initiators computing the same
 -- key converge on one row and send one key, so Stripe returns one PaymentIntent
 -- to both.
+--
+-- PARTIAL on the same predicate as the guard below, and that is load-bearing
+-- rather than tidy. A total index also blocks a RESOLVED row's key, and those
+-- keys legitimately recur: charge_attempt_seq only moves when an outcome is
+-- recorded, so if the settle after a successful create fails, the next attempt
+-- recomputes the identical key. The INSERT would then conflict, the read-back
+-- (which looks only for unresolved rows) would find nothing, and the invoice
+-- would be refused forever — a permanent block created by the very mechanism
+-- meant to prevent a double charge (found by adversarial review, 2026-07-30).
+-- Re-attempting under a recurring key is safe by construction: Stripe returns
+-- the original PaymentIntent for it.
 CREATE UNIQUE INDEX charge_intents_key
-    ON charge_intents (tenant_id, idempotency_key);
+    ON charge_intents (tenant_id, idempotency_key)
+    WHERE state <> 'resolved';
 
 -- THE guard, and it is structural rather than advisory: while any attempt is
 -- unresolved, a second one cannot be RECORDED, and since the pre-call write is
