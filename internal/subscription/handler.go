@@ -1852,7 +1852,14 @@ func (h *Handler) resolveClawbackPieces(ctx context.Context, tenantID string, su
 	caps := make([]fundingCap, 0, len(funding))
 	for _, f := range funding {
 		var grossCap int64
-		if f.PaymentStatus == domain.PaymentSucceeded {
+		// An IN-FLIGHT funding invoice is capped like a PAID one, not like an
+		// unpaid one (2026-07-30): a paid-then-in-flight source has amount_due=0,
+		// so the unpaid arm would cap the piece at 0 and the draft would be worth
+		// nothing — the same silent-drop this fix exists to remove. The headroom
+		// that matters is what the source could still be credited for
+		// (total − already credited); whether the in-flight charge ultimately
+		// succeeds is decided later, by creditnote.Issue's paid/unpaid branch.
+		if f.PaymentStatus == domain.PaymentSucceeded || f.PaymentStatus.IsInFlight() {
 			credited, cerr := h.creditNotes.CreditedCents(ctx, tenantID, f.ID)
 			if cerr != nil {
 				return nil, fmt.Errorf("read creditable headroom for %s: %w", f.ID, cerr)
@@ -2138,7 +2145,33 @@ func (h *Handler) handleItemProration(ctx context.Context, tenantID string, sub 
 			)
 			return nil, nil
 		}
-		if resolved.PaymentStatus != domain.PaymentSucceeded {
+		// THREE-way split, not two (fixed 2026-07-30, found walking FLOW C2).
+		// `!= PaymentSucceeded` used to lump IN-FLIGHT sources in with genuinely
+		// unpaid ones and send them down the amount_due-reduction branch. On a
+		// source that is already PAID but has a charge in flight (amount_due=0,
+		// payment_status=processing/unknown), that branch computes
+		// min(grossCredit, amount_due) == 0 and returns nil SILENTLY — the item
+		// change committed, the customer kept the cheaper plan, and the credit
+		// they were owed existed nowhere. Proven with a control: the identical
+		// downgrade on a `succeeded` source credited $32.18; on a `processing`
+		// source it produced no row at all.
+		//
+		// domain.IsInFlight's own contract says such a mutation must "refuse or
+		// defer", and DEFER is already built end to end: creditnote.Issue is the
+		// single chokepoint for every issue trigger and leaves the note
+		// draft+issue_pending while the source is in flight, after which the
+		// ADR-059 reconciler re-drives it and picks the paid/unpaid channel from
+		// how the source actually resolved. All of that needs one thing from us:
+		// a DRAFT must exist. So an in-flight source falls through to the
+		// draft-creating path below instead of being settled inline.
+		if resolved.PaymentStatus.IsInFlight() {
+			slog.InfoContext(ctx, "item proration: source payment in flight — clawback will be drafted and issued once it settles (ADR-059)",
+				"subscription_id", sub.ID,
+				"item_id", spec.itemID,
+				"source_invoice_id", resolved.ID,
+				"payment_status", string(resolved.PaymentStatus),
+			)
+		} else if resolved.PaymentStatus != domain.PaymentSucceeded {
 			// UNPAID source. Industry-convergent rule (Chargebee Adjustment
 			// Credit / Lago credit-note wallet / Orb adjustment / Stripe
 			// proration_behavior=none on unpaid / Recurly block-on-past-due):
@@ -2632,6 +2665,22 @@ func (h *Handler) settleUnpaidSourceProration(ctx context.Context, tenantID stri
 	grossCredit := grossUpByInvoiceRatio(creditAmount, src.SubtotalCents, src.TotalAmountCents)
 	reduceBy := min(grossCredit, src.AmountDueCents)
 	if reduceBy <= 0 {
+		// Nothing left to reduce on the source, so this branch cannot place the
+		// credit. Reaching here with a credit owed used to `return nil, nil` —
+		// the change committed and the money owed vanished with no row, no error
+		// and no log (2026-07-30). The in-flight case that made it reachable now
+		// routes to the draft path upstream; anything ELSE landing here is a
+		// state we have not modelled, so say so LOUDLY rather than silently
+		// under-crediting (no-silent-fallbacks).
+		slog.ErrorContext(ctx, "downgrade credit could not be placed: unpaid source has no remaining amount_due to reduce — customer may be under-credited, reconcile manually",
+			"subscription_id", sub.ID,
+			"item_id", spec.itemID,
+			"source_invoice_id", src.ID,
+			"source_status", string(src.Status),
+			"source_payment_status", string(src.PaymentStatus),
+			"source_amount_due_cents", src.AmountDueCents,
+			"gross_credit_cents", grossCredit,
+		)
 		return nil, nil
 	}
 
