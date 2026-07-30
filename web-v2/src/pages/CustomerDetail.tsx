@@ -1653,28 +1653,19 @@ function AssignDunningPolicyDialog({ customerId, currentPolicyID, policies, onCl
         <form onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-2">
             <Label>Policy</Label>
-            {/* items maps value→label so <SelectValue> renders the policy
-                name, not the raw policy ID (Base UI). */}
-            <Select
-              items={[
+            {/* Searchable: policies are TENANT DATA and grow unbounded. The
+                sentinel "__default__" row stays FIRST so "inherit the tenant
+                default" is never something you have to search for. */}
+            <Combobox
+              value={selected}
+              onChange={(val) => setSelected(val ?? '__default__')}
+              options={[
                 { value: '__default__', label: defaultPolicy ? `Tenant default (${defaultPolicy.name || 'Default'})` : 'Tenant default' },
                 ...policies.filter(p => !p.is_default).map(p => ({ value: p.id, label: p.name || '(unnamed policy)' })),
               ]}
-              value={selected}
-              onValueChange={(val) => setSelected(val ?? '__default__')}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__default__">
-                  Tenant default {defaultPolicy ? `(${defaultPolicy.name || 'Default'})` : ''}
-                </SelectItem>
-                {policies.filter(p => !p.is_default).map(p => (
-                  <SelectItem key={p.id} value={p.id}>{p.name || '(unnamed policy)'}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              emptyMessage="No policy matches that search."
+              triggerClassName="w-full"
+            />
             <p className="text-xs text-muted-foreground">
               Manage policies on the <Link to="/dunning-policies" className="underline">Dunning policies</Link> page.
             </p>
