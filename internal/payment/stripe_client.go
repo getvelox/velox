@@ -85,6 +85,16 @@ func humanizeDeclineCode(code string) string {
 // tick the dunning attempt count, unlike a real payment failure.
 var ErrPaymentTransient = errors.New("payment attempt skipped; upstream breaker open or timeout before Stripe")
 
+// isIdempotencyConflict reports whether err is Stripe refusing a key that was
+// already used with different parameters. Distinguished from the other
+// ambiguous outcomes because it carries a stronger fact: an attempt under this
+// exact key definitely reached Stripe. Callers use it to name the key in an
+// operator-facing ERROR, since the dashboard is searchable by it.
+func isIdempotencyConflict(err error) bool {
+	var stripeErr *stripe.Error
+	return errors.As(err, &stripeErr) && stripeErr.Type == stripe.ErrorTypeIdempotency
+}
+
 // classifyStripeError maps a stripe-go SDK error to a PaymentError. Non-Stripe
 // errors (context cancel, DNS failure wrapped by our code, etc.) are treated
 // as unknown, because we cannot prove the request never reached Stripe.
@@ -107,10 +117,27 @@ func classifyStripeError(err error) *PaymentError {
 
 	switch stripeErr.Type {
 	case stripe.ErrorTypeCard,
-		stripe.ErrorTypeInvalidRequest,
-		stripe.ErrorTypeIdempotency:
+		stripe.ErrorTypeInvalidRequest:
 		// Stripe explicitly rejected the request; no charge occurred.
 		pe.Unknown = false
+	case stripe.ErrorTypeIdempotency:
+		// AMBIGUOUS, not a rejection — and it used to be grouped with the two
+		// above under "no charge occurred", which is backwards. Stripe raises
+		// this when the key was ALREADY USED with different parameters, so the
+		// one thing it proves is that an attempt with this key reached Stripe;
+		// a PaymentIntent may well be live and charging right now.
+		//
+		// Classifying it as a definite failure stamped payment_status='failed',
+		// started dunning inline, told the customer their card had failed, and
+		// freed the next retry to mint a SECOND PaymentIntent alongside the
+		// first. Unknown routes it to the reconciler instead, which is the
+		// component whose entire job is "an attempt may exist at Stripe — go
+		// find out". Found 2026-07-30 auditing the idempotency-key seed (#678).
+		//
+		// The key is logged at the call site precisely for this case: Stripe's
+		// dashboard is searchable by idempotency key, so an operator can find
+		// the live PI even when the error carries no PI id.
+		pe.Unknown = true
 	case stripe.ErrorTypeAPI:
 		// 5xx from Stripe — request may or may not have been processed.
 		pe.Unknown = true

@@ -441,17 +441,36 @@ func (s *Stripe) ChargeInvoiceForDunningRetry(ctx context.Context, tenantID stri
 
 // ChargeIdempotencyKey is the SINGLE SOURCE for an invoice charge's Stripe
 // idempotency key. Exported so tests derive the key from this function instead
-// of re-typing the format — a test that hardcodes "velox_inv_%s_%d" keeps
-// passing when the real key changes shape, which is the divergence class §3.6
-// of docs/dev/manual-test-strategy.md exists to catch.
+// of re-typing the format — a test that hardcodes the shape keeps passing when
+// the real key changes, which is the divergence class §3.6 of
+// docs/dev/manual-test-strategy.md exists to catch.
 //
-// The updatedAt seed is what makes a crashed leader's retry converge on the
-// SAME PaymentIntent (a crash writes nothing, so updatedAt is unchanged, so
-// Stripe returns the existing PI) while a genuine retry after a recorded
-// failure gets a fresh key. The auto-charge lease deliberately does not write
-// updated_at for exactly this reason — see ClaimAutoCharge.
-func ChargeIdempotencyKey(invoiceID string, updatedAt time.Time, purpose string) string {
-	key := fmt.Sprintf("velox_inv_%s_%d", invoiceID, updatedAt.UnixNano())
+// The key answers exactly one question: is this call the SAME charge attempt as
+// before, or a new one? Two requirements pull against each other:
+//
+//   - a crash between the Stripe call and the outcome write must REUSE the key,
+//     so Stripe returns the in-flight PaymentIntent rather than creating a
+//     second one (no double charge);
+//   - a RECORDED decline must get a FRESH key, so a retry after the customer
+//     fixes their card isn't handed the declined PI forever (no liveness sink).
+//
+// So the seed must move exactly when an attempt outcome was recorded.
+// charge_attempt_seq is that signal directly: it is bumped by the three writes
+// that stamp stripe_payment_intent_id and by nothing else (migration 0165,
+// CI-enforced by TestChargeAttemptSeqBumpedByEveryPIStamp).
+//
+// It replaced inv.UpdatedAt, which was a PROXY for the same question and
+// answered a much broader one — "did anything at all touch this row?" — making
+// every unrelated writer an accidental participant in the payment protocol. A
+// tax-commit stamp or a credit application landing in the crash window
+// re-seeded the key and minted a second PaymentIntent for an invoice already
+// being charged (observed in #677; fixed in #678).
+//
+// The purpose suffix keeps the finalize-time charge and a dunning retry
+// distinct even at the same seq: they attach different PI metadata, and Stripe
+// answers "same key, different parameters" with a 409.
+func ChargeIdempotencyKey(invoiceID string, chargeAttemptSeq int64, purpose string) string {
+	key := fmt.Sprintf("velox_inv_%s_%d", invoiceID, chargeAttemptSeq)
 	if purpose != "" {
 		key += "_" + purpose
 	}
@@ -511,30 +530,22 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		metadata["velox_anchor_at"] = sim.At.UTC().Format(time.RFC3339Nano)
 	}
 	// Per-attempt idempotency key — see ChargeIdempotencyKey, the single
-	// source. inv.UpdatedAt advances every time
-	// UpdatePayment runs (which happens on every prior failed attempt
-	// recording last_payment_error), so each genuine retry gets a
-	// fresh key — Stripe creates a new PI rather than returning the
-	// cached failed one. Within a single attempt, two concurrent
-	// callers (scheduler + operator click) read the same UpdatedAt
-	// and dedupe correctly: Stripe returns the same PI to both, no
-	// double-charge.
+	// source. inv.ChargeAttemptSeq advances on every write that records an
+	// attempt outcome, so each genuine retry gets a fresh key and Stripe
+	// creates a new PI rather than returning the cached declined one. Within
+	// a single attempt, two concurrent callers (scheduler + operator click)
+	// read the same seq and dedupe correctly: Stripe returns the same PI to
+	// both, no double-charge.
 	//
 	// The `purpose` suffix prevents key collisions between the initial
 	// finalize-time auto-charge (purpose="") and the first dunning
-	// retry (purpose="dunning_retry"). Without it, both calls use
-	// inv.UpdatedAt = T1 (the dunning retry reads the inv with
-	// updated_at still pinned to the initial-charge-fail moment
-	// because no UpdatePayment runs between them), but the metadata
-	// differs because the retry path adds velox_purpose=dunning_retry.
-	// Stripe sees "same key, different parameters" → 409. Surfaced
-	// 2026-05-19 from a clock-pinned dunning workflow; the bug exists
-	// on wall-clock too in theory but is masked because invoice
-	// metadata typically doesn't change between consecutive
-	// chargeInvoice/ChargeInvoiceForDunningRetry calls in production
-	// (they sit far enough apart in time for UpdatedAt to drift via
-	// other writes).
-	idempotencyKey := ChargeIdempotencyKey(inv.ID, inv.UpdatedAt, purpose)
+	// retry (purpose="dunning_retry") when no outcome was recorded between
+	// them, so both read the same seq — the metadata differs (the retry adds
+	// velox_purpose=dunning_retry) and Stripe answers "same key, different
+	// parameters" with a 409. Surfaced 2026-05-19 from a clock-pinned dunning
+	// workflow. The seq seed does not retire this: it narrows when two calls
+	// share a key, it does not eliminate it.
+	idempotencyKey := ChargeIdempotencyKey(inv.ID, inv.ChargeAttemptSeq, purpose)
 	params := PaymentIntentParams{
 		AmountCents:     inv.AmountDueCents,
 		Currency:        inv.Currency,
@@ -593,6 +604,23 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			slog.Warn("payment intent outcome unknown — reconciler will resolve",
 				"invoice_id", inv.ID,
 				"stripe_payment_intent_id", pe.PaymentIntentID,
+				"idempotency_key", idempotencyKey,
+				"error", pe.Message,
+			)
+		}
+		// Idempotency conflict: the key was already used with different
+		// parameters, so a PaymentIntent for this attempt EXISTS at Stripe but
+		// this response carries no id for it. The reconciler cannot query what
+		// it cannot name, so its no-PI branch will settle this failed and a
+		// later retry may open a second PI beside the live one. Name the key
+		// at ERROR — Stripe's dashboard is searchable by idempotency key, so
+		// this line is the operator's route to the actual PaymentIntent.
+		if isIdempotencyConflict(err) && pe.PaymentIntentID == "" {
+			slog.Error("CRITICAL: idempotency conflict with no PaymentIntent id — an attempt EXISTS at Stripe but cannot be reconciled automatically; look this key up in the Stripe dashboard before retrying",
+				"invoice_id", inv.ID,
+				"tenant_id", tenantID,
+				"idempotency_key", idempotencyKey,
+				"amount_due_cents", inv.AmountDueCents,
 				"error", pe.Message,
 			)
 		}

@@ -3,7 +3,9 @@ package invoice_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/invoice"
 	"github.com/sagarsuperuser/velox/internal/payment"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
@@ -19,23 +21,26 @@ func chargeKey(t *testing.T, store *invoice.PostgresStore, ctx context.Context, 
 	if err != nil {
 		t.Fatalf("get invoice: %v", err)
 	}
-	return payment.ChargeIdempotencyKey(inv.ID, inv.UpdatedAt, "")
+	return payment.ChargeIdempotencyKey(inv.ID, inv.ChargeAttemptSeq, "")
 }
 
-// TestAutoChargeLease_NeverTouchesUpdatedAt pins the load-bearing claim in
-// ClaimAutoCharge's own comment: "updated_at is NOT touched: the Stripe
-// idempotency key derives from it, and key stability across claim windows is
-// what makes a re-claimed retry after a stalled leader converge on the SAME
-// PaymentIntent instead of minting a second."
+// TestChargeKey_StableUntilAnOutcomeIsRecorded is requirement R1: a charge that
+// reached Stripe but whose outcome was never written must retry under the SAME
+// key, so Stripe returns the in-flight PaymentIntent instead of opening a
+// second one and charging the customer twice.
 //
-// The property was declared and relied upon, but nothing tested it, so a lease
-// write that added `updated_at = now()` — the natural thing to type — would
-// have shipped green while quietly converting every crashed-leader retry into
-// a second charge on the customer's card.
+// The walk interleaves the crashed-leader lease sequence with the writers that
+// used to re-seed the key. SetTaxTransaction is the load-bearing case — it is
+// tax_commit's own stamp, and tax_commit runs immediately BEFORE the auto-charge
+// sweep in the same scheduler tick, so it is the writer most likely to land
+// between a crashed attempt and its retry. Under the old updated_at seed these
+// assertions FAILED; that failure was the bug (#677 characterised it, #678
+// fixed it).
 //
-// Mutation check: add `, updated_at = now()` to ClaimAutoCharge's UPDATE and
-// this test fails on the first assertion.
-func TestAutoChargeLease_NeverTouchesUpdatedAt(t *testing.T) {
+// Mutation check: re-seed the key from inv.UpdatedAt and the tax-stamp
+// assertion fails; add `updated_at = now()` to ClaimAutoCharge and nothing
+// fails, which is the point — the seq seed is immune to it by construction.
+func TestChargeKey_StableUntilAnOutcomeIsRecorded(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := postgres.WithLivemode(context.Background(), false)
 	tenantID := testutil.CreateTestTenant(t, db, "Key Stability")
@@ -48,73 +53,79 @@ func TestAutoChargeLease_NeverTouchesUpdatedAt(t *testing.T) {
 		t.Helper()
 		if got := chargeKey(t, store, ctx, tenantID, inv.ID); got != want {
 			t.Fatalf("%s re-seeded the idempotency key: got %q, want %q — a crashed "+
-				"leader's retry would now mint a SECOND PaymentIntent", step, got, want)
+				"attempt's retry would now mint a SECOND PaymentIntent", step, got, want)
 		}
 	}
 
+	// The crashed-leader sequence: a leader claims, dies mid-charge, the lease
+	// ages out, the next sweep re-claims. (updated_at stability across the lease
+	// is TestClaimAutoCharge_UpdatedAtStable's job — asserted here only because
+	// it is the sequence the unrelated writes below interleave with.)
 	if ok, _ := store.ClaimAutoCharge(ctx, tenantID, inv.ID); !ok {
 		t.Fatal("first claim must succeed")
 	}
-	assertKeyUnchanged("taking the lease")
-
-	if ok, _ := store.ClaimAutoCharge(ctx, tenantID, inv.ID); ok {
-		t.Fatal("second claim inside the lease must fail")
-	}
-	assertKeyUnchanged("a refused claim")
-
-	// The crashed-leader path: the lease ages out and the next sweep re-claims.
-	// This is the exact sequence the stable key exists to serve — the first
-	// attempt may already have reached Stripe.
 	expireLease(t, db, inv.ID)
 	if ok, _ := store.ClaimAutoCharge(ctx, tenantID, inv.ID); !ok {
 		t.Fatal("claim after lease expiry must succeed")
 	}
 	assertKeyUnchanged("re-claiming after a stalled leader")
 
-	if err := store.ReleaseAutoChargeClaim(ctx, tenantID, inv.ID); err != nil {
-		t.Fatalf("release: %v", err)
-	}
-	assertKeyUnchanged("releasing the lease")
-}
-
-// TestAutoChargeKey_ReSeededByAnUnrelatedInvoiceWrite is a CHARACTERISATION of
-// the residual exposure, not a blessing of it. The lease is drift-proof by
-// construction (test above), but the key seed is the invoice's updated_at, so
-// ANY other writer touching the row inside the crash window re-seeds it.
-//
-// SetTaxTransaction is not a hypothetical writer: it is the tax_commit
-// reconciler's own stamp, and tax_commit runs immediately BEFORE the
-// auto-charge sweep in the same scheduler tick (billing/scheduler.go). So the
-// sequence is ordinary, not exotic:
-//
-//	tick N    auto-charge calls Stripe, PI_A created, process dies pre-stamp
-//	          (invoice still payment_status='pending', updated_at unchanged)
-//	tick N+1  tax_commit finally lands its transaction id  → updated_at bumps
-//	          auto-charge retries with a DIFFERENT key      → PI_B created
-//
-// Both PIs can settle. The webhook for PI_A normally closes the window first
-// (it moves payment_status out of 'pending' and the CAS then refuses the
-// claim), so this needs a lost or >5-minute-delayed webhook to bite — narrow,
-// but the guard is conditional, and the code comments claimed it as absolute.
-//
-// If this test ever FAILS because the key stopped depending on updated_at, the
-// exposure is closed — delete the test rather than repairing it.
-func TestAutoChargeKey_ReSeededByAnUnrelatedInvoiceWrite(t *testing.T) {
-	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
-	tenantID := testutil.CreateTestTenant(t, db, "Key Drift")
-	inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-KEY-DRIFT")
-	store := invoice.NewPostgresStore(db)
-
-	before := chargeKey(t, store, ctx, tenantID, inv.ID)
-
+	// Unrelated writers on the same row — the drift that used to mint a second
+	// PaymentIntent. tax_commit's stamp runs immediately before the auto-charge
+	// sweep in the same tick.
 	if err := store.SetTaxTransaction(ctx, tenantID, inv.ID, "tax_txn_drift"); err != nil {
 		t.Fatalf("set tax transaction: %v", err)
 	}
+	assertKeyUnchanged("tax_commit stamping tax_transaction_id")
 
-	after := chargeKey(t, store, ctx, tenantID, inv.ID)
-	if after == before {
-		t.Skip("key no longer derives from updated_at — the drift exposure is closed; delete this test")
+	if err := store.SetNoPMNotifiedAt(ctx, tenantID, inv.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("set no-PM notified: %v", err)
 	}
-	t.Logf("documented exposure: an unrelated invoice write re-seeded the charge key (%s → %s)", before, after)
+	assertKeyUnchanged("the sweep stamping its no-PM email marker")
+}
+
+// TestChargeKey_MovesOnEveryRecordedOutcome is requirement R2, the opposite
+// failure: once a decline is RECORDED, the retry must present a fresh key. Miss
+// this and Stripe replays the declined PaymentIntent for every future attempt —
+// the customer fixes their card and still cannot pay, with no error raised
+// anywhere (playbook class G, liveness sink).
+//
+// Both recorded-decline writers are exercised, because they are separate SQL
+// statements and a fix applied to only one is the class-C2 shape this test
+// exists to catch.
+func TestChargeKey_MovesOnEveryRecordedOutcome(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Key Advance")
+	store := invoice.NewPostgresStore(db)
+
+	t.Run("UpdatePayment", func(t *testing.T) {
+		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-KEY-ADV-1")
+		before := chargeKey(t, store, ctx, tenantID, inv.ID)
+
+		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID,
+			domain.PaymentFailed, "pi_declined_1", "card_declined", nil); err != nil {
+			t.Fatalf("update payment: %v", err)
+		}
+
+		if after := chargeKey(t, store, ctx, tenantID, inv.ID); after == before {
+			t.Fatalf("a recorded decline left the key at %q — the retry would be handed "+
+				"Stripe's DECLINED PaymentIntent and the invoice could never be paid", before)
+		}
+	})
+
+	t.Run("MarkPaymentFailedReportingTransition", func(t *testing.T) {
+		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-KEY-ADV-2")
+		before := chargeKey(t, store, ctx, tenantID, inv.ID)
+
+		if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, inv.ID,
+			"pi_declined_2", "card_declined"); err != nil {
+			t.Fatalf("mark payment failed: %v", err)
+		}
+
+		if after := chargeKey(t, store, ctx, tenantID, inv.ID); after == before {
+			t.Fatalf("a recorded decline left the key at %q — the retry would be handed "+
+				"Stripe's DECLINED PaymentIntent and the invoice could never be paid", before)
+		}
+	})
 }

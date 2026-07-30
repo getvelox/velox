@@ -178,10 +178,16 @@ func TestClaimAutoCharge_PredicateRecheck(t *testing.T) {
 	}
 }
 
-// TestClaimAutoCharge_UpdatedAtStable pins the load-bearing choice:
-// claim and release must NOT touch updated_at — the Stripe idempotency
-// key derives from it, and key stability across claim windows is what
-// makes a re-claimed retry converge on the SAME PaymentIntent.
+// TestClaimAutoCharge_UpdatedAtStable pins that claim and release must NOT
+// touch updated_at.
+//
+// The original reason — "the Stripe idempotency key derives from it" — expired
+// with #678: the key is now seeded from charge_attempt_seq, which the lease
+// cannot reach, and TestChargeKey_StableUntilAnOutcomeIsRecorded owns that
+// property. What remains is still worth pinning: the sweep lists order by
+// `updated_at ASC`, so a lease that bumped it would send an invoice to the back
+// of the queue on every claim — an invoice that fails to complete its charge
+// could be starved indefinitely behind newer arrivals.
 func TestClaimAutoCharge_UpdatedAtStable(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := postgres.WithLivemode(context.Background(), false)
