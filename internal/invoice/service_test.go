@@ -1091,44 +1091,8 @@ func TestVoid_ReversesUpstreamTaxTransaction(t *testing.T) {
 	})
 }
 
-func TestRecordPayment(t *testing.T) {
-	svc := NewService(newMemStore(), nil, newMemNumberer())
-	ctx := context.Background()
-
-	inv, _ := svc.Create(ctx, "t1", CreateInput{
-		CustomerID: "c", SubscriptionID: "s",
-		BillingPeriodStart: time.Now(), BillingPeriodEnd: time.Now().AddDate(0, 1, 0),
-	})
-
-	t.Run("success", func(t *testing.T) {
-		paid, err := svc.RecordPayment(ctx, "t1", inv.ID, "pi_stripe_123")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if paid.PaymentStatus != domain.PaymentSucceeded {
-			t.Errorf("got payment_status %q, want succeeded", paid.PaymentStatus)
-		}
-		if paid.StripePaymentIntentID != "pi_stripe_123" {
-			t.Errorf("got stripe_pi %q, want pi_stripe_123", paid.StripePaymentIntentID)
-		}
-		if paid.PaidAt == nil {
-			t.Error("paid_at should be set")
-		}
-	})
-
-	t.Run("failure", func(t *testing.T) {
-		failed, err := svc.RecordPaymentFailure(ctx, "t1", inv.ID, "pi_stripe_456", "card_declined")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if failed.PaymentStatus != domain.PaymentFailed {
-			t.Errorf("got payment_status %q, want failed", failed.PaymentStatus)
-		}
-		if failed.LastPaymentError != "card_declined" {
-			t.Errorf("got error %q, want card_declined", failed.LastPaymentError)
-		}
-	})
-}
+// TestRecordPayment was deleted with the methods it covered (ADR-107): two
+// unguarded payment_status writers with no production callers.
 
 // captureAudit + captureEvents let the tests assert that the service-
 // layer audit + webhook emit fire on state transitions.
@@ -1137,7 +1101,7 @@ type captureAuditInvoice struct {
 }
 
 // LogInTx captures like Log — a nil tx is fine for content-level tests;
-// shared-fate semantics are pinned by the real-Postgres integration tests.
+
 func (c *captureAuditInvoice) LogInTx(_ context.Context, _ *sql.Tx, e audit.Entry) error {
 	c.entries = append(c.entries, capturedAuditEntryInvoice{
 		action: e.Action, resourceID: e.ResourceID, resourceType: e.ResourceType, metadata: e.Metadata,

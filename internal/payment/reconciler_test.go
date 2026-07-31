@@ -160,9 +160,18 @@ func TestReconciler_StillInFlightSkipped(t *testing.T) {
 	}
 }
 
-func TestReconciler_NoPaymentIntentIDMarksFailed(t *testing.T) {
-	// The ambiguous error came back without a PI ID — we cannot query
-	// Stripe. Mark failed so downstream (dunning / operator) can decide.
+// TestReconciler_NoPaymentIntentIDStaysUnknown replaces
+// TestReconciler_NoPaymentIntentIDMarksFailed, which pinned the behaviour that
+// WAS the bug: it asserted the reconciler settles an unresolvable invoice
+// failed, under the comment "mark failed so downstream can decide".
+//
+// Settling failed is exactly what makes the double charge possible. It bumps
+// charge_attempt_seq — rotating the Stripe idempotency key — and moves
+// payment_status out of 'unknown' into a state every charge-claim predicate
+// admits, so the next retry opens a SECOND PaymentIntent beside one that may be
+// live and charging. Leaving it at 'unknown' closes that by construction
+// (ADR-107).
+func TestReconciler_NoPaymentIntentIDStaysUnknown(t *testing.T) {
 	store := newMockReconcileStore(domain.Invoice{
 		ID: "inv_4", TenantID: "t1", PaymentStatus: domain.PaymentUnknown,
 	})
@@ -172,15 +181,12 @@ func TestReconciler_NoPaymentIntentIDMarksFailed(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if resolved != 1 {
-		t.Errorf("resolved: got %d, want 1", resolved)
+	if resolved != 0 {
+		t.Errorf("resolved %d — an invoice whose attempt cannot be named has not been resolved by anything", resolved)
 	}
 	got := store.byID["inv_4"]
-	if got.PaymentStatus != domain.PaymentFailed {
-		t.Errorf("payment_status: got %q, want failed", got.PaymentStatus)
-	}
-	if got.LastPaymentError == "" {
-		t.Error("last_payment_error should explain why we gave up")
+	if got.PaymentStatus != domain.PaymentUnknown {
+		t.Fatalf("payment_status moved to %q — leaving 'unknown' is the whole guarantee: every charge-claim predicate excludes it, so no sweep, operator click or dunning retry can open a second PaymentIntent", got.PaymentStatus)
 	}
 }
 

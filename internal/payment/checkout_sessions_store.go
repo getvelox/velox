@@ -91,7 +91,11 @@ func (s *CheckoutSessionStore) ClaimOpenAudited(ctx context.Context, tenantID, i
 	if status != "finalized" || amountDue <= 0 {
 		return CheckoutClaim{}, false, ErrInvoiceNotPayable
 	}
-	if paymentStatus == "processing" {
+	// IsInFlight semantics, not just 'processing' (domain.InvoicePaymentStatus.
+	// IsInFlight): 'unknown' means a PaymentIntent MAY be live and charging, so
+	// letting the customer pay through the hosted page is the same double charge
+	// by a customer-facing route.
+	if paymentStatus == "processing" || paymentStatus == "unknown" {
 		return CheckoutClaim{}, false, ErrChargeInFlight
 	}
 	if amountCents != amountDue {

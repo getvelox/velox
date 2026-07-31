@@ -1345,16 +1345,14 @@ func (s *Service) RecordOfflinePayment(ctx context.Context, tenantID, id, note s
 	return updated, nil
 }
 
-func (s *Service) RecordPayment(ctx context.Context, tenantID, id string, stripePaymentIntentID string) (domain.Invoice, error) {
-	ctx = s.bindForInvoice(ctx, tenantID, id)
-	now := s.clock.Now(ctx)
-	return s.store.UpdatePayment(ctx, tenantID, id, domain.PaymentSucceeded, stripePaymentIntentID, "", &now)
-}
-
-func (s *Service) RecordPaymentFailure(ctx context.Context, tenantID, id, stripePaymentIntentID, errorMessage string) (domain.Invoice, error) {
-	ctx = s.bindForInvoice(ctx, tenantID, id)
-	return s.store.UpdatePayment(ctx, tenantID, id, domain.PaymentFailed, stripePaymentIntentID, errorMessage, nil)
-}
+// RecordPayment and RecordPaymentFailure were DELETED here (ADR-107). They wrote
+// payment_status with no state guard whatsoever and had zero production callers
+// — they existed only to be wired up by someone later. Under ADR-107 the
+// no-double-charge invariant rests on an invoice at payment_status='unknown'
+// being unreachable by every writer that could make it claimable again, and
+// these two were the easiest possible way to reopen that hole by accident:
+// convenient names, obvious signatures, no guard. Anything that needs to record
+// a payment outcome goes through the settle primitives, which carry the guards.
 
 // ListChargeAttempts returns the invoice's ADR-102 charge-attempt
 // facts, oldest first — the timeline's billing-axis payment rows.
