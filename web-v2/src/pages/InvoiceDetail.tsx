@@ -1530,7 +1530,20 @@ function OperatorContextCard({
           {invoice.payment_status === 'unknown' && (
             <>
               <dt className="text-xs text-muted-foreground">Payment outcome</dt>
-              <dd className="text-foreground">Reconciler will query Stripe after the cool-off window.</dd>
+              {/*
+                Two cases, and stating the wrong one here is worse than saying
+                nothing: this card sits directly under the attention banner, so
+                until now a PARKED invoice showed "Velox will not resolve this"
+                immediately above "Reconciler will query Stripe" — adjacent
+                panels asserting opposites (found walking the page as an
+                operator, 2026-07-31). Without a PaymentIntent id there is
+                nothing to query and the reconciler skips it by design.
+              */}
+              <dd className="text-foreground">
+                {invoice.stripe_payment_intent_id
+                  ? 'Reconciler will query Stripe after the cool-off window.'
+                  : 'No payment intent was recorded, so there is nothing to query — this will not resolve on its own.'}
+              </dd>
             </>
           )}
 

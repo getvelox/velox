@@ -66,7 +66,7 @@ export function InvoiceAttention({
           <div className="flex-1 space-y-1.5 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <Badge variant="outline" className={cn('text-xs', styles.badge)}>
-                {humanReason(att.reason)}
+                {humanReason(att.reason, att.code)}
               </Badge>
               {/* `since` reads as duration but is sourced from
                   inv.UpdatedAt — for fresh invoices that's the
@@ -375,7 +375,14 @@ const severityIcons: Record<string, typeof Info> = {
 // humanReason maps a typed reason code to dashboard-display copy.
 // Server sends the typed code; the UI owns its own label so wording
 // changes don't require a server roll.
-function humanReason(reason: string): string {
+function humanReason(reason: string, code?: string): string {
+  // A PARKED invoice shares the payment_unconfirmed REASON with a charge that is
+  // genuinely still being confirmed, but they are opposite situations — one
+  // resolves itself, the other never will. The server distinguishes them by
+  // CODE, so the chip does too: labelling a permanently stuck invoice
+  // "Payment unconfirmed" reads as "hang on a moment" (found walking the page
+  // as an operator, 2026-07-31).
+  if (code === 'payment.unidentifiable') return 'Payment unidentifiable'
   const map: Record<string, string> = {
     tax_calculation_failed: 'Tax calculation failed',
     tax_location_required: 'Customer address required',
