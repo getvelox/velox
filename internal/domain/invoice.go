@@ -82,6 +82,21 @@ func (s InvoicePaymentStatus) IsInFlight() bool {
 	return s == PaymentProcessing || s == PaymentUnknown
 }
 
+// Provider PaymentIntent statuses, verbatim from Stripe. These name the values
+// that can land in Invoice.ProviderPaymentStatus (migration 0167) so stored
+// data and tests read against symbols rather than loose string literals. No
+// logic branches on them today — the column is recorded for queue ordering and
+// for diagnosing a long-running payment.
+const (
+	ProviderPIRequiresPaymentMethod = "requires_payment_method"
+	ProviderPIRequiresConfirmation  = "requires_confirmation"
+	ProviderPIRequiresAction        = "requires_action"
+	ProviderPIProcessing            = "processing"
+	ProviderPIRequiresCapture       = "requires_capture"
+	ProviderPISucceeded             = "succeeded"
+	ProviderPICanceled              = "canceled"
+)
+
 // InvoiceTaxStatus tracks whether tax has been successfully calculated for
 // an invoice. The happy path is ok: calculation succeeded (including
 // zero-tax outcomes from none/manual/exempt/reverse-charge). Pending means
@@ -241,8 +256,29 @@ type Invoice struct {
 	// outcome, so the seq and therefore the key are unchanged) while a retry
 	// after a RECORDED decline gets a fresh one. Internal: never serialised —
 	// it is a payment-protocol detail, not invoice data an operator reads.
-	ChargeAttemptSeq int64  `json:"-"`
-	PDFObjectKey     string `json:"-"`
+	ChargeAttemptSeq int64 `json:"-"`
+
+	// ProviderPaymentStatus is Stripe's verbatim PaymentIntent status at the
+	// last reconciler poll, and ProviderSyncedAt is when we looked (migration
+	// 0167). They are OBSERVATIONS. PaymentStatus stays the authoritative money
+	// state — these never override it, and nothing derives money from them.
+	//
+	// They exist because the reconciler already fetched this on every sweep and
+	// discarded it whenever the PaymentIntent was non-terminal, which is exactly
+	// the case that needed it: a payment waiting on the customer looked
+	// identical to one settling normally. Recording it is what lets the sweep
+	// rotate instead of jamming on a frozen row, lets the banner say "waiting on
+	// the customer since <date>" instead of promising resolution, and lets the
+	// gate offer a cancel when the PROVIDER — not a guess here — says no money
+	// moved.
+	//
+	// Empty/zero means never polled: every row predating 0167, and every
+	// invoice whose payment has not yet been in flight long enough for a sweep.
+	// Treat unknown-because-unpolled as "no information", never as "not stuck".
+	ProviderPaymentStatus string     `json:"provider_payment_status,omitempty"`
+	ProviderSyncedAt      *time.Time `json:"provider_synced_at,omitempty"`
+
+	PDFObjectKey string `json:"-"`
 	// PublicToken is the hosted-invoice-URL credential (Stripe-parity
 	// hosted_invoice_url). Generated at finalize; drafts have an empty
 	// token. Rotatable via the rotate-public-token endpoint if the URL

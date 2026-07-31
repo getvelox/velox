@@ -717,12 +717,21 @@ func classifyPaymentUnconfirmed(inv Invoice) *Attention {
 		Severity: AttentionSeverityInfo,
 		Reason:   AttentionReasonPaymentUnconfirmed,
 		Code:     "payment.unconfirmed",
-		// Honest scope (2026-07-06 truth pass): the reconciler resolves
-		// TERMINAL Stripe outcomes (succeeded / canceled /
-		// requires_payment_method). A PI parked at requires_action —
-		// off-session SCA nobody completes — is deliberately SKIPPED every
-		// sweep, so those need the operator (cancel or nudge the customer),
-		// and this copy must not promise otherwise.
+		// Honest scope (2026-07-06 truth pass; cause corrected 2026-07-31):
+		// the reconciler settles TERMINAL Stripe outcomes and skips the rest,
+		// so a PaymentIntent that stays non-terminal keeps this banner and the
+		// operator's lever is at the provider. The advice below is therefore
+		// kept, deliberately — it is the honest thing to say about a state we
+		// do not resolve for them.
+		//
+		// The CAUSE this note used to give was wrong, and the phrasing spread
+		// into ADR-107 before anyone checked it: it blamed "off-session SCA
+		// nobody completes". Off-session SCA is a DECLINE — Stripe's
+		// authentication_required is a decline code, which arrives as a card
+		// error and settles the invoice FAILED with dunning started, never
+		// reaching this banner. A live requires_action PaymentIntent comes from
+		// the hosted checkout, where the customer is present and mid-3DS, and
+		// that one expires with its session inside the hour.
 		Message: "Payment outcome unconfirmed by the provider — Velox re-checks automatically and resolves once Stripe reports a final outcome. If it sits here for hours the charge may be waiting on customer action (e.g. 3-D Secure): check the payment in Stripe, then cancel or retry it.",
 		DocURL:  docBaseURL + "payment-unconfirmed",
 		Since:   &since,
