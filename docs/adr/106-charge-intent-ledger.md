@@ -341,3 +341,83 @@ resolved): a state machine to avoid one table.
 **Search Stripe by metadata on every ambiguous outcome.** Viable and closes the
 cached-error residual, but adds a client method and a round-trip on a rare path.
 Deferred to the trigger above rather than built speculatively.
+
+## Amendment (2026-08-01): the key derivation is load-bearing — do not "simplify" it
+
+This section originally argued the opposite: that deriving the idempotency key
+from `charge_attempt_seq` was an incidental implementation choice, and that a
+self-keyed intent (key = the row's own id) would be cleaner. **That was wrong,
+and the reasoning is recorded here so nobody re-proposes it.**
+
+There is no `Seq` column on `charge_intents`. The seq at attempt time survives in
+exactly one place: **inside the stored key string**. So the key does two jobs, not
+one:
+
+1. the exact Stripe idempotency header, and
+2. a snapshot of `charge_attempt_seq` at the moment the attempt began.
+
+Which makes the first of the three guards a **staleness detector**, not an
+identity check:
+
+	stored ..._7   vs   recomputed ..._8
+	mismatch  <=>  the seq moved
+	          <=>  an outcome was recorded since this intent opened
+	          <=>  the intent no longer describes the invoice — do not replay
+
+A self-minted key (a UUID) carries no information about the invoice, so there
+would be nothing to recompute and nothing to compare. The check would not become
+simpler — it would **cease to exist**, and would have to be rebuilt by adding an
+explicit seq column and comparing that instead. Strictly more machinery for the
+same guarantee. The derivation is the mechanism, not a coupling to be removed.
+
+The two hazards previously blamed on the derivation do not survive inspection
+either. The key rotates only when an intent CLOSES, and closing happens on a
+named outcome (the PaymentIntent is known) or a definite rejection (nothing is
+live) — neither is dangerous. Rotation is only unsafe if the outcome was
+MISCLASSIFIED, which is a `classifyStripeError` dependency shared with the
+shipped design, not a property of the ledger. And a quarantined intent
+recomputing an identical key is caught by the state check.
+
+### What is actually left against this ADR
+
+- **The replay TTL.** `chargeIntentReplayTTL` approximates an eviction policy
+  Stripe does not contractually pin, measured from our clock. Only **read-based
+  recovery** removes it — the metadata-search alternative already listed above,
+  which composes with everything else here and needs no ledger changes.
+- **`classifyStripeError`.** Shared with the shipped design; calling an ambiguous
+  outcome definite closes an intent whose PaymentIntent may be live. Neither
+  design escapes this, so it is the highest-value place to harden either.
+
+Not cost-free, but neither is a correctness objection.
+
+### And the strongest argument FOR resuming it
+
+The shipped design **cannot replay at all**, and not by choice. The parked write
+(`payment_status='unknown'`) goes through `UpdatePayment`, which bumps
+`charge_attempt_seq` unconditionally — so the derived key rotates the moment the
+ambiguous outcome is recorded. `main` persists the sent key nowhere. The only
+handle that could ever reach that PaymentIntent is destroyed by the very write
+that records the problem, which is exactly what this ADR's struct comment says:
+*"A key we cannot reproduce is a PaymentIntent we cannot find."*
+
+That is why ADR-107 must park the invoice for a human: not because refusal was
+judged safer than replay, but because replay is **impossible** once the key is
+gone. Resuming this ADR restores that capability.
+
+**Resume it as written.** The branch works; the guards each earn their place.
+
+### One cheaper experiment to run first
+
+Do not bump `charge_attempt_seq` when recording `unknown` with no PaymentIntent
+id. ADR-105's own rule is that the seed moves "exactly when an attempt outcome
+was recorded", and `unknown` means no outcome was recorded — so the bump appears
+to be an accident of routing through the shared `UpdatePayment` statement, which
+stamps an EMPTY PaymentIntent id and bumps anyway. The CI gate only enforces
+"if you stamp, you bump", never the converse.
+
+If that holds, the key stays reproducible and `main` gains replay-based recovery
+with no ledger at all — which would change the economics of this entire ADR.
+UNVERIFIED: it touches the double-charge invariant and needs the money-path
+site-set enumeration (every writer of the seq, every reader of the key, every
+path by which a parked invoice becomes claimable) before anyone acts on it.
+
