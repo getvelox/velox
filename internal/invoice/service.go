@@ -1069,14 +1069,8 @@ func (s *Service) Void(ctx context.Context, tenantID, id string) (domain.Invoice
 	// the reconciler resolves it, then the void can proceed. Stripe enforces
 	// the same rule ("you can't void an invoice with open payments"). Guard
 	// sits BEFORE reverseInvoiceTax so the reversal never fires in-flight.
-	if inv.PaymentStatus.IsInFlight() {
-		if inv.PaymentStatus == domain.PaymentUnknown && inv.StripePaymentIntentID == "" {
-			// Parked: telling the operator to "wait for it to settle or cancel
-			// it" names two things that cannot happen — it never settles, and
-			// there is no cancel path without a PaymentIntent id to cancel.
-			return domain.Invoice{}, errs.InvalidState("this invoice's charge attempt could not be identified at the provider, so it cannot be voided safely — a charge may have succeeded. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead")
-		}
-		return domain.Invoice{}, errs.InvalidState("a charge is in flight on this invoice — wait for the provider to report its outcome before voiding")
+	if b := domain.PaymentBlocksAction(inv, domain.ActionVoid); b.Blocked {
+		return domain.Invoice{}, errs.InvalidState(b.Message).WithCode(b.Code)
 	}
 
 	// Atomic: flip status to voided AND reverse the consumed customer credits
@@ -1220,9 +1214,8 @@ func (s *Service) MarkUncollectible(ctx context.Context, tenantID, id string) (d
 	// stays refused because a voided-then-succeeded invoice is a contradiction,
 	// and RecordOfflinePayment stays refused because it would label a card
 	// charge as out-of-band.
-	parked := inv.PaymentStatus == domain.PaymentUnknown && inv.StripePaymentIntentID == ""
-	if inv.PaymentStatus.IsInFlight() && !parked {
-		return domain.Invoice{}, errs.InvalidState("a charge is in flight on this invoice — wait for the provider to report its outcome before marking uncollectible")
+	if b := domain.PaymentBlocksAction(inv, domain.ActionMarkUncollectible); b.Blocked {
+		return domain.Invoice{}, errs.InvalidState(b.Message).WithCode(b.Code)
 	}
 
 	updated, err := s.store.UpdateStatus(ctx, tenantID, id, domain.InvoiceUncollectible)
@@ -1300,8 +1293,8 @@ func (s *Service) RecordOfflinePayment(ctx context.Context, tenantID, id, note s
 	case domain.InvoiceDraft:
 		return domain.Invoice{}, errs.InvalidState("finalize the invoice before recording a payment")
 	}
-	if inv.PaymentStatus.IsInFlight() {
-		return domain.Invoice{}, errs.InvalidState("a charge is already in flight on this invoice — wait for it to settle or cancel it before recording an offline payment")
+	if b := domain.PaymentBlocksAction(inv, domain.ActionRecordOfflinePayment); b.Blocked {
+		return domain.Invoice{}, errs.InvalidState(b.Message).WithCode(b.Code)
 	}
 	now := s.clock.Now(ctx)
 	// Use a synthetic out-of-band marker in the PaymentIntent field so

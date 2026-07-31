@@ -225,10 +225,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, input CreateInput
 	// (ADR-059). A Get error here falls through to create(), which raises the
 	// canonical not-found/validation error.
 	if input.InvoiceID != "" {
-		if inv, err := s.invoices.Get(ctx, tenantID, input.InvoiceID); err == nil &&
-			inv.PaymentStatus.IsInFlight() {
-			return domain.CreditNote{}, errs.InvalidState(
-				"cannot credit-note an invoice whose payment is in flight — settle or cancel the payment first, or wait for charge reconciliation")
+		if inv, err := s.invoices.Get(ctx, tenantID, input.InvoiceID); err == nil {
+			if b := domain.PaymentBlocksAction(inv, domain.ActionIssueCreditNote); b.Blocked {
+				return domain.CreditNote{}, errs.InvalidState(b.Message).WithCode(b.Code)
+			}
 		}
 	}
 	return s.create(ctx, tenantID, input, nil)
@@ -864,8 +864,11 @@ func (s *Service) CreateAndIssueCommitRelief(ctx context.Context, tenantID strin
 	switch {
 	case inv.Status == domain.InvoiceVoided || inv.Status == domain.InvoiceUncollectible:
 		return domain.CreditNote{}, errs.InvalidState("cannot relieve a voided or uncollectible commit invoice")
-	case inv.PaymentStatus.IsInFlight():
-		return domain.CreditNote{}, errs.InvalidState("a charge is in flight on this invoice — wait for it to settle (or cancel it) before relieving the commit")
+	case domain.PaymentBlocksAction(inv, domain.ActionIssueCreditNote).Blocked:
+		// Same rule, same source — this one told the operator to "cancel it",
+		// which has never been an action the product offers.
+		return domain.CreditNote{}, errs.InvalidState(domain.PaymentBlocksAction(inv, domain.ActionIssueCreditNote).Message).
+			WithCode(domain.PaymentBlocksAction(inv, domain.ActionIssueCreditNote).Code)
 	case inv.Status != domain.InvoicePaid || inv.PaymentStatus != domain.PaymentSucceeded:
 		return domain.CreditNote{}, errs.InvalidState("commit relief applies to PAID commit invoices — void the unpaid invoice to cancel the commit instead")
 	}
