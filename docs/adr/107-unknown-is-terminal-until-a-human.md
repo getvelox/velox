@@ -112,6 +112,38 @@ sweep at the SQL level — they are not reconcilable by definition — and the p
 state is announced ONCE, where it is created, rather than as an identical
 CRITICAL every tick forever.
 
+**Every oldest-first queue over these rows is a starvation sink.** The
+`ListUnknownPayments` case above was found first and treated as one bug. It was
+an instance of a shape: a parked row's ordering timestamp is frozen (nothing
+writes it again), so in any `ORDER BY … ASC LIMIT n` scan parked rows migrate to
+the head and stay there, and at `n` of them the queue stops serving anyone else.
+Two more were found by looking for the shape rather than the bug (2026-07-31):
+
+- **Dunning retries.** No charge path admits a parked invoice, so
+  `ClaimChargeForDunningRetry` declines, the adapter returns `ErrTransientSkip`,
+  and the transient handler deliberately does *not* reschedule — right for a
+  Stripe blip, endless for an invoice that can never be charged. The run was
+  re-selected every tick forever, each tick writing an attempt and rewinding it,
+  while its frozen `next_action_at` held the head of a `LIMIT 20` queue. Parked
+  sources are now excluded from `ListDueRuns` and its sim-time twin.
+- **Clawback drafts.** Covered under ADR-059's amendment: the draft's
+  eligibility tested payment state alone, so a parked source deferred it
+  permanently — no issue, no void, no log, and a gauge counting it forever.
+
+**A terminal invoice closes the payment question; it does not answer it.** Both
+fixes are scoped to invoices that are still OPEN, and that scoping is the load-
+bearing part. A write-off deliberately leaves `payment_status='unknown'` — we
+never learned whether the card was charged, and recording `failed` on an
+operator's click would assert the provider declined, which we do not know. So
+the release has to key on invoice STATUS, and the excluded rows have to become
+visible again once the invoice is terminal: dunning's own processing path is
+what resolves the run (mark-uncollectible's resolve is explicitly best-effort,
+documented as relying on "dunning runs scan the invoice status on next tick
+anyway"), and the clawback's orphan guard is what voids the draft. An exclusion
+that also hid written-off invoices would fix one starvation by creating another
+— stranding the run active and the draft pending forever. Both directions are
+mechanised, in each scan, by mutation-verified tests.
+
 **How often:** only when the response is lost *and* the `payment_intent.*`
 webhook never arrives. The webhook names the PaymentIntent and settles the
 invoice through the ordinary path, which is what happens in nearly every real

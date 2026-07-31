@@ -37,7 +37,7 @@ the canonical source, not a progress tracker.
 `R1` List + preview · `R2` Instantiate · `R3` Idempotent re-apply, no uninstall · `R4` Atomic rollback · `R5` Dashboard UI
 
 **Invoices**  
-`I1` Multiple meters · `I2` Negative usage · `I3` Manual line items · `I4` Void · `I4b` Uncollectible invoice lifecycle · `I5` Collect + payment timeline · `I5b` Invoice attention banner · `I6` Email + PDF preview · `I7` Zero-amount invoice · `I8` Currency consistency · `SUB7` Mid-period change outcome on the timeline + invoice · `I9` Credit note on void · `I9b` Credit note PDF totals reconcile · `I10` Hosted invoice page · `I11` `create_preview` · `I12` One-off invoice composer · `I13` Timeline completeness · `TR-CXL` Trial cancellation · `C-ARCH` Archive semantics
+`I1` Multiple meters · `I2` Negative usage · `I3` Manual line items · `I4` Void · `I4b` Uncollectible invoice lifecycle · `I4c` Parked payment (ADR-107) · `I5` Collect + payment timeline · `I5b` Invoice attention banner · `I6` Email + PDF preview · `I7` Zero-amount invoice · `I8` Currency consistency · `SUB7` Mid-period change outcome on the timeline + invoice · `I9` Credit note on void · `I9b` Credit note PDF totals reconcile · `I10` Hosted invoice page · `I11` `create_preview` · `I12` One-off invoice composer · `I13` Timeline completeness · `TR-CXL` Trial cancellation · `C-ARCH` Archive semantics
 
 **Dunning**  
 `D1` Retry cycle + escalation · `D2` Resolution · `D4` Self-service payment update · `D5` Dunning policy admin (CRUD + assignment + terminal actions)
@@ -1040,6 +1040,20 @@ Mark-uncollectible (terminal bad-debt) + its page UX + offline recovery back to 
 - [x] **Operator-driven uncollectible from the dunning resolve dialog** *(walked 2026-07-26 on NIM-000244: run → resolved/invoice_not_collectible AND invoice → uncollectible; banner + button changes verified.)* — on an active dunning run, click Resolve → pick **Write off invoice** → confirm. The dunning run flips to `resolved` with `resolution=invoice_not_collectible` AND the underlying invoice flips to `status=uncollectible` (cross-flow per ADR-036). Invoice detail page reflects the change: status banner reads "Marked uncollectible — recorded as bad debt", Collect Payment / Mark Uncollectible buttons disappear, Record Payment + Void + Issue Credit remain.
 - [x] **Uncollectible page UX (Stripe parity — verified across Stripe + Chargebee + Recurly 2026-05-20)** *(walked 2026-07-26: banner copy exact, menu = Record-offline/Email/Copy/Rotate/Preview-PDF/Download-PDF/Issue-CN/Void; Collect/Mark-Uncollectible/Finalize/Add-Line absent; attention banner hidden.)* — on an `uncollectible` invoice: InvoiceAttention banner is hidden, OperatorContext/Diagnosis card is hidden, status banner explains the bad-debt classification + that the subscription stays active + recovery options. Buttons present: Void, Email, Issue Credit, Record Payment, Copy Link, Preview/Download PDF. Buttons absent: Collect Payment, Mark Uncollectible, Finalize, Add Line Item.
 - [x] **Stripe-parity offline recovery: uncollectible → paid** *(walked 2026-07-26 on NIM-000244 with "Cheque #1234": paid/succeeded/paid_at, `out_of_band:` PI prefix, audit `recovered_from_status=uncollectible`, webhooks `invoice.payment_recorded` + `invoice.paid` both fired.)* — click Record Payment on an uncollectible invoice, optionally enter a reference (e.g. "Cheque #1234"), confirm. Invoice flips to `status=paid`, `payment_status=succeeded`, `paid_at` set, `stripe_payment_intent_id` prefixed `out_of_band:` so reports can distinguish operator-recorded payments from engine charges. Audit row carries `recovered_from_status=uncollectible`. Webhooks `invoice.payment_recorded` AND `invoice.paid` both fire (the latter from MarkPaid on every paid transition — card, credits, offline, dunning recovery). Active dunning run (if any) resolves to `payment_recovered`.
+
+## FLOW I4c: Parked payment — charge attempt we cannot identify (ADR-107)
+
+Setup (no UI can produce this — it needs a lost Stripe response): on a finalized
+unpaid invoice, `UPDATE invoices SET payment_status='unknown', stripe_payment_intent_id=NULL WHERE id='<inv>'`.
+
+- [ ] Invoice page raises a **Critical** attention banner stating the attempt could not be identified, that no further charge will be attempted, and naming the write-off as the resolution — not "Velox re-checks automatically".
+- [ ] Actions menu offers **Mark uncollectible** plus read-only items only; Collect Payment, Email invoice, Issue credit note, Void, Resend setup link are all absent.
+- [ ] Each of those refusals, via API, answers `payment_unidentifiable` and names mark-uncollectible as the way out — none says "wait for it to settle".
+- [ ] Hosted invoice page shows no Pay button and says payment is paused so the customer cannot be charged twice.
+- [ ] Invoice is absent from the **Past due** list; Outstanding AR still includes its amount.
+- [ ] `curl -s localhost:8080/metrics | grep velox_parked_invoices` reports 1 for the mode.
+- [ ] With an active dunning run on it, advance past `next_action_at` twice → `attempt_count` is unchanged and no new charge-attempt row appears (the run is skipped at selection, not retried and rewound).
+- [ ] Mark uncollectible → invoice `uncollectible`, `payment_status` still `unknown` (the write-off closes the invoice; it does not claim to know whether the card was charged), the dunning run resolves, and a deferred clawback draft against it voids on the next reconciler pass.
 
 ## FLOW I5: Collect + payment timeline
 

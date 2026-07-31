@@ -587,6 +587,39 @@ func (s *PostgresStore) ListDueRuns(ctx context.Context, tenantID string, dueBef
 			  SELECT 1 FROM invoices i
 			  WHERE i.id = r.invoice_id AND i.is_simulated = true
 			)
+			-- ADR-107 parked source. 'unknown' with no PaymentIntent id means the
+			-- charge attempt could never be named at the provider, so no charge
+			-- path admits the invoice: ClaimChargeForDunningRetry declines, the
+			-- adapter returns ErrTransientSkip, and the transient handler
+			-- deliberately does NOT reschedule (a Stripe blip must not burn a
+			-- tenant's retry budget). For a transient outage that is right; for a
+			-- parked invoice the skip never ends, so the run was re-selected every
+			-- tick forever, each tick writing an attempt and rewinding it.
+			--
+			-- Worse than the wasted work: next_action_at is frozen in the past and
+			-- this scan is next_action_at ASC with LIMIT, so parked runs
+			-- permanently HEAD the queue — at LIMIT of them, real dunning stops
+			-- entirely. That is the same starvation shape ADR-107 already hit in
+			-- ListUnknownPayments, from the same cause (oldest-first over rows that
+			-- never move).
+			--
+			-- SCOPED TO OPEN INVOICES ON PURPOSE. A voided/uncollectible source
+			-- must STILL be selected: the processing path's own terminal branch
+			-- (service.go, "invoice_"+status) is what resolves the run, and
+			-- markUncollectible's ResolveByInvoice is explicitly best-effort,
+			-- documented as relying on "dunning runs scan the invoice status on
+			-- next tick anyway". Excluding terminal rows here would delete that
+			-- backstop and strand the run active forever — the exact bug this
+			-- predicate's twin in creditnote/postgres.go was just fixed for.
+			-- Only 'unknown' is excluded, not all in-flight states: a 'processing'
+			-- charge does resolve on its own, and skipping it is correct.
+			AND NOT EXISTS (
+			  SELECT 1 FROM invoices i
+			  WHERE i.id = r.invoice_id
+			    AND i.payment_status = 'unknown'
+			    AND COALESCE(i.stripe_payment_intent_id, '') = ''
+			    AND i.status NOT IN ('voided', 'uncollectible')
+			)
 		ORDER BY r.next_action_at ASC LIMIT $2
 		FOR UPDATE SKIP LOCKED
 	`, dueBefore, limit)
@@ -643,6 +676,18 @@ func (s *PostgresStore) ListDueRunsForClock(ctx context.Context, tenantID, clock
 			AND r.next_action_at <= $3
 			AND r.paused = false
 			AND r.state NOT IN ('resolved', 'escalated')
+			-- ADR-107 parked source — the sim-time twin of the wall-clock scan's
+			-- exclusion above; see there for why, and for why it is scoped to OPEN
+			-- invoices rather than all of them. Expressed against the joined row
+			-- (1:1) instead of a second NOT EXISTS. A clock advance drives many
+			-- ticks in a burst, so the spin this prevents is faster here, not
+			-- slower: without it one parked sim invoice can consume the whole
+			-- catchup budget and stall every other run on the clock.
+			AND NOT (
+			  i.payment_status = 'unknown'
+			  AND COALESCE(i.stripe_payment_intent_id, '') = ''
+			  AND i.status NOT IN ('voided', 'uncollectible')
+			)
 		ORDER BY r.next_action_at ASC LIMIT $4
 		FOR UPDATE SKIP LOCKED
 	`, tenantID, clockID, frozenTime, limit)

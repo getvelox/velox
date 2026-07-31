@@ -46,6 +46,24 @@ One canonical predicate, in-flight guards on the status writers, a single void w
 - **Parts A + B closed for full capture.** The operator vector was gated (Part A, #295); the automated vector now defers → `amount_due` stays full while in-flight → `MarkPaid` records the full captured amount → the reconciler credits the unused share. No under-record, no over-charge.
 - **Part C (partial capture) is not reachable in Velox.** `MarkPaid` records `amount_paid = amount_due`. That equals the captured amount under Velox's PaymentIntent-only **full-capture** model — Velox exposes no partial/manual-capture flow. If one is ever added, recording `amount_paid` from the PI's `amount_received` is the correct source of truth; until then this is a theoretical vector, not a live gap.
 - **Genuinely-wedged payment → deferred draft waits (observability follow-up).** If a charge *never* reaches terminal (e.g. a `requires_action` PI nobody authenticates or cancels), the deferred draft sits unissued. It is **not lost** — it is durably captured and auto-issues the instant the payment settles, and a wedged payment is independently visible (the invoice stuck in `processing`; the tenant unpaid). A dedicated **stale-deferred-draft alarm** (surface a draft deferred > N days so an operator can cancel/await the wedged PI, which then auto-resolves the clawback) is a deferred *observability* follow-up — it does not affect whether the books are correct or the customer is eventually made whole.
+
+  **Amended 2026-07-31 ([ADR-107](107-unknown-is-terminal-until-a-human.md)).**
+  "Auto-issues the instant the payment settles" assumed every payment eventually
+  settles. A **parked** invoice never does — `unknown` with no PaymentIntent id
+  means nothing can name the attempt, so there is no webhook and no sweep to end
+  the wait. The deferral was therefore permanent, and silently so: the scan's
+  eligibility predicate tested payment state alone, so the draft could not reach
+  the code that decides its fate, produced no error logs (deferred drafts log
+  nothing, by design), and sat in the pending-drafts gauge forever. Writing the
+  invoice off did not release it either, because a write-off deliberately does
+  not change `payment_status`.
+
+  Fixed by adding a **status** term to that predicate: a terminal invoice defers
+  nothing. The outcome is unchanged from what this ADR already specified — the
+  existing orphan guard voids a draft whose source was voided or written off,
+  since an invoice that collected nothing has nothing to claw back, and the
+  customer is made whole by not being charged. The bug was reachability, not
+  behaviour. Pinned by `TestListPendingClawbackDrafts_ParkedSourceReleasedByWriteOff`.
 - **Industry parity.** Operator block matches Stripe exactly. The automated defer-then-act-on-settled-state matches Lago's terminate-subscription rule (*"the unused paid amount is refunded; any unpaid unused amount is credited back"*) — Velox just sequences it after settlement instead of guessing the channel mid-flight.
 
 ## Deferred / follow-ups
