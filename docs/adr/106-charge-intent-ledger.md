@@ -341,3 +341,61 @@ resolved): a state machine to avoid one table.
 **Search Stripe by metadata on every ambiguous outcome.** Viable and closes the
 cached-error residual, but adds a client method and a round-trip on a rare path.
 Deferred to the trigger above rather than built speculatively.
+
+## Amendment (2026-08-01): the key derivation was an implementation choice
+
+Raised in review of the parked branch, and NOT considered by the alternatives
+above — which weigh where the intent should live and how recovery should work,
+but never question where the idempotency key comes from.
+
+The branch derives it from the invoice: `ChargeIdempotencyKey(inv.ID,
+inv.ChargeAttemptSeq, purpose, pmID)` (`stripe.go:597`). Nothing about
+record-before-effect requires that. The intent row already has its own `ID`,
+and the struct's own comment says the key is *"the EXACT header sent to Stripe,
+not a seed of it"* — so **the intent could mint and own its key**, with the
+invoice contributing nothing.
+
+That is not cosmetic. Two of the branch's worst defects exist ONLY because the
+key is derived from a field the invoice can move:
+
+- **The failure write rotates the key.** Closing an intent bumps
+  `charge_attempt_seq`, so the next attempt presents a key Stripe has never
+  seen and creates a second PaymentIntent beside a possibly-live one. Recorded
+  at `stripe.go:811`, where it produced the mirror bug too: an intent left open
+  on a *definite* rejection left the invoice "permanently uncollectible AND
+  permanently un-write-off-able, with dunning spinning silently forever".
+- **A quarantined attempt recomputes an IDENTICAL key**, because quarantine
+  means no outcome was recorded and therefore the seq never moved — so a
+  key-equality check passes at the single worst moment (round-3 critical,
+  `stripe.go:640`).
+
+Neither survives a self-keyed intent: there is no recomputation to collide, and
+no invoice field that can perturb the key. The three-condition guard reduces to
+two (state, TTL), and the "is this key ours?" question disappears because the
+key IS the row.
+
+**What still does not survive**, and is the honest reason this stays parked:
+
+- `classifyStripeError`'s `Unknown` boolean remains the single point of failure
+  for EVERY design here, including the shipped one — calling an ambiguous
+  outcome definite closes an intent whose PaymentIntent may be live. ADR-107's
+  refuse-to-act design shares this exact dependency; it is not immune, it merely
+  has fewer decisions stacked on top of it.
+- The replay TTL remains a number approximating an eviction policy Stripe does
+  not contractually pin, measured from our clock. Only **read-based recovery**
+  removes it — which is the metadata-search alternative above, and the two
+  compose: a self-keyed intent plus recovery-by-search has no TTL, no quarantine
+  tail, and no give-up decision anywhere.
+
+**If this ADR is ever resumed, resume it in that shape** — self-keyed intent,
+read-based recovery — not as the branch is written. And re-ask whether the row
+still earns its keep once recovery is a read, since an invoice at
+`payment_status='unknown'` already implies an attempt happened.
+
+**A correction to how the parking was justified.** ADR-107 records the rejection
+as "the design is sound, the implementation did not converge". That is
+incomplete, and unfair to the design: the convergence failures cluster around a
+key derivation that was never required, and around replay-based recovery whose
+ceiling is imposed by Stripe rather than chosen. Both are fixable without
+abandoning record-before-effect, which remains a stronger invariant than
+safety-by-abstention.

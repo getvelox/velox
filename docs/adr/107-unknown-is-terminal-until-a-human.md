@@ -288,6 +288,19 @@ over this is *automatic* recovery — no human, no stuck invoice. That becomes
 worth its complexity when stuck invoices are frequent enough to cost more than
 the guards do.
 
+**Amended 2026-08-01 — "sound design, failed implementation" is too kind to
+this ADR and too harsh on ADR-106.** The convergence failures cluster around two
+things that are NOT intrinsic to record-before-effect: a key derived from
+`charge_attempt_seq` (an implementation choice — the intent could own its key,
+which removes the rotate-on-failure and identical-recomputation traps outright),
+and recovery by replay (whose 12h ceiling is imposed by Stripe's key retention,
+not chosen). ADR-106 now carries the resumable shape. Also worth stating plainly
+because this ADR's framing obscured it: `classifyStripeError`'s ambiguous/definite
+boolean is the single point of failure for the design BELOW too — calling an
+ambiguous outcome definite settles `failed`, bumps the seq, rotates the key and
+makes the invoice claimable again. Parking is not immune to that; it simply
+stacks fewer decisions on top of it.
+
 **Trigger to revisit:** the first real stuck `unknown` invoice, or production
 cutover — whichever comes first. Resume it **on top of** this ADR, where its two
 worst round-3 criticals (the give-up gate un-gating, and the reconciler treating
