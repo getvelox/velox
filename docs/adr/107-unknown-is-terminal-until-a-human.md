@@ -74,10 +74,43 @@ an `unknown` one. Admitting `unknown` anywhere fails the build, naming the path.
 
 ## Consequences
 
-**A stuck invoice needs a human.** It is excluded from every charge path, so no
-money moves — but no dunning starts either, and it will not resolve itself. The
-CRITICAL log names the invoice, customer and amount so the attempt can be found
-in the Stripe dashboard by customer and amount.
+**A stuck invoice needs a human — and the human needs a lever.** The first
+version of this ADR said "a human must act" without checking that they could.
+They could not: `Void`, `MarkUncollectible` and `RecordOfflinePayment` all refuse
+an in-flight payment, and `unknown` is in-flight, so the complete set of
+state-changing operator actions on a parked invoice was EMPTY. An invoice that
+can reach no terminal state violates the every-invoice-terminates rule, and the
+CRITICAL log was instructing operators to "settle or void it by hand" — both
+refused. Corrected the same day (the parked-invoice honesty sweep):
+
+- **`MarkUncollectible` is now allowed** on a parked invoice. It is the one safe
+  exit: it moves no money, and if the charge did succeed the provider webhook
+  still marks the invoice paid through the ordinary recovery path. `Void` stays
+  refused (a voided-then-succeeded invoice is a contradiction) and
+  `RecordOfflinePayment` stays refused (it would label a card charge as
+  out-of-band). The invoice page already carried the button; only the service
+  refused it.
+- **The banner tells the truth.** It rendered at Info severity saying "Velox
+  re-checks automatically and resolves" — of an invoice that will never resolve,
+  on day 1 and day 400. A parked invoice now raises Critical, states that it
+  will not resolve on its own, explains that no further charge is attempted
+  deliberately, and names the write-off.
+- **No collection promise goes out.** `resend-setup-link` was allowed on a
+  parked invoice and emails the customer "add a payment method and we'll collect
+  it automatically" — a promise the engine will never keep. Now refused.
+- **The Collect refusal distinguishes the two cases.** "Retry after it resolves"
+  is right when a PaymentIntent id exists and wrong when one does not.
+
+**And a liveness sink this ADR introduced.** `ListUnknownPayments` is
+oldest-first with a batch limit, and a parked row's `updated_at` is frozen
+because nothing ever writes it again — so parked rows permanently headed the
+queue, and once a batch-size accumulated the sweep would never reach a NEW
+ambiguous charge that DOES carry an id and that the provider would resolve in one
+call. The safety fix had quietly converted into a liveness sink for exactly the
+invoices the reconciler exists to save. Parked rows are now excluded from that
+sweep at the SQL level — they are not reconcilable by definition — and the parked
+state is announced ONCE, where it is created, rather than as an identical
+CRITICAL every tick forever.
 
 **How often:** only when the response is lost *and* the `payment_intent.*`
 webhook never arrives. The webhook names the PaymentIntent and settles the

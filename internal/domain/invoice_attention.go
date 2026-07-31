@@ -689,6 +689,30 @@ func classifyPaymentUnconfirmed(inv Invoice) *Attention {
 	// "Check provider" button was non-functional (no endpoint); an on-demand
 	// re-check is deferred until real stuck-payment pressure (ADR-049), so the
 	// dead button is removed rather than shipped greyed-out.
+	// PARKED (ADR-107) — a genuinely different situation, and the copy below
+	// asserts the opposite of it. With no PaymentIntent id there is nothing for
+	// the reconciler to re-query: it early-returns, the invoice is excluded from
+	// every charge path, and it will NEVER resolve on its own. Rendering the
+	// muted "we've got this" banner at Info severity, forever, with no actions,
+	// is the system telling an operator to wait for something that cannot
+	// happen (found by the honesty sweep, 2026-07-31).
+	if inv.StripePaymentIntentID == "" {
+		return &Attention{
+			Severity: AttentionSeverityCritical,
+			Reason:   AttentionReasonPaymentUnconfirmed,
+			Code:     "payment.unidentifiable",
+			Message: "This invoice's charge attempt could not be identified with the payment provider, so Velox cannot confirm whether the customer was charged. " +
+				"It will not resolve on its own, and no further charge will be attempted — deliberately, to rule out charging twice. " +
+				"Find the attempt in Stripe (search by customer and amount). If money was taken, it will settle here once the provider reports it; if nothing was taken, mark this invoice uncollectible to close it out.",
+			DocURL: docBaseURL + "payment-unconfirmed",
+			Since:  &since,
+			// No Actions entry: the invoice page already carries a
+			// Mark-uncollectible control, which the service refused for this
+			// state until now. The message names it rather than adding a
+			// second, differently-worded route to the same button.
+		}
+	}
+
 	return &Attention{
 		Severity: AttentionSeverityInfo,
 		Reason:   AttentionReasonPaymentUnconfirmed,

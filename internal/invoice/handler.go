@@ -771,6 +771,17 @@ func (h *Handler) resendSetupLink(w http.ResponseWriter, r *http.Request) {
 			"setup link can only be resent for a finalized, unpaid invoice")
 		return
 	}
+	// The setup-link email tells the CUSTOMER "add a payment method and we'll
+	// collect it automatically". No charge path will ever collect an invoice
+	// whose payment is in flight — and for a parked one (ADR-107) that is
+	// permanent. Sending it would be an outbound promise the engine cannot
+	// keep, triggerable by an operator button (found by the honesty sweep,
+	// 2026-07-31).
+	if inv.PaymentStatus.IsInFlight() {
+		respond.Error(w, r, http.StatusConflict, "invalid_state", "payment_unresolved",
+			"this invoice has an unresolved charge attempt, so Velox will not collect it automatically — resolve the payment before asking the customer for a card")
+		return
+	}
 	if h.noPMNotifier == nil {
 		slog.ErrorContext(r.Context(), "resend setup link: no-PM notifier not wired", "invoice_id", inv.ID)
 		respond.InternalError(w, r)
@@ -1059,6 +1070,19 @@ func resolveSendCC(ctx context.Context, customers CustomerGetter, tenantID, cust
 	return kept, nil
 }
 
+// collectInFlightMessage explains WHY a collect was refused, and the two cases
+// are genuinely different. With a PaymentIntent id the reconciler really is
+// confirming the outcome and waiting is correct. Without one the invoice is
+// parked (ADR-107) — nothing is confirming anything, and "retry after it
+// resolves" would have the operator clicking Collect on day 1, day 7 and day 90
+// against a state that never changes.
+func collectInFlightMessage(inv domain.Invoice) string {
+	if inv.StripePaymentIntentID == "" {
+		return "this invoice's charge attempt could not be identified at the provider and will not resolve on its own — check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible"
+	}
+	return "a previous payment attempt is still being confirmed — retry after it resolves"
+}
+
 func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 	tenantID := auth.TenantID(r.Context())
 	id := chi.URLParam(r, "id")
@@ -1086,7 +1110,7 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		// blind re-charging an ambiguous outcome is how double charges
 		// happen. The claim below also excludes 'unknown'; this gate
 		// exists to say WHY instead of a generic conflict.
-		respond.Validation(w, r, "a previous payment attempt is still being confirmed — retry after it resolves")
+		respond.Validation(w, r, collectInFlightMessage(inv))
 		return
 	}
 	if inv.AmountDueCents <= 0 {

@@ -52,6 +52,17 @@ func TestInFlightGuards(t *testing.T) {
 			}
 		})
 		t.Run("MarkUncollectible rejected when "+string(ps), func(t *testing.T) {
+			if ps == domain.PaymentUnknown {
+				// DELIBERATE carve-out (ADR-107). An 'unknown' payment with no
+				// PaymentIntent id is PARKED — excluded from every charge path,
+				// so without this exit the invoice can reach no terminal state
+				// at all and the operator has literally no action. Writing it
+				// off moves no money, and a late webhook still marks it paid.
+				// The parked path has its own coverage in
+				// TestParkedInvoiceHasExactlyOneWayOut, including the negative
+				// control that 'processing' still refuses.
+				t.Skip("parked invoices are deliberately write-off-able — see ADR-107")
+			}
 			svc, id := finalized(ps)
 			if _, err := svc.MarkUncollectible(ctx, "t1", id); !errors.Is(err, errs.ErrInvalidState) {
 				t.Fatalf("MarkUncollectible on %s: want ErrInvalidState, got %v", ps, err)

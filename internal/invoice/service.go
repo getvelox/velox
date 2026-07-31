@@ -1070,7 +1070,13 @@ func (s *Service) Void(ctx context.Context, tenantID, id string) (domain.Invoice
 	// the same rule ("you can't void an invoice with open payments"). Guard
 	// sits BEFORE reverseInvoiceTax so the reversal never fires in-flight.
 	if inv.PaymentStatus.IsInFlight() {
-		return domain.Invoice{}, errs.InvalidState("a charge is in flight on this invoice — wait for it to settle or cancel it before voiding")
+		if inv.PaymentStatus == domain.PaymentUnknown && inv.StripePaymentIntentID == "" {
+			// Parked: telling the operator to "wait for it to settle or cancel
+			// it" names two things that cannot happen — it never settles, and
+			// there is no cancel path without a PaymentIntent id to cancel.
+			return domain.Invoice{}, errs.InvalidState("this invoice's charge attempt could not be identified at the provider, so it cannot be voided safely — a charge may have succeeded. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead")
+		}
+		return domain.Invoice{}, errs.InvalidState("a charge is in flight on this invoice — wait for the provider to report its outcome before voiding")
 	}
 
 	// Atomic: flip status to voided AND reverse the consumed customer credits
@@ -1201,8 +1207,22 @@ func (s *Service) MarkUncollectible(ctx context.Context, tenantID, id string) (d
 	// tax for a real collected sale has been reversed → the tenant under-remits.
 	// Block until terminal. Stripe enforces the same ("can't mark uncollectible
 	// with open payments"). Guard sits BEFORE reverseInvoiceTax.
-	if inv.PaymentStatus.IsInFlight() {
-		return domain.Invoice{}, errs.InvalidState("a charge is in flight on this invoice — wait for it to settle or cancel it before marking uncollectible")
+	// A PARKED invoice is the exception (ADR-107): payment_status='unknown' with
+	// no PaymentIntent id means the attempt could not be identified at the
+	// provider and never will be. It is excluded from every charge path, so it
+	// can otherwise reach no terminal state at all — which violates the
+	// every-invoice-terminates rule and left the operator with literally no
+	// action (found by the honesty sweep, 2026-07-31).
+	//
+	// Writing it off is safe in a way voiding is not: it moves no money, and if
+	// the charge did succeed the payment webhook still marks the invoice paid
+	// through the ordinary recovery path, which audits recovered_from. Void
+	// stays refused because a voided-then-succeeded invoice is a contradiction,
+	// and RecordOfflinePayment stays refused because it would label a card
+	// charge as out-of-band.
+	parked := inv.PaymentStatus == domain.PaymentUnknown && inv.StripePaymentIntentID == ""
+	if inv.PaymentStatus.IsInFlight() && !parked {
+		return domain.Invoice{}, errs.InvalidState("a charge is in flight on this invoice — wait for the provider to report its outcome before marking uncollectible")
 	}
 
 	updated, err := s.store.UpdateStatus(ctx, tenantID, id, domain.InvoiceUncollectible)

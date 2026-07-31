@@ -240,6 +240,12 @@ func TestClassifyInvoiceAttention_PaymentFailed(t *testing.T) {
 func TestClassifyInvoiceAttention_PaymentUnknownIsInfo(t *testing.T) {
 	inv := draft()
 	inv.PaymentStatus = PaymentUnknown
+	// A PaymentIntent id is what makes this the RESOLVING case — the reconciler
+	// has something to query, so Info is honest. Without one the invoice is
+	// parked and will never resolve, which is Critical
+	// (TestParkedInvoiceAttentionTellsTheTruth). This fixture predates that
+	// split and meant the resolving case.
+	inv.StripePaymentIntentID = "pi_resolving"
 	att := ClassifyInvoiceAttention(inv, AttentionContext{})
 	if att == nil || att.Severity != AttentionSeverityInfo {
 		t.Fatalf("payment_unknown should be info, got %+v", att)
@@ -569,6 +575,9 @@ func TestClassify_PaymentUnconfirmed_NoDeadAction(t *testing.T) {
 	inv := Invoice{
 		ID: "vlx_inv_test", Status: InvoiceFinalized,
 		PaymentStatus: PaymentUnknown, TaxFacts: TaxFacts{TaxStatus: InvoiceTaxOK},
+		// The resolving case — see the note in
+		// TestClassifyInvoiceAttention_PaymentUnknownIsInfo.
+		StripePaymentIntentID: "pi_resolving",
 	}
 	att := ClassifyInvoiceAttention(inv, AttentionContext{})
 	if att == nil || att.Code != "payment.unconfirmed" {

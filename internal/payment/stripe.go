@@ -601,6 +601,19 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		if pe.Unknown {
 			status = domain.PaymentUnknown
 			verb = "payment state unknown"
+			if pe.PaymentIntentID == "" {
+				// PARKED (ADR-107). With no PaymentIntent id the reconciler
+				// cannot query anything, so this invoice will not resolve on
+				// its own and is deliberately excluded from every charge path
+				// rather than risk a second charge. This is the ONE place it is
+				// announced — the sweep no longer re-lists it, precisely so
+				// this does not become an identical CRITICAL every tick
+				// forever, which is how real alerts get buried.
+				slog.ErrorContext(ctx, "CRITICAL: a charge attempt could not be identified at the provider — this invoice is parked and will NOT resolve automatically. Find the attempt in the Stripe dashboard (search by customer and amount); if no charge succeeded, mark the invoice uncollectible to close it out",
+					"invoice_id", inv.ID, "tenant_id", tenantID,
+					"customer_id", inv.CustomerID, "invoice_number", inv.InvoiceNumber,
+					"amount_due_cents", inv.AmountDueCents, "error", pe.Message)
+			}
 			slog.Warn("payment intent outcome unknown — reconciler will resolve",
 				"invoice_id", inv.ID,
 				"stripe_payment_intent_id", pe.PaymentIntentID,
