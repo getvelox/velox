@@ -145,6 +145,26 @@ Two more were found by looking for the shape rather than the bug (2026-07-31):
   eligibility tested payment state alone, so a parked source deferred it
   permanently — no issue, no void, no log, and a gauge counting it forever.
 
+- **A fourth instance, KNOWN AND ACCEPTED (not fixed).** `ListUnknownPayments`
+  is `ORDER BY updated_at ASC LIMIT 50` and now excludes parked rows — but a PI
+  sitting at `requires_action` is a *different* never-moving row it still
+  admits: `reconcileOne` skips those with a bare `return false, nil`, writing
+  nothing, so `updated_at` stays frozen and the row heads this queue exactly as
+  parked rows once did. At batch-size of them the sweep returns only stuck rows
+  and never reaches a new ambiguous charge. Unlike the parked case they must NOT
+  simply be excluded — they are still reconcilable, and the sweep is what
+  notices when the customer finally authenticates. The obvious cheap fix,
+  touching `updated_at` on skip to rotate them to the back, is wrong: that
+  column feeds the attention banner's "since" and the staleness gate this very
+  query uses, so it would reset the operator's age signal every sweep. A correct
+  fix needs its own `last_reconcile_attempt_at` ordering column, which is a
+  migration for a hazard that requires 50 concurrently-stuck SCA invoices in one
+  mode to bite. **Trigger:** the parked/unknown gauge showing a sustained
+  batch-size population, or the first report of a new ambiguous charge going
+  unreconciled — whichever comes first. Recorded here rather than fixed because
+  the class is now the point of this section: the next oldest-first scan over
+  rows that stop moving should be recognised before it ships, not after.
+
 **A terminal invoice closes the payment question; it does not answer it.** Both
 fixes are scoped to invoices that are still OPEN, and that scoping is the load-
 bearing part. A write-off deliberately leaves `payment_status='unknown'` — we
