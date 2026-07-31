@@ -106,13 +106,27 @@ func TestNoHandWrittenPaymentInFlightRefusals(t *testing.T) {
 	// Phrases that only ever appear in a payment-in-flight refusal.
 	banned := regexp.MustCompile(`(?i)(charge is (already )?in flight|payment is in flight|wait for it to settle|charge reconciliation)`)
 
-	root := ".."
+	// Walk the repo root, not just internal/ — see the scope note below.
+	root := "../.."
 	var offenders []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		// SCOPE IS THE GUARANTEE. This scanner was .go-only, so the dashboard —
+		// named in this package's own doc comment as one of the places the rule
+		// had been hand-written — was structurally invisible to it. It kept
+		// hand-writing `payment_status !== 'succeeded' && !== 'processing'`,
+		// omitting 'unknown', which rendered a green "Collect Payment" button on
+		// a parked invoice directly beneath a Critical banner saying no further
+		// charge would be attempted. A green scanner reported success the whole
+		// time. Widen before trusting.
+		isGo := strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
+		isWeb := strings.HasSuffix(path, ".tsx") || strings.HasSuffix(path, ".ts")
+		if !isGo && !isWeb {
+			return nil
+		}
+		if strings.Contains(path, "node_modules") || strings.Contains(path, "/dist/") {
 			return nil
 		}
 		// The single source is allowed to say it; that is its job.
@@ -129,6 +143,17 @@ func TestNoHandWrittenPaymentInFlightRefusals(t *testing.T) {
 		// refusals that must derive from the single source. The constructor and
 		// its message often sit on different lines, so look ahead a little.
 		refusal := regexp.MustCompile(`(errs\.InvalidState\(|respond\.Validation\(|respond\.Error\()`)
+		if isWeb {
+			// Frontend copy has no refusal constructor — any occurrence of the
+			// banned phrasing is operator- or customer-facing text, which is
+			// exactly what must not restate the rule.
+			for i, line := range strings.Split(string(src), "\n") {
+				if banned.MatchString(line) {
+					offenders = append(offenders, path+":"+itoa(i+1)+"  "+strings.TrimSpace(line))
+				}
+			}
+			return nil
+		}
 		lines := strings.Split(string(src), "\n")
 		for i, line := range lines {
 			if !refusal.MatchString(line) {

@@ -20,7 +20,7 @@ import { DueBadge } from '@/components/DueBadge'
 import { effectiveNow } from '@/lib/effectiveNow'
 import { Layout } from '@/components/Layout'
 import { cn } from '@/lib/utils'
-import { statusBadgeVariant, creditNoteReasonLabel } from '@/lib/status'
+import { statusBadgeVariant, creditNoteReasonLabel, paymentIsUnresolved } from '@/lib/status'
 
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -593,7 +593,7 @@ export default function InvoiceDetailPage() {
             )
           })()}
 
-          {invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && invoice.payment_status !== 'processing' && invoice.amount_due_cents > 0 && (
+          {invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && !paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0 && (
             !hasPaymentMethod ? (
               // No card → no collect. A greyed-out primary next to the
               // banner's active primary was competing noise; the banner
@@ -641,26 +641,38 @@ export default function InvoiceDetailPage() {
               <MoreHorizontal size={16} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              {((invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && invoice.payment_status !== 'processing' && invoice.amount_due_cents > 0) ||
+              {((invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && !paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0) ||
                 invoice.status === 'uncollectible') && (
                 <DropdownMenuItem onClick={() => setShowRecordPaymentDialog(true)} disabled={acting}>
                   <Receipt size={14} className="mr-2" />
                   Record offline payment
                 </DropdownMenuItem>
               )}
-              {invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && invoice.payment_status !== 'processing' && (
+              {/* Mark uncollectible is the DELIBERATE exception (ADR-107). It is
+                  the only action permitted on a parked invoice — the one whose
+                  charge could not be identified — so hiding it here would leave
+                  that invoice with no way to reach any terminal state, which is
+                  the gap the write-off exists to close. A payment that is
+                  genuinely still resolving is a different matter and is still
+                  excluded. */}
+              {invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' &&
+                invoice.payment_status !== 'processing' && (
                 <DropdownMenuItem onClick={() => setShowMarkUncollectibleConfirm(true)} disabled={acting} className="text-amber-700 dark:text-amber-400">
                   <AlertOctagon size={14} className="mr-2" />
                   Mark uncollectible
                 </DropdownMenuItem>
               )}
-              {((invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && invoice.payment_status !== 'processing' && invoice.amount_due_cents > 0) ||
+              {((invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && !paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0) ||
                 invoice.status === 'uncollectible' ||
-                (invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && invoice.payment_status !== 'processing')) && (
+                (invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && !paymentIsUnresolved(invoice.payment_status))) && (
                 <DropdownMenuSeparator />
               )}
 
-              {invoice.status !== 'voided' && (
+              {/* Hidden while the payment is unresolved: the server refuses it
+                  (the email carries a pay call-to-action, and for a parked
+                  invoice the hosted page will not even show a Pay button), so
+                  offering it here is discovery-by-failure. */}
+              {invoice.status !== 'voided' && !paymentIsUnresolved(invoice.payment_status) && (
                 <DropdownMenuItem onClick={() => setShowEmailModal(true)} disabled={acting}>
                   <Mail size={14} className="mr-2" />
                   Email invoice
@@ -700,14 +712,22 @@ export default function InvoiceDetailPage() {
                 <Download size={14} className="mr-2" />
                 Download PDF
               </DropdownMenuItem>
-              {(invoice.status === 'finalized' || invoice.status === 'paid' || invoice.status === 'uncollectible') && (
+              {/* Refused while the payment is unresolved — crediting could
+                  refund money that was never collected. */}
+              {(invoice.status === 'finalized' || invoice.status === 'paid' || invoice.status === 'uncollectible') &&
+                !paymentIsUnresolved(invoice.payment_status) && (
                 <DropdownMenuItem onClick={() => setShowCreditModal(true)} disabled={acting}>
                   <CreditCard size={14} className="mr-2" />
                   Issue credit note
                 </DropdownMenuItem>
               )}
 
-              {invoice.status !== 'voided' && invoice.status !== 'paid' && (
+              {/* Refused while the payment is unresolved: voiding an invoice
+                  whose charge may have succeeded would annul something that was
+                  in fact paid. Mark uncollectible stays available above — it is
+                  the one exit for a parked invoice. */}
+              {invoice.status !== 'voided' && invoice.status !== 'paid' &&
+                !paymentIsUnresolved(invoice.payment_status) && (
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
@@ -1304,7 +1324,7 @@ export default function InvoiceDetailPage() {
         open={showVoidConfirm}
         onOpenChange={setShowVoidConfirm}
         title="Void Invoice"
-        description="Voiding annuls the invoice — it'll be treated as if it was never owed. Any applied credits are returned and any open charge attempt is cancelled. If a charge is actively processing, voiding is blocked — wait for it to settle or cancel it first. Use this when the invoice was created in error. For 'we tried to collect and failed', use Mark Uncollectible instead. This action cannot be undone."
+        description="Voiding annuls the invoice — it'll be treated as if it was never owed. Any applied credits are returned and any open charge attempt is cancelled. Voiding is blocked while a payment is unresolved: if the charge is still being confirmed the server will refuse until it reports an outcome, and if its outcome can never be identified the invoice must be marked uncollectible instead. Use this when the invoice was created in error. For 'we tried to collect and failed', use Mark Uncollectible instead. This action cannot be undone."
         confirmWord="VOID"
         confirmLabel="Void Invoice"
         onConfirm={() => voidMutation.mutate()}
@@ -1319,7 +1339,7 @@ export default function InvoiceDetailPage() {
         open={showMarkUncollectibleConfirm}
         onOpenChange={setShowMarkUncollectibleConfirm}
         title="Mark Invoice Uncollectible"
-        description="Records this invoice as bad debt. The invoice stays on the books for audit, but dunning automation halts and no further collection is attempted. Subscription stays active — cancel it separately if you also want to stop future billing. The invoice can later transition to paid (Record Payment) or void if circumstances change."
+        description="Records this invoice as bad debt. The invoice stays on the books for audit, but dunning automation halts and no further collection is attempted. Subscription stays active — cancel it separately if you also want to stop future billing. If the payment provider later confirms the charge did go through, the invoice still settles as paid on its own."
         confirmWord="WRITE OFF"
         confirmLabel="Mark Uncollectible"
         onConfirm={() => markUncollectibleMutation.mutate()}
