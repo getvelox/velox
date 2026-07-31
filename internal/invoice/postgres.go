@@ -2266,6 +2266,33 @@ func (s *PostgresStore) ListUnknownPayments(ctx context.Context, olderThan time.
 	return s.listInflightPayments(ctx, domain.PaymentUnknown, olderThan, limit)
 }
 
+// CountParkedInvoices counts invoices parked by ADR-107 — finalized, payment
+// unresolved, and carrying no PaymentIntent id, so nothing can name the attempt
+// and no sweep will resolve them.
+//
+// It exists because ListUnknownPayments deliberately EXCLUDES these rows (they
+// are not reconcilable, and leaving them in starved the queue). That exclusion
+// was correct but it also made them invisible, and "stuck and loud" was
+// log-only. This is the number an operator and an alert can act on.
+func (s *PostgresStore) CountParkedInvoices(ctx context.Context) (int, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		return 0, err
+	}
+	defer postgres.Rollback(tx)
+
+	var n int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM invoices
+		WHERE status = 'finalized'
+		  AND payment_status = 'unknown'
+		  AND COALESCE(stripe_payment_intent_id, '') = ''
+		  AND livemode = $1`, postgres.Livemode(ctx)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
 // ListProcessingPayments returns invoices stuck in payment_status 'processing'
 // older than the cool-off — the dropped-webhook backstop (ADR-049 Phase 2).
 // Same tenant-crossing + livemode-scoped shape as ListUnknownPayments.
@@ -3174,14 +3201,21 @@ func buildInvWhere(f ListFilter) (string, []any) {
 		// invoices out of this view until wall-clock catches up —
 		// the same trade Stripe's dashboard makes, and the per-row
 		// attention dot still reflects the authoritative state.
+		// 'unknown' is excluded alongside 'processing' because the comment above
+		// already states the intent — "not mid-payment" — and IsInFlight has
+		// always meant processing OR unknown. Leaving it in listed a PARKED
+		// invoice (ADR-107) as past-due and chaseable, when it is the one
+		// invoice no charge path will touch and whose money may already have
+		// been taken. The filter said what it meant; the SQL did not match it.
 		clauses = append(clauses, fmt.Sprintf(
-			"(status = $%d AND due_at IS NOT NULL AND due_at < now() AND payment_status NOT IN ($%d, $%d))",
-			idx, idx+1, idx+2))
+			"(status = $%d AND due_at IS NOT NULL AND due_at < now() AND payment_status NOT IN ($%d, $%d, $%d))",
+			idx, idx+1, idx+2, idx+3))
 		args = append(args,
 			string(domain.InvoiceFinalized),
 			string(domain.PaymentSucceeded),
-			string(domain.PaymentProcessing))
-		idx += 3
+			string(domain.PaymentProcessing),
+			string(domain.PaymentUnknown))
+		idx += 4
 	}
 	if len(f.IDs) > 0 {
 		// ids=... filter — same shape as customer.ListFilter.IDs.

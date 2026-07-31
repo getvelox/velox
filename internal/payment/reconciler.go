@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"time"
 
+	mw "github.com/sagarsuperuser/velox/internal/api/middleware"
 	"github.com/sagarsuperuser/velox/internal/auth"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/payment/breaker"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
+	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 )
 
 // ReconcileInvoiceStore is the narrow interface the reconciler needs from
@@ -29,6 +31,10 @@ type ReconcileInvoiceStore interface {
 	// that won the race during the GetPaymentIntent round-trip is observed
 	// (the snapshot from the sweep list may be stale).
 	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
+	// CountParkedInvoices reports invoices this sweep deliberately does NOT
+	// process (ADR-107) — excluding them from the queue must not also make
+	// them invisible.
+	CountParkedInvoices(ctx context.Context) (int, error)
 	UpdatePayment(ctx context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error)
 	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
 }
@@ -138,6 +144,19 @@ func (r *Reconciler) SetResolver(res clock.Resolver) { r.resolver = res }
 // settler), so a backstop-recovered settlement fires the full side-effects.
 // Returns the number resolved (succeeded or failed) and any per-invoice errors.
 func (r *Reconciler) Run(ctx context.Context, limit int) (int, []error) {
+	// Report the parked set before sweeping. These rows are excluded from the
+	// queries below by design; publishing the count is what keeps "stuck and
+	// loud" (ADR-107) actually loud, instead of log-only.
+	if n, err := r.invoices.CountParkedInvoices(ctx); err == nil {
+		mode := "live"
+		if !postgres.Livemode(ctx) {
+			mode = "test"
+		}
+		mw.RecordParkedInvoices(mode, n)
+	} else {
+		slog.WarnContext(ctx, "could not count parked invoices for the gauge", "error", err)
+	}
+
 	n1, e1 := r.sweep(ctx, "unknown", r.invoices.ListUnknownPayments, r.olderThan, limit)
 	n2, e2 := r.sweep(ctx, "processing", r.invoices.ListProcessingPayments, r.olderThanProcessing, limit)
 	return n1 + n2, append(e1, e2...)

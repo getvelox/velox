@@ -622,6 +622,29 @@ export default function HostedInvoicePage() {
                 It reappears only on an authoritative payment_status of
                 'failed' (no charge exists) or naturally when the invoice
                 flips paid (pay_enabled goes false). */}
+            {/* A customer whose invoice has an unresolved payment previously
+                arrived here, saw "Amount due", found no Pay button, and was
+                told nothing at all — the worst possible version of a page whose
+                entire job is to be payable. pay_enabled is false for both
+                in-flight states (ADR-107), so say WHICH one it is and what,
+                if anything, they should do. */}
+            {!data.pay_enabled && !isPaymentSettling(data) &&
+              (data.invoice.payment_status === 'processing' ||
+                data.invoice.payment_status === 'unknown') && (
+                <div className="rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/20 px-4 py-3">
+                  <p className="font-medium text-amber-800 dark:text-amber-300">
+                    {data.invoice.payment_status === 'processing'
+                      ? 'A payment for this invoice is being confirmed'
+                      : "We're checking a recent payment on this invoice"}
+                  </p>
+                  <p className="text-sm text-amber-700/80 dark:text-amber-400/80 mt-1">
+                    {data.invoice.payment_status === 'processing'
+                      ? "You don't need to do anything — we'll email a receipt once it completes."
+                      : "Payment is paused here so you can't be charged twice while we confirm it with our payment provider. If you've already been charged, nothing further is needed; otherwise we'll be in touch."}
+                  </p>
+                </div>
+              )}
+
             <section className="flex flex-col sm:flex-row gap-3 pt-2">
               {data.pay_enabled && !isPaymentSettling(data) ? (
                 <Button

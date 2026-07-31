@@ -165,3 +165,33 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// TestEmailActionsRefuseAnUnresolvedPayment pins the customer-facing half. Both
+// invoice emails carry a pay call-to-action, so sending either while a payment
+// is unresolved asks a customer to pay something we may already have taken —
+// and for a parked invoice the hosted page will not even offer a Pay button
+// when they arrive, so the email leads them to a dead end.
+func TestEmailActionsRefuseAnUnresolvedPayment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		inv  Invoice
+	}{
+		{"parked", Invoice{PaymentStatus: PaymentUnknown}},
+		{"resolving", Invoice{PaymentStatus: PaymentProcessing, StripePaymentIntentID: "pi_1"}},
+	} {
+		for _, action := range []InvoiceAction{ActionEmailInvoice, ActionResendSetupLink} {
+			got := PaymentBlocksAction(tc.inv, action)
+			if !got.Blocked {
+				t.Errorf("%s/%s: allowed — this email asks the customer to pay an invoice whose payment is unresolved", tc.name, action)
+			}
+		}
+	}
+
+	// Negative control: a normal unpaid invoice must still be emailable, or
+	// this guard would break ordinary collections.
+	for _, action := range []InvoiceAction{ActionEmailInvoice, ActionResendSetupLink} {
+		if PaymentBlocksAction(Invoice{PaymentStatus: PaymentPending}, action).Blocked {
+			t.Errorf("%s blocked on an ordinary unpaid invoice — that is the normal collections path", action)
+		}
+	}
+}

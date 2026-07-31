@@ -44,13 +44,19 @@ func TestBuildInvWhere_CreatedRange(t *testing.T) {
 
 func TestBuildInvWhere_Overdue(t *testing.T) {
 	where, args := buildInvWhere(ListFilter{Overdue: true})
-	for _, frag := range []string{"status = $1", "due_at IS NOT NULL", "due_at < now()", "payment_status NOT IN ($2, $3)"} {
+	for _, frag := range []string{"status = $1", "due_at IS NOT NULL", "due_at < now()", "payment_status NOT IN ($2, $3, $4)"} {
 		if !strings.Contains(where, frag) {
 			t.Fatalf("overdue clause missing %q in %q", frag, where)
 		}
 	}
-	if len(args) != 3 || args[0] != "finalized" || args[1] != "succeeded" || args[2] != "processing" {
-		t.Fatalf("want [finalized succeeded processing] args, got %v", args)
+	// 'unknown' joined 'processing' as an excluded status (ADR-107): the
+	// clause's own comment has always said "not mid-payment", and IsInFlight
+	// means processing OR unknown. Listing a PARKED invoice as past-due and
+	// chaseable pointed an operator at the one invoice no charge path will
+	// touch, and whose money may already have left the customer's account.
+	if len(args) != 4 || args[0] != "finalized" || args[1] != "succeeded" ||
+		args[2] != "processing" || args[3] != "unknown" {
+		t.Fatalf("want [finalized succeeded processing unknown] args, got %v", args)
 	}
 }
 
@@ -69,13 +75,13 @@ func TestBuildInvWhere_ComposedPlaceholderNumbering(t *testing.T) {
 		IDs:           []string{"inv_a", "inv_b"},
 	})
 	// 1 customer + 1 status + 1 payment_status + 1 search + 1 from +
-	// 3 overdue + 2 ids = 10 args.
-	if len(args) != 10 {
-		t.Fatalf("want 10 args, got %d: %v", len(args), args)
+	// 4 overdue + 2 ids = 11 args.
+	if len(args) != 11 {
+		t.Fatalf("want 11 args, got %d: %v", len(args), args)
 	}
 	// The highest placeholder must equal the arg count.
-	if !strings.Contains(where, "$10") || strings.Contains(where, "$11") {
-		t.Fatalf("placeholder numbering does not end at $10: %q", where)
+	if !strings.Contains(where, "$11") || strings.Contains(where, "$12") {
+		t.Fatalf("placeholder numbering does not end at $11: %q", where)
 	}
 	if !strings.Contains(where, "customer_id = $1") {
 		t.Fatalf("first clause should bind customer_id to $1: %q", where)
