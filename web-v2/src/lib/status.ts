@@ -39,3 +39,19 @@ export function creditNoteReasonLabel(reason: string): string {
     default: return reason
   }
 }
+
+// paymentIsUnresolved mirrors domain.InvoicePaymentStatus.IsInFlight() — the
+// server's single source for whether a payment blocks operator actions
+// (domain.PaymentBlocksAction). The dashboard used to hand-write
+// `!== 'succeeded' && !== 'processing'` at four call sites, all of which omitted
+// 'unknown' — so a parked invoice (ADR-107) rendered a green "Collect Payment"
+// button directly beneath a Critical banner saying no further charge would be
+// attempted.
+//
+// This is deliberately ONE copy rather than four, and the Go-side scanner now
+// walks .ts/.tsx so a fifth cannot quietly appear. The durable version is the
+// server returning per-action availability so the dashboard derives instead of
+// mirroring; until then, this is the single place to change.
+export function paymentIsUnresolved(paymentStatus: string): boolean {
+  return paymentStatus === 'processing' || paymentStatus === 'unknown'
+}

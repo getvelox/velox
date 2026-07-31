@@ -31,7 +31,20 @@ type PaymentBlock struct {
 //
 // It exists because this one rule used to be re-expressed by hand in eight
 // independent places — five service guards, two HTTP handlers and the
-// dashboard's own menu conditions — each with its own wording. When ADR-107
+// dashboard's own menu conditions — each with its own wording.
+//
+// CORRECTION (2026-07-31): when that sentence was first written only the seven
+// GO sites had been collapsed. The dashboard was named as if it derived from
+// here and did not: it went on hand-writing `payment_status !== 'succeeded' &&
+// !== 'processing'` at four call sites, every one omitting 'unknown', so a
+// parked invoice rendered a green "Collect Payment" button directly beneath a
+// Critical banner saying no further charge would be attempted. The scanner
+// below could not catch it because it walked only .go files — the mechanisation
+// was as good as its SCOPE, and its scope excluded the surface the comment was
+// boasting about. The dashboard now derives from a single frontend helper
+// (web-v2/src/lib/status.ts paymentIsUnresolved) and the scanner walks .ts/.tsx.
+// The durable version is the server returning per-action availability so the
+// dashboard derives rather than mirrors; one mirror beats four copies. When ADR-107
 // changed what payment_status='unknown' MEANS (from a transient state that
 // resolves in seconds to one that may never resolve), all eight became wrong
 // independently, and finding them took a four-agent sweep plus a manual walk of
