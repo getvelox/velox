@@ -150,8 +150,16 @@ func parkedMessage(action InvoiceAction) string {
 		return why + " — crediting it could refund money that was never collected. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead"
 	case ActionCollectPayment:
 		return why + " — charging again risks a second charge. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead"
-	case ActionResendSetupLink, ActionEmailInvoice:
+	case ActionResendSetupLink:
 		return why + " — that email tells the customer we will collect automatically, which will not happen. Resolve the attempt in Stripe first, or mark the invoice uncollectible"
+	case ActionEmailInvoice:
+		// Split from resend-setup-link after a walk read this refusal back:
+		// the invoice email's call to action is "View & pay invoice", not a
+		// promise to collect, so the shared sentence described the wrong
+		// email. What makes sending it wrong is that it asks for money we may
+		// already have taken, and lands the customer on a page with no Pay
+		// button.
+		return why + " — that email asks the customer to pay an invoice we may already have charged them for, and the hosted page will not offer them a Pay button when they arrive. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead"
 	default:
 		return why + " — resolve the attempt in Stripe, or mark the invoice uncollectible"
 	}
