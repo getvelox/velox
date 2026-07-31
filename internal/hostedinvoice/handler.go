@@ -456,7 +456,15 @@ func (h *Handler) checkoutReturnURLs(token string) (successURL, cancelURL string
 // amount_due=0 isn't payable either — that's a credit-fully-covered
 // invoice, not a Pay action.
 func payEnabled(inv domain.Invoice) bool {
-	return inv.Status == domain.InvoiceFinalized && inv.AmountDueCents > 0
+	// IsInFlight is load-bearing here, not decorative. An invoice whose payment
+	// is 'processing' or 'unknown' may have a live PaymentIntent, so the claim
+	// inside the checkout store refuses it — and without this term the page
+	// happily rendered a Pay button that answered 409 when the customer pressed
+	// it. A button that cannot do what it says is the UI-lies class, and on the
+	// one page a paying customer sees.
+	return inv.Status == domain.InvoiceFinalized &&
+		inv.AmountDueCents > 0 &&
+		!inv.PaymentStatus.IsInFlight()
 }
 
 func toViewInvoice(inv domain.Invoice) viewInvoice {

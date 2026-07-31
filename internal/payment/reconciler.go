@@ -186,12 +186,34 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 	ctx = auth.WithTenantID(ctx, inv.TenantID)
 
 	if inv.StripePaymentIntentID == "" {
-		// No PI ID to query (an 'unknown' invoice whose ambiguous charge error
-		// carried no PI). Settle failed so dunning/operator can decide; a safe
-		// retry generates a new PI.
-		slog.Warn("reconcile: no PI to query, settling failed",
-			"invoice_id", inv.ID, "tenant_id", inv.TenantID)
-		return r.settle(ctx, inv, "", 0, false, "unknown outcome: no payment_intent_id to reconcile", terminalFailed)
+		// DO NOTHING. This branch used to settle the invoice failed, with the
+		// comment "a safe retry generates a new PI" — which was the whole bug:
+		// an ambiguous charge may have left a PaymentIntent live at Stripe that
+		// we never learned the name of, and settling failed both bumps
+		// charge_attempt_seq (rotating the idempotency key) and moves
+		// payment_status into a claimable state, so the next retry opens a
+		// SECOND PaymentIntent beside the live one.
+		//
+		// Leaving it at 'unknown' closes that by construction, because every
+		// charge-claim predicate already excludes it:
+		//
+		//   ClaimAutoCharge            payment_status = 'pending'
+		//   ClaimChargeForManualCollect payment_status IN ('pending','failed')
+		//   ClaimChargeForDunningRetry  payment_status IN ('pending','failed')
+		//
+		// So no sweep, no operator click and no dunning retry can re-charge it.
+		// The invoice is stuck and LOUD rather than silently double-charged,
+		// which is the trade this makes deliberately (ADR-107).
+		//
+		// It is not a dead end: the ordinary payment_intent.* webhook names the
+		// PaymentIntent and settles the invoice through the normal path, which
+		// is what happens in almost every real occurrence. Only a LOST webhook
+		// plus a lost response needs a human.
+		slog.ErrorContext(ctx, "CRITICAL: an ambiguous charge left no PaymentIntent id — this invoice cannot be reconciled automatically and is deliberately left uncollectible rather than risk a second charge. Find the attempt in the Stripe dashboard (search by customer and amount) and settle or void it by hand",
+			"invoice_id", inv.ID, "tenant_id", inv.TenantID,
+			"customer_id", inv.CustomerID, "amount_due_cents", inv.AmountDueCents,
+			"invoice_number", inv.InvoiceNumber)
+		return false, nil
 	}
 
 	var res PaymentIntentResult
