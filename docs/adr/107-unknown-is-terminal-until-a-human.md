@@ -288,18 +288,35 @@ over this is *automatic* recovery — no human, no stuck invoice. That becomes
 worth its complexity when stuck invoices are frequent enough to cost more than
 the guards do.
 
-**Amended 2026-08-01 — "sound design, failed implementation" is too kind to
-this ADR and too harsh on ADR-106.** The convergence failures cluster around two
-things that are NOT intrinsic to record-before-effect: a key derived from
-`charge_attempt_seq` (an implementation choice — the intent could own its key,
-which removes the rotate-on-failure and identical-recomputation traps outright),
-and recovery by replay (whose 12h ceiling is imposed by Stripe's key retention,
-not chosen). ADR-106 now carries the resumable shape. Also worth stating plainly
-because this ADR's framing obscured it: `classifyStripeError`'s ambiguous/definite
-boolean is the single point of failure for the design BELOW too — calling an
-ambiguous outcome definite settles `failed`, bumps the seq, rotates the key and
-makes the invoice claimable again. Parking is not immune to that; it simply
-stacks fewer decisions on top of it.
+**Amended 2026-08-01 — the parking is FORCED, not chosen.** This ADR reads as
+though refusing to act were judged safer than replaying the attempt. It was not
+a judgement: replay is *impossible* here. The parked write goes through
+`UpdatePayment`, which bumps `charge_attempt_seq` unconditionally, so recording
+the ambiguous outcome **rotates the derived idempotency key** — and `main`
+persists the sent key nowhere. The only handle that could ever reach that
+PaymentIntent is destroyed by the very write that records the problem.
+
+That reframes ADR-106 as well. Its ledger is not an alternative safety posture;
+it is the thing that *retains the handle*, which is why it can recover an invoice
+this design must park. Its key derivation, which looked like incidental coupling,
+is load-bearing — it doubles as a staleness detector, since there is no separate
+seq column. See ADR-106's 2026-08-01 amendment, which corrects an earlier
+version of this note that recommended self-keying the intent; that change would
+have removed a signal, not a guard.
+
+Also worth stating plainly, because this ADR's framing obscured it:
+`classifyStripeError`'s ambiguous/definite boolean is the single point of failure
+for the design below too — calling an ambiguous outcome definite settles
+`failed`, bumps the seq, rotates the key and makes the invoice claimable again.
+Parking is not immune to that; it merely stacks fewer decisions on top of it.
+
+**A cheaper experiment than resuming the ledger:** stop bumping the seq when
+recording `unknown` with no PaymentIntent id. ADR-105's rule is that the seed
+moves "exactly when an attempt outcome was recorded", and `unknown` means none
+was — so the bump looks like an accident of routing through a shared statement
+that stamps an empty id. If that holds, the key stays reproducible and this
+design gains replay-based recovery with no ledger. UNVERIFIED; needs the
+money-path site-set enumeration first.
 
 **Trigger to revisit:** the first real stuck `unknown` invoice, or production
 cutover — whichever comes first. Resume it **on top of** this ADR, where its two
