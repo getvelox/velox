@@ -980,6 +980,15 @@ func (h *Handler) sendEmail(w http.ResponseWriter, r *http.Request) {
 		respond.NotFound(w, r, "invoice")
 		return
 	}
+
+	// This email carries a "View & pay invoice" button. Sending it for an
+	// invoice whose payment is unresolved asks the customer to pay something we
+	// may already have taken from them — and for a parked invoice (ADR-107) the
+	// hosted page will not even offer a Pay button when they arrive.
+	if b := domain.PaymentBlocksAction(inv, domain.ActionEmailInvoice); b.Blocked {
+		respond.Error(w, r, http.StatusConflict, "invalid_state", b.Code, b.Message)
+		return
+	}
 	if err != nil {
 		respond.InternalError(w, r)
 		return

@@ -141,6 +141,20 @@ var (
 		},
 	)
 
+	// parkedInvoices is the alerting surface for ADR-107. A parked invoice is
+	// money we may or may not have taken, that no charge path will touch and
+	// that no sweep will resolve — it needs a person. Until now "stuck and
+	// loud" was log-only, which is not loud: nothing counted them, so nothing
+	// could alert on them and an operator had no way to find them. Alert on
+	// this being non-zero, and on it growing.
+	parkedInvoices = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "velox_parked_invoices",
+			Help: "Finalized invoices whose charge attempt could not be identified with the provider (ADR-107). Each needs an operator: resolve it at the provider, then settle or write it off.",
+		},
+		[]string{"mode"},
+	)
+
 	scheduledCleanupRows = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "velox_scheduled_cleanup_rows_total",
@@ -162,6 +176,14 @@ func RecordStripeBreakerState(state string) {
 		v = 2
 	}
 	stripeBreakerState.Set(v)
+}
+
+// RecordParkedInvoices publishes the count of invoices parked by ADR-107 for
+// the given mode. Called from the payment reconciler each tick — the sweep that
+// deliberately no longer PROCESSES them is still the right place to REPORT
+// them, so excluding them from the queue did not also make them invisible.
+func RecordParkedInvoices(mode string, n int) {
+	parkedInvoices.WithLabelValues(mode).Set(float64(n))
 }
 
 // Metrics returns middleware that records HTTP request metrics.
