@@ -119,13 +119,28 @@ writes it again), so in any `ORDER BY … ASC LIMIT n` scan parked rows migrate 
 the head and stay there, and at `n` of them the queue stops serving anyone else.
 Two more were found by looking for the shape rather than the bug (2026-07-31):
 
-- **Dunning retries.** No charge path admits a parked invoice, so
-  `ClaimChargeForDunningRetry` declines, the adapter returns `ErrTransientSkip`,
+- **Dunning retries.** `ClaimChargeForDunningRetry` requires `payment_status IN
+  ('pending','failed')`, so it declines, the adapter returns `ErrTransientSkip`,
   and the transient handler deliberately does *not* reschedule — right for a
   Stripe blip, endless for an invoice that can never be charged. The run was
   re-selected every tick forever, each tick writing an attempt and rewinding it,
-  while its frozen `next_action_at` held the head of a `LIMIT 20` queue. Parked
-  sources are now excluded from `ListDueRuns` and its sim-time twin.
+  while its frozen `next_action_at` held the head of a `LIMIT 20` queue.
+  In-flight sources are now excluded from `ListDueRuns` and its sim-time twin.
+
+  **This shipped keyed on the wrong question first.** The exclusion originally
+  tested the PARKED shape — `unknown` with no PaymentIntent id — and carried a
+  comment asserting that a `processing` charge "does resolve on its own, so
+  skipping it is correct". Both halves were wrong, and the second was wrong in a
+  way that mattered: `reconcileOne` settles only TERMINAL provider outcomes and
+  skips `processing` / `requires_action` / `requires_confirmation` /
+  `requires_capture` on every sweep. An `unknown` invoice **with** an id whose PI
+  sits at `requires_action` (off-session SCA nobody completes) therefore never
+  resolves either, and spun exactly like a parked one. "Do we hold an id"
+  answered the wrong question. The right one is "can the claim succeed", and the
+  claim's own predicate answers it for every in-flight shape at once — so the
+  exclusion is now `domain.IsInFlight` expressed in SQL, matching the clawback
+  scan's predicate rather than special-casing beside it. Nothing is lost by the
+  widening: the moment a payment leaves flight the row is selectable again.
 - **Clawback drafts.** Covered under ADR-059's amendment: the draft's
   eligibility tested payment state alone, so a parked source deferred it
   permanently — no issue, no void, no log, and a gauge counting it forever.
@@ -143,6 +158,20 @@ anyway"), and the clawback's orphan guard is what voids the draft. An exclusion
 that also hid written-off invoices would fix one starvation by creating another
 — stranding the run active and the draft pending forever. Both directions are
 mechanised, in each scan, by mutation-verified tests.
+
+**A stuck `requires_action` PI is a dead end too, and deliberately keeps its
+exit at the provider.** An `unknown` invoice that DOES carry a PaymentIntent id
+gets the Info banner and every action refused with "wait for it to report an
+outcome" — correct, because the reconciler will settle it. Except when the PI
+parks at `requires_action`: then it waits forever and Velox offers no terminal
+action, which is the parked shape again. We are NOT adding a Velox-side write-off
+for it, because unlike a parked invoice this one is fully resolvable — the
+operator cancels or completes the PI in Stripe and the webhook settles the
+invoice through the ordinary path. The banner already says exactly that ("check
+the payment in Stripe, then cancel or retry it"), so the operator has a real
+lever and the copy names it. Revisit if a real invoice ever sits there long
+enough to be reported, at which point the honest fix is surfacing the PI's
+provider status rather than inventing a local override.
 
 **How often:** only when the response is lost *and* the `payment_intent.*`
 webhook never arrives. The webhook names the PaymentIntent and settles the
