@@ -2303,6 +2303,18 @@ func (s *PostgresStore) listInflightPayments(ctx context.Context, status domain.
 		WHERE payment_status = $1
 		  AND updated_at < $2
 		  AND livemode = $3
+		  -- A row with no PaymentIntent id is NOT reconcilable: the sweep
+		  -- resolves by querying Stripe for the id, and there is none. Since
+		  -- ADR-107 such a row is also parked forever, and nothing ever writes
+		  -- it again — so its updated_at is frozen and, under this
+		  -- oldest-first LIMIT, it would permanently head the queue. Once
+		  -- batch-size of them accumulate the sweep returns only parked rows
+		  -- and never reaches a NEW ambiguous charge that DOES carry an id and
+		  -- that Stripe would resolve in one call. Excluding them keeps this
+		  -- sweep about work it can actually finish; the parked set is
+		  -- surfaced by its own gauge instead (found by the honesty sweep,
+		  -- 2026-07-31 — a liveness sink introduced by ADR-107 itself).
+		  AND COALESCE(stripe_payment_intent_id, '') <> ''
 		ORDER BY updated_at ASC
 		LIMIT $4
 	`, string(status), olderThan, postgres.Livemode(ctx), limit)
