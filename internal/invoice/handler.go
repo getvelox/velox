@@ -1105,7 +1105,16 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		// blind re-charging an ambiguous outcome is how double charges
 		// happen. The claim below also excludes 'unknown'; this gate
 		// exists to say WHY instead of a generic conflict.
-		respond.Validation(w, r, domain.PaymentBlocksAction(inv, domain.ActionCollectPayment).Message)
+		//
+		// Carries the gate's CODE, not just its message. respond.Validation
+		// flattens everything to 422/validation_error, so a walk of all four
+		// parked refusals found this one alone answering a different code than
+		// void/send/resend — same rule, same sentence, and an API consumer
+		// still could not branch on it uniformly. The single source exists to
+		// stop exactly that divergence; it only works if callers pass both
+		// halves through.
+		b := domain.PaymentBlocksAction(inv, domain.ActionCollectPayment)
+		respond.Error(w, r, http.StatusConflict, "invalid_state", b.Code, b.Message)
 		return
 	}
 	if inv.AmountDueCents <= 0 {

@@ -59,6 +59,18 @@ Velox is therefore in the **defensible shape**, not the discouraged synchronous-
 2. **Idempotency key on every create** (`velox_inv_<id>_…`) — a lost/timed-out response replays the original PI rather than double-charging.
 3. **Lost-response recovery is explicit, not blind-retry** — a 5xx/timeout maps to `payment_status = unknown` (never `failed`); the reconciler then `GetPaymentIntent`s and settles through the same primitive. So a charge that succeeded-but-whose-response-was-lost is recovered, not missed.
 
+   **Amended 2026-07-31 ([ADR-107](107-unknown-is-terminal-until-a-human.md)).**
+   "The reconciler then `GetPaymentIntent`s" assumes we hold a PaymentIntent id.
+   In the sub-case where the response was lost *before* we learned the id — a
+   timeout with no body, or an ambiguous error carrying no PI — there is nothing
+   to call `GetPaymentIntent` with, so this condition does not hold and recovery
+   is not automatic. That invoice is **parked**: it stays `unknown`, no charge
+   path admits it (which is what makes a double charge unreachable rather than
+   merely guarded), and a human resolves it by writing it off. The condition as
+   written holds whenever an id exists, which is the overwhelming majority;
+   ADR-107 covers the remainder, and is where the parked state's operator
+   surfaces, gauge and liveness rules live.
+
 The webhook + reconciler remain idempotent backstops routing through the one primitive, so a backstop-recovered settlement is byte-identical to the inline one by construction. The only residual gap — post-success **disputes / reversals** — is the deferred async/dispute tail below, and is not a regression (webhook-only billers miss disputes too unless they subscribe to `charge.dispute.*`).
 
 ## Deferred (named triggers — the triggering surface does not exist yet)
