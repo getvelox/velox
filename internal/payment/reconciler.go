@@ -31,6 +31,12 @@ type ReconcileInvoiceStore interface {
 	// that won the race during the GetPaymentIntent round-trip is observed
 	// (the snapshot from the sweep list may be stale).
 	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
+	// RecordProviderSync stamps the provider's verbatim PaymentIntent status
+	// and the moment we observed it, for the non-terminal case this sweep
+	// cannot settle. It is what makes the queue rotate rather than jam, and
+	// what turns a long-running payment from silent into diagnosable
+	// (migration 0167).
+	RecordProviderSync(ctx context.Context, tenantID, id, providerStatus string) error
 	// CountParkedInvoices reports invoices this sweep deliberately does NOT
 	// process (ADR-107) — excluding them from the queue must not also make
 	// them invisible.
@@ -272,13 +278,39 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 		return r.settle(ctx, inv, res.ID, 0, suppressEmail, "reconciled: "+res.Status, terminalFailed)
 
 	case "processing", "requires_action", "requires_confirmation", "requires_capture":
-		// Still in flight on Stripe's side — give the webhook more time.
-		slog.Debug("reconcile: PI still in flight, skipping",
+		// Not terminal, so nothing settles here — but RECORD WHAT WE OBSERVED
+		// (migration 0167). This branch used to return with no write at all.
+		//
+		// That mattered because the sweep is LIMITed and ordered by how
+		// recently we looked: a row nothing ever writes never ages, so it
+		// headed the queue permanently and, once batch-size of them
+		// accumulated, newly-ambiguous charges were never reached at all. It is
+		// not a hypothetical shape — this package's own contract notes that
+		// "async methods legitimately sit in processing for days", and those
+		// are exactly the rows that used to freeze.
+		//
+		// Recording the observation makes the queue rotate instead, and makes a
+		// long-running payment diagnosable ("stuck at requires_action") rather
+		// than merely silent.
+		r.recordSync(ctx, inv, res.Status)
+		slog.Debug("reconcile: PI still in flight, recorded and skipping",
 			"invoice_id", inv.ID, "stripe_payment_intent_id", res.ID, "stripe_status", res.Status)
 		return false, nil
 
 	default:
 		return false, fmt.Errorf("unexpected stripe PI status %q", res.Status)
+	}
+}
+
+// recordSync stamps the provider's verbatim status and the moment we observed
+// it. Best-effort by design: a failed stamp must not fail the sweep or mask the
+// real payment state. The only cost of losing one is that this row is polled
+// again sooner than strictly necessary — the safe direction, since the write
+// exists to stop a never-resolving row from monopolising the queue.
+func (r *Reconciler) recordSync(ctx context.Context, inv domain.Invoice, providerStatus string) {
+	if err := r.invoices.RecordProviderSync(ctx, inv.TenantID, inv.ID, providerStatus); err != nil {
+		slog.WarnContext(ctx, "reconcile: could not record provider sync",
+			"invoice_id", inv.ID, "stripe_status", providerStatus, "error", err)
 	}
 }
 

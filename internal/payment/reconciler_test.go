@@ -61,6 +61,24 @@ func (m *mockReconcileStore) MarkPaid(_ context.Context, _, id string, piID stri
 	return *inv, nil
 }
 
+// RecordProviderSync MUTATES the stored invoice, matching the real store's
+// narrow UPDATE rather than swallowing the call. A no-op fake here would let a
+// test assert "the reconciler recorded the observation" against a double that
+// records nothing — the drift class that gave an earlier fix zero executing
+// coverage. It deliberately leaves ChargeAttemptSeq and UpdatedAt alone,
+// exactly as the SQL does, so a regression that starts bumping either is
+// visible here too.
+func (m *mockReconcileStore) RecordProviderSync(_ context.Context, _, id, providerStatus string) error {
+	inv, ok := m.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	inv.ProviderPaymentStatus = providerStatus
+	now := time.Now().UTC()
+	inv.ProviderSyncedAt = &now
+	return nil
+}
+
 func (m *mockReconcileStore) ListProcessingPayments(_ context.Context, _ time.Time, _ int) ([]domain.Invoice, error) {
 	var out []domain.Invoice
 	for _, inv := range m.unknowns {

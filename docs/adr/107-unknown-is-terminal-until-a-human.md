@@ -134,8 +134,13 @@ Two more were found by looking for the shape rather than the bug (2026-07-31):
   way that mattered: `reconcileOne` settles only TERMINAL provider outcomes and
   skips `processing` / `requires_action` / `requires_confirmation` /
   `requires_capture` on every sweep. An `unknown` invoice **with** an id whose PI
-  sits at `requires_action` (off-session SCA nobody completes) therefore never
-  resolves either, and spun exactly like a parked one. "Do we hold an id"
+  sits at `requires_action` therefore never resolved either, and spun exactly
+  like a parked one. (The first version of this paragraph blamed "off-session
+  SCA nobody completes" — wrong, and worth recording because the phrase was
+  inherited from a code comment and repeated without checking. Off-session SCA
+  is a DECLINE: Stripe's `authentication_required` is a decline code, so it
+  settles the invoice FAILED with dunning started. A live `requires_action` PI
+  comes from the hosted checkout.) "Do we hold an id"
   answered the wrong question. The right one is "can the claim succeed", and the
   claim's own predicate answers it for every in-flight shape at once — so the
   exclusion is now `domain.IsInFlight` expressed in SQL, matching the clawback
@@ -145,25 +150,26 @@ Two more were found by looking for the shape rather than the bug (2026-07-31):
   eligibility tested payment state alone, so a parked source deferred it
   permanently — no issue, no void, no log, and a gauge counting it forever.
 
-- **A fourth instance, KNOWN AND ACCEPTED (not fixed).** `ListUnknownPayments`
-  is `ORDER BY updated_at ASC LIMIT 50` and now excludes parked rows — but a PI
-  sitting at `requires_action` is a *different* never-moving row it still
-  admits: `reconcileOne` skips those with a bare `return false, nil`, writing
-  nothing, so `updated_at` stays frozen and the row heads this queue exactly as
-  parked rows once did. At batch-size of them the sweep returns only stuck rows
-  and never reaches a new ambiguous charge. Unlike the parked case they must NOT
-  simply be excluded — they are still reconcilable, and the sweep is what
-  notices when the customer finally authenticates. The obvious cheap fix,
-  touching `updated_at` on skip to rotate them to the back, is wrong: that
-  column feeds the attention banner's "since" and the staleness gate this very
-  query uses, so it would reset the operator's age signal every sweep. A correct
-  fix needs its own `last_reconcile_attempt_at` ordering column, which is a
-  migration for a hazard that requires 50 concurrently-stuck SCA invoices in one
-  mode to bite. **Trigger:** the parked/unknown gauge showing a sustained
-  batch-size population, or the first report of a new ambiguous charge going
-  unreconciled — whichever comes first. Recorded here rather than fixed because
-  the class is now the point of this section: the next oldest-first scan over
-  rows that stop moving should be recognised before it ships, not after.
+- **A fourth instance, NOW FIXED AT THE SOURCE (migration 0167).**
+  `ListUnknownPayments` was `ORDER BY updated_at ASC LIMIT 50`, and a PI sitting
+  at `requires_action` is a never-moving row it still admitted: `reconcileOne`
+  skipped those with a bare `return false, nil`, writing nothing, so
+  `updated_at` stayed frozen and the row headed the queue exactly as parked rows
+  once did.
+
+  This one was first registered as accepted-with-a-trigger, on the reasoning
+  that fixing it needed an ordering column for a hazard requiring ~50
+  concurrently-stuck invoices. That reasoning missed the real defect. The
+  reconciler was FETCHING the provider's status every sweep and throwing it
+  away — so the starvation, the banner's false promise of automatic resolution,
+  and the absence of any terminal state were three symptoms of one omission, not
+  three independent problems to be triaged separately. Recording the observation
+  fixes all three, and the ordering column falls out of it for free.
+
+  The sweep now orders by least-recently-observed, so a row it cannot resolve
+  rotates to the back instead of jamming the head. Ordering, not exclusion, on
+  purpose: these rows must keep being polled, because the sweep is what notices
+  when the customer finally authenticates.
 
 **A terminal invoice closes the payment question; it does not answer it.** Both
 fixes are scoped to invoices that are still OPEN, and that scoping is the load-
@@ -179,19 +185,44 @@ that also hid written-off invoices would fix one starvation by creating another
 — stranding the run active and the draft pending forever. Both directions are
 mechanised, in each scan, by mutation-verified tests.
 
-**A stuck `requires_action` PI is a dead end too, and deliberately keeps its
-exit at the provider.** An `unknown` invoice that DOES carry a PaymentIntent id
-gets the Info banner and every action refused with "wait for it to report an
-outcome" — correct, because the reconciler will settle it. Except when the PI
-parks at `requires_action`: then it waits forever and Velox offers no terminal
-action, which is the parked shape again. We are NOT adding a Velox-side write-off
-for it, because unlike a parked invoice this one is fully resolvable — the
-operator cancels or completes the PI in Stripe and the webhook settles the
-invoice through the ordinary path. The banner already says exactly that ("check
-the payment in Stripe, then cancel or retry it"), so the operator has a real
-lever and the copy names it. Revisit if a real invoice ever sits there long
-enough to be reported, at which point the honest fix is surfacing the PI's
-provider status rather than inventing a local override.
+**The reconciler now records what it observes (migration 0167).** It polls
+Stripe for every in-flight invoice on every sweep and, for a non-terminal
+PaymentIntent, used to return without writing anything. That discarded
+observation was a liveness bug: the sweep is `ORDER BY updated_at ASC LIMIT n`,
+so a row nothing ever writes never ages, heads the queue permanently, and at
+batch-size of them the sweep stops reaching newly-ambiguous charges entirely.
+Not a hypothetical shape — this package's own contract notes that "async methods
+legitimately sit in processing for days", and those are precisely the rows that
+froze. The sweep now orders by least-recently-observed, so an unresolvable row
+rotates to the back. Ordering, NOT exclusion, deliberately: these rows must keep
+being polled, because the sweep is what notices when they finally resolve.
+
+**What was deliberately NOT built.** An earlier version of this change added an
+operator "cancel payment attempt" action, then replaced it with the reconciler
+cancelling unreachable attempts automatically. Both were cut, and the reasoning
+is worth keeping because it nearly shipped twice:
+
+- The case they served is an ENGINE-minted PaymentIntent stalled on
+  `requires_action`. Every engine charge is `Confirm:true` + `OffSession:true`
+  with no `return_url`, and no `client_secret` is ever exposed to a customer
+  (verified: the frontend has no payment-confirmation code at all), so such an
+  attempt is unreachable by anyone — a genuine dead end.
+- But Velox never sets Stripe's `error_on_requires_action`, whose documented
+  purpose is exactly *"fail the payment attempt if the PaymentIntent transitions
+  into requires_action"*. **The right fix is preventing the state, not
+  remediating it** — one parameter instead of a cancel path, a provider-status
+  allow-list, an invariant guard for hosted checkout, and their tests.
+- And nobody could demonstrate the state occurs. Building remediation for a
+  state we can neither produce nor rule out is how a codebase accretes.
+
+**Open, with the experiment that settles it:** set `error_on_requires_action` on
+the engine charge — gated on first confirming which error type it raises.
+`classifyStripeError` maps `card_error`/`invalid_request` to a definite failure
+(invoice `failed`, dunning retries — correct), but anything else falls to the
+ambiguous default and would stamp `unknown`, trading a stuck `processing` for a
+parked invoice. That is worse, so the flag is not set blind. The check is a
+test-mode charge against `4000002500003155` (authentication-required) with
+`off_session`, reading back what Stripe returns.
 
 **How often:** only when the response is lost *and* the `payment_intent.*`
 webhook never arrives. The webhook names the PaymentIntent and settles the
@@ -200,6 +231,32 @@ occurrence. At zero customers the expected count is zero.
 
 **Stuck-and-loud beats silently-double-charged.** That is the whole trade, and
 it is the same one the no-silent-fallbacks rule makes everywhere else in billing.
+
+## Still open: the same defect on the REFUND path
+
+This ADR closed the "record a definite outcome for something we do not know"
+class on the CHARGE path. The refund path still has it, and it is recorded here
+rather than left in a branch description because an undocumented known defect on
+a money path is how the same lesson gets paid for twice.
+
+`creditnote/service.go` settles **any** refund error — including an ambiguous
+timeout or 5xx — as `RefundFailed`. That is the identical false statement
+`reconcileOne` used to make about charges.
+
+It is materially less dangerous, and the reason is worth stating precisely: the
+refund idempotency key is `velox_cn_<id>`, **invariant** — no attempt counter,
+so settling `failed` does NOT rotate it. A retry therefore dedups against the
+original and Stripe returns the existing refund. **A double refund is not
+reachable.** What remains is (a) a credit note asserting "refund failed" when it
+may have succeeded, which an operator and an auditor both read as fact, and (b)
+no self-recovery — a human must press retry.
+
+**Parked as #680**, alongside ADR-106's ledger. **Trigger:** the first ambiguous
+refund outcome observed in reality, or production cutover — whichever comes
+first. Resume it on top of this ADR: the shape of the fix is the same one that
+worked here (stop asserting the unknown; let the provider's own answer settle
+it), and the charge-side machinery — provider-status observation, sweep
+rotation — is now built and can be reused rather than re-invented.
 
 ## Why not the ledger (ADR-106)
 

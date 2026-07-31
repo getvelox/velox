@@ -199,7 +199,8 @@ const invCols = `id, tenant_id, customer_id, COALESCE(subscription_id,''), invoi
 	COALESCE(public_token_encrypted,''), COALESCE(billing_reason,''), COALESCE(stripe_invoice_id,''),
 	is_simulated, tax_reversed_at,
 	COALESCE(payment_anomaly_kind,''), COALESCE(payment_anomaly_payment_intent_id,''), COALESCE(payment_anomaly_captured_cents,0),
-	COALESCE(billing_timezone,''), no_pm_notified_at, charge_attempt_seq`
+	COALESCE(billing_timezone,''), no_pm_notified_at, charge_attempt_seq,
+	COALESCE(provider_payment_status,''), provider_synced_at`
 
 // qualifiedInvCols returns invCols with every column reference prefixed
 // by the given table alias. Used by ADR-029's per-clock queries that
@@ -2274,6 +2275,40 @@ func (s *PostgresStore) ListUnknownPayments(ctx context.Context, olderThan time.
 // are not reconcilable, and leaving them in starved the queue). That exclusion
 // was correct but it also made them invisible, and "stuck and loud" was
 // log-only. This is the number an operator and an alert can act on.
+// RecordProviderSync stamps what the reconciler just observed at the provider:
+// the verbatim PaymentIntent status and the moment we looked (migration 0167).
+//
+// It is deliberately the NARROWEST possible write. It does not touch
+// payment_status, stripe_payment_intent_id, charge_attempt_seq or updated_at —
+// which matters more than it looks:
+//
+//   - charge_attempt_seq seeds the Stripe idempotency key (ADR-105). Bumping it
+//     from an OBSERVATION would rotate the key without an attempt having
+//     happened, so the next retry could open a second PaymentIntent beside a
+//     live one. That is the exact double charge ADR-107 exists to prevent.
+//   - updated_at feeds the attention banner's "since" and this sweep's own
+//     staleness gate. Touching it every 5 minutes would reset the operator's
+//     age signal forever and make a stuck invoice look permanently fresh.
+//
+// So the poll records only what it learned, and the row's money state and age
+// remain the settle path's to write.
+func (s *PostgresStore) RecordProviderSync(ctx context.Context, tenantID, id, providerStatus string) error {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return err
+	}
+	defer postgres.Rollback(tx)
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE invoices
+		SET provider_payment_status = $1, provider_synced_at = now()
+		WHERE id = $2
+	`, providerStatus, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *PostgresStore) CountParkedInvoices(ctx context.Context) (int, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
@@ -2342,7 +2377,21 @@ func (s *PostgresStore) listInflightPayments(ctx context.Context, status domain.
 		  -- surfaced by its own gauge instead (found by the honesty sweep,
 		  -- 2026-07-31 — a liveness sink introduced by ADR-107 itself).
 		  AND COALESCE(stripe_payment_intent_id, '') <> ''
-		ORDER BY updated_at ASC
+		-- Least-recently-observed first, never-observed ahead of everything
+		-- (migration 0167). This replaced ORDER BY updated_at ASC, which was a
+		-- liveness sink: the reconciler writes NOTHING when it finds a
+		-- non-terminal PaymentIntent, so such a row's updated_at froze and it
+		-- headed this LIMITed queue forever — once batch-size of them
+		-- accumulated the sweep returned only stuck rows and never reached a
+		-- NEW ambiguous charge that Stripe resolves in one call. Now every poll
+		-- stamps provider_synced_at, so a row that cannot be resolved rotates to
+		-- the back and the queue round-robins.
+		--
+		-- Ordering, NOT exclusion, is the fix on purpose: these rows must keep
+		-- being polled (the sweep is what notices when the customer finally
+		-- authenticates), and every exclusion added during this arc risked
+		-- hiding a row from the very code that would end its wait.
+		ORDER BY provider_synced_at ASC NULLS FIRST, updated_at ASC
 		LIMIT $4
 	`, string(status), olderThan, postgres.Livemode(ctx), limit)
 	if err != nil {
@@ -2755,6 +2804,7 @@ func (s *PostgresStore) scanInvDest(inv *domain.Invoice) []any {
 		&inv.IsSimulated, &inv.TaxReversedAt,
 		&inv.PaymentAnomalyKind, &inv.PaymentAnomalyPaymentIntentID, &inv.PaymentAnomalyCapturedCents,
 		&inv.BillingTimezone, &inv.NoPMNotifiedAt, &inv.ChargeAttemptSeq,
+		&inv.ProviderPaymentStatus, &inv.ProviderSyncedAt,
 	}
 }
 

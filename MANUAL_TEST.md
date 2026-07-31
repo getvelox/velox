@@ -37,7 +37,7 @@ the canonical source, not a progress tracker.
 `R1` List + preview · `R2` Instantiate · `R3` Idempotent re-apply, no uninstall · `R4` Atomic rollback · `R5` Dashboard UI
 
 **Invoices**  
-`I1` Multiple meters · `I2` Negative usage · `I3` Manual line items · `I4` Void · `I4b` Uncollectible invoice lifecycle · `I4c` Parked payment (ADR-107) · `I5` Collect + payment timeline · `I5b` Invoice attention banner · `I6` Email + PDF preview · `I7` Zero-amount invoice · `I8` Currency consistency · `SUB7` Mid-period change outcome on the timeline + invoice · `I9` Credit note on void · `I9b` Credit note PDF totals reconcile · `I10` Hosted invoice page · `I11` `create_preview` · `I12` One-off invoice composer · `I13` Timeline completeness · `TR-CXL` Trial cancellation · `C-ARCH` Archive semantics
+`I1` Multiple meters · `I2` Negative usage · `I3` Manual line items · `I4` Void · `I4b` Uncollectible invoice lifecycle · `I4c` Parked payment (ADR-107) · `I4d` In-flight re-check queue rotates · `I5` Collect + payment timeline · `I5b` Invoice attention banner · `I6` Email + PDF preview · `I7` Zero-amount invoice · `I8` Currency consistency · `SUB7` Mid-period change outcome on the timeline + invoice · `I9` Credit note on void · `I9b` Credit note PDF totals reconcile · `I10` Hosted invoice page · `I11` `create_preview` · `I12` One-off invoice composer · `I13` Timeline completeness · `TR-CXL` Trial cancellation · `C-ARCH` Archive semantics
 
 **Dunning**  
 `D1` Retry cycle + escalation · `D2` Resolution · `D4` Self-service payment update · `D5` Dunning policy admin (CRUD + assignment + terminal actions)
@@ -1040,6 +1040,16 @@ Mark-uncollectible (terminal bad-debt) + its page UX + offline recovery back to 
 - [x] **Operator-driven uncollectible from the dunning resolve dialog** *(walked 2026-07-26 on NIM-000244: run → resolved/invoice_not_collectible AND invoice → uncollectible; banner + button changes verified.)* — on an active dunning run, click Resolve → pick **Write off invoice** → confirm. The dunning run flips to `resolved` with `resolution=invoice_not_collectible` AND the underlying invoice flips to `status=uncollectible` (cross-flow per ADR-036). Invoice detail page reflects the change: status banner reads "Marked uncollectible — recorded as bad debt", Collect Payment / Mark Uncollectible buttons disappear, Record Payment + Void + Issue Credit remain.
 - [x] **Uncollectible page UX (Stripe parity — verified across Stripe + Chargebee + Recurly 2026-05-20)** *(walked 2026-07-26: banner copy exact, menu = Record-offline/Email/Copy/Rotate/Preview-PDF/Download-PDF/Issue-CN/Void; Collect/Mark-Uncollectible/Finalize/Add-Line absent; attention banner hidden.)* — on an `uncollectible` invoice: InvoiceAttention banner is hidden, OperatorContext/Diagnosis card is hidden, status banner explains the bad-debt classification + that the subscription stays active + recovery options. Buttons present: Void, Email, Issue Credit, Record Payment, Copy Link, Preview/Download PDF. Buttons absent: Collect Payment, Mark Uncollectible, Finalize, Add Line Item.
 - [x] **Stripe-parity offline recovery: uncollectible → paid** *(walked 2026-07-26 on NIM-000244 with "Cheque #1234": paid/succeeded/paid_at, `out_of_band:` PI prefix, audit `recovered_from_status=uncollectible`, webhooks `invoice.payment_recorded` + `invoice.paid` both fired.)* — click Record Payment on an uncollectible invoice, optionally enter a reference (e.g. "Cheque #1234"), confirm. Invoice flips to `status=paid`, `payment_status=succeeded`, `paid_at` set, `stripe_payment_intent_id` prefixed `out_of_band:` so reports can distinguish operator-recorded payments from engine charges. Audit row carries `recovered_from_status=uncollectible`. Webhooks `invoice.payment_recorded` AND `invoice.paid` both fire (the latter from MarkPaid on every paid transition — card, credits, offline, dunning recovery). Active dunning run (if any) resolves to `payment_recovered`.
+
+## FLOW I4d: The in-flight re-check queue rotates (migration 0167)
+
+Setup: two finalized invoices forced in-flight with a PaymentIntent id —
+`UPDATE invoices SET payment_status='processing', stripe_payment_intent_id='pi_x' WHERE id='<inv>'` — one aged older than the other.
+
+- [ ] `ListProcessingPayments` with `LIMIT 1` returns the OLDER one first (never observed sorts first).
+- [ ] After a reconciler tick records it, the same `LIMIT 1` query returns the OTHER invoice — the queue moved on instead of returning the same row forever.
+- [ ] Once both have been observed, the least-recently-observed comes back up (round-robin, not permanent demotion).
+- [ ] `psql`: `provider_payment_status` / `provider_synced_at` populated after a tick; `charge_attempt_seq` and `updated_at` **unchanged** by the observation.
 
 ## FLOW I4c: Parked payment — charge attempt we cannot identify (ADR-107)
 
