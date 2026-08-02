@@ -62,8 +62,9 @@ func TestChargeInvoice_SyncSuccessSettlesInline(t *testing.T) {
 }
 
 // TestChargeInvoice_ProcessingStaysProcessing confirms a genuinely in-flight
-// status (async methods / off-session SCA) is NOT settled inline — it stays
-// `processing` and awaits the webhook (+ the reconciler backstop from Phase 2).
+// status (async methods / a PI Stripe returned non-terminal) is NOT settled
+// inline — it stays `processing` and awaits the webhook (+ the reconciler
+// backstop from Phase 2).
 func TestChargeInvoice_ProcessingStaysProcessing(t *testing.T) {
 	client := &mockStripeClient{piID: "pi_async", chargeStatus: "processing"}
 	invoices := newMockInvoiceUpdater()

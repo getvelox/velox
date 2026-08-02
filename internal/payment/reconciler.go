@@ -234,7 +234,19 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 		// PaymentIntent and settles the invoice through the normal path, which
 		// is what happens in almost every real occurrence. Only a LOST webhook
 		// plus a lost response needs a human.
-		slog.ErrorContext(ctx, "CRITICAL: an ambiguous charge left no PaymentIntent id — this invoice cannot be reconciled automatically and is deliberately left uncollectible rather than risk a second charge. Find the attempt in the Stripe dashboard (search by customer and amount) and settle or void it by hand",
+		//
+		// UNREACHABLE FROM THE SWEEP since #682: ListUnknownPayments excludes
+		// empty-PI rows at SQL (they are not reconcilable, and they starved the
+		// queue). This branch is kept as defense-in-depth so a future widening
+		// of the sweep's predicate cannot silently resurrect the give-up write
+		// this ADR deleted — if it ever logs, the sweep's SQL has drifted.
+		//
+		// The advice below matches the payment gate: Void is REFUSED on a
+		// parked invoice (a voided-then-succeeded invoice is a contradiction);
+		// mark-uncollectible is the one allowed exit. A prior version of this
+		// message said "settle or void it by hand" — advice the gate refuses,
+		// found by the 2026-08-02 design-review panel.
+		slog.ErrorContext(ctx, "CRITICAL: an ambiguous charge left no PaymentIntent id — this invoice cannot be reconciled automatically and is deliberately parked rather than risk a second charge. Find the attempt in the Stripe dashboard (search by customer and amount): if money was taken, the payment webhook settles it once Stripe reports it; if nothing was taken, mark the invoice uncollectible",
 			"invoice_id", inv.ID, "tenant_id", inv.TenantID,
 			"customer_id", inv.CustomerID, "amount_due_cents", inv.AmountDueCents,
 			"invoice_number", inv.InvoiceNumber)

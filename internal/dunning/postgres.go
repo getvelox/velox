@@ -610,8 +610,11 @@ func (s *PostgresStore) ListDueRuns(ctx context.Context, tenantID string, dueBef
 			-- reconciler settles only TERMINAL provider outcomes — reconciler.go
 			-- skips processing/requires_action/requires_confirmation/
 			-- requires_capture every sweep — so an 'unknown' invoice WITH an id
-			-- whose PI sits at requires_action (off-session SCA nobody completes)
-			-- never resolves either, and spun exactly like a parked one. Drawing
+			-- whose PI sits at requires_action (a PI stalled non-terminal that
+			-- nothing advances; NOT "off-session SCA", which raises the
+			-- authentication_required DECLINE instead — phrase retracted
+			-- 2026-07-31, see ADR-107) never resolves either, and spun exactly
+			-- like a parked one. Drawing
 			-- the line at "do we hold an id" answered the wrong question; the
 			-- right one is "can this claim succeed", and the claim's own
 			-- predicate answers it for every in-flight shape at once. This is
