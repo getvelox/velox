@@ -624,10 +624,13 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		// Idempotency conflict: the key was already used with different
 		// parameters, so a PaymentIntent for this attempt EXISTS at Stripe but
 		// this response carries no id for it. The reconciler cannot query what
-		// it cannot name, so its no-PI branch will settle this failed and a
-		// later retry may open a second PI beside the live one. Name the key
-		// at ERROR — Stripe's dashboard is searchable by idempotency key, so
-		// this line is the operator's route to the actual PaymentIntent.
+		// it cannot name, so the invoice PARKS at 'unknown' (ADR-107) and no
+		// charge path will touch it again — a prior version of this comment
+		// said the no-PI branch "will settle this failed and a later retry may
+		// open a second PI", which was true pre-#681 and is exactly the write
+		// that ADR deleted. Name the key at ERROR — Stripe's dashboard is
+		// searchable by idempotency key, so this line is the operator's route
+		// to the actual PaymentIntent behind a parked invoice.
 		if isIdempotencyConflict(err) && pe.PaymentIntentID == "" {
 			slog.Error("CRITICAL: idempotency conflict with no PaymentIntent id — an attempt EXISTS at Stripe but cannot be reconciled automatically; look this key up in the Stripe dashboard before retrying",
 				"invoice_id", inv.ID,
@@ -742,7 +745,11 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 	// dev. The webhook + reconciler stay idempotent backstops (SettleSucceeded
 	// skips an already-paid invoice). Genuinely-async statuses (processing /
 	// requires_action / requires_confirmation / requires_capture — delayed
-	// methods, or rare off-session SCA) stay `processing` and await the webhook.
+	// methods; or a non-terminal PI Stripe can return because
+	// error_on_requires_action is not set, see ADR-107) stay `processing` and
+	// await the webhook. NOT "off-session SCA": that raises the
+	// authentication_required DECLINE (a card error → definite failure), it
+	// does not park a PI here — the phrase was retracted 2026-07-31.
 	if result.Status == "succeeded" {
 		settleCtx := ctx
 		if sim, ok := clock.SimOf(ctx); ok {
