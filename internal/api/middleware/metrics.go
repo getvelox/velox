@@ -158,7 +158,7 @@ var (
 	parkedInvoices = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "velox_parked_invoices",
-			Help: "Finalized invoices whose charge attempt could not be identified with the provider (ADR-107). Each needs an operator: resolve it at the provider, then settle or write it off.",
+			Help: "Finalized invoices whose charge attempt could not be identified with the provider (ADR-107). The search sweep (ADR-108) adopts any it can find at the provider; the rest need an operator — resolve at the provider or write off.",
 		},
 		[]string{"mode"},
 	)

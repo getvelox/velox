@@ -620,14 +620,18 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			status = domain.PaymentUnknown
 			verb = "payment state unknown"
 			if pe.PaymentIntentID == "" {
-				// PARKED (ADR-107). With no PaymentIntent id the reconciler
-				// cannot query anything, so this invoice will not resolve on
-				// its own and is deliberately excluded from every charge path
-				// rather than risk a second charge. This is the ONE place it is
-				// announced — the sweep no longer re-lists it, precisely so
-				// this does not become an identical CRITICAL every tick
-				// forever, which is how real alerts get buried.
-				slog.ErrorContext(ctx, "CRITICAL: a charge attempt could not be identified at the provider — this invoice is parked and will NOT resolve automatically. Find the attempt in the Stripe dashboard (search by customer and amount); if no charge succeeded, mark the invoice uncollectible to close it out",
+				// PARKED (ADR-107). With no PaymentIntent id the GetPaymentIntent
+				// sweeps cannot query anything, so the invoice is deliberately
+				// excluded from every charge path rather than risk a second
+				// charge. Since ADR-108 it is not strictly terminal: the
+				// search-and-adopt sweep looks the attempt up by metadata and
+				// adopts it if the provider can find it — but only a FOUND
+				// PaymentIntent may resolve this, so the operator advice below
+				// stays. This is the ONE place the park is announced — the
+				// sweeps do not re-announce it, precisely so this does not
+				// become an identical CRITICAL every tick forever, which is
+				// how real alerts get buried.
+				slog.ErrorContext(ctx, "CRITICAL: a charge attempt could not be identified at the provider — this invoice is parked; Velox will keep searching the provider and adopts the attempt if it can be found, but if it cannot be found this will not resolve on its own. If it is still parked tomorrow: find the attempt in the Stripe dashboard (search by customer and amount); if no charge succeeded, mark the invoice uncollectible to close it out",
 					"invoice_id", inv.ID, "tenant_id", tenantID,
 					"customer_id", inv.CustomerID, "invoice_number", inv.InvoiceNumber,
 					"amount_due_cents", inv.AmountDueCents, "error", pe.Message)
@@ -641,9 +645,11 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		}
 		// Idempotency conflict: the key was already used with different
 		// parameters, so a PaymentIntent for this attempt EXISTS at Stripe but
-		// this response carries no id for it. The reconciler cannot query what
-		// it cannot name, so the invoice PARKS at 'unknown' (ADR-107) and no
-		// charge path will touch it again — a prior version of this comment
+		// this response carries no id for it. The GetPaymentIntent sweeps cannot
+		// query what they cannot name, so the invoice PARKS at 'unknown'
+		// (ADR-107) and no charge path will touch it again — though this shape
+		// is exactly ADR-108's best case: a PI provably EXISTS, so the search
+		// sweep will usually find and adopt it. A prior version of this comment
 		// said the no-PI branch "will settle this failed and a later retry may
 		// open a second PI", which was true pre-#681 and is exactly the write
 		// that ADR deleted. Name the key at ERROR — Stripe's dashboard is
