@@ -2394,17 +2394,21 @@ func (s *PostgresStore) AdoptPaymentIntentIfParked(ctx context.Context, tenantID
 	}
 	defer postgres.Rollback(tx)
 
+	// DB-side now(), same as RecordProviderSync above: this is an operational
+	// wall-clock stamp (it feeds the processing sweep's staleness cool-off),
+	// and the ADR-030 gate rightly refuses bare time.Now() in clock-pinned
+	// packages.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoices SET
 			stripe_payment_intent_id = $1,
 			payment_status = 'processing',
 			charge_attempt_seq = charge_attempt_seq + 1,
-			updated_at = $2
-		WHERE id = $3
+			updated_at = now()
+		WHERE id = $2
 		  AND payment_status = 'unknown'
 		  AND COALESCE(stripe_payment_intent_id, '') = ''
 		  AND status = 'finalized'
-	`, paymentIntentID, time.Now().UTC(), id)
+	`, paymentIntentID, id)
 	if err != nil {
 		return false, err
 	}
