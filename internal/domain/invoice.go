@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -80,6 +81,45 @@ const (
 // uncollectible an invoice with open payments").
 func (s InvoicePaymentStatus) IsInFlight() bool {
 	return s == PaymentProcessing || s == PaymentUnknown
+}
+
+// OutOfBandPaymentIntentPrefix marks the synthetic PaymentIntent id that
+// RecordOfflinePayment stamps ("out_of_band:<RFC3339>") so an operator-recorded
+// bank transfer / cheque is distinguishable from an engine-collected card
+// charge. It is NOT a Stripe id: nothing at the provider will resolve it.
+const OutOfBandPaymentIntentPrefix = "out_of_band:"
+
+// HasCardPayment reports whether this invoice's settled money is refundable to
+// a card — i.e. a real Stripe PaymentIntent backs it. False for never-charged
+// invoices AND for offline-recorded ones, whose PI field holds only the
+// synthetic OutOfBandPaymentIntentPrefix marker.
+//
+// This is the single canonical answer to "can money go back the way it came?".
+// It exists because the rule was hand-copied at four sites while the three that
+// actually move refund money tested only `!= ""` — so an operator could promise
+// a card refund on a bank transfer, Velox would call Stripe with the synthetic
+// marker as a PaymentIntent id, and the credit note issued with a permanently
+// failed refund leg that no retry could ever clear (found walking FLOW C2,
+// 2026-08-02: VLX-000068 offered "Refund to card — max $53.62" on an invoice
+// paid entirely by bank transfer; Retry refund answered HTTP 500 forever).
+//
+// Callers that move refund money must gate on this, not on a bare emptiness
+// check: an out-of-band invoice has a NON-empty PI that is not a PI.
+func (i Invoice) HasCardPayment() bool {
+	return i.StripePaymentIntentID != "" &&
+		!strings.HasPrefix(i.StripePaymentIntentID, OutOfBandPaymentIntentPrefix)
+}
+
+// CardRefundableCents is the ceiling on what a credit note may push back to the
+// card: what the card actually settled, less refunds already committed by
+// prior (non-voided) credit notes. Zero when no card backs the payment, which
+// collapses the offline case into the SAME cap the over-refund path already
+// enforces rather than adding a second, parallel guard.
+func (i Invoice) CardRefundableCents(priorRefundCents int64) int64 {
+	if !i.HasCardPayment() {
+		return 0
+	}
+	return max(0, i.AmountPaidCents-priorRefundCents)
 }
 
 // Provider PaymentIntent statuses, verbatim from Stripe. These name the values
