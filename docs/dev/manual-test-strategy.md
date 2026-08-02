@@ -267,6 +267,22 @@ to reconcile them **without leaving the page**.
 > **Drove:** Invariant A — any row whose two calendars differ shows both, so the
 > invoice timeline and the Sent-emails card can be checked against each other.
 
+### 3.13 Tick-phase fixture — open a race window against the real scheduler
+
+Some boxes assert a race: "X happens between the moment a state becomes due and
+the moment the scheduler processes it." A clock advance cannot walk these — the
+catchup runs synchronously inside the advance, closing exactly the window under
+test. Shrinking the scheduler interval walks a *different configuration* than
+production. Instead: observe a real tick fire (log timestamp), then **backdate
+the row's due-time immediately after it** — the premise is now true and the
+untouched production scheduler will not look again for a full interval. The walk
+gets a race window as wide as the tick interval, with zero product changes and
+the binary in its exact production configuration.
+
+> **Proved:** FLOW I4d's rotation (one row observed per tick, on cue) and FLOW
+> TR-CXL's elapsed-trial cancel (2026-08-02) — both walked in 5-minute windows
+> phase-locked to logged tick times.
+
 ---
 
 ## 4. The per-box protocol
@@ -304,6 +320,26 @@ For each box, in order. Steps 4 and 7 are the ones most often skipped.
   later).
 - **Keep the fixture that proves the finding**, and name it in the box, so the
   next session can re-observe rather than rebuild.
+
+### The DB-write gate — three questions before any psql fixture (2026-08-02)
+
+Operator paths walk everything the box asserts; a direct DB write is a scalpel
+for exactly one thing — a **temporal premise** no wall-clock flow can produce on
+demand ("parked two hours ago", "trial just elapsed"). Before writing, answer
+all three:
+
+1. **Which axis does the box assert on?** Never write that axis. (I4d asserts
+   on `provider_synced_at` ordering → only `updated_at`, the window axis, was
+   ever poked; every observation was written by the real reconciler.)
+2. **Which real flow created this row?** A poke may move a row's *clock*, never
+   its *shape*. Seeding the state under test is where walks rot.
+3. **Would the external contracts agree this state is possible?** Check the
+   provider (a PI id must exist at Stripe — I4d's own setup line said `'pi_x'`
+   and could not have passed its boxes), triggers (0021 silently overwrites
+   `livemode` on bypass inserts), and RLS (mode scoping) *before* the write —
+   each of these produced a false alarm or a dead fixture when skipped.
+
+A write that fails any question isn't a fixture; it's a different system.
 
 ---
 
