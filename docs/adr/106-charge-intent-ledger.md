@@ -406,18 +406,43 @@ gone. Resuming this ADR restores that capability.
 
 **Resume it as written.** The branch works; the guards each earn their place.
 
-### One cheaper experiment to run first
+### One cheaper experiment to run first — RUN AND REFUTED (2026-08-02)
 
-Do not bump `charge_attempt_seq` when recording `unknown` with no PaymentIntent
-id. ADR-105's own rule is that the seed moves "exactly when an attempt outcome
-was recorded", and `unknown` means no outcome was recorded — so the bump appears
-to be an accident of routing through the shared `UpdatePayment` statement, which
-stamps an EMPTY PaymentIntent id and bumps anyway. The CI gate only enforces
-"if you stamp, you bump", never the converse.
+The experiment proposed here (do not bump `charge_attempt_seq` when recording
+`unknown` with no PaymentIntent id, so the key stays reproducible and `main`
+gains replay without a ledger) was taken through the full money-path discipline:
+a three-sweep site-set enumeration, a complete design, and an adversarial attack
+round. It is REFUTED, twice over:
 
-If that holds, the key stays reproducible and `main` gains replay-based recovery
-with no ledger at all — which would change the economics of this entire ADR.
-UNVERIFIED: it touches the double-charge invariant and needs the money-path
-site-set enumeration (every writer of the seq, every reader of the key, every
-path by which a parked invoice becomes claimable) before anyone acts on it.
+- **Economics.** The wire key is the derived seed plus `"_<PaymentMethodID>"`,
+  appended in `stripe_client.go` — and the PM used at attempt time is persisted
+  NOWHERE (0162's `invoice_charge_attempts` has no PM column; the PM is resolved
+  from the customer's CURRENT default on every charge). Recomputing it at
+  recovery time is a heuristic proxy for the attempt-time PM: a card change
+  inside the window mints a NEW key and a fresh charge. So honest replay needs a
+  migration, a recorder change, and a key-derivation refactor — the "tens of
+  lines" framing was false.
+- **A grounded BREAKS.** Even with the PM persisted, replay reconstructs the key
+  from bookkeeping (the best-effort 0162 attempt row) that cannot prove it
+  describes the CURRENT parked attempt. The attack round produced a concrete
+  code-grounded sequence — a stale attempt row surviving a decline-then-park
+  history — where the reconstructed key is one Stripe has never seen, which
+  executes a fresh charge beside a possibly-live PI. The fix (persisting an
+  attempt discriminator and refusing on mismatch) converges on storing the
+  key — i.e. on this ledger — at which point the experiment is not cheaper.
 
+**Where the recoverability question actually landed:** [ADR-108]
+(108-parked-invoices-search-and-adopt.md). Stripe's PaymentIntent Search API can
+find an unnamed PI by the `velox_invoice_id` metadata every engine PI has always
+carried — a READ, so it cannot double-charge. Its found-PI arms survived the
+same attack round; its give-up arms did not and were deleted from the design.
+That delivers the automatic-recovery delta this ledger promised for the common
+parked case, with no table, no TTL, and no replay.
+
+**Panel verdict, recorded (2026-08-02).** A four-judge independent panel scored
+this ledger against the shipped design on six dimensions, grounded in the code:
+4–0 for the shipped design, five dimensions unanimous, the ledger winning only
+recoverability. This ADR therefore stays PARKED; its trigger is unchanged, and
+if it ever fires, resume per the 2026-08-01 amendment above — after ADR-108's
+search-and-adopt has been given the chance to resolve the case first, since it
+covers the same residual read-only.

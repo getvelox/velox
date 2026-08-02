@@ -41,6 +41,15 @@ type ReconcileInvoiceStore interface {
 	// process (ADR-107) — excluding them from the queue must not also make
 	// them invisible.
 	CountParkedInvoices(ctx context.Context) (int, error)
+	// ListParkedSearchable is the ADR-108 sweep's input: parked invoices
+	// (unknown, empty PI id, finalized) old enough to search and not searched
+	// within the cool-off. Rotation, rate-pacing and the re-search interval
+	// all live in its predicate.
+	ListParkedSearchable(ctx context.Context, olderThan time.Time, limit int) ([]domain.Invoice, error)
+	// AdoptPaymentIntentIfParked stamps a search-found LIVE PaymentIntent onto
+	// a parked invoice via a CAS on the full parked shape. false = another
+	// path (usually the webhook) won the race; the caller does nothing.
+	AdoptPaymentIntentIfParked(ctx context.Context, tenantID, id, paymentIntentID string) (bool, error)
 	UpdatePayment(ctx context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error)
 	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
 }
@@ -93,6 +102,14 @@ type Reconciler struct {
 	// clock — that's the legacy behavior, preserved so the constructor
 	// stays zero-arg.
 	resolver clock.Resolver
+	// searchDisabled remembers account+mode pairs whose provider refused the
+	// Search API itself (ErrSearchNotOffered — a request-shape error that
+	// will not heal). Announce-once: first sight logs CRITICAL, later ticks
+	// skip silently, and those tenants keep exactly the pre-ADR-108 behavior
+	// (parked + gauge + write-off exit). Process-lifetime is deliberate: a
+	// provider enabling search for an account is a deploy-scale event, not a
+	// tick-scale one.
+	searchDisabled map[string]bool
 }
 
 // NewReconciler constructs a Reconciler. If olderThan <= 0, defaults to 60s
@@ -108,6 +125,7 @@ func NewReconciler(client StripeClient, invoices ReconcileInvoiceStore, olderTha
 		olderThan:           olderThan,
 		olderThanProcessing: 30 * time.Minute,
 		now:                 func() time.Time { return time.Now().UTC() },
+		searchDisabled:      map[string]bool{},
 	}
 }
 
@@ -165,7 +183,163 @@ func (r *Reconciler) Run(ctx context.Context, limit int) (int, []error) {
 
 	n1, e1 := r.sweep(ctx, "unknown", r.invoices.ListUnknownPayments, r.olderThan, limit)
 	n2, e2 := r.sweep(ctx, "processing", r.invoices.ListProcessingPayments, r.olderThanProcessing, limit)
-	return n1 + n2, append(e1, e2...)
+	n3, e3 := r.sweepParked(ctx, limit)
+	errs := append(e1, e2...)
+	return n1 + n2 + n3, append(errs, e3...)
+}
+
+// parkedSearchAge is how long an invoice must have been parked before the
+// ADR-108 sweep spends a search on it — 60x Stripe's documented normal search
+// indexing lag ("under 1 minute"), so the ordinary payment_intent.* webhook
+// wins the common race and early empty results (which we would ignore anyway)
+// are mostly avoided.
+const parkedSearchAge = time.Hour
+
+// sweepParked is the ADR-108 search-and-adopt sweep: for each parked invoice,
+// ask Stripe for the PaymentIntents carrying its velox_invoice_id metadata and
+// act on POSITIVE evidence only.
+//
+//   - any SUCCEEDED PI  -> settle paid with it (newest first). Money moved;
+//     recording it is the resolution ADR-107 always wanted.
+//   - else any LIVE PI  -> CAS-adopt the newest (unknown -> processing WITH an
+//     id); the invoice joins the ordinary sweeps and resolves there.
+//   - terminal-only / nothing / error -> record an observation and WRITE NO
+//     MONEY OUTCOME. Absence from an eventually-consistent index proves
+//     nothing — the outage that mints a parked row is the same weather that
+//     delays its PI's indexing, and a stale PI from a previous attempt can be
+//     indexed while the one that matters is not (both attack-verified,
+//     ADR-108). The deleted give-up write stays deleted.
+func (r *Reconciler) sweepParked(ctx context.Context, limit int) (int, []error) {
+	before := r.now().Add(-parkedSearchAge)
+	invoices, err := r.invoices.ListParkedSearchable(ctx, before, limit)
+	if err != nil {
+		return 0, []error{fmt.Errorf("list parked searchable: %w", err)}
+	}
+
+	mode := "live"
+	if !postgres.Livemode(ctx) {
+		mode = "test"
+	}
+
+	var errs []error
+	resolved := 0
+	for _, inv := range invoices {
+		if r.searchDisabled[inv.TenantID+"/"+mode] {
+			continue
+		}
+		ok, serr := r.searchAndAdoptOne(ctx, inv, mode)
+		if serr != nil {
+			errs = append(errs, serr)
+		}
+		if ok {
+			resolved++
+		}
+	}
+	return resolved, errs
+}
+
+func (r *Reconciler) searchAndAdoptOne(ctx context.Context, inv domain.Invoice, mode string) (bool, error) {
+	// Per-tenant credentials, same as reconcileOne: background ctx carries no
+	// auth, and the search must run under THIS invoice's tenant + mode key.
+	ctx = auth.WithTenantID(ctx, inv.TenantID)
+
+	results, err := r.client.SearchPaymentIntentsByInvoiceID(ctx, inv.ID)
+	switch {
+	case errors.Is(err, ErrStripeNotConfigured):
+		// No credentials for this mode (common in dev) — not a provider
+		// refusal; skip quietly and let the next tick retry.
+		return false, nil
+	case errors.Is(err, ErrSearchNotOffered):
+		// Request-shape refusal (the documented India case and its kin).
+		// Disable for this account+mode and say so ONCE — those tenants keep
+		// exactly the pre-ADR-108 behavior, visibly (the parked gauge still
+		// counts their rows and the write-off remains the exit).
+		r.searchDisabled[inv.TenantID+"/"+mode] = true
+		mw.RecordParkedSearchError(mode, "not_offered")
+		slog.ErrorContext(ctx, "CRITICAL: payment provider refuses the Search API for this account — parked invoices here cannot self-resolve and keep the manual write-off exit (ADR-108)",
+			"tenant_id", inv.TenantID, "mode", mode, "error", err)
+		return false, nil
+	case err != nil:
+		// Transient (rate limit, 5xx, network). Stamp the row anyway — the
+		// stamp is an honest observation ("we asked; the call failed") and it
+		// is what keeps the rotation moving: an un-stamped erroring row would
+		// hold the head of this LIMITed queue forever, the exact starvation
+		// shape 0167 fixed for the sibling sweeps.
+		mw.RecordParkedSearchError(mode, "transient")
+		r.recordSync(ctx, inv, "search_error")
+		slog.WarnContext(ctx, "parked search failed; will retry after the cool-off",
+			"invoice_id", inv.ID, "tenant_id", inv.TenantID, "error", err)
+		return false, nil
+	}
+
+	// Precedence is explicit and tested (attack-verified): a first-match loop
+	// over an unordered result set can reach a wrong conclusion from a partial
+	// view. Succeeded beats live; within a class, NEWEST by provider creation
+	// time — the stale-history bias of an eventually-consistent index means
+	// older attempts' PIs are always the better-indexed ones.
+	var succeeded, live *PaymentIntentResult
+	for i := range results {
+		pi := results[i]
+		switch pi.Status {
+		case "succeeded":
+			if succeeded == nil || pi.CreatedAt > succeeded.CreatedAt {
+				succeeded = &results[i]
+			}
+		case "processing", "requires_action", "requires_confirmation", "requires_capture":
+			if live == nil || pi.CreatedAt > live.CreatedAt {
+				live = &results[i]
+			}
+		}
+	}
+
+	switch {
+	case succeeded != nil:
+		// Settle through the shared primitive — full side-effects, race-guarded
+		// (settle re-reads fresh and skips an already-settled invoice). Any
+		// SECOND succeeded PI is left to the webhook path, whose already-paid +
+		// different-PI branch escalates the duplicate-charge anomaly.
+		// suppressEmail=false: it only gates the FAILURE email, and this arm
+		// settles success.
+		done, serr := r.settle(ctx, inv, succeeded.ID, succeeded.AmountReceivedCents, false, "adopted: search found succeeded PI", terminalSucceeded)
+		if serr != nil {
+			return false, fmt.Errorf("settle search-found succeeded PI %s: %w", succeeded.ID, serr)
+		}
+		if done {
+			slog.InfoContext(ctx, "parked invoice resolved by provider search — succeeded PaymentIntent adopted and settled",
+				"invoice_id", inv.ID, "stripe_payment_intent_id", succeeded.ID)
+		}
+		return done, nil
+
+	case live != nil:
+		adopted, aerr := r.invoices.AdoptPaymentIntentIfParked(ctx, inv.TenantID, inv.ID, live.ID)
+		if aerr != nil {
+			return false, fmt.Errorf("adopt live PI %s: %w", live.ID, aerr)
+		}
+		if !adopted {
+			// Another path won while we were searching — the COMMON race
+			// (webhook and sweep both fire when the provider recovers). Losing
+			// it is the designed outcome, not an error.
+			slog.InfoContext(ctx, "parked adopt lost the race — another path already resolved the invoice",
+				"invoice_id", inv.ID, "stripe_payment_intent_id", live.ID)
+			return false, nil
+		}
+		slog.InfoContext(ctx, "parked invoice adopted a live PaymentIntent from provider search — ordinary reconciliation takes it from here",
+			"invoice_id", inv.ID, "stripe_payment_intent_id", live.ID, "stripe_status", live.Status)
+		return true, nil
+
+	default:
+		// Terminal-only or nothing at all. Either way: OBSERVE, never settle.
+		// An empty result cannot prove no PI exists (indexing lags exactly in
+		// the weather that creates parked rows), and a terminal-only result
+		// cannot prove the CURRENT attempt is terminal (metadata carries the
+		// invoice id, not the attempt id — the found set may be pure history).
+		obs := "search_not_found"
+		if len(results) > 0 {
+			obs = "search_terminal_only"
+		}
+		r.recordSync(ctx, inv, obs)
+		return false, nil
+	}
 }
 
 // sweep lists invoices in one non-terminal state older than the given cool-off

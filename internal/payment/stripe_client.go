@@ -330,3 +330,58 @@ func (c *LiveStripeClient) GetPaymentIntent(ctx context.Context, paymentIntentID
 		AmountReceivedCents: pi.AmountReceived,
 	}, nil
 }
+
+// SearchPaymentIntentsByInvoiceID implements the ADR-108 lookup: find the
+// PaymentIntents this invoice's attempts created, by the velox_invoice_id
+// metadata every engine PI carries since inception (stripe.go chargeInvoice).
+//
+// Two provider properties shape every caller (verified against Stripe docs,
+// 2026-08-02):
+//   - EVENTUAL CONSISTENCY: "data is searchable in under 1 minute…
+//     propagation of new or updated data could be delayed during an outage".
+//     The outage that mints a parked invoice is the same weather that delays
+//     its PI's indexing, so an EMPTY result proves nothing — callers must
+//     never write a money outcome from absence (the attack round that forced
+//     this is recorded in ADR-108).
+//   - Search filters on cached fields but RETURNS current objects, so the
+//     statuses read off these results are authoritative-current.
+//
+// Errors pass through classifyStripeError like every other call here; the
+// caller additionally treats the invalid_request class as "search not offered
+// on this account" (the documented India case and its kin) and disables its
+// sweep for the account rather than retrying a request-shape error forever.
+func (c *LiveStripeClient) SearchPaymentIntentsByInvoiceID(ctx context.Context, invoiceID string) ([]PaymentIntentResult, error) {
+	sc := c.clients.ForCtx(ctx)
+	if sc == nil {
+		return nil, ErrStripeNotConfigured
+	}
+	params := &stripe.PaymentIntentSearchParams{
+		SearchParams: stripe.SearchParams{
+			Query: fmt.Sprintf("metadata['velox_invoice_id']:'%s'", invoiceID),
+		},
+	}
+	var out []PaymentIntentResult
+	for pi, err := range sc.V1PaymentIntents.Search(ctx, params) {
+		if err != nil {
+			// invalid_request on a fixed-shape query is "search is not offered
+			// here" (Stripe documents Search as unavailable to businesses in
+			// India; permission/tier refusals take the same shape). A request-
+			// shape error will not heal by retrying, so the caller disables its
+			// sweep for this account+mode instead of burning the budget forever.
+			var se *stripe.Error
+			if errors.As(err, &se) && se.Type == stripe.ErrorTypeInvalidRequest {
+				return nil, fmt.Errorf("%w: %s", ErrSearchNotOffered, errs.Scrub(se.Msg))
+			}
+			return nil, classifyStripeError(err)
+		}
+		out = append(out, PaymentIntentResult{
+			ID:                  pi.ID,
+			Status:              string(pi.Status),
+			ClientSecret:        pi.ClientSecret,
+			CreatedAt:           pi.Created,
+			Purpose:             pi.Metadata["velox_purpose"],
+			AmountReceivedCents: pi.AmountReceived,
+		})
+	}
+	return out, nil
+}

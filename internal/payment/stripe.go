@@ -164,10 +164,24 @@ func (s *Stripe) bindForInvoice(ctx context.Context, tenantID, invoiceID string)
 
 // StripeClient is the interface for Stripe API calls.
 // In production this wraps stripe-go; in tests it's a mock.
+// ErrSearchNotOffered marks a provider refusal of the Search API itself —
+// a request-shape error (invalid_request) on ADR-108's fixed-form metadata
+// query, not a transient fault. Stripe documents Search as unavailable to
+// businesses in India; account-tier and permission refusals surface the same
+// way. The reconciler disables the search sweep for that account+mode on
+// first sight (one CRITICAL, then silence) rather than re-asking forever.
+var ErrSearchNotOffered = errors.New("payment provider does not offer search on this account")
+
 type StripeClient interface {
 	CreatePaymentIntent(ctx context.Context, params PaymentIntentParams) (PaymentIntentResult, error)
 	CancelPaymentIntent(ctx context.Context, paymentIntentID string) error
 	GetPaymentIntent(ctx context.Context, paymentIntentID string) (PaymentIntentResult, error)
+	// SearchPaymentIntentsByInvoiceID finds PaymentIntents carrying
+	// metadata velox_invoice_id = invoiceID — the pull-shaped twin of the
+	// webhook naming a PI (ADR-108). Read-only at Stripe; eventual
+	// consistency means an EMPTY result proves nothing and callers must
+	// never write a money outcome from absence.
+	SearchPaymentIntentsByInvoiceID(ctx context.Context, invoiceID string) ([]PaymentIntentResult, error)
 }
 
 type PaymentIntentParams struct {
@@ -188,6 +202,10 @@ type PaymentIntentResult struct {
 	ID           string
 	Status       string
 	ClientSecret string
+	// CreatedAt is the PI's Stripe-side creation instant (unix seconds).
+	// Populated by the search path so ADR-108's "newest" precedence is
+	// decided on provider truth, not result order. Zero when unset.
+	CreatedAt int64
 	// Purpose is the velox_purpose PI metadata (e.g. "dunning_retry",
 	// "hosted_invoice_pay"). Populated by GetPaymentIntent so the reconciler
 	// can replicate the webhook's customer-email suppression when it recovers a

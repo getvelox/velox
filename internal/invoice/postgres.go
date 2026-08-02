@@ -2314,6 +2314,114 @@ func (s *PostgresStore) RecordProviderSync(ctx context.Context, tenantID, id, pr
 	return tx.Commit()
 }
 
+// ListParkedSearchable returns the parked invoices (ADR-107 shape) eligible
+// for this tick of the ADR-108 search-and-adopt sweep. Four predicate choices,
+// each an attack-round finding:
+//
+//   - livemode = $1: a mode-mismatched search is empty with probability 1, and
+//     ADR-108 deliberately makes empty results inert — but a mode bleed would
+//     still waste the 20/s search budget and stall rotation (the #13 bug class
+//     listInflightPayments already carries).
+//   - updated_at < $2 (park age >= 1h): a parked row's updated_at is frozen at
+//     park time, so it doubles as the park timestamp. 60x the documented
+//     normal indexing lag — the webhook wins the common race and we rarely
+//     spend a search on a PI that could not be indexed yet.
+//   - provider_synced_at cool-off IN the predicate: rotation, rate-limiting
+//     and re-search pacing ride ONE mechanism. Every search stamps the row
+//     (found or not), and a stamped row is not re-listed for an hour — so the
+//     sweep round-robins by construction instead of hammering the head.
+//   - ORDER BY provider_synced_at NULLS FIRST: never-searched rows first,
+//     matching the 0167 rotation the sibling sweeps use.
+func (s *PostgresStore) ListParkedSearchable(ctx context.Context, olderThan time.Time, limit int) ([]domain.Invoice, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT `+invCols+` FROM invoices
+		WHERE status = 'finalized'
+		  AND payment_status = 'unknown'
+		  AND COALESCE(stripe_payment_intent_id, '') = ''
+		  AND livemode = $1
+		  AND updated_at < $2
+		  AND (provider_synced_at IS NULL OR provider_synced_at < now() - interval '1 hour')
+		ORDER BY provider_synced_at ASC NULLS FIRST, updated_at ASC
+		LIMIT $3
+	`, postgres.Livemode(ctx), olderThan, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.Invoice
+	for rows.Next() {
+		var inv domain.Invoice
+		if err := rows.Scan(s.scanInvDest(&inv)...); err != nil {
+			return nil, err
+		}
+		out = append(out, inv)
+	}
+	return out, rows.Err()
+}
+
+// AdoptPaymentIntentIfParked is ADR-108's adopt write: stamp a search-found
+// LIVE PaymentIntent onto a parked invoice and move it into the ordinary
+// reconcilable population (unknown -> processing WITH an id).
+//
+// It is a CAS on the FULL parked shape, not a plain UpdatePayment, because the
+// webhook racing this sweep is the COMMON case — both fire when Stripe
+// recovers. An unconditional stamp landing after a webhook settle would
+// regress a paid invoice to in-flight: every IsInFlight-derived gate would
+// mis-block, and the processing sweep would re-list a settled row forever
+// (attack-verified). Zero rows affected means another path won; the caller
+// does nothing.
+//
+// charge_attempt_seq rides the stamp: adopting a PI records a NAMED attempt,
+// which is exactly ADR-105's condition for moving the seed, and the CI gate
+// (TestChargeAttemptSeqBumpedByEveryPIStamp) requires the pair textually.
+func (s *PostgresStore) AdoptPaymentIntentIfParked(ctx context.Context, tenantID, id, paymentIntentID string) (bool, error) {
+	if paymentIntentID == "" {
+		return false, fmt.Errorf("adopt requires a PaymentIntent id — an empty id would re-park the row while bumping the seq")
+	}
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer postgres.Rollback(tx)
+
+	// DB-side now(), same as RecordProviderSync above: this is an operational
+	// wall-clock stamp (it feeds the processing sweep's staleness cool-off),
+	// and the ADR-030 gate rightly refuses bare wall-clock calls in clock-pinned
+	// packages.
+	res, err := tx.ExecContext(ctx, `
+		UPDATE invoices SET
+			stripe_payment_intent_id = $1,
+			payment_status = 'processing',
+			charge_attempt_seq = charge_attempt_seq + 1,
+			updated_at = now()
+		WHERE id = $2
+		  AND payment_status = 'unknown'
+		  AND COALESCE(stripe_payment_intent_id, '') = ''
+		  AND status = 'finalized'
+	`, paymentIntentID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func (s *PostgresStore) CountParkedInvoices(ctx context.Context) (int, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {

@@ -140,7 +140,11 @@ func PaymentBlocksAction(inv Invoice, action InvoiceAction) PaymentBlock {
 // action that works on a parked invoice and an operator who is not told that
 // has no way out.
 func parkedMessage(action InvoiceAction) string {
-	const why = "this invoice's charge attempt could not be identified with the payment provider, so we cannot tell whether the customer was charged, and it will not resolve on its own"
+	// Bounded since ADR-108: the search sweep can adopt a found PaymentIntent,
+	// so "will not resolve on its own" is conditional now — but every refusal
+	// below still holds while the invoice IS parked, and the write-off remains
+	// the only operator exit.
+	const why = "this invoice's charge attempt could not be identified with the payment provider, so we cannot tell whether the customer was charged, and unless the attempt can be found by Velox's provider search it will not resolve on its own"
 	switch action {
 	case ActionVoid:
 		return why + " — voiding it could annul an invoice that was in fact paid. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead"

@@ -310,13 +310,26 @@ for the design below too — calling an ambiguous outcome definite settles
 `failed`, bumps the seq, rotates the key and makes the invoice claimable again.
 Parking is not immune to that; it merely stacks fewer decisions on top of it.
 
-**A cheaper experiment than resuming the ledger:** stop bumping the seq when
-recording `unknown` with no PaymentIntent id. ADR-105's rule is that the seed
-moves "exactly when an attempt outcome was recorded", and `unknown` means none
-was — so the bump looks like an accident of routing through a shared statement
-that stamps an empty id. If that holds, the key stays reproducible and this
-design gains replay-based recovery with no ledger. UNVERIFIED; needs the
-money-path site-set enumeration first.
+**A cheaper experiment than resuming the ledger — RUN AND REFUTED (2026-08-02):**
+the no-bump-on-parked idea was enumerated, designed, and adversarially attacked;
+a grounded BREAKS (a stale attempt row reconstructs a never-sent key and mints a
+second PaymentIntent) plus collapsed economics (the wire key's PM suffix is
+persisted nowhere) killed it. ADR-106 records the full refutation.
+
+**And the "cannot be reconciled" premise of this ADR is now amended (2026-08-02,
+[ADR-108](108-parked-invoices-search-and-adopt.md)).** This ADR reasoned as if
+an unnamed PaymentIntent were unreachable. It is not: Stripe's PaymentIntent
+Search API finds it by the `velox_invoice_id` metadata every engine PI carries
+(SDK v82 surface verified; search works in test mode; 20 reads/sec, separate
+per mode). What survives of this ADR's conclusion — on the TRUE ground — is
+that search is eventually consistent, indexing "could be delayed during an
+outage" (Stripe's words), and the outage that mints a parked row is the same
+weather that delays its indexing. So ABSENCE from search results can never
+carry a money write: the give-up write stays deleted, exactly as this ADR
+decided. What changes is the other half: a PI search DOES find is a named PI,
+and naming it is what this ADR always treated as the resolution. ADR-108 adopts
+found PIs and writes nothing on absence; the parked state keeps this ADR's
+floor (gauge, banner, write-off exit) and gains recovery as pure upside.
 
 **Trigger to revisit:** the first real stuck `unknown` invoice, or production
 cutover — whichever comes first. Resume it **on top of** this ADR, where its two
