@@ -521,6 +521,9 @@ func TestCreate_CreditNote(t *testing.T) {
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 10000,
 			AmountPaidCents:  10000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		}
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:  "inv_paid",
@@ -605,9 +608,12 @@ func TestCreate_CreditNote(t *testing.T) {
 		invoices.invoices["inv_mixed"] = domain.Invoice{
 			ID: "inv_mixed", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
-			TotalAmountCents:    20000,
-			AmountPaidCents:     5000,
-			CreditsAppliedCents: 15000,
+			TotalAmountCents: 20000,
+			AmountPaidCents:  5000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
+			CreditsAppliedCents:   15000,
 		}
 		_, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:  "inv_mixed",
@@ -630,9 +636,12 @@ func TestCreate_CreditNote(t *testing.T) {
 		invoices.invoices["inv_mixed_at_max"] = domain.Invoice{
 			ID: "inv_mixed_at_max", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
-			TotalAmountCents:    20000,
-			AmountPaidCents:     5000,
-			CreditsAppliedCents: 15000,
+			TotalAmountCents: 20000,
+			AmountPaidCents:  5000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
+			CreditsAppliedCents:   15000,
 		}
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:  "inv_mixed_at_max",
@@ -657,9 +666,12 @@ func TestCreate_CreditNote(t *testing.T) {
 		invoices.invoices["inv_mixed2"] = domain.Invoice{
 			ID: "inv_mixed2", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
-			TotalAmountCents:    20000,
-			AmountPaidCents:     5000,
-			CreditsAppliedCents: 15000,
+			TotalAmountCents: 20000,
+			AmountPaidCents:  5000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
+			CreditsAppliedCents:   15000,
 		}
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:  "inv_mixed2",
@@ -682,9 +694,12 @@ func TestCreate_CreditNote(t *testing.T) {
 		invoices.invoices["inv_overcap"] = domain.Invoice{
 			ID: "inv_overcap", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
-			TotalAmountCents:    10000,
-			AmountPaidCents:     3000,
-			CreditsAppliedCents: 7000,
+			TotalAmountCents: 10000,
+			AmountPaidCents:  3000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
+			CreditsAppliedCents:   7000,
 		}
 		_, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:  "inv_overcap",
@@ -765,6 +780,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_split", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 8260, AmountPaidCents: 6260, CreditsAppliedCents: 2000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:         "inv_split",
@@ -795,6 +813,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_3ch", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 10000, AmountPaidCents: 10000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:            "inv_3ch",
@@ -818,6 +839,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_default", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 5000, AmountPaidCents: 5000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID: "inv_default",
@@ -838,6 +862,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_mismatch", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 10000, AmountPaidCents: 10000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		_, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:         "inv_mismatch",
@@ -863,6 +890,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_overrefund", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 20000, AmountPaidCents: 5000, CreditsAppliedCents: 15000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		_, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:         "inv_overrefund",
@@ -883,6 +913,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_neg", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 10000, AmountPaidCents: 10000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		_, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:         "inv_neg",
@@ -930,6 +963,9 @@ func TestCreate_ExplicitAllocation(t *testing.T) {
 			ID: "inv_legacy_refund", TenantID: "t1", CustomerID: "cus_1",
 			Status: domain.InvoicePaid, Currency: "USD",
 			TotalAmountCents: 10000, AmountPaidCents: 10000,
+			// A card-settled invoice always carries a real PaymentIntent; without one
+			// the refund rail is correctly unavailable (domain.HasCardPayment).
+			StripePaymentIntentID: "pi_card_test",
 		})
 		cn, err := svc.Create(ctx, "t1", CreateInput{
 			InvoiceID:  "inv_legacy_refund",
@@ -961,6 +997,9 @@ func TestCreate_SmartBucketTaxResidual(t *testing.T) {
 		Status: domain.InvoicePaid, Currency: "INR",
 		TotalAmountCents: 8260, TaxFacts: domain.TaxFacts{TaxAmountCents: 1260},
 		AmountPaidCents: 8260,
+		// A card-settled invoice always carries a real PaymentIntent; without one
+		// the refund rail is correctly unavailable (domain.HasCardPayment).
+		StripePaymentIntentID: "pi_card_test",
 	}
 	store := newMemStore()
 	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{inv.ID: inv}}
@@ -1018,6 +1057,9 @@ func TestCreate_PartialCNUsesPureProportional(t *testing.T) {
 		Status: domain.InvoicePaid, Currency: "INR",
 		TotalAmountCents: 8260, TaxFacts: domain.TaxFacts{TaxAmountCents: 1260},
 		AmountPaidCents: 8260,
+		// A card-settled invoice always carries a real PaymentIntent; without one
+		// the refund rail is correctly unavailable (domain.HasCardPayment).
+		StripePaymentIntentID: "pi_card_test",
 	}
 	store := newMemStore()
 	invoices := &memInvoiceReader{invoices: map[string]domain.Invoice{inv.ID: inv}}

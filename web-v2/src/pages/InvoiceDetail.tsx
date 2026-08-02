@@ -1782,7 +1782,15 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
   const priorRefunds = existingCreditNotes
     .filter(cn => cn.status !== 'voided')
     .reduce((sum, cn) => sum + cn.refund_amount_cents, 0)
-  const pmRefundableCents = Math.max(0, invoice.amount_paid_cents - priorRefunds)
+  // An offline-recorded payment (Record payment) carries a NON-empty PI field
+  // holding a synthetic "out_of_band:<ts>" marker, so `amount_paid_cents > 0`
+  // does not imply a card was charged. Mirrors domain.Invoice.HasCardPayment.
+  const hasCardPayment =
+    !!invoice.stripe_payment_intent_id &&
+    !invoice.stripe_payment_intent_id.startsWith('out_of_band:')
+  const pmRefundableCents = hasCardPayment
+    ? Math.max(0, invoice.amount_paid_cents - priorRefunds)
+    : 0
 
   const [amount, setAmount] = useState('')
   const [refund, setRefund] = useState('')
@@ -1917,7 +1925,9 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
               <div className="space-y-2">
                 <Label htmlFor="cn-refund" className="flex items-center justify-between">
                   <span>Refund to card</span>
-                  <span className="text-xs text-muted-foreground font-normal">max {fmt(pmRefundableCents)}</span>
+                  <span className="text-xs text-muted-foreground font-normal">
+                    {hasCardPayment ? `max ${fmt(pmRefundableCents)}` : 'not paid by card'}
+                  </span>
                 </Label>
                 <Input
                   id="cn-refund"
@@ -1926,8 +1936,15 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
                   min={0}
                   value={refund}
                   onChange={(e) => handleRefundChange(e.target.value)}
+                  disabled={!hasCardPayment}
                 />
-                {refundOverCap && (
+                {!hasCardPayment && (
+                  <p className="text-xs text-muted-foreground">
+                    This invoice was paid outside Stripe, so there is no card to refund. Use
+                    Credit balance or Outside Stripe.
+                  </p>
+                )}
+                {hasCardPayment && refundOverCap && (
                   <p className="text-xs text-destructive">
                     Refund cannot exceed {fmt(pmRefundableCents)} paid via card
                     {priorRefunds > 0 ? ` (after ${fmt(priorRefunds)} prior refunds)` : ''}.
