@@ -167,4 +167,14 @@ func TestReconciler_RaceGuardSkipsWebhookWinner(t *testing.T) {
 	if resolved != 0 || len(rec.failed) != 0 || len(rec.succeeded) != 0 {
 		t.Fatalf("race guard failed: resolved=%d failed=%+v succeeded=%+v — must skip an already-settled invoice", resolved, rec.failed, rec.succeeded)
 	}
+	// The skip must still RECORD the observation (verbatim provider status).
+	// Pre-fix this branch wrote nothing, so a row that keeps re-entering the
+	// sweep's list (invoice status terminal, payment_status still in-flight on
+	// disk — a shape only seed/ops artifacts produce) was polled every tick
+	// with provider_synced_at NULL and permanently headed the LIMITed queue:
+	// found live on two rows monopolising the walk DB's queue head since May.
+	got := store.byID["inv_1"]
+	if got.ProviderPaymentStatus != "canceled" {
+		t.Errorf("provider observation = %q, want %q — the already-settled skip must stamp the observation or the row heads the rotation queue forever", got.ProviderPaymentStatus, "canceled")
+	}
 }
