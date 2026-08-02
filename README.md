@@ -275,6 +275,7 @@ API keys are salted-SHA-256 hashed at rest; rotation supports an optional grace 
 
 ### Recently shipped
 
+- **Ambiguous-charge safety, end to end (Jul-Aug 2026, ADR-105-108)** — a lost Stripe response can no longer double-charge: the idempotency key is seeded by an attempt counter (not `updated_at`), an unidentifiable outcome parks the invoice instead of guessing, every surface tells the truth about it (banner, hosted page, collections, dunning, clawbacks, a gauge), and the reconciler now searches Stripe by metadata and adopts the attempt when the provider can find it — positive evidence may write money; absence only ever writes an observation
 - **Team invites (Jul 2026, ADR-081)** — invite teammates by email (tokenized single-use accept links, member removal with session revocation); kills the shared-password reality and gives the audit log real per-person actors. No RBAC yet — every member has full access, roles recorded for the future split
 - **Provider cost tables + margin (Jul 2026, ADR-079)** — enter what you pay LLM providers; every usage event is stamped with its COGS at ingest; per-customer margin report (billed vs cost by model) — the report every other billing engine makes you build in your warehouse
 - **Prepaid commits + drawdown (Jul 2026, ADR-078)** — sell commit + usage: a commit line on an invoice funds a credit block at finalize (fund-once, atomic), promotional credits drain before paid, balance-threshold webhooks (`credit.balance_low/_depleted/_recovered`), void retires the unfunded remainder
