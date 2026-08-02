@@ -300,7 +300,7 @@ func (r *Reconciler) searchAndAdoptOne(ctx context.Context, inv domain.Invoice, 
 		// different-PI branch escalates the duplicate-charge anomaly.
 		// suppressEmail=false: it only gates the FAILURE email, and this arm
 		// settles success.
-		done, serr := r.settle(ctx, inv, succeeded.ID, succeeded.AmountReceivedCents, false, "adopted: search found succeeded PI", terminalSucceeded)
+		done, serr := r.settle(ctx, inv, succeeded.ID, succeeded.AmountReceivedCents, false, "adopted: search found succeeded PI", terminalSucceeded, succeeded.Status)
 		if serr != nil {
 			return false, fmt.Errorf("settle search-found succeeded PI %s: %w", succeeded.ID, serr)
 		}
@@ -454,14 +454,14 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 
 	switch res.Status {
 	case "succeeded":
-		return r.settle(ctx, inv, res.ID, res.AmountReceivedCents, false, "", terminalSucceeded)
+		return r.settle(ctx, inv, res.ID, res.AmountReceivedCents, false, "", terminalSucceeded, res.Status)
 
 	case "canceled", "requires_payment_method":
 		// Replicate the webhook's customer-email suppression from the PI
 		// purpose: a dunning-retry PI already sent its own per-attempt email,
 		// and a hosted-pay PI's decline was shown inline. Other failures send.
 		suppressEmail := res.Purpose == "hosted_invoice_pay" || res.Purpose == "dunning_retry"
-		return r.settle(ctx, inv, res.ID, 0, suppressEmail, "reconciled: "+res.Status, terminalFailed)
+		return r.settle(ctx, inv, res.ID, 0, suppressEmail, "reconciled: "+res.Status, terminalFailed, res.Status)
 
 	case "processing", "requires_action", "requires_confirmation", "requires_capture":
 		// Not terminal, so nothing settles here — but RECORD WHAT WE OBSERVED
@@ -505,7 +505,7 @@ func (r *Reconciler) recordSync(ctx context.Context, inv domain.Invoice, provide
 // through the settlement primitive so it fires the full side-effects (dunning,
 // event, email, card stamp) — identical to the webhook (ADR-049 Phase 2).
 // Falls back to legacy bare writes when no settler is wired (test-only).
-func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string, capturedCents int64, suppressEmail bool, failMsg string, kind terminalKind) (bool, error) {
+func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string, capturedCents int64, suppressEmail bool, failMsg string, kind terminalKind, providerStatus string) (bool, error) {
 	// Fresh re-read so a webhook that won the race during the round-trip is
 	// observed (the sweep-list snapshot may be stale). On read error, proceed
 	// with the snapshot — the primitive's own guards still apply.
@@ -519,6 +519,16 @@ func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string
 	if fresh.Status == domain.InvoicePaid ||
 		fresh.PaymentStatus == domain.PaymentSucceeded ||
 		fresh.PaymentStatus == domain.PaymentFailed {
+		// Record the observation even though nothing settles: this was the one
+		// return on the sweep path that wrote nothing, and a row that keeps
+		// re-entering the LIMITed queue with provider_synced_at NULL heads it
+		// forever (the 0167 shape). Ordinarily the winner's settle removes the
+		// row from the sweep's predicate and this stamp is a harmless one-off —
+		// but a row whose invoice status is terminal while payment_status stays
+		// in-flight (no real writer produces one; seed/ops artifacts can) hits
+		// this branch every tick, and two such rows were found monopolising the
+		// walk DB's queue head, never stamped, since May 2026.
+		r.recordSync(ctx, inv, providerStatus)
 		slog.Info("reconcile: invoice already settled by another path, skipping",
 			"invoice_id", inv.ID, "payment_status", fresh.PaymentStatus, "invoice_status", fresh.Status)
 		return false, nil
