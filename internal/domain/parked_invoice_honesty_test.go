@@ -34,10 +34,20 @@ func TestParkedInvoiceAttentionTellsTheTruth(t *testing.T) {
 	if strings.Contains(att.Message, "re-checks automatically") {
 		t.Error("the banner still promises automatic resolution for an invoice that will never resolve automatically")
 	}
-	// It must say the two things an operator needs: that waiting is futile, and
-	// what to do instead.
+	// It must say the three things an operator needs (ADR-108): that Velox is
+	// actively searching the provider, that an UNFOUND attempt will not
+	// resolve on its own, and what to do instead. The bound matters in both
+	// directions — an absolute "will not resolve" is a lie now that search
+	// adopts found PIs, and an unconditional "resolves automatically" would be
+	// the pre-#682 lie again for the rows search never finds.
+	if !strings.Contains(att.Message, "searching the provider") {
+		t.Error("the banner does not say Velox is searching — an operator would go do the search by hand")
+	}
 	if !strings.Contains(att.Message, "will not resolve on its own") {
-		t.Error("the banner does not tell the operator that waiting is futile")
+		t.Error("the banner does not tell the operator that an unfound attempt stays stuck")
+	}
+	if !strings.Contains(att.Message, "if it cannot be found") {
+		t.Error("the banner states futility unconditionally — false since ADR-108's search sweep adopts found PaymentIntents")
 	}
 	if !strings.Contains(strings.ToLower(att.Message), "uncollectible") {
 		t.Error("the banner names no way out — mark-uncollectible is the one action the product allows here")

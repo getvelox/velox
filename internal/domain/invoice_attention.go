@@ -701,8 +701,16 @@ func classifyPaymentUnconfirmed(inv Invoice) *Attention {
 			Severity: AttentionSeverityCritical,
 			Reason:   AttentionReasonPaymentUnconfirmed,
 			Code:     "payment.unidentifiable",
+			// Bounded, not absolute (ADR-108): Velox now searches the provider
+			// for the attempt, so SOME parked invoices resolve without a human
+			// — but only a found PaymentIntent may resolve one, so "if it
+			// cannot be found" keeps the old sentence's truth. The severity
+			// stays Critical: until the search finds something, this invoice
+			// still needs a human's eventual decision, and demoting it on the
+			// hope of a future find would hide exactly the rows that never get
+			// found.
 			Message: "This invoice's charge attempt could not be identified with the payment provider, so Velox cannot confirm whether the customer was charged. " +
-				"It will not resolve on its own, and no further charge will be attempted — deliberately, to rule out charging twice. " +
+				"Velox keeps searching the provider for the attempt and adopts it automatically if it can be found; if it cannot be found, this will not resolve on its own — and no further charge will be attempted, deliberately, to rule out charging twice. " +
 				"Find the attempt in Stripe (search by customer and amount). If money was taken, it will settle here once the provider reports it; if nothing was taken, mark this invoice uncollectible to close it out.",
 			DocURL: docBaseURL + "payment-unconfirmed",
 			Since:  &since,

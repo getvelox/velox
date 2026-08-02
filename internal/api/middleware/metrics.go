@@ -147,6 +147,14 @@ var (
 	// loud" was log-only, which is not loud: nothing counted them, so nothing
 	// could alert on them and an operator had no way to find them. Alert on
 	// this being non-zero, and on it growing.
+	parkedSearchErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "velox_parked_search_errors_total",
+			Help: "ADR-108 parked-invoice search failures by mode and class (not_offered = provider refuses Search for this account; transient = retried after cool-off).",
+		},
+		[]string{"mode", "class"},
+	)
+
 	parkedInvoices = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "velox_parked_invoices",
@@ -176,6 +184,16 @@ func RecordStripeBreakerState(state string) {
 		v = 2
 	}
 	stripeBreakerState.Set(v)
+}
+
+// RecordParkedSearchError counts ADR-108 search-and-adopt failures by class.
+// "not_offered" is the provider refusing the Search API for an account (those
+// tenants' parked invoices cannot self-resolve — the one CRITICAL log names
+// it); "transient" is rate limits / 5xx / network, which retry after the
+// cool-off. Distinct from the parked gauge so "search never works here" pages
+// differently from "nothing is parked".
+func RecordParkedSearchError(mode, class string) {
+	parkedSearchErrors.WithLabelValues(mode, class).Inc()
 }
 
 // RecordParkedInvoices publishes the count of invoices parked by ADR-107 for

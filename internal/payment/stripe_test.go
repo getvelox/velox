@@ -23,6 +23,14 @@ type mockStripeClient struct {
 	piID         string
 	chargeStatus string                         // CreatePaymentIntent result.Status; defaults to "requires_capture"
 	piStates     map[string]PaymentIntentResult // reconciler lookups by PI ID
+	// searchResults maps invoice ID -> the PIs a metadata search returns
+	// (ADR-108). searchErr, when set, is returned instead — tests use it for
+	// the not-offered and transient classes. searchCalls records every query
+	// so tests can assert the sweep respected disable/cool-off decisions
+	// rather than silently not caring.
+	searchResults map[string][]PaymentIntentResult
+	searchErr     error
+	searchCalls   []string
 }
 
 func (m *mockStripeClient) CreatePaymentIntent(_ context.Context, params PaymentIntentParams) (PaymentIntentResult, error) {
@@ -42,6 +50,14 @@ func (m *mockStripeClient) CreatePaymentIntent(_ context.Context, params Payment
 		Status:       status,
 		ClientSecret: "pi_secret_test",
 	}, nil
+}
+
+func (m *mockStripeClient) SearchPaymentIntentsByInvoiceID(_ context.Context, invoiceID string) ([]PaymentIntentResult, error) {
+	m.searchCalls = append(m.searchCalls, invoiceID)
+	if m.searchErr != nil {
+		return nil, m.searchErr
+	}
+	return m.searchResults[invoiceID], nil
 }
 
 func (m *mockStripeClient) CancelPaymentIntent(_ context.Context, _ string) error {
