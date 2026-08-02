@@ -2396,7 +2396,7 @@ func (s *PostgresStore) AdoptPaymentIntentIfParked(ctx context.Context, tenantID
 
 	// DB-side now(), same as RecordProviderSync above: this is an operational
 	// wall-clock stamp (it feeds the processing sweep's staleness cool-off),
-	// and the ADR-030 gate rightly refuses bare time.Now() in clock-pinned
+	// and the ADR-030 gate rightly refuses bare wall-clock calls in clock-pinned
 	// packages.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoices SET
