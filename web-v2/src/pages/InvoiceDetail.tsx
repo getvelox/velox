@@ -1553,16 +1553,20 @@ function OperatorContextCard({
               {/*
                 Two cases, and stating the wrong one here is worse than saying
                 nothing: this card sits directly under the attention banner, so
-                until now a PARKED invoice showed "Velox will not resolve this"
+                a PARKED invoice once showed "Velox will not resolve this"
                 immediately above "Reconciler will query Stripe" — adjacent
                 panels asserting opposites (found walking the page as an
-                operator, 2026-07-31). Without a PaymentIntent id there is
-                nothing to query and the reconciler skips it by design.
+                operator, 2026-07-31). The parked sentence drifted AGAIN when
+                ADR-108 shipped: it said "this will not resolve on its own",
+                unconditional, two inches under a banner explaining the search
+                sweep — the same contradiction class, caught by the same kind
+                of walk (2026-08-02). Both sentences now match the banner's
+                bounded truth.
               */}
               <dd className="text-foreground">
                 {invoice.stripe_payment_intent_id
                   ? 'Reconciler will query Stripe after the cool-off window.'
-                  : 'No payment intent was recorded, so there is nothing to query — this will not resolve on its own.'}
+                  : 'No payment intent was recorded, so there is nothing to query directly. Velox searches the provider for the attempt hourly and adopts it if found; if it cannot be found, this will not resolve on its own.'}
               </dd>
             </>
           )}

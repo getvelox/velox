@@ -578,6 +578,16 @@ func (s *PostgresStore) ListDueRuns(ctx context.Context, tenantID string, dueBef
 			r.paused, r.resolved_at, COALESCE(r.resolution,''), r.created_at, r.updated_at
 		FROM invoice_dunning_runs r
 		WHERE r.next_action_at <= $1 AND r.paused = false
+			-- Mode isolation is RLS's job here, on purpose: this query runs
+			-- under TxTenant, whose row policy already scopes livemode = GUC.
+			-- A 2026-08-02 walk briefly "found" cross-mode selection and added
+			-- an explicit predicate — the observation was a malformed fixture
+			-- (a bypass-inserted live-mode run on a test invoice), and the
+			-- predicate was provably redundant: its mutation survived the RLS
+			-- isolation test. The #13-class explicit clauses belong on
+			-- TxBypass queries, where RLS does NOT apply; adding one here
+			-- would be belt-and-suspenders asserting a guarantee RLS owns.
+			-- The property is pinned by TestListDueRuns_LivemodeIsolation.
 			AND r.state NOT IN ('resolved', 'escalated')
 			-- Exclude runs whose invoice is simulated by the invoice's OWN
 			-- durable is_simulated flag (not a subscriptions join, which

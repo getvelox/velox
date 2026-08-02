@@ -468,15 +468,6 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 	// picks up the new policy. Stripe-Lago shape (verified during
 	// ADR-036 research — no platform switches a mid-flight retry
 	// schedule under the operator's feet).
-	policy, err := s.store.GetPolicyByID(ctx, tenantID, run.PolicyID)
-	if err != nil {
-		return fmt.Errorf("get bound policy %s for run %s: %w", run.PolicyID, run.ID, err)
-	}
-
-	if run.Paused {
-		return nil // Skip paused runs
-	}
-
 	// Paid-pre-check — the durable backstop for an invoice settled OUT-OF-BAND
 	// (a credit-cover sweep MarkPaids the invoice without resolving its run, or
 	// any settle path the prompt-resolve doesn't instrument). Resolve the run in
@@ -498,6 +489,26 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 				return rerr
 			}
 		}
+	}
+
+	// The terminal-resolution check above deliberately runs BEFORE the policy
+	// fetch: resolving a run whose invoice is already terminal needs no policy,
+	// so a run whose policy cannot be loaded must not error out of processing
+	// when a one-line resolve is all that remains. Honest provenance: the
+	// original ordering was surfaced by a 2026-08-02 walk fixture that was
+	// itself malformed (a cross-mode run RLS makes unconstructible through real
+	// flows), and no REAL path to an unloadable policy is known today — the FK
+	// is RESTRICT and runs bind same-mode policies. The reorder stays because
+	// it is correct on principle (robustness against a class, not an instance)
+	// and costs nothing; TestProcessDueRuns_TerminalInvoiceResolvesWithoutPolicy
+	// pins it via a bypass-constructed fixture.
+	policy, err := s.store.GetPolicyByID(ctx, tenantID, run.PolicyID)
+	if err != nil {
+		return fmt.Errorf("get bound policy %s for run %s: %w", run.PolicyID, run.ID, err)
+	}
+
+	if run.Paused {
+		return nil // Skip paused runs
 	}
 
 	// Check if max retries exhausted
