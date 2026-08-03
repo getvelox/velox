@@ -12,5 +12,7 @@ import type { GetV1PublicCostDashboardToken200BillingPeriodSource } from './getV
 export type GetV1PublicCostDashboardToken200BillingPeriod = {
   start?: string;
   end?: string;
+  /** Branch on this before rendering the period. When it is `no_subscription` the customer has no active subscription, every array is empty, and `start`/`end` carry the zero time (`0001-01-01T00:00:00Z`) rather than a real range — display them and the page reads "January 1, year 1".
+   */
   source?: GetV1PublicCostDashboardToken200BillingPeriodSource;
 };
