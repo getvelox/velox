@@ -84,11 +84,14 @@ func (m *memStore) UpdateEndpoint(_ context.Context, tenantID string, ep domain.
 	return existing, nil
 }
 
+// ListEndpoints returns ALL endpoints including inactive — matching the real
+// store since the FLOW W0 fix (dispatch filters ep.Active in its own match
+// loop; the list must show inactive rows or they're unreachable from the UI).
 func (m *memStore) ListEndpoints(ctx context.Context, tenantID string) ([]domain.WebhookEndpoint, error) {
 	live := postgres.Livemode(ctx)
 	var result []domain.WebhookEndpoint
 	for _, ep := range m.endpoints {
-		if ep.TenantID == tenantID && ep.Active && ep.Livemode == live {
+		if ep.TenantID == tenantID && ep.Livemode == live {
 			result = append(result, ep)
 		}
 	}
@@ -573,6 +576,67 @@ func TestDispatch(t *testing.T) {
 		if data["invoice_id"] != "inv_123" {
 			t.Errorf("payload data.invoice_id: got %v", data["invoice_id"])
 		}
+	}
+}
+
+// TestInactiveEndpoint_ListedButNeverDispatched pins both halves of the FLOW
+// W0 fix: an inactive endpoint MUST appear in the operator list (it was
+// hidden by a store-level `WHERE active` — a deactivated or recipe-born
+// endpoint became unreachable from the dashboard, with the FE's "paused"
+// badge as dead code) and MUST NOT receive deliveries (dispatch's own
+// ep.Active check is the filter that matters).
+func TestInactiveEndpoint_ListedButNeverDispatched(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 200})
+	ctx := context.Background()
+
+	if _, err := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9901/hook", Events: []string{"*"},
+	}); err != nil {
+		t.Fatalf("create active endpoint: %v", err)
+	}
+	res, err := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9902/hook", Events: []string{"*"},
+	})
+	if err != nil {
+		t.Fatalf("create endpoint to deactivate: %v", err)
+	}
+	inactive := false
+	if _, err := svc.UpdateEndpoint(ctx, "t1", res.Endpoint.ID, UpdateEndpointInput{Active: &inactive}); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+
+	eps, err := svc.ListEndpoints(ctx, "t1")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(eps) != 2 {
+		t.Fatalf("list returned %d endpoints, want 2 — the inactive one must be visible or it is unreachable from the dashboard", len(eps))
+	}
+
+	if err := svc.Dispatch(ctx, "t1", "invoice.paid", map[string]any{"invoice_id": "inv_1"}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	for _, d := range store.deliveries {
+		if d.WebhookEndpointID == res.Endpoint.ID {
+			t.Fatalf("a delivery was created for the INACTIVE endpoint — listing it must not mean dispatching to it")
+		}
+	}
+	if len(store.deliveries) == 0 {
+		t.Fatal("no deliveries at all — the active endpoint should have received the event (control)")
+	}
+
+	// Delete is a DIFFERENT intent than pause (migration 0168): a deleted
+	// endpoint leaves the list entirely instead of surfacing as "paused".
+	if err := svc.DeleteEndpoint(ctx, "t1", res.Endpoint.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	eps, err = svc.ListEndpoints(ctx, "t1")
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(eps) != 1 {
+		t.Fatalf("list returned %d endpoints after delete, want 1 — deleted must not resurface as paused", len(eps))
 	}
 }
 
