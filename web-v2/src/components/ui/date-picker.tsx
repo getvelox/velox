@@ -251,7 +251,14 @@ export function DatePicker({ value, onChange, placeholder = 'Pick a date', class
               mode="single"
               selected={selectedDate}
               onSelect={handleSelect}
-              defaultMonth={selectedDate}
+              // Fall back to minDate, not today: startMonth below pins the
+              // lower bound to JANUARY of minDate's year, and DayPicker clamps
+              // its default month into [startMonth, endMonth]. So whenever
+              // minDate is in the future — always, on a test clock, where it
+              // is the clock's simulated now — an unset field opened on
+              // January with every day disabled, and the operator had to page
+              // forward to reach the first selectable date.
+              defaultMonth={selectedDate ?? minDate}
               showOutsideDays
               className="velox-cal"
               disabled={minDate ? { before: minDate } : undefined}
