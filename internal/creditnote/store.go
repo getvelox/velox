@@ -71,7 +71,7 @@ type Store interface {
 	// lock in the write's own tx, and emit fires ONLY when the persisted refund
 	// state actually moves — an idempotent retry that gets the same 'pending'
 	// back from Stripe records nothing.
-	UpdateRefundStatusAudited(ctx context.Context, tenantID, id string, status domain.RefundStatus, stripeRefundID string, emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error) error
+	UpdateRefundStatusAudited(ctx context.Context, tenantID, id string, w RefundStatusWrite, emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error) error
 	// ApplyRefundWebhookStatus monotonically applies an async refund-webhook
 	// status to the credit note carrying stripeRefundID: terminal
 	// (succeeded/failed) always wins; a stale out-of-order 'pending' never

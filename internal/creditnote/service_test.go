@@ -214,24 +214,41 @@ func (m *memStore) TransitionStatus(ctx context.Context, tenantID, id string, fr
 }
 
 func (m *memStore) UpdateRefundStatus(ctx context.Context, tenantID, id string, status domain.RefundStatus, stripeRefundID string) error {
-	return m.UpdateRefundStatusAudited(ctx, tenantID, id, status, stripeRefundID, nil)
+	return m.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: status, StripeRefundID: stripeRefundID}, nil)
 }
 
-// UpdateRefundStatusAudited mirrors the real store: `prior` is the state the
-// write replaced, and emit fires only when the persisted refund state actually
-// moved (status or refund id) — a same-value re-drive records nothing.
-func (m *memStore) UpdateRefundStatusAudited(_ context.Context, tenantID, id string, status domain.RefundStatus, stripeRefundID string, emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error) error {
+// UpdateRefundStatusAudited mirrors the REAL store's attempt-scoped write
+// rules — identity CAS, same-value no-op, same-identity regression guard with
+// the ProviderRead bypass — not just its happy path. The fake-fidelity rule:
+// a service test passing against a laxer fake would assert nothing about the
+// paths that matter (retry_guard_integration_test.go pins the real SQL).
+func (m *memStore) UpdateRefundStatusAudited(_ context.Context, tenantID, id string, w RefundStatusWrite, emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error) error {
 	cn, ok := m.notes[id]
 	if !ok || cn.TenantID != tenantID {
 		return errs.ErrNotFound
 	}
 	prior := cn.RefundStatus
 	priorRefundID := cn.StripeRefundID
-	cn.RefundStatus = status
-	if stripeRefundID != "" {
-		cn.StripeRefundID = stripeRefundID
+	skip := false
+	if cn.StripeRefundID != w.ExpectedPriorRefundID {
+		skip = true // stale writer: identity moved
+	} else {
+		newID := cn.StripeRefundID
+		if w.StripeRefundID != "" {
+			newID = w.StripeRefundID
+		}
+		sameIdentity := newID == cn.StripeRefundID
+		if sameIdentity && (w.Status == prior || (!w.ProviderRead && refundStatusRegression(prior, w.Status))) {
+			skip = true
+		}
 	}
-	m.notes[id] = cn
+	if !skip {
+		cn.RefundStatus = w.Status
+		if w.StripeRefundID != "" {
+			cn.StripeRefundID = w.StripeRefundID
+		}
+		m.notes[id] = cn
+	}
 	changed := cn.RefundStatus != prior || cn.StripeRefundID != priorRefundID
 	// Mirrors the real store: emit ALWAYS runs (with `changed`); the caller
 	// decides whether the fact is audit-worthy.

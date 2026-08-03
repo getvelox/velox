@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -12,23 +13,44 @@ import (
 // fakeRefunder records refund calls so tests can assert the Stripe leg ran
 // (or didn't) with the expected amount. The returned refund ID is
 // deterministic for easy assertions.
+//
+// The reconcile/search knobs default to "provider knows nothing": GetRefund
+// echoes getStatus (or the stored-status semantics a test scripts), and
+// FindRefundForCreditNote returns foundID/foundStatus (default none). Tests
+// for the retry convergence paths script these to simulate lost responses.
 type fakeRefunder struct {
 	calls        []fakeRefundCall
 	failWith     error
 	returnStatus domain.RefundStatus // empty → succeeded (back-compat with existing tests)
+
+	getCalls    []string
+	getStatus   domain.RefundStatus // empty → succeeded
+	getReason   string
+	getErr      error
+	findCalls   []fakeFindCall
+	foundID     string
+	foundStatus domain.RefundStatus
+	findErr     error
 }
 
 type fakeRefundCall struct {
 	paymentIntentID string
 	amountCents     int64
 	idempotencyKey  string
+	creditNoteID    string
 }
 
-func (f *fakeRefunder) CreateRefund(_ context.Context, paymentIntentID string, amountCents int64, idempotencyKey string) (string, domain.RefundStatus, error) {
+type fakeFindCall struct {
+	paymentIntentID string
+	creditNoteID    string
+}
+
+func (f *fakeRefunder) CreateRefund(_ context.Context, paymentIntentID string, amountCents int64, idempotencyKey, creditNoteID string) (string, domain.RefundStatus, error) {
 	f.calls = append(f.calls, fakeRefundCall{
 		paymentIntentID: paymentIntentID,
 		amountCents:     amountCents,
 		idempotencyKey:  idempotencyKey,
+		creditNoteID:    creditNoteID,
 	})
 	if f.failWith != nil {
 		return "", "", f.failWith
@@ -38,6 +60,29 @@ func (f *fakeRefunder) CreateRefund(_ context.Context, paymentIntentID string, a
 		status = domain.RefundSucceeded
 	}
 	return fmt.Sprintf("re_fake_%d", len(f.calls)), status, nil
+}
+
+func (f *fakeRefunder) GetRefund(_ context.Context, refundID string) (domain.RefundStatus, string, error) {
+	f.getCalls = append(f.getCalls, refundID)
+	if f.getErr != nil {
+		return "", "", f.getErr
+	}
+	status := f.getStatus
+	if status == "" {
+		status = domain.RefundSucceeded
+	}
+	return status, f.getReason, nil
+}
+
+func (f *fakeRefunder) FindRefundForCreditNote(_ context.Context, paymentIntentID, creditNoteID string) (string, domain.RefundStatus, error) {
+	f.findCalls = append(f.findCalls, fakeFindCall{
+		paymentIntentID: paymentIntentID,
+		creditNoteID:    creditNoteID,
+	})
+	if f.findErr != nil {
+		return "", "", f.findErr
+	}
+	return f.foundID, f.foundStatus, nil
 }
 
 // setupRefundSvc builds a Service with a paid invoice ready for refund. The
@@ -295,11 +340,19 @@ func TestIssue_PassesIdempotencyKeyToStripe(t *testing.T) {
 
 // TestRetryRefund exercises the operator-driven retry of a Stripe
 // refund leg that failed/was-pending at Issue() time. The CN itself
-// stays issued; only the cash-back leg is re-driven. Same idempotency
-// key as Issue() so retries after network-failure-but-Stripe-actually-
-// succeeded converge cleanly (Stripe returns the existing refund_id).
+// stays issued; only the cash-back leg is re-driven.
+//
+// The retry converges via reconcile-then-create (ADR-063 amendment,
+// 2026-08-04), NOT via key reuse: an earlier version of this test pinned
+// the retry to Issue()'s eternal `velox_cn_<id>` key, encoding the exact
+// broken premise the amendment removes — Stripe v1 keys expire after ~24h
+// (a late retry of a stuck partial refund minted a second live refund) and
+// within the horizon a key replay returns the SAVED first response, stale
+// against webhook-recorded truth. Convergence now rests on metadata
+// adoption + a pre-create provider reconcile; the key only dedups
+// transport-level races within one state generation.
 func TestRetryRefund(t *testing.T) {
-	t.Run("failed → succeeded; uses same idempotency key as Issue", func(t *testing.T) {
+	t.Run("failed (create never reached Stripe) → search finds nothing → fresh create succeeds", func(t *testing.T) {
 		svc, store, _, refunder := setupRefundSvc(t)
 
 		cn, err := store.Create(context.Background(), "t1", domain.CreditNote{
@@ -336,10 +389,136 @@ func TestRetryRefund(t *testing.T) {
 		if len(refunder.calls) != 1 {
 			t.Fatalf("expected 1 refund call, got %d", len(refunder.calls))
 		}
-		expectedKey := "velox_cn_" + cn.ID
-		if refunder.calls[0].idempotencyKey != expectedKey {
-			t.Errorf("idempotency_key: got %q want %q (must match Issue() key for Stripe-side dedup)",
-				refunder.calls[0].idempotencyKey, expectedKey)
+		// Empty stored id → the reconcile lane is skipped and the SEARCH lane
+		// must run before any create (lost-response recovery).
+		if len(refunder.findCalls) != 1 {
+			t.Fatalf("expected 1 provider search before create, got %d", len(refunder.findCalls))
+		}
+		if refunder.findCalls[0].creditNoteID != cn.ID {
+			t.Errorf("search: got %+v, want cn=%s", refunder.findCalls[0], cn.ID)
+		}
+		// The key scopes to the CN's state generation — deliberately NOT
+		// Issue()'s eternal key (expired keys can't dedup; a replayed saved
+		// response would be stale) — and the create must stamp the CN id as
+		// metadata, which is what future adoption converges on.
+		key := refunder.calls[0].idempotencyKey
+		if !strings.HasPrefix(key, "velox_cn_"+cn.ID+"_r_") {
+			t.Errorf("idempotency_key: got %q, want state-generation key velox_cn_%s_r_<gen>", key, cn.ID)
+		}
+		if refunder.calls[0].creditNoteID != cn.ID {
+			t.Errorf("create must stamp velox_cn_id metadata: got %q want %q", refunder.calls[0].creditNoteID, cn.ID)
+		}
+	})
+
+	t.Run("stored id still pending at provider → NO second refund is created", func(t *testing.T) {
+		svc, store, _, refunder := setupRefundSvc(t)
+		refunder.getStatus = domain.RefundPending
+		cn, _ := store.Create(context.Background(), "t1", domain.CreditNote{
+			TenantID: "t1", InvoiceID: "inv_paid", CustomerID: "cus_1",
+			CreditNoteNumber: "CN-STUCK", Status: domain.CreditNoteDraft,
+			Reason: "retry", SubtotalCents: 5000, TotalCents: 5000,
+			RefundAmountCents: 5000, Currency: "USD",
+			RefundStatus: domain.RefundPending,
+		})
+		stale := store.notes[cn.ID]
+		stale.Status = domain.CreditNoteIssued
+		stale.StripeRefundID = "re_stuck_1"
+		store.notes[cn.ID] = stale
+
+		_, err := svc.RetryRefund(context.Background(), "t1", cn.ID)
+		if err == nil {
+			t.Fatal("expected refusal while the refund is still processing at the provider")
+		}
+		if len(refunder.calls) != 0 {
+			t.Fatalf("a second refund was created for an in-flight one: %d create calls", len(refunder.calls))
+		}
+		if len(refunder.getCalls) != 1 || refunder.getCalls[0] != "re_stuck_1" {
+			t.Fatalf("expected one provider reconcile of re_stuck_1, got %v", refunder.getCalls)
+		}
+	})
+
+	t.Run("stored id succeeded at provider (missed webhook) → recovered without a create", func(t *testing.T) {
+		svc, store, _, refunder := setupRefundSvc(t)
+		refunder.getStatus = domain.RefundSucceeded
+		cn, _ := store.Create(context.Background(), "t1", domain.CreditNote{
+			TenantID: "t1", InvoiceID: "inv_paid", CustomerID: "cus_1",
+			CreditNoteNumber: "CN-MISSED-WH", Status: domain.CreditNoteDraft,
+			Reason: "retry", SubtotalCents: 5000, TotalCents: 5000,
+			RefundAmountCents: 5000, Currency: "USD",
+			RefundStatus: domain.RefundPending,
+		})
+		stale := store.notes[cn.ID]
+		stale.Status = domain.CreditNoteIssued
+		stale.StripeRefundID = "re_lost_wh"
+		store.notes[cn.ID] = stale
+
+		out, err := svc.RetryRefund(context.Background(), "t1", cn.ID)
+		if err != nil {
+			t.Fatalf("RetryRefund: %v", err)
+		}
+		if out.RefundStatus != domain.RefundSucceeded {
+			t.Errorf("refund_status: got %q want succeeded (provider truth adopted)", out.RefundStatus)
+		}
+		if len(refunder.calls) != 0 {
+			t.Fatalf("reconcile recovered the outcome; create must not run (got %d calls)", len(refunder.calls))
+		}
+	})
+
+	t.Run("empty stored id but Stripe HAS the refund → adopted, never duplicated", func(t *testing.T) {
+		svc, store, _, refunder := setupRefundSvc(t)
+		refunder.foundID = "re_orphan_1"
+		refunder.foundStatus = domain.RefundSucceeded
+		cn, _ := store.Create(context.Background(), "t1", domain.CreditNote{
+			TenantID: "t1", InvoiceID: "inv_paid", CustomerID: "cus_1",
+			CreditNoteNumber: "CN-ORPHAN", Status: domain.CreditNoteDraft,
+			Reason: "retry", SubtotalCents: 5000, TotalCents: 5000,
+			RefundAmountCents: 5000, Currency: "USD",
+			RefundStatus: domain.RefundFailed, // create errored; Stripe minted anyway
+		})
+		stale := store.notes[cn.ID]
+		stale.Status = domain.CreditNoteIssued
+		store.notes[cn.ID] = stale
+
+		out, err := svc.RetryRefund(context.Background(), "t1", cn.ID)
+		if err != nil {
+			t.Fatalf("RetryRefund: %v", err)
+		}
+		if out.StripeRefundID != "re_orphan_1" || out.RefundStatus != domain.RefundSucceeded {
+			t.Errorf("adoption: got (%q,%q) want (re_orphan_1, succeeded)", out.StripeRefundID, out.RefundStatus)
+		}
+		if len(refunder.calls) != 0 {
+			t.Fatalf("orphan existed at Stripe; create must not run (got %d calls)", len(refunder.calls))
+		}
+	})
+
+	t.Run("provider-confirmed-failed id → live-only search finds nothing, creates anew", func(t *testing.T) {
+		svc, store, _, refunder := setupRefundSvc(t)
+		refunder.getStatus = domain.RefundFailed
+		refunder.getReason = "expired_or_canceled_card"
+		cn, _ := store.Create(context.Background(), "t1", domain.CreditNote{
+			TenantID: "t1", InvoiceID: "inv_paid", CustomerID: "cus_1",
+			CreditNoteNumber: "CN-DEAD-REDRIVE", Status: domain.CreditNoteDraft,
+			Reason: "retry", SubtotalCents: 5000, TotalCents: 5000,
+			RefundAmountCents: 5000, Currency: "USD",
+			RefundStatus: domain.RefundFailed,
+		})
+		stale := store.notes[cn.ID]
+		stale.Status = domain.CreditNoteIssued
+		stale.StripeRefundID = "re_dead_1"
+		store.notes[cn.ID] = stale
+
+		out, err := svc.RetryRefund(context.Background(), "t1", cn.ID)
+		if err != nil {
+			t.Fatalf("RetryRefund: %v", err)
+		}
+		if len(refunder.findCalls) != 1 {
+			t.Fatalf("expected exactly one live-refund search, got %d", len(refunder.findCalls))
+		}
+		if len(refunder.calls) != 1 {
+			t.Fatalf("expected exactly one fresh create, got %d", len(refunder.calls))
+		}
+		if out.RefundStatus != domain.RefundSucceeded || out.StripeRefundID == "re_dead_1" {
+			t.Errorf("re-drive result: got (%q,%q), want a NEW succeeded refund", out.StripeRefundID, out.RefundStatus)
 		}
 	})
 

@@ -76,3 +76,88 @@ was *rare* (only "no refunder/no PI at issue").
 ## Related
 - #319 (the refund "needs attention" alert this co-refines).
 - ADR-061 (atomic `creditnote.Issue()`); ADR-040 (webhook outbox / dedup spine).
+
+## Amendment (2026-08-04): retry convergence cannot rest on the idempotency key
+
+An adversarial architecture review of the refund model found the original
+retry contract — "same `velox_cn_<id>` key as Issue(), Stripe dedups, so a
+retry converges on the original refund" — resting on a premise Stripe does
+not provide: **v1 idempotency keys expire after ~24 hours**, while this ADR's
+own needs-attention window tells the operator to act at **72 hours**. Two
+shipped defects followed:
+
+1. **Double-refund window.** Retrying a stuck *partial* `pending` refund past
+   the key horizon minted a second live refund (Stripe's `amount_too_large`
+   protects only full-amount refunds), and the persist's overwrite of
+   `stripe_refund_id` orphaned the first refund's webhooks as "foreign".
+2. **Truth regression.** Within the horizon, a key replay returns the SAVED
+   first response — so a retry after a webhook-recorded terminal `failed`
+   re-persisted the stale create-time `pending` through the operator writer,
+   which (unlike the webhook writer) had no monotonic guard. Event-id dedup
+   then swallowed any correcting redelivery forever.
+
+**The amended contract — reconcile, adopt, only then create:**
+
+- Every refund create stamps **metadata `velox_cn_id`**. Durable convergence
+  is the metadata, not the key: a refund whose response was lost is always
+  findable again.
+- `RetryRefund` with a stored id calls **`GetRefund`** first — a read, which
+  always returns current truth, never a replay. `succeeded` → recovered (this
+  also collects the missed-webhook case, the stand-in this ADR deferred the
+  poller for); `pending` → **refuse to mint a second refund** while one is in
+  flight; `failed` → a new refund is legitimate.
+- With no stored id, or past a provider-confirmed-dead one,
+  **`FindRefundForCreditNote`** searches the PaymentIntent's refunds by
+  metadata (excluding the dead id) and **adopts** a live match instead of
+  creating — ADR-108's search-and-adopt, applied to money-out.
+- The create key scopes to the CN's **state generation**
+  (`velox_cn_<id>_r_<hash(refund_id|status)>`): concurrent retries share a
+  snapshot and collapse into one refund at Stripe, while a retry after a
+  persisted identity/status change gets a fresh key instead of replaying a
+  dead attempt's saved response. `updated_at` is deliberately NOT in the
+  hash — the finder review showed the reconcile's own row-touch would have
+  split two close-together clicks into two keys, re-opening the double.
+- Adoption is **live-only**: a provider-failed twin is never adopted. The
+  finder review caught an exclude-one-id variant livelocking between two
+  dead twins — each click adopting the other dead refund and never reaching
+  the create leg. Dead attempts remain in the audit trail.
+- Every status persist is **identity-CAS'd** (the writer names the refund id
+  its snapshot held; the store skips stale writers), and the same-identity
+  regression guard has a **ProviderRead** bypass: a fresh read — unlike a
+  webhook delivery — cannot be stale, so it may correct a locally-misstamped
+  `failed` upward. A same-value persist no longer touches `updated_at`,
+  because re-confirming "still pending" is continued stuckness and resetting
+  the 72h attention clock on the operator's own poke hid exactly the rows
+  the alert exists for.
+- `refund_status=none` on an issued CN **with a refund allocation** is now
+  retry-eligible: that state is the Issue-crash window (leg ran, persist
+  died), and the adoption lane recovers precisely it.
+- The operator writer now refuses **same-identity regressions** (failed is
+  absorbing; succeeded yields only to failed) while still emitting the
+  audit row — the action is the fact — and a NEW identity may write any
+  status, because a fresh attempt legitimately restarts the lifecycle.
+  Same-value persists still touch `updated_at` (the 72h window resets on a
+  fresh provider confirmation).
+- Stripe's **`failure_reason`** now rides every failed transition's audit
+  metadata (webhook, reconcile, and create-error paths). Previously it lived
+  only in process logs, so refund-failure forensics were unanswerable
+  retroactively.
+
+Also shipped with this amendment: `credit_notes` gained its first useful
+lookup indexes (migration 0169 — `invoice_id`, partial `stripe_refund_id`);
+the webhook match was previously a tenant-wide scan.
+
+Transition note: refunds created before this amendment carry no
+`velox_cn_id` metadata, so the adoption search cannot see them. No
+environment holds such a row with a live lost refund (verified: the two
+pre-amendment failed CNs are walk fixtures with no provider refund at all),
+but a self-hosted upgrader with a stuck pre-amendment refund should
+reconcile it manually in the Stripe dashboard before clicking retry.
+
+Unchanged: refunds stay **operator-retried**, never auto-swept; the refund
+remains a leg of the credit note (the review confirmed the peer set —
+Lago, Orb, Stripe Billing's own recommendation — models it the same way, and
+rejected a freestanding refunds table); the deferred attempt-history table
+(`invoice_refund_attempts`, mirroring ADR-102's charge attempts) keeps its
+trigger: a DP asking for refund observability, a second PSP, or dispute
+ingestion.
