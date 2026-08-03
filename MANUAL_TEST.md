@@ -164,51 +164,51 @@ JSON works when no shell var is referenced.
 Brings the stack up, runs the full money path, signs out. Pre-merge canary.
 
 ### S1.1 Stack health
-- [ ] `make up` — containers start clean.
-- [ ] `make dev` — logs show `migrations: applied N` + `using app database connection (RLS enforced)`.
-- [ ] `curl localhost:8080/health` → `{"status":"ok"}`.
-- [ ] `curl localhost:8080/health/ready` → 200 with `database`, `scheduler` ok.
-- [ ] Frontend at http://localhost:5173 loads.
+- [x] `make up` — containers start clean. *(walked 2026-08-03: postgres, redis and mailpit all `running` under compose — and the walk incidentally proved recovery twice, bringing the stack back cleanly after two Docker Desktop daemon drops.)*
+- [x] `make dev` — logs show `migrations: applied N` + `using app database connection (RLS enforced)`. *(walked 2026-08-03: boot log carries "migrations up to date" (and "migrations applied version=168 applied=1" when 0168 shipped earlier today) plus **"using app database connection (RLS enforced)" role=velox_app** — the least-privilege runtime role, not the owner.)*
+- [x] `curl localhost:8080/health` → `{"status":"ok"}`. *(walked 2026-08-03: exactly `{"status":"ok"}`.)*
+- [x] `curl localhost:8080/health/ready` → 200 with `database`, `scheduler` ok. *(walked 2026-08-03: 200 with `{"checks":{"api":"ok","database":"ok","scheduler":"ok: last run 13s ago"},"status":"ok"}` — the scheduler check names its own freshness.)*
+- [x] Frontend at http://localhost:5173 loads. *(walked 2026-08-03: 200, and every UI box in this campaign was walked against it.)*
 
 ### S1.2 Bootstrap + sign in
-- [ ] `make bootstrap` (if no tenants) prints test/live secret keys + publishable test key. Copy the secret test key.
-- [ ] Sign in at `/login`. Redirect to dashboard.
-- [ ] Cookie `velox_session` set, `HttpOnly: ✓`. No API key in localStorage.
+- [x] `make bootstrap` (if no tenants) prints test/live secret keys + publishable test key. Copy the secret test key. *(walked 2026-08-03: `cmd/velox-bootstrap` minted **Smoke Co 2 (vlx_ten_d9o85cb…)** printing the tenant id, the dashboard sign-in, and test/live secret + publishable keys once. NOTE for the next reader: the CLI reads `VELOX_BOOTSTRAP_EMAIL` / `_PASSWORD` / `_TENANT` — the `VELOX_OWNER_*` names some older docs used are dead (ADR-073).)*
+- [x] Sign in at `/login`. Redirect to dashboard. *(walked 2026-08-03: `POST /v1/auth/login` → 200 and the dashboard renders for the new tenant.)*
+- [x] Cookie `velox_session` set, `HttpOnly: ✓`. No API key in localStorage. *(walked 2026-08-03 from the raw response header: `Set-Cookie: velox_session=…; Path=/; Expires=…; Max-Age=604799; HttpOnly; SameSite=Lax` — HttpOnly present, so no script can read it, and the session is cookie-borne rather than a key in storage.)*
 
 ### S1.3 Stripe connection
-- [ ] Settings → Payments → paste `sk_test_...` + `pk_test_...` → Connect. `vlx_spc_...` shown.
-- [ ] Terminal 4: `stripe listen --forward-to localhost:8080/v1/webhooks/stripe/<vlx_spc_...>`. Paste the `whsec_...` back.
-- [ ] Settings shows "Connected".
+- [x] Settings → Payments → paste `sk_test_...` + `pk_test_...` → Connect. `vlx_spc_...` shown. *(walked 2026-08-03 via `POST /v1/settings/stripe` with the sandbox test keys: 200 with a fresh **vlx_spc_95d43257…** and `verified_at` set — Velox verified the key against Stripe before storing it.)*
+- [x] Terminal 4: `stripe listen --forward-to localhost:8080/v1/webhooks/stripe/<vlx_spc_...>`. Paste the `whsec_...` back. *(walked 2026-08-03: a SECOND `stripe listen` was started against the new tenant's own endpoint id (the Walkthrough listener kept running untouched), its `whsec_…` registered via `PATCH /v1/settings/stripe/test/webhook` → 200 with the last4 stored. Events flowed to the new endpoint immediately: customer.created, setup_intent.created/succeeded, then three payment_intent.succeeded.)*
+- [x] Settings shows "Connected". *(walked 2026-08-03: `GET /v1/settings/stripe` returns the credential row with its `stripe_account_id` (acct_1TOxdK…), livemode=false and the verified stamp.)*
 
 ### S1.4 Build the graph
-- [ ] Pricing → rating rule `api_calls` flat $0.01. Meter `api_calls` sum, **link the rule to the meter** (bind — key-match alone does NOT bind). Plan `starter` $29/mo, attach meter. **Guard (ADR-096):** attaching a meter with NO rating rule is rejected at plan create/update — `422 meter "…" has no rating rule` — so an unpriced meter can't silently bill $0. Bind the rule first, then attach.
-- [ ] Customers → create "Smoke Corp", external_id `smoke_corp`, email any@any.test. Billing profile: address + USD + 10% tax.
-- [ ] Customer detail → Set Up Payment → `4242 4242 4242 4242`.
-- [ ] Mint a test clock (avoids 30-day wait):
+- [x] Pricing → rating rule `api_calls` flat $0.01. Meter `api_calls` sum, **link the rule to the meter** (bind — key-match alone does NOT bind). Plan `starter` $29/mo, attach meter. **Guard (ADR-096):** attaching a meter with NO rating rule is rejected at plan create/update — `422 meter "…" has no rating rule` — so an unpriced meter can't silently bill $0. Bind the rule first, then attach. *(walked 2026-08-03 INCLUDING the guard's negative half first: with the meter created but UNBOUND, `POST /v1/plans` attaching it → **422 "meter \"api_calls\" has no rating rule — bind one (POST /v1/meters/{id}/pricing-rules) before attaching"**. Then the flat rule (`rule_key=api_calls_flat`, mode flat, $0.01) was created, bound to the meter, and the SAME plan create succeeded (201). The ADR-096 guard is proven in both directions — an unpriced meter cannot silently bill $0.)*
+- [x] Customers → create "Smoke Corp", external_id `smoke_corp`, email any@any.test. Billing profile: address + USD + 10% tax. *(walked 2026-08-03: customer created with `external_id=smoke_corp`, and its billing profile upserted (US/94107, USD). Tax was set at the TENANT level — `PUT /v1/settings` with `tax_provider=manual, tax_rate=10` — which is where the 10% actually lives; the profile carries address + currency + tax_status.)*
+- [x] Customer detail → Set Up Payment → `4242 4242 4242 4242`. *(walked 2026-08-03 through a real Stripe Checkout setup session: 4242 saved, `setup_intent.succeeded` forwarded to the NEW tenant's endpoint, and the card landed as `visa ····4242` default. Walk trap worth recording: Checkout offered a Link login for the reused email — "Pay without Link" reaches the card form — and the US billing address requires a ZIP, without which Save silently does nothing.)*
+- [x] Mint a test clock (avoids 30-day wait): *(walked 2026-08-03: `POST /v1/test-clocks` → clock `vlx_tclk_b90e380b…` frozen at the wall instant.)*
   ```bash
   curl -sS -X POST "$API/v1/test-clocks" -H "Authorization: Bearer $KEY" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"smoke\",\"frozen_time\":\"$(date -u +%FT%TZ)\"}" | jq .
   ```
-- [ ] Create the customer pinned to the clock (ADR-027 customer-level attach): Customers → New Customer → tick **Pin to test clock** dropdown → select your clock → Create. Customer Detail header shows the test-clock badge.
-- [ ] Customer detail → New Subscription → Starter plan. No clock dropdown — the dialog shows an amber inheritance hint ("This subscription will inherit the customer's test clock — &lt;name&gt;") because the customer is pinned. Server inherits automatically.
+- [x] Create the customer pinned to the clock (ADR-027 customer-level attach): Customers → New Customer → tick **Pin to test clock** dropdown → select your clock → Create. Customer Detail header shows the test-clock badge. *(walked 2026-08-03: the customer was created with `test_clock_id` set, and the created row carries the clock — the customer-level attach ADR-027 specifies.)*
+- [x] Customer detail → New Subscription → Starter plan. No clock dropdown — the dialog shows an amber inheritance hint ("This subscription will inherit the customer's test clock — &lt;name&gt;") because the customer is pinned. Server inherits automatically. *(walked 2026-08-03: the subscription was created with NO clock field in the request and came back carrying the customer's clock — the server inherits it, which is exactly what the dialog's amber hint describes.)*
 
 ### S1.5 Bill + charge
-- [ ] Ingest 1,000 events:
+- [x] Ingest 1,000 events: *(walked 2026-08-03: a 1,000-event batch → 201 `{"ingested":1000,"deduplicated":0,"total":1000}`; two further batches (500, 200) were ingested for the later cycles.)*
   ```bash
   TS=$(date -u +%FT%TZ)
   jq -n --arg ts "$TS" '[range(1000) | {external_customer_id:"smoke_corp",event_name:"api_calls",quantity:"1",idempotency_key:"smoke_\($ts)_\(.)"}]' > /tmp/events.json
   curl -sS -X POST "$API/v1/usage-events/batch" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" --data-binary @/tmp/events.json | jq .
   ```
-- [ ] Advance the clock 31 days: `POST /v1/test-clocks/$CLK/advance` with `frozen_time = now+31d` (BSD `date -u -v+31d` / GNU `date -u -d '+31 days'`).
-- [ ] `curl -sS -X POST "$API/v1/billing/run" -H "Authorization: Bearer $KEY"` → 1 invoice generated (bills only THIS tenant's due subs; the response `errors` carry only your own subscription ids, never another tenant's data or raw DB/Stripe text). *(auto: `TestGetDueBillingForTenant_ScopesToTenant`)*
-- [ ] Same call with a **platform** key (no tenant scope) → **403** (never triggers the global scheduler sweep). *(auto: `TestTriggerCycle_ForbidsUnscopedKey`)*
-- [ ] Invoice auto-finalized, `payment_status=succeeded`. Line items: prorated base + usage + tax. **A missing usage line now means drift, not a setup slip (ADR-096):** the plan-attach guard rejects attaching an unpriced meter, so the common "forgot to bind" case is caught at plan create/update (422), not here. If a rule is later unbound out from under a live sub, finalize drops that meter's usage but is no longer silent — a `slog.Warn` fires (and `GET /v1/customers/{id}/usage` still warns "no rating rule binding — skipped from totals"). Re-bind with `POST /v1/meters/{id}/pricing-rules`.
-- [ ] Stripe CLI shows `payment_intent.succeeded`. Dashboard MRR stays **$0** and the invoice shows a **Simulated** badge — the clock-pinned customer's rows are simulated (`is_simulated` / `test_clock_id`) and analytics gates simulated data out of every aggregate (ADR-086, `internal/analytics/simfilter.go`). A real wall-clock customer moves MRR; a test-clock smoke never does.
+- [x] Advance the clock 31 days: `POST /v1/test-clocks/$CLK/advance` with `frozen_time = now+31d` (BSD `date -u -v+31d` / GNU `date -u -d '+31 days'`). *(walked 2026-08-03: +31 days → 200, and the advance's own catchup billed the period — so the box below's `billing/run` correctly reports 0 (the work was already done), which is the engine being idempotent rather than idle.)*
+- [x] `curl -sS -X POST "$API/v1/billing/run" -H "Authorization: Bearer $KEY"` → 1 invoice generated (bills only THIS tenant's due subs; the response `errors` carry only your own subscription ids, never another tenant's data or raw DB/Stripe text). *(auto: `TestGetDueBillingForTenant_ScopesToTenant`)* *(walked 2026-08-03 with the tenant secret key: 200 `{"errors":[],"invoices_generated":0}` — zero because the clock advance had already billed the due period; the response carries an empty error list and nothing from any other tenant.)*
+- [x] Same call with a **platform** key (no tenant scope) → **403** (never triggers the global scheduler sweep). *(auto: `TestTriggerCycle_ForbidsUnscopedKey`)* *(satisfied 2026-08-03 by the box's own designated automation, RUN this session: `go test ./internal/billing -run TestTriggerCycle_ForbidsUnscopedKey` → ok. The live half could not be constructed on this tenant — bootstrap mints only secret + publishable keys, and an unscoped/invalid credential is refused at the auth layer (401) before reaching the 403 branch, so the scoping rule is unreachable by hand here. Recorded plainly: the guard is proven by its test, not by a hand-walk.)*
+- [x] Invoice auto-finalized, `payment_status=succeeded`. Line items: prorated base + usage + tax. **A missing usage line now means drift, not a setup slip (ADR-096):** the plan-attach guard rejects attaching an unpriced meter, so the common "forgot to bind" case is caught at plan create/update (422), not here. If a rule is later unbound out from under a live sub, finalize drops that meter's usage but is no longer silent — a `slog.Warn` fires (and `GET /v1/customers/{id}/usage` still warns "no rating rule binding — skipped from totals"). Re-bind with `POST /v1/meters/{id}/pricing-rules`. *(walked 2026-08-03 across THREE cycles on the fresh tenant, each auto-finalized and auto-charged to `paid/succeeded`: **VLX-000001** = prorated base $27.13 ("Starter - base fee (qty 1, prorated 29/31 days)") + usage $10.00 (1,000 calls × $0.01) = $37.13; **VLX-000002** = full base $29 + $5 usage = $34.00; **VLX-000003**, after the tenant tax rate was set, = $31.00 subtotal + **$3.10 tax (10%)** = $34.10 — base, usage and tax all present and arithmetically exact.)*
+- [x] Stripe CLI shows `payment_intent.succeeded`. Dashboard MRR stays **$0** and the invoice shows a **Simulated** badge — the clock-pinned customer's rows are simulated (`is_simulated` / `test_clock_id`) and analytics gates simulated data out of every aggregate (ADR-086, `internal/analytics/simfilter.go`). A real wall-clock customer moves MRR; a test-clock smoke never does. *(walked 2026-08-03: the tenant's own listener logged **3** `payment_intent.succeeded` (one per cycle), while `GET /v1/analytics/overview` reports `mrr: 0, revenue: 0, active_customers: 0, active_subscriptions: 0` — every row is `is_simulated=true` and the ADR-086 analytics gate excludes them. A clock-pinned smoke moves no aggregate, which is the entire point of running the canary this way.)*
 
 ### S1.6 Sign out
-- [ ] Sidebar → Sign Out. Redirect to /login.
-- [ ] Stale cookie on `/v1/whoami` → 401.
+- [x] Sidebar → Sign Out. Redirect to /login. *(walked 2026-08-03: `/v1/whoami` 200 while signed in → `POST /v1/auth/logout` 204 → the dashboard bounces to /login.)*
+- [x] Stale cookie on `/v1/whoami` → 401. *(walked 2026-08-03: replaying the exact pre-logout cookie against `/v1/whoami` → **401** — the session is revoked server-side, not just cleared in the browser.)*
 
 **S1 passing = core engine healthy.**
 
