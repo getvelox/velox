@@ -758,6 +758,24 @@ func (e PostV1PlansJSONBodyBillingInterval) Valid() bool {
 	}
 }
 
+// Defines values for GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource.
+const (
+	GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSourceNoSubscription GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource = "no_subscription"
+	GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSourceSubscription   GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource = "subscription"
+)
+
+// Valid indicates whether the value is a known member of the GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource enum.
+func (e GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource) Valid() bool {
+	switch e {
+	case GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSourceNoSubscription:
+		return true
+	case GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSourceSubscription:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PostV1RatingRulesJSONBodyMode.
 const (
 	Flat      PostV1RatingRulesJSONBodyMode = "flat"
@@ -1844,6 +1862,9 @@ type PutV1ProviderCostsJSONBody struct {
 	// TokenType ADR-044 role — input / output / cache_read.
 	TokenType string `json:"token_type"`
 }
+
+// GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource defines parameters for GetV1PublicCostDashboardToken.
+type GetV1PublicCostDashboardToken200JSONResponseBodyBillingPeriodSource string
 
 // PostV1RatingRulesJSONBody defines parameters for PostV1RatingRules.
 type PostV1RatingRulesJSONBody struct {

@@ -322,8 +322,16 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// MANUAL_TEST FLOW CU8.
 	costDashboardSvc := usage.NewCostDashboardAssembler(customerStore, customerUsageSvc, subStore)
 	customerH.SetCostDashboardService(costDashboardSvc)
+	// Same loud-boot shape as the HOSTED_INVOICE_BASE_URL / PAYMENT_UPDATE
+	// / DASHBOARD_BASE_URL warns below: unset, the rotate response's
+	// public_url degrades to a bare PATH, and the operator's Copy button
+	// hands them something a customer cannot open. Composing an origin
+	// from the request would be a guess — the API origin is not the
+	// dashboard origin — so the config stays explicit and the gap stays loud.
 	if base := strings.TrimSpace(os.Getenv("VELOX_API_BASE_URL")); base != "" {
 		customerH.SetAPIBaseURL(base)
+	} else {
+		slog.Warn("VELOX_API_BASE_URL NOT SET — the public cost-dashboard URL operators copy will be a relative path, not a shareable link. Set this to your public API origin (e.g. https://api.example.com).")
 	}
 	settingsH := tenant.NewSettingsHandler(settingsStore)
 	// Field-level settings-change audit (which fields, before/after). This is the

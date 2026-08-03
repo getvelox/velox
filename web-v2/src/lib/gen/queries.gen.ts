@@ -37,6 +37,7 @@ import type {
   GetV1InvoicesParams,
   GetV1Members200,
   GetV1ProviderCosts200,
+  GetV1PublicCostDashboardToken200,
   GetV1SubscriptionsParams,
   GetV1TestClocks200,
   GetV1TestClocksId200,
@@ -474,9 +475,9 @@ export const getGetV1PublicCostDashboardTokenUrl = (token: string,) => {
   return `/v1/public/cost-dashboard/${token}`
 }
 
-export const getV1PublicCostDashboardToken = async (token: string, options?: RequestInit): Promise<void> => {
+export const getV1PublicCostDashboardToken = async (token: string, options?: RequestInit): Promise<GetV1PublicCostDashboardToken200> => {
 
-  return orvalClient<void>(getGetV1PublicCostDashboardTokenUrl(token),
+  return orvalClient<GetV1PublicCostDashboardToken200>(getGetV1PublicCostDashboardTokenUrl(token),
   {
     ...options,
     method: 'GET'
