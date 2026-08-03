@@ -190,6 +190,43 @@ type CreditNoteInfo struct {
 	RefundStatus     string
 }
 
+// cnChannelDescription builds the per-channel breakdown line for a
+// post-payment credit note in the POST-PAYMENT ADJUSTMENTS section.
+//
+// A mixed-allocation CN reaches that list via its settled credit /
+// out-of-band leg, so its card leg can be present in ANY refund state —
+// a non-succeeded leg is annotated rather than printed bare, because
+// "1,000.00 to card" on a customer-visible document asserts cash moved
+// when refund_status says it didn't. Same rule as the dashboard
+// waterfall's channelDescription; keep the two in step.
+//
+// ASCII-safe on purpose: the embedded Noto Sans subset covers Latin +
+// currency symbols but NOT arrows (→, ↳), so the dashboard's arrow
+// styling would render as missing-glyph boxes here.
+func cnChannelDescription(cn CreditNoteInfo, symbol string) string {
+	var channels []string
+	if cn.RefundAmountCents > 0 {
+		note := ""
+		switch cn.RefundStatus {
+		case string(domain.RefundSucceeded):
+			// settled — no annotation
+		case string(domain.RefundFailed):
+			note = " (refund failed)"
+		default:
+			// pending, or empty on legacy rows: either way, not settled.
+			note = " (refund pending)"
+		}
+		channels = append(channels, formatCentsIn(symbol, cn.RefundAmountCents)+" to card"+note)
+	}
+	if cn.CreditAmountCents > 0 {
+		channels = append(channels, formatCentsIn(symbol, cn.CreditAmountCents)+" to credit")
+	}
+	if cn.OutOfBandAmountCents > 0 {
+		channels = append(channels, formatCentsIn(symbol, cn.OutOfBandAmountCents)+" out of band")
+	}
+	return strings.Join(channels, " | ")
+}
+
 // BillToInfo holds the customer's billing address for the PDF.
 type BillToInfo struct {
 	Name         string
@@ -661,25 +698,7 @@ func RenderPDF(ctx context.Context, inv domain.Invoice, lineItems []domain.Invoi
 			textAt(margin, y, "POST-PAYMENT ADJUSTMENTS")
 			y += 12
 			for _, cn := range completedCNs {
-				// Channel breakdown — concat of whichever channels are
-				// non-zero. Matches the dashboard row's channelDescription
-				// shape so PDF + UI tell the same story.
-				// PDF font (embedded Noto Sans subset) covers Latin +
-				// currency symbols but NOT arrows (→, ↳) or
-				// checkmarks. Use ASCII-safe labels so the rendered
-				// PDF doesn't show missing-glyph boxes. The dashboard
-				// renders with system fonts and can keep the arrows.
-				var channels []string
-				if cn.RefundAmountCents > 0 {
-					channels = append(channels, formatCents(cn.RefundAmountCents)+" to card")
-				}
-				if cn.CreditAmountCents > 0 {
-					channels = append(channels, formatCents(cn.CreditAmountCents)+" to credit")
-				}
-				if cn.OutOfBandAmountCents > 0 {
-					channels = append(channels, formatCents(cn.OutOfBandAmountCents)+" out of band")
-				}
-				channelDesc := strings.Join(channels, " | ")
+				channelDesc := cnChannelDescription(cn, symbol)
 				reason := cn.Reason
 				if len([]rune(reason)) > 40 {
 					reason = string([]rune(reason)[:37]) + "..."
