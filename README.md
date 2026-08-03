@@ -175,6 +175,8 @@ End-to-end demo — the whole wedge in ~30 seconds (Anthropic-style price matrix
 
 Every call in the script is checked — it fails loudly at the first API mismatch instead of pretending. Rerun it as often as you like (each run creates a fresh demo customer on its own test clock).
 
+Testing **outbound webhooks** locally needs no tunnel: `python3 scripts/dev/webhook-sink.py` runs a receiver on `localhost:9099` that logs every delivery (with its `Velox-Signature` header, so you can verify the HMAC offline) — any path returns 200, paths under `/fail` return 500 to exercise the retry ladder. Register it as an endpoint URL; localhost delivery is allowed in development and refused in production.
+
 Self-host: single-VM Docker Compose. See [`docs/self-host.md`](docs/self-host.md). Helm/Terraform/multi-replica HA paths land when a design partner names which Kubernetes flavour they actually run — pre-emptively shipping three deployment shapes produced surface nobody was running.
 
 ---
