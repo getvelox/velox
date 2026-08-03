@@ -66,7 +66,7 @@ func (r *stubRefunder) GetRefund(_ context.Context, _ string) (domain.RefundStat
 	return r.getStatus, "", nil
 }
 
-func (r *stubRefunder) FindRefundForCreditNote(_ context.Context, _, _, _ string) (string, domain.RefundStatus, error) {
+func (r *stubRefunder) FindRefundForCreditNote(_ context.Context, _, _ string) (string, domain.RefundStatus, error) {
 	return "", "", nil
 }
 
@@ -586,29 +586,42 @@ func TestRetryRefundAudit_SharedFate(t *testing.T) {
 	t.Run("idempotent re-drive still records the operator's retry, flagged as no-change", func(t *testing.T) {
 		cn := seedIssuedRefundCN(t, "retry-noop", domain.RefundPending, "re_retry_noop")
 
-		// Stripe dedups on velox_cn_<id> and hands back the SAME refund, still
-		// pending — nothing about the persisted state moves.
-		refunder := &stubRefunder{refundID: "re_retry_noop", status: domain.RefundPending}
+		// ADR-063 amendment: the retry reconciles first. The provider
+		// confirms the refund is STILL pending → no second refund is minted
+		// (the old flow re-fired Create and leaned on key replay), the row
+		// is unchanged, and the operator gets a clear refusal. The reconcile
+		// that hit the provider is still recorded, flagged as no-change.
+		refunder := &stubRefunder{getStatus: domain.RefundPending}
 		svc := creditnote.NewService(store, invStore, refunder)
 		svc.SetNumberGenerator(&seqNumbers{prefix: "RETRYNOOP"})
 		svc.SetAuditLogger(logger)
 
-		got, err := svc.RetryRefund(ctx, tenantID, cn.ID)
-		if err != nil {
-			t.Fatalf("RetryRefund: %v", err)
+		_, err := svc.RetryRefund(ctx, tenantID, cn.ID)
+		if err == nil {
+			t.Fatal("want the still-processing refusal; a pending refund must not be re-fired")
+		}
+		if refunder.calls != 0 {
+			t.Fatalf("stripe create fired %d times for an in-flight refund, want 0", refunder.calls)
+		}
+		got, gerr := store.Get(ctx, tenantID, cn.ID)
+		if gerr != nil {
+			t.Fatalf("get: %v", gerr)
 		}
 		if got.RefundStatus != domain.RefundPending || got.StripeRefundID != "re_retry_noop" {
 			t.Fatalf("persisted refund leg moved: got (%s, %s), want (pending, re_retry_noop)", got.RefundStatus, got.StripeRefundID)
 		}
 		rows := cnAuditRows(ctx, t, logger, tenantID, cn.ID)
 		if len(rows) != 1 {
-			t.Fatalf("the operator's retry must be recorded even when Stripe converged; got %d rows: %+v", len(rows), rows)
+			t.Fatalf("the operator's reconcile must be recorded even when nothing moved; got %d rows: %+v", len(rows), rows)
 		}
 		if rows[0].Metadata["action"] != "refund_retried" {
 			t.Errorf("metadata action: got %v, want refund_retried", rows[0].Metadata["action"])
 		}
 		if changed, _ := rows[0].Metadata["status_changed"].(bool); changed {
 			t.Errorf("status_changed: got true, want false — the row must say the state did not move")
+		}
+		if rec, _ := rows[0].Metadata["reconciled_from_provider"].(bool); !rec {
+			t.Errorf("reconciled_from_provider: want true — the row must say where the answer came from")
 		}
 	})
 
@@ -648,9 +661,15 @@ func TestRetryRefundAudit_SharedFate(t *testing.T) {
 		}
 	})
 
-	t.Run("stripe error persists the failed move and records it", func(t *testing.T) {
+	t.Run("stripe error records both facts: the reconcile move and the failed create", func(t *testing.T) {
 		cn := seedIssuedRefundCN(t, "retry-stripefail", domain.RefundPending, "re_retry_stripefail")
 
+		// Provider says the stored refund is dead (stub GetRefund defaults to
+		// failed) → the reconcile persists pending→failed with the provider's
+		// reason; the re-drive create then errors. TWO audit rows, each a real
+		// fact: the state move the provider reported, and the operator's
+		// create attempt that failed. The old single-row expectation encoded
+		// the pre-reconcile flow.
 		refunder := &stubRefunder{err: errors.New("stripe: card_declined")}
 		svc := creditnote.NewService(store, invStore, refunder)
 		svc.SetNumberGenerator(&seqNumbers{prefix: "RETRYSTRIPEFAIL"})
@@ -668,17 +687,26 @@ func TestRetryRefundAudit_SharedFate(t *testing.T) {
 			t.Fatalf("refund_status: got %q, want failed", got.RefundStatus)
 		}
 
-		// pending→failed IS a real committed state change on a money document —
-		// it carries its evidence, even though the request 500s.
 		rows := cnAuditRows(ctx, t, logger, tenantID, cn.ID)
-		if len(rows) != 1 {
-			t.Fatalf("want exactly one audit row for the pending→failed move; got %+v", rows)
+		if len(rows) != 2 {
+			t.Fatalf("want two audit rows (reconcile move + failed create attempt); got %+v", rows)
 		}
-		if rows[0].Metadata["refund_status"] != string(domain.RefundFailed) {
-			t.Errorf("metadata refund_status: got %v, want failed", rows[0].Metadata["refund_status"])
+		// cnAuditRows returns newest-first: rows[1] is the reconcile, rows[0]
+		// the create failure.
+		if rec, _ := rows[1].Metadata["reconciled_from_provider"].(bool); !rec {
+			t.Errorf("first row must be the provider reconcile; got %+v", rows[1].Metadata)
 		}
-		if rows[0].Metadata["prior_refund_status"] != string(domain.RefundPending) {
-			t.Errorf("metadata prior_refund_status: got %v, want pending", rows[0].Metadata["prior_refund_status"])
+		if rows[1].Metadata["prior_refund_status"] != string(domain.RefundPending) {
+			t.Errorf("reconcile prior: got %v, want pending", rows[1].Metadata["prior_refund_status"])
+		}
+		if rows[1].Metadata["provider_failure_reason"] != "expired_or_canceled_card" {
+			t.Errorf("reconcile must carry the provider failure reason; got %v", rows[1].Metadata["provider_failure_reason"])
+		}
+		if rows[0].Metadata["provider_error"] != "stripe: card_declined" {
+			t.Errorf("create-failure row must carry provider_error; got %v", rows[0].Metadata["provider_error"])
+		}
+		if changed, _ := rows[0].Metadata["status_changed"].(bool); changed {
+			t.Errorf("failed→failed create record: status_changed must be false")
 		}
 	})
 }

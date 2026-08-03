@@ -43,7 +43,6 @@ type fakeRefundCall struct {
 type fakeFindCall struct {
 	paymentIntentID string
 	creditNoteID    string
-	excludeRefundID string
 }
 
 func (f *fakeRefunder) CreateRefund(_ context.Context, paymentIntentID string, amountCents int64, idempotencyKey, creditNoteID string) (string, domain.RefundStatus, error) {
@@ -75,11 +74,10 @@ func (f *fakeRefunder) GetRefund(_ context.Context, refundID string) (domain.Ref
 	return status, f.getReason, nil
 }
 
-func (f *fakeRefunder) FindRefundForCreditNote(_ context.Context, paymentIntentID, creditNoteID, excludeRefundID string) (string, domain.RefundStatus, error) {
+func (f *fakeRefunder) FindRefundForCreditNote(_ context.Context, paymentIntentID, creditNoteID string) (string, domain.RefundStatus, error) {
 	f.findCalls = append(f.findCalls, fakeFindCall{
 		paymentIntentID: paymentIntentID,
 		creditNoteID:    creditNoteID,
-		excludeRefundID: excludeRefundID,
 	})
 	if f.findErr != nil {
 		return "", "", f.findErr
@@ -396,8 +394,8 @@ func TestRetryRefund(t *testing.T) {
 		if len(refunder.findCalls) != 1 {
 			t.Fatalf("expected 1 provider search before create, got %d", len(refunder.findCalls))
 		}
-		if refunder.findCalls[0].creditNoteID != cn.ID || refunder.findCalls[0].excludeRefundID != "" {
-			t.Errorf("search: got %+v, want cn=%s exclude=\"\"", refunder.findCalls[0], cn.ID)
+		if refunder.findCalls[0].creditNoteID != cn.ID {
+			t.Errorf("search: got %+v, want cn=%s", refunder.findCalls[0], cn.ID)
 		}
 		// The key scopes to the CN's state generation — deliberately NOT
 		// Issue()'s eternal key (expired keys can't dedup; a replayed saved
@@ -493,7 +491,7 @@ func TestRetryRefund(t *testing.T) {
 		}
 	})
 
-	t.Run("provider-confirmed-failed id → search EXCLUDES the dead id, then creates anew", func(t *testing.T) {
+	t.Run("provider-confirmed-failed id → live-only search finds nothing, creates anew", func(t *testing.T) {
 		svc, store, _, refunder := setupRefundSvc(t)
 		refunder.getStatus = domain.RefundFailed
 		refunder.getReason = "expired_or_canceled_card"
@@ -513,8 +511,8 @@ func TestRetryRefund(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RetryRefund: %v", err)
 		}
-		if len(refunder.findCalls) != 1 || refunder.findCalls[0].excludeRefundID != "re_dead_1" {
-			t.Fatalf("search must exclude the provider-confirmed-dead id: %+v", refunder.findCalls)
+		if len(refunder.findCalls) != 1 {
+			t.Fatalf("expected exactly one live-refund search, got %d", len(refunder.findCalls))
 		}
 		if len(refunder.calls) != 1 {
 			t.Fatalf("expected exactly one fresh create, got %d", len(refunder.calls))

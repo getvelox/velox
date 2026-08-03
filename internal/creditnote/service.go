@@ -59,12 +59,12 @@ type Refunder interface {
 	// GetRefund returns the refund's CURRENT provider status plus the
 	// provider's failure reason (empty unless failed).
 	GetRefund(ctx context.Context, refundID string) (domain.RefundStatus, string, error)
-	// FindRefundForCreditNote returns the id+status of a refund carrying
-	// this credit note's metadata on the given PaymentIntent, or ("","",nil)
-	// when none exists. excludeRefundID (may be empty) names a
-	// provider-confirmed-dead refund that must not be re-adopted; among the
-	// rest a live refund (succeeded/pending) is preferred over a failed one.
-	FindRefundForCreditNote(ctx context.Context, paymentIntentID, creditNoteID, excludeRefundID string) (string, domain.RefundStatus, error)
+	// FindRefundForCreditNote returns the id+status of a LIVE
+	// (succeeded/pending) refund carrying this credit note's metadata on
+	// the given PaymentIntent, or ("","",nil) when none exists. Failed
+	// matches are never returned — adoption exists to prevent duplicates,
+	// and a dead attempt returned here would shadow the create leg forever.
+	FindRefundForCreditNote(ctx context.Context, paymentIntentID, creditNoteID string) (string, domain.RefundStatus, error)
 }
 
 // CreditGranter adds credits to a customer's balance.
@@ -1535,7 +1535,7 @@ func (s *Service) runPostIssueExternalLegs(ctx context.Context, tenantID, id str
 					})
 				}
 			}
-			if err := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, cn.RefundStatus, cn.StripeRefundID, emit); err != nil {
+			if err := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: cn.RefundStatus, StripeRefundID: cn.StripeRefundID, ExpectedPriorRefundID: ""}, emit); err != nil {
 				slog.Warn("failed to persist refund status",
 					"credit_note_id", cn.ID, "refund_status", cn.RefundStatus,
 					"stripe_refund_id", cn.StripeRefundID, "error", err)
@@ -1632,6 +1632,16 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	switch cn.RefundStatus {
 	case domain.RefundFailed, domain.RefundPending:
 		// retry-eligible
+	case domain.RefundNone:
+		// An issued CN with a refund allocation but NO recorded outcome is
+		// the Issue-crash window: the external leg ran (or was about to)
+		// and the process died before the persist. The metadata search
+		// below recovers a minted refund; finding none, a create is the
+		// leg running for the first time. Refusing this state stranded the
+		// exact lost-response class the adoption machinery exists for.
+		if cn.RefundAmountCents <= 0 {
+			return domain.CreditNote{}, errs.InvalidState("credit-only credit note has no refund leg to retry")
+		}
 	case domain.RefundSucceeded:
 		return domain.CreditNote{}, errs.InvalidState("refund already succeeded — nothing to retry")
 	default:
@@ -1731,14 +1741,13 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	//      ADR-108's pattern). Found → persist and stop; the operator sees
 	//      the adopted state and a second click walks path 1.
 	//   3. Only when the provider confirms nothing viable exists → create.
-	deadRefundID := "" // a provider-confirmed-failed refund id, excluded from adoption
 	if cn.StripeRefundID != "" {
 		provStatus, provReason, gerr := s.refunder.GetRefund(ctx, cn.StripeRefundID)
 		if gerr != nil {
 			return domain.CreditNote{}, fmt.Errorf("reconcile refund with provider: %w", gerr)
 		}
 		reconcileEmit := retryEmit(map[string]any{"reconciled_from_provider": true, "provider_failure_reason": provReason})
-		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, provStatus, cn.StripeRefundID, reconcileEmit); perr != nil {
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: provStatus, StripeRefundID: cn.StripeRefundID, ExpectedPriorRefundID: cn.StripeRefundID, ProviderRead: true}, reconcileEmit); perr != nil {
 			return domain.CreditNote{}, fmt.Errorf("persist reconciled refund status: %w", perr)
 		}
 		switch provStatus {
@@ -1749,10 +1758,14 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 				"refund %s is still processing at Stripe — no new refund was created; it settles via webhook, or retry later", cn.StripeRefundID))
 		}
 		// Provider-confirmed failed → a new refund is legitimate. Fall
-		// through to the search, EXCLUDING this dead id: a previous
-		// re-drive may have minted a live refund whose response we lost,
-		// and the stored id would still point at the dead one.
-		deadRefundID = cn.StripeRefundID
+		// through to the search: a previous re-drive may have minted a
+		// LIVE refund whose response was lost, and the stored id would
+		// still point at the dead one. The search adopts live matches
+		// only, so the dead id (provider-failed, hence not live) can
+		// never be re-adopted — which is also what makes a pile of dead
+		// prior attempts unable to shadow the create leg (the finder
+		// review caught an exclude-one-id version of this livelocking
+		// between two dead twins).
 	}
 
 	// Search-and-adopt (ADR-108's pattern) before any create, in BOTH lanes:
@@ -1761,13 +1774,13 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	// create stamps metadata velox_cn_id, so a lost refund is always
 	// findable; adopting it is what makes convergence independent of the
 	// idempotency key's 24h lifetime.
-	foundID, foundStatus, ferr := s.refunder.FindRefundForCreditNote(ctx, inv.StripePaymentIntentID, cn.ID, deadRefundID)
+	foundID, foundStatus, ferr := s.refunder.FindRefundForCreditNote(ctx, inv.StripePaymentIntentID, cn.ID)
 	if ferr != nil {
 		return domain.CreditNote{}, fmt.Errorf("search provider refunds: %w", ferr)
 	}
 	if foundID != "" {
 		adoptEmit := retryEmit(map[string]any{"adopted_from_provider": true})
-		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, foundStatus, foundID, adoptEmit); perr != nil {
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: foundStatus, StripeRefundID: foundID, ExpectedPriorRefundID: cn.StripeRefundID, ProviderRead: true}, adoptEmit); perr != nil {
 			return domain.CreditNote{}, fmt.Errorf("persist adopted refund: %w", perr)
 		}
 		return s.store.Get(ctx, tenantID, id)
@@ -1780,7 +1793,7 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	// updated_at) gets a fresh key instead of replaying a dead attempt's
 	// saved response. Durable convergence never rests on the key: the
 	// metadata stamp above makes any lost refund findable and adoptable.
-	gen := sha256.Sum256([]byte(cn.StripeRefundID + "|" + string(cn.RefundStatus) + "|" + cn.UpdatedAt.UTC().Format(time.RFC3339Nano)))
+	gen := sha256.Sum256([]byte(cn.StripeRefundID + "|" + string(cn.RefundStatus)))
 	idempotencyKey := fmt.Sprintf("velox_cn_%s_r_%s", cn.ID, hex.EncodeToString(gen[:8]))
 	refundID, refStatus, refundErr := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, idempotencyKey, cn.ID)
 	if refundErr != nil {
@@ -1802,7 +1815,7 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 		// The persist error is LOGGED, never discarded, and the Stripe error stays
 		// primary.
 		failEmit := retryEmit(map[string]any{"provider_error": refundErr.Error()})
-		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, domain.RefundFailed, cn.StripeRefundID, failEmit); perr != nil {
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: domain.RefundFailed, StripeRefundID: cn.StripeRefundID, ExpectedPriorRefundID: cn.StripeRefundID, ProviderRead: true}, failEmit); perr != nil {
 			slog.ErrorContext(ctx, "persist failed refund status after retry",
 				"credit_note_id", id, "error", perr)
 		}
@@ -1813,7 +1826,7 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	// (still settling), not necessarily succeeded; the refund webhook settles it.
 	// Recording a blanket succeeded here would re-introduce the false-success lie
 	// and permanently 409 a legitimate later retry.
-	if err := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, refStatus, refundID, retryEmit(nil)); err != nil {
+	if err := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: refStatus, StripeRefundID: refundID, ExpectedPriorRefundID: cn.StripeRefundID}, retryEmit(nil)); err != nil {
 		// Stripe call succeeded but local persist (or its audit emission —
 		// shared fate) failed. Convergence is the METADATA, not the key: the
 		// next retry's FindRefundForCreditNote finds this refund by

@@ -107,39 +107,36 @@ func (r *StripeRefunder) GetRefund(ctx context.Context, refundID string) (domain
 	return mapStripeRefundStatus(string(ref.Status)), string(ref.FailureReason), nil
 }
 
-// FindRefundForCreditNote searches the PaymentIntent's refunds for one minted
-// for this credit note (metadata velox_cn_id). Returns ("", "", nil) when none
-// exists. This is the search half of search-and-adopt (ADR-108's pattern,
-// applied to refunds): it recovers the lost-response shapes — a create that
-// errored on the wire after Stripe minted the refund, in either the original
-// Issue leg (Velox holds no id) or a later re-drive (Velox still holds the
-// dead predecessor's id, passed as excludeRefundID).
+// FindRefundForCreditNote searches the PaymentIntent's refunds for a LIVE
+// (succeeded/pending) refund minted for this credit note (metadata
+// velox_cn_id). Returns ("", "", nil) when none exists. This is the search
+// half of search-and-adopt (ADR-108's pattern, applied to refunds): it
+// recovers the lost-response shapes — a create that errored on the wire
+// after Stripe minted the refund, in either the original Issue leg (Velox
+// holds no id) or a later re-drive (Velox still holds a dead predecessor).
 //
-// Preference among matches: a LIVE refund (succeeded/pending) wins over a
-// failed one — adopting a live twin is what prevents a duplicate; adopting a
-// failed twin merely records the truer id, so it is the fallback.
-func (r *StripeRefunder) FindRefundForCreditNote(ctx context.Context, paymentIntentID, creditNoteID, excludeRefundID string) (string, domain.RefundStatus, error) {
+// Failed matches are deliberately NOT returned. Adopting a live twin is what
+// prevents a duplicate; a failed twin is a dead prior attempt, and returning
+// it would let a pile of dead attempts permanently shadow the create leg
+// (adopt returns early), livelocking the retry — the finder review caught
+// exactly that with an exclude-one-id variant. Dead attempts stay visible in
+// the audit trail, which records every id and failure reason as it happened.
+func (r *StripeRefunder) FindRefundForCreditNote(ctx context.Context, paymentIntentID, creditNoteID string) (string, domain.RefundStatus, error) {
 	sc := r.clients.ForCtx(ctx)
 	if sc == nil {
 		return "", "", ErrStripeNotConfigured
 	}
 	params := &stripe.RefundListParams{PaymentIntent: stripe.String(paymentIntentID)}
-	var failedID string
-	var failedStatus domain.RefundStatus
 	for ref, err := range sc.V1Refunds.List(ctx, params) {
 		if err != nil {
 			return "", "", fmt.Errorf("stripe list refunds: %s", stripeErrorMessage(err))
 		}
-		if ref.ID == excludeRefundID || ref.Metadata["velox_cn_id"] != creditNoteID {
+		if ref.Metadata["velox_cn_id"] != creditNoteID {
 			continue
 		}
-		status := mapStripeRefundStatus(string(ref.Status))
-		if status != domain.RefundFailed {
+		if status := mapStripeRefundStatus(string(ref.Status)); status != domain.RefundFailed {
 			return ref.ID, status, nil
 		}
-		if failedID == "" {
-			failedID, failedStatus = ref.ID, status
-		}
 	}
-	return failedID, failedStatus, nil
+	return "", "", nil
 }

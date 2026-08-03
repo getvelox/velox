@@ -603,8 +603,30 @@ func (s *PostgresStore) SetTaxTransaction(ctx context.Context, tenantID, id stri
 	return tx.Commit()
 }
 
+// RefundStatusWrite carries one attempt-scoped write to a CN's refund leg.
+// Every writer names the identity it ACTED ON (ExpectedPriorRefundID — what
+// the row held when the writer read it), which is what lets the store refuse
+// stale writers instead of letting an old snapshot stamp over a newer
+// attempt's live refund.
+type RefundStatusWrite struct {
+	Status domain.RefundStatus
+	// StripeRefundID: "" keeps the stored id (COALESCE semantics).
+	StripeRefundID string
+	// ExpectedPriorRefundID is the CAS term: the refund id the writer's row
+	// snapshot held ("" for none). If the row has moved to a different
+	// identity since, the write is skipped (emit still fires, changed=false).
+	ExpectedPriorRefundID string
+	// ProviderRead marks a status obtained from a FRESH provider read
+	// (GetRefund / list), which — unlike a webhook delivery — cannot be a
+	// stale redelivery. It may therefore correct a same-identity `failed`
+	// upward to `succeeded` (a locally-misstamped failure); webhook writes
+	// never can.
+	ProviderRead bool
+}
+
 func (s *PostgresStore) UpdateRefundStatus(ctx context.Context, tenantID, id string, status domain.RefundStatus, stripeRefundID string) error {
-	return s.UpdateRefundStatusAudited(ctx, tenantID, id, status, stripeRefundID, nil)
+	// Seed/back-compat wrapper: writes onto rows with no prior identity.
+	return s.UpdateRefundStatusAudited(ctx, tenantID, id, RefundStatusWrite{Status: status, StripeRefundID: stripeRefundID}, nil)
 }
 
 // UpdateRefundStatusAudited is UpdateRefundStatus with an in-tx audit emission
@@ -634,7 +656,7 @@ func (s *PostgresStore) UpdateRefundStatus(ctx context.Context, tenantID, id str
 //
 // An emission failure aborts the write (shared fate) — the refund state and its
 // evidence commit together or not at all.
-func (s *PostgresStore) UpdateRefundStatusAudited(ctx context.Context, tenantID, id string, status domain.RefundStatus, stripeRefundID string, emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error) error {
+func (s *PostgresStore) UpdateRefundStatusAudited(ctx context.Context, tenantID, id string, w RefundStatusWrite, emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error) error {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return err
@@ -653,30 +675,61 @@ func (s *PostgresStore) UpdateRefundStatusAudited(ctx context.Context, tenantID,
 		return err
 	}
 
-	// Same-identity regressions are refused HERE, not only in the webhook
-	// writer (ADR-063 amendment, 2026-08-04). The window this closes:
-	// RetryRefund reads provider truth (GetRefund) and then persists it —
-	// a refund.failed webhook landing between the read and this write
-	// would be overwritten by the now-stale non-terminal answer, and no
-	// webhook would ever correct it back (event-id dedup swallows the
-	// redelivery). Before the reconcile-first flow the same overwrite
-	// happened through an idempotency-key replay's SAVED create response.
-	// Three deliberate asymmetries with the webhook guard:
-	//   - a NEW provider identity (different refund id) may write ANY
-	//     status: a fresh attempt legitimately restarts the lifecycle
-	//     (failed → pending is exactly what a successful re-drive looks
-	//     like);
-	//   - a SAME-VALUE persist still runs the UPDATE so updated_at moves —
-	//     the "stuck pending >72h" attention window resets on a fresh
-	//     provider confirmation, per the contract above;
-	//   - the refusal still EMITS (changed=false): the operator action or
-	//     reconcile that hit the provider is the fact, even when its stale
-	//     answer was discarded.
-	sameIdentity := stripeRefundID == "" || stripeRefundID == cur.StripeRefundID
-	if sameIdentity && refundStatusRegression(cur.RefundStatus, status) {
+	// Attempt-scoped write rules (ADR-063 amendment, 2026-08-04; tightened
+	// after the finder review caught three ways the first cut still lost):
+	//
+	// 1. IDENTITY CAS. The writer names the refund id its snapshot held;
+	//    if the row has moved to a different identity, this writer is
+	//    stale — a slow reconcile about a dead re_A must not stamp over a
+	//    completed re-drive's live re_B, and a create-error persist that
+	//    raced a concurrent success must not mark the live refund failed.
+	//    Refused writes still EMIT (changed=false): the action happened.
+	//
+	// 2. SAME-VALUE writes skip the UPDATE entirely, so updated_at does
+	//    NOT move. The needs-attention window measures time since the last
+	//    real state change; a provider re-confirming "still pending" is
+	//    CONTINUED stuckness, and resetting the clock on the operator's
+	//    own reconcile poke would hide exactly the rows the alert exists
+	//    to surface. (The first cut of this guard did the opposite, on a
+	//    misreading of the window's semantics.)
+	//
+	// 3. Same-identity REGRESSIONS (failed → anything, succeeded →
+	//    pending) are refused — unless the value comes from a FRESH
+	//    provider read (w.ProviderRead). A read can never be a stale
+	//    redelivery, so it may correct a locally-misstamped `failed`
+	//    upward; the webhook writer keeps failed absorbing because it
+	//    cannot make that distinction.
+	//
+	// 4. An identity CHANGE that passed the CAS may write any status: a
+	//    fresh attempt legitimately restarts the lifecycle.
+	if cur.StripeRefundID != w.ExpectedPriorRefundID {
+		slog.WarnContext(ctx, "refused stale refund-status write (identity moved)",
+			"credit_note_id", id, "row_refund_id", cur.StripeRefundID,
+			"writer_expected", w.ExpectedPriorRefundID, "attempted", string(w.Status))
+		if emit != nil {
+			if err := emit(tx, cur, cur.RefundStatus, false); err != nil {
+				return fmt.Errorf("audit emission: %w", err)
+			}
+		}
+		return tx.Commit()
+	}
+	newID := cur.StripeRefundID
+	if w.StripeRefundID != "" {
+		newID = w.StripeRefundID
+	}
+	sameIdentity := newID == cur.StripeRefundID
+	if sameIdentity && w.Status == cur.RefundStatus {
+		if emit != nil {
+			if err := emit(tx, cur, cur.RefundStatus, false); err != nil {
+				return fmt.Errorf("audit emission: %w", err)
+			}
+		}
+		return tx.Commit()
+	}
+	if sameIdentity && !w.ProviderRead && refundStatusRegression(cur.RefundStatus, w.Status) {
 		slog.WarnContext(ctx, "refused same-refund status regression",
 			"credit_note_id", id, "stripe_refund_id", cur.StripeRefundID,
-			"current", string(cur.RefundStatus), "attempted", string(status))
+			"current", string(cur.RefundStatus), "attempted", string(w.Status))
 		if emit != nil {
 			if err := emit(tx, cur, cur.RefundStatus, false); err != nil {
 				return fmt.Errorf("audit emission: %w", err)
@@ -689,17 +742,13 @@ func (s *PostgresStore) UpdateRefundStatusAudited(ctx context.Context, tenantID,
 		UPDATE credit_notes SET refund_status=$1, stripe_refund_id=COALESCE(NULLIF($2,''), stripe_refund_id),
 			updated_at=$3
 		WHERE id=$4`,
-		status, stripeRefundID, clock.Now(ctx), id); err != nil {
+		w.Status, w.StripeRefundID, clock.Now(ctx), id); err != nil {
 		return err
 	}
 
-	// The persisted result of the COALESCE above: an empty stripeRefundID
-	// leaves the stored id untouched.
 	updated := cur
-	updated.RefundStatus = status
-	if stripeRefundID != "" {
-		updated.StripeRefundID = stripeRefundID
-	}
+	updated.RefundStatus = w.Status
+	updated.StripeRefundID = newID
 	// The store REPORTS whether the persisted state moved; it does not decide
 	// whether that is audit-worthy. The two callers want opposite semantics:
 	// a webhook no-op is a non-event (no row), while an operator's retry hit

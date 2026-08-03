@@ -111,10 +111,27 @@ shipped defects followed:
   metadata (excluding the dead id) and **adopts** a live match instead of
   creating — ADR-108's search-and-adopt, applied to money-out.
 - The create key scopes to the CN's **state generation**
-  (`velox_cn_<id>_r_<hash(refund_id|status|updated_at)>`): double-clicked
-  retries share a snapshot and collapse into one refund; a retry after a
-  persisted state change gets a fresh key instead of replaying a dead
-  attempt's saved response.
+  (`velox_cn_<id>_r_<hash(refund_id|status)>`): concurrent retries share a
+  snapshot and collapse into one refund at Stripe, while a retry after a
+  persisted identity/status change gets a fresh key instead of replaying a
+  dead attempt's saved response. `updated_at` is deliberately NOT in the
+  hash — the finder review showed the reconcile's own row-touch would have
+  split two close-together clicks into two keys, re-opening the double.
+- Adoption is **live-only**: a provider-failed twin is never adopted. The
+  finder review caught an exclude-one-id variant livelocking between two
+  dead twins — each click adopting the other dead refund and never reaching
+  the create leg. Dead attempts remain in the audit trail.
+- Every status persist is **identity-CAS'd** (the writer names the refund id
+  its snapshot held; the store skips stale writers), and the same-identity
+  regression guard has a **ProviderRead** bypass: a fresh read — unlike a
+  webhook delivery — cannot be stale, so it may correct a locally-misstamped
+  `failed` upward. A same-value persist no longer touches `updated_at`,
+  because re-confirming "still pending" is continued stuckness and resetting
+  the 72h attention clock on the operator's own poke hid exactly the rows
+  the alert exists for.
+- `refund_status=none` on an issued CN **with a refund allocation** is now
+  retry-eligible: that state is the Issue-crash window (leg ran, persist
+  died), and the adoption lane recovers precisely it.
 - The operator writer now refuses **same-identity regressions** (failed is
   absorbing; succeeded yields only to failed) while still emitting the
   audit row — the action is the fact — and a NEW identity may write any
@@ -129,6 +146,13 @@ shipped defects followed:
 Also shipped with this amendment: `credit_notes` gained its first useful
 lookup indexes (migration 0169 — `invoice_id`, partial `stripe_refund_id`);
 the webhook match was previously a tenant-wide scan.
+
+Transition note: refunds created before this amendment carry no
+`velox_cn_id` metadata, so the adoption search cannot see them. No
+environment holds such a row with a live lost refund (verified: the two
+pre-amendment failed CNs are walk fixtures with no provider refund at all),
+but a self-hosted upgrader with a stuck pre-amendment refund should
+reconcile it manually in the Stripe dashboard before clicking retry.
 
 Unchanged: refunds stay **operator-retried**, never auto-swept; the refund
 remains a leg of the credit note (the review confirmed the peer set —
