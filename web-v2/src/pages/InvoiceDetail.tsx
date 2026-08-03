@@ -1183,7 +1183,15 @@ export default function InvoiceDetailPage() {
                       )
                       const channelDescription = (cn: CreditNote): string => {
                         const parts: string[] = []
-                        if (cn.refund_amount_cents > 0) parts.push(`${formatCents(cn.refund_amount_cents, invoice.currency)} → card`)
+                        // A mixed-allocation CN reaches this list via its settled
+                        // credit/out-of-band leg, so its card leg can be here in any
+                        // state — say so instead of printing "→ card" for cash that
+                        // failed or hasn't moved.
+                        if (cn.refund_amount_cents > 0) {
+                          const cardNote = cn.refund_status === 'succeeded' ? '' :
+                            cn.refund_status === 'failed' ? ' (refund failed)' : ' (refund pending)'
+                          parts.push(`${formatCents(cn.refund_amount_cents, invoice.currency)} → card${cardNote}`)
+                        }
                         if (cn.credit_amount_cents > 0) parts.push(`${formatCents(cn.credit_amount_cents, invoice.currency)} → credit`)
                         if ((cn.out_of_band_amount_cents ?? 0) > 0) parts.push(`${formatCents(cn.out_of_band_amount_cents ?? 0, invoice.currency)} → out of band`)
                         return parts.join(' · ')
