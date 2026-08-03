@@ -47,8 +47,15 @@ func ParseRange(r *http.Request, fromParam, toParam string) (from, to time.Time,
 			return time.Time{}, time.Time{}, errs.Invalid(toParam, "must be RFC3339 (e.g. 2026-12-31T23:59:59Z) or YYYY-MM-DD")
 		}
 	}
-	if !from.IsZero() && !to.IsZero() && !to.After(from) {
-		return time.Time{}, time.Time{}, errs.Invalid(toParam, "must be after `"+fromParam+"`")
+	// Reject only INVERTED ranges. Equal endpoints are a valid zero-width
+	// window: every consumer's SQL is inclusive on both ends (>= / <=), so
+	// from==to selects rows at exactly that instant — which is THE natural
+	// query on the sim axis, where sim_effective_at is quantized to advance
+	// targets and cycle boundaries (found on the FLOW P2 walk: the flow's
+	// own single-instant example 422'd against the stricter check, while
+	// the package doc and the SQL beneath both promised inclusivity).
+	if !from.IsZero() && !to.IsZero() && to.Before(from) {
+		return time.Time{}, time.Time{}, errs.Invalid(toParam, "must not be before `"+fromParam+"`")
 	}
 	return from, to, nil
 }
