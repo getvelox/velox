@@ -56,6 +56,34 @@ function encodeCursor(e: AuditEntry): string {
     .replace(/\//g, '_')
 }
 
+// Velox ids are time-sortable, so two keys minted in the same window share a
+// long LEADING prefix and differ only at the end — `slice(0, 16)` throws away
+// exactly the entropy that tells them apart. Verified on real data: two
+// distinct keys both rendered as "Key vlx_key_d9d763rm", and another pair as
+// "Key vlx_key_d9ksum3m". This fires precisely in the forensic case (the key
+// was deleted, so the name join misses and the id is all that is left), which
+// is when telling two keys apart matters most.
+//
+// Keeping both ends is the documented remedy for identifier-shaped strings —
+// the question to ask is "which part of the string differentiates the item?",
+// and for a time-ordered id the answer is the tail.
+function middleTruncate(value: string, max: number): string {
+  if (value.length <= max) return value
+  const head = Math.ceil((max - 1) / 2)
+  const tail = Math.floor((max - 1) / 2)
+  return `${value.slice(0, head)}…${value.slice(-tail)}`
+}
+
+// The tooltip must carry BOTH strings, because they answer different questions
+// and the cell shows only one of them. Before this it carried actor_id alone —
+// so a clipped "owner@walkthrough.local" hovered to reveal a UUID, i.e. the one
+// recovery channel did not recover the text that was clipped. Measured: 37
+// clipped actor cells on a single audit page, none of them recoverable.
+function actorTooltip(entry: AuditEntry): string {
+  const name = formatActorName(entry)
+  return name === entry.actor_id ? name : `${name} · ${entry.actor_id}`
+}
+
 function formatActorName(entry: AuditEntry): string {
   if (entry.actor_type === 'system') return 'System'
   if (entry.actor_type === 'api_key') {
@@ -63,7 +91,7 @@ function formatActorName(entry: AuditEntry): string {
     // join). Falls back to a truncated key id for rows written before the
     // name was set, or for keys that have since been deleted.
     if (entry.actor_name) return entry.actor_name
-    return entry.actor_id.startsWith('vlx_') ? `Key ${entry.actor_id.slice(0, 16)}...` : 'API Key'
+    return entry.actor_id.startsWith('vlx_') ? `Key ${middleTruncate(entry.actor_id, 20)}` : 'API Key'
   }
   if (entry.actor_type === 'user') {
     // Dashboard session operators (#225 actor identity). actor_name is the
@@ -519,7 +547,7 @@ export default function AuditLogPage() {
                                   View
                                 </Link>
                               )}
-                              <span className="text-xs text-muted-foreground shrink-0 ml-3 w-28 text-right truncate" title={entry.actor_id}>
+                              <span className="text-xs text-muted-foreground shrink-0 ml-3 max-w-[20rem] text-right truncate" title={actorTooltip(entry)}>
                                 {formatActorName(entry)}
                               </span>
                               <ChevronRight size={14} className={cn('text-muted-foreground ml-2 shrink-0 transition-transform', isExpanded && 'rotate-90')} />

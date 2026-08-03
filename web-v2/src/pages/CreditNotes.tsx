@@ -451,7 +451,12 @@ export default function CreditNotesPage() {
                             {invoiceMap[note.invoice_id]?.invoice_number || note.invoice_id.slice(0, 12) + '...'}
                           </Link>
                         </TableCell>
-                        <TableCell className="text-sm text-muted-foreground max-w-[220px] truncate" title={note.reason}>
+                        {/* Tooltip must show what the CELL shows. `note.reason` is the raw
+                            enum code for system-issued notes — the cell renders
+                            "Quantity decrease" while the hover said
+                            "subscription_quantity_decrease". For operator free text
+                            the two are identical, so nothing is lost either way. */}
+                        <TableCell className="text-sm text-muted-foreground max-w-[220px] truncate" title={creditNoteReasonLabel(note.reason)}>
                           {creditNoteReasonLabel(note.reason)}
                         </TableCell>
                         <TableCell>

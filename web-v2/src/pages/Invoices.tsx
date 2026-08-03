@@ -421,7 +421,7 @@ export default function InvoicesPage() {
                         <div className="flex items-center gap-1.5">
                           <Link
                             to={`/invoices/${inv.id}`}
-                            className="text-sm font-medium text-foreground hover:text-primary transition-colors truncate block max-w-[140px]"
+                            className="text-sm font-medium text-foreground hover:text-primary transition-colors whitespace-nowrap"
                             title={inv.invoice_number}
                           >
                             {inv.invoice_number}
