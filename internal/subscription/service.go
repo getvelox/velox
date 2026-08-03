@@ -2155,8 +2155,18 @@ func (s *Service) ScheduleCancel(ctx context.Context, tenantID, id string, input
 					"for a trialing subscription cancel_at must be the trial end (%s) or on/after current_billing_period_end (%s) — dates in between are honored by neither boundary",
 					sub.TrialEndAt.UTC().Format(time.RFC3339), sub.CurrentBillingPeriodEnd.UTC().Format(time.RFC3339)))
 			}
-			return domain.Subscription{}, errs.Invalid("cancel_at",
-				"must be on or after current_billing_period_end (mid-period cancel with proration is not yet supported)")
+			// The message must name the ACTUAL constraint: only the period
+			// already in progress is closed. A cancel_at landing mid-period in
+			// a LATER period is accepted and prorates correctly — ADR-097
+			// shipped that firing path, and FLOW TC8 walks it (cancel_at on the
+			// 16th of a future month produces a final invoice for
+			// [period_start, cancel_at] at 15/30 of the base). The previous
+			// wording, "mid-period cancel with proration is not yet supported",
+			// described a capability gap that no longer exists and sent
+			// operators looking for a workaround they don't need.
+			return domain.Subscription{}, errs.Invalid("cancel_at", fmt.Sprintf(
+				"must be on or after current_billing_period_end (%s) — the period already in progress can't be shortened; a date inside a later period is fine and bills that period prorated up to it",
+				sub.CurrentBillingPeriodEnd.UTC().Format(time.RFC3339)))
 		}
 		cancelAt = &ts
 	}

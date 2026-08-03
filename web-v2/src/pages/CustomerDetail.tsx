@@ -2315,6 +2315,22 @@ function PublicCostDashboardCard({ customerId }: { customerId: string }) {
             <p className="text-[11px] text-amber-700 dark:text-amber-400">
               Save this URL now — Velox doesn't show it again after navigation. Re-rotate to mint a new one.
             </p>
+            {/* The server composes an absolute URL only when VELOX_API_BASE_URL
+                is set; unset, public_url is a bare path and the thing the
+                operator copies cannot be opened by their customer. The server
+                warns about this at boot, but boot logs are not where the person
+                clicking Copy is looking — so say it here, next to the value
+                that's wrong. Deliberately NOT auto-prefixed with the dashboard's
+                own origin: the API origin is a different host in any real
+                deployment, so guessing would hand over a confidently broken URL
+                instead of an obviously incomplete one. */}
+            {!/^https?:\/\//i.test(latest.public_url) && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                This is a path, not a full URL — your customer can't open it as-is. Set{' '}
+                <code className="font-mono">VELOX_API_BASE_URL</code> to your public API origin and
+                re-generate, or prefix the path with that origin yourself.
+              </p>
+            )}
           </div>
         ) : null}
         <Button onClick={onRotate} disabled={rotating} size="sm">
