@@ -35,7 +35,7 @@ type fakeRefundUpdater struct {
 	err   error
 }
 
-func (f *fakeRefundUpdater) ApplyRefundWebhook(_ context.Context, _, refundID string, status domain.RefundStatus) error {
+func (f *fakeRefundUpdater) ApplyRefundWebhook(_ context.Context, _, refundID string, status domain.RefundStatus, _ string) error {
 	f.calls = append(f.calls, fakeRefundUpdaterCall{refundID: refundID, status: status})
 	return f.err
 }

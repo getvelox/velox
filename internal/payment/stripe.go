@@ -388,7 +388,10 @@ func (s *Stripe) SetCustomerResolver(r CustomerByStripeIDResolver) {
 // or the row hasn't committed yet). Optional — nil logs+acks refund events.
 // payment imports nothing from creditnote; creditnote.Service satisfies this.
 type RefundStatusUpdater interface {
-	ApplyRefundWebhook(ctx context.Context, tenantID, stripeRefundID string, status domain.RefundStatus) error
+	// failureReason is Stripe's failure_reason enum (empty unless failed) —
+	// persisted with the transition so refund-failure forensics survive
+	// beyond process logs.
+	ApplyRefundWebhook(ctx context.Context, tenantID, stripeRefundID string, status domain.RefundStatus, failureReason string) error
 }
 
 // SetRefundStatusUpdater wires the async refund-status reconciler used by the
@@ -1199,6 +1202,12 @@ func (s *Stripe) handleRefundUpdated(ctx context.Context, tenantID string, event
 				ID      string `json:"id"`
 				Status  string `json:"status"`
 				Created int64  `json:"created"`
+				// FailureReason is Stripe's enum for why a refund failed
+				// (lost_or_stolen_card, expired_or_canceled_card, …).
+				// Persisted into the audit row — before this it existed
+				// only in process logs, so "why did last quarter's
+				// refunds fail" was unanswerable retroactively.
+				FailureReason string `json:"failure_reason"`
 			} `json:"object"`
 		} `json:"data"`
 	}
@@ -1211,7 +1220,7 @@ func (s *Stripe) handleRefundUpdated(ctx context.Context, tenantID string, event
 	}
 	status := mapStripeRefundStatus(rf.Status)
 
-	err := s.refundUpdater.ApplyRefundWebhook(ctx, tenantID, rf.ID, status)
+	err := s.refundUpdater.ApplyRefundWebhook(ctx, tenantID, rf.ID, status, rf.FailureReason)
 	if errors.Is(err, errs.ErrNotFound) {
 		// No Velox credit note carries this refund id. Either a refund created
 		// OUTSIDE Velox (dashboard / direct API) — ack and ignore, never fabricate

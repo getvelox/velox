@@ -49,7 +49,7 @@ func TestApplyRefundWebhook_FlipsThenMonotonic(t *testing.T) {
 	}
 
 	// webhook: pending → failed (bank reject / insufficient platform balance)
-	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundFailed); err != nil {
+	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundFailed, "lost_or_stolen_card"); err != nil {
 		t.Fatalf("ApplyRefundWebhook(failed): %v", err)
 	}
 	if got := store.notes[cn.ID].RefundStatus; got != domain.RefundFailed {
@@ -57,7 +57,7 @@ func TestApplyRefundWebhook_FlipsThenMonotonic(t *testing.T) {
 	}
 
 	// stale out-of-order pending must NOT clobber the terminal failed
-	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundPending); err != nil {
+	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundPending, ""); err != nil {
 		t.Fatalf("ApplyRefundWebhook(stale pending): %v", err)
 	}
 	if got := store.notes[cn.ID].RefundStatus; got != domain.RefundFailed {
@@ -71,7 +71,7 @@ func TestApplyRefundWebhook_FlipsThenMonotonic(t *testing.T) {
 func TestApplyRefundWebhook_UnknownRefundIsNotFound(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _ := setupRefundSvc(t)
-	err := svc.ApplyRefundWebhook(context.Background(), "t1", "re_foreign_dashboard", domain.RefundSucceeded)
+	err := svc.ApplyRefundWebhook(context.Background(), "t1", "re_foreign_dashboard", domain.RefundSucceeded, "")
 	if !errors.Is(err, errs.ErrNotFound) {
 		t.Errorf("foreign refund: got %v, want ErrNotFound", err)
 	}
@@ -97,7 +97,7 @@ func TestApplyRefundWebhook_FailedAbsorbing(t *testing.T) {
 	}
 
 	// succeeded → failed (real Stripe transition) MUST win
-	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundFailed); err != nil {
+	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundFailed, "lost_or_stolen_card"); err != nil {
 		t.Fatalf("ApplyRefundWebhook(failed): %v", err)
 	}
 	if got := store.notes[cn.ID].RefundStatus; got != domain.RefundFailed {
@@ -105,7 +105,7 @@ func TestApplyRefundWebhook_FailedAbsorbing(t *testing.T) {
 	}
 
 	// stale 'succeeded' redelivery must NOT un-fail it
-	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundSucceeded); err != nil {
+	if err := svc.ApplyRefundWebhook(context.Background(), "t1", rid, domain.RefundSucceeded, ""); err != nil {
 		t.Fatalf("ApplyRefundWebhook(stale succeeded): %v", err)
 	}
 	if got := store.notes[cn.ID].RefundStatus; got != domain.RefundFailed {

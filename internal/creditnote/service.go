@@ -2,7 +2,9 @@ package creditnote
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,6 +19,18 @@ import (
 	"github.com/sagarsuperuser/velox/internal/tax"
 )
 
+// withoutEmpty drops empty-string values from audit metadata so optional
+// fields (provider failure reasons, mostly) appear only when they carry a
+// fact — an empty key in every row is noise that reads like a schema.
+func withoutEmpty(md map[string]any) map[string]any {
+	for k, v := range md {
+		if s, ok := v.(string); ok && s == "" {
+			delete(md, k)
+		}
+	}
+	return md
+}
+
 // InvoiceReader reads invoice data for credit note validation.
 type InvoiceReader interface {
 	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
@@ -29,15 +43,28 @@ type InvoiceReader interface {
 
 // Refunder processes refunds via the payment provider.
 //
-// `idempotencyKey` is passed to the provider (Stripe-style) so a retry
-// after a partial failure in Issue() returns the existing refund_id
-// rather than creating a duplicate refund. Callers MUST pass a
-// deterministic key tied to the credit-note id (Velox uses
-// `velox_cn_<cn_id>`).
+// Convergence contract (ADR-063 amendment, 2026-08-04): the idempotency key
+// protects only the individual request from transport-level duplication —
+// Stripe v1 keys EXPIRE after ~24h, so the key alone cannot make a late
+// retry converge on an earlier attempt. Durable exactly-once comes from the
+// other two methods: every create stamps metadata velox_cn_id, GetRefund
+// reads current provider truth (a read never replays a stale saved
+// response), and FindRefundForCreditNote recovers a refund Velox lost the
+// id of. Callers reconcile-then-create; they never blind-create on retry.
 type Refunder interface {
 	// Returns the refund id + Stripe's create-time status (mapped to a Velox
 	// refund_status). A pending result settles later via a refund webhook.
-	CreateRefund(ctx context.Context, paymentIntentID string, amountCents int64, idempotencyKey string) (string, domain.RefundStatus, error)
+	// creditNoteID is stamped as metadata for later adoption.
+	CreateRefund(ctx context.Context, paymentIntentID string, amountCents int64, idempotencyKey, creditNoteID string) (string, domain.RefundStatus, error)
+	// GetRefund returns the refund's CURRENT provider status plus the
+	// provider's failure reason (empty unless failed).
+	GetRefund(ctx context.Context, refundID string) (domain.RefundStatus, string, error)
+	// FindRefundForCreditNote returns the id+status of a refund carrying
+	// this credit note's metadata on the given PaymentIntent, or ("","",nil)
+	// when none exists. excludeRefundID (may be empty) names a
+	// provider-confirmed-dead refund that must not be re-adopted; among the
+	// rest a live refund (succeeded/pending) is preferred over a failed one.
+	FindRefundForCreditNote(ctx context.Context, paymentIntentID, creditNoteID, excludeRefundID string) (string, domain.RefundStatus, error)
 }
 
 // CreditGranter adds credits to a customer's balance.
@@ -1453,7 +1480,7 @@ func (s *Service) runPostIssueExternalLegs(ctx context.Context, tenantID, id str
 	if inv.PaymentStatus == domain.PaymentSucceeded && cn.RefundAmountCents > 0 && cn.StripeRefundID == "" {
 		if s.refunder != nil && inv.HasCardPayment() {
 			idempotencyKey := fmt.Sprintf("velox_cn_%s", cn.ID)
-			refundID, refStatus, err := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, idempotencyKey)
+			refundID, refStatus, err := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, idempotencyKey, cn.ID)
 			if err != nil {
 				slog.Warn("stripe refund failed, credit note will be issued with failed refund status",
 					"credit_note_id", cn.ID, "error", err)
@@ -1647,33 +1674,115 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	// This is deliberately the OPPOSITE of ApplyRefundWebhook's gate: there, a
 	// no-op redelivery is a non-event Stripe happened to send twice, so
 	// recording it would fabricate a transition that never occurred.
-	var emit func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error
-	if s.audit != nil {
-		emit = func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error {
+	// retryEmit builds the per-persist emission, merging call-site extras —
+	// which is where provider failure reasons finally get a durable home:
+	// before this, Stripe's rejection reason lived only in process logs, so
+	// "why did last quarter's refunds fail" was unanswerable retroactively.
+	retryEmit := func(extra map[string]any) func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error {
+		if s.audit == nil {
+			return nil
+		}
+		return func(tx *sql.Tx, updated domain.CreditNote, prior domain.RefundStatus, changed bool) error {
+			md := map[string]any{
+				"action":              "refund_retried",
+				"refund_status":       string(updated.RefundStatus),
+				"prior_refund_status": string(prior),
+				"status_changed":      changed,
+				"stripe_refund_id":    updated.StripeRefundID,
+				"invoice_id":          updated.InvoiceID,
+				"customer_id":         updated.CustomerID,
+			}
+			for k, v := range extra {
+				if s, isStr := v.(string); isStr && s == "" {
+					continue // don't write empty reason keys
+				}
+				md[k] = v
+			}
 			return s.audit.LogInTx(ctx, tx, audit.Entry{
 				Action:        domain.AuditActionUpdate,
 				ResourceType:  "credit_note",
 				ResourceID:    updated.ID,
 				ResourceLabel: updated.CreditNoteNumber,
-				Metadata: map[string]any{
-					"action":              "refund_retried",
-					"refund_status":       string(updated.RefundStatus),
-					"prior_refund_status": string(prior),
-					"status_changed":      changed,
-					"stripe_refund_id":    updated.StripeRefundID,
-					"invoice_id":          updated.InvoiceID,
-					"customer_id":         updated.CustomerID,
-				},
+				Metadata:      md,
 			})
 		}
 	}
 
-	// Same idempotency key as Issue() — Stripe dedups against this so
-	// the retry is safe even if the prior attempt actually succeeded
-	// (network failure after Stripe completed): Stripe returns the
-	// existing refund_id, Velox persists it.
-	idempotencyKey := fmt.Sprintf("velox_cn_%s", cn.ID)
-	refundID, refStatus, refundErr := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, idempotencyKey)
+	// ── Reconcile with provider truth BEFORE any create (ADR-063 amendment,
+	// 2026-08-04). The old contract — re-call Create with the eternal
+	// velox_cn_<id> key and let Stripe dedup — was broken twice over:
+	// Stripe v1 idempotency keys EXPIRE after ~24h, while our own
+	// needs-attention alert tells the operator to retry at 72h (a retried
+	// stuck PARTIAL refund past the horizon minted a second live refund);
+	// and within the horizon a key replay returns the SAVED create-time
+	// response, so a webhook-recorded terminal `failed` could be overwritten
+	// by a stale replayed `pending` that no webhook would ever correct.
+	//
+	// New contract, in order:
+	//   1. Known refund id  → GetRefund (a READ — always current, never a
+	//      replay) and persist what the provider says. succeeded → done
+	//      (this also recovers a missed terminal webhook, the stand-in
+	//      ADR-063 deferred the poller for). pending → refuse to mint a
+	//      second refund while one is in flight. failed → fall through and
+	//      create a genuinely new refund.
+	//   2. No refund id (the create leg errored) → FindRefundForCreditNote
+	//      by metadata velox_cn_id: if Stripe DID mint one despite the
+	//      error, ADOPT it instead of duplicating (search-and-adopt,
+	//      ADR-108's pattern). Found → persist and stop; the operator sees
+	//      the adopted state and a second click walks path 1.
+	//   3. Only when the provider confirms nothing viable exists → create.
+	deadRefundID := "" // a provider-confirmed-failed refund id, excluded from adoption
+	if cn.StripeRefundID != "" {
+		provStatus, provReason, gerr := s.refunder.GetRefund(ctx, cn.StripeRefundID)
+		if gerr != nil {
+			return domain.CreditNote{}, fmt.Errorf("reconcile refund with provider: %w", gerr)
+		}
+		reconcileEmit := retryEmit(map[string]any{"reconciled_from_provider": true, "provider_failure_reason": provReason})
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, provStatus, cn.StripeRefundID, reconcileEmit); perr != nil {
+			return domain.CreditNote{}, fmt.Errorf("persist reconciled refund status: %w", perr)
+		}
+		switch provStatus {
+		case domain.RefundSucceeded:
+			return s.store.Get(ctx, tenantID, id)
+		case domain.RefundPending:
+			return domain.CreditNote{}, errs.InvalidState(fmt.Sprintf(
+				"refund %s is still processing at Stripe — no new refund was created; it settles via webhook, or retry later", cn.StripeRefundID))
+		}
+		// Provider-confirmed failed → a new refund is legitimate. Fall
+		// through to the search, EXCLUDING this dead id: a previous
+		// re-drive may have minted a live refund whose response we lost,
+		// and the stored id would still point at the dead one.
+		deadRefundID = cn.StripeRefundID
+	}
+
+	// Search-and-adopt (ADR-108's pattern) before any create, in BOTH lanes:
+	// with no stored id (the create leg errored — Stripe may have minted one
+	// anyway) and past a dead stored id (a lost re-drive may have too). Every
+	// create stamps metadata velox_cn_id, so a lost refund is always
+	// findable; adopting it is what makes convergence independent of the
+	// idempotency key's 24h lifetime.
+	foundID, foundStatus, ferr := s.refunder.FindRefundForCreditNote(ctx, inv.StripePaymentIntentID, cn.ID, deadRefundID)
+	if ferr != nil {
+		return domain.CreditNote{}, fmt.Errorf("search provider refunds: %w", ferr)
+	}
+	if foundID != "" {
+		adoptEmit := retryEmit(map[string]any{"adopted_from_provider": true})
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, foundStatus, foundID, adoptEmit); perr != nil {
+			return domain.CreditNote{}, fmt.Errorf("persist adopted refund: %w", perr)
+		}
+		return s.store.Get(ctx, tenantID, id)
+	}
+
+	// The idempotency key scopes to the CN's current STATE GENERATION, not
+	// eternally to the CN: two operators double-clicking Retry read the same
+	// row snapshot, derive the same key, and Stripe collapses them into one
+	// refund — while a retry after a persisted state change (which bumps
+	// updated_at) gets a fresh key instead of replaying a dead attempt's
+	// saved response. Durable convergence never rests on the key: the
+	// metadata stamp above makes any lost refund findable and adoptable.
+	gen := sha256.Sum256([]byte(cn.StripeRefundID + "|" + string(cn.RefundStatus) + "|" + cn.UpdatedAt.UTC().Format(time.RFC3339Nano)))
+	idempotencyKey := fmt.Sprintf("velox_cn_%s_r_%s", cn.ID, hex.EncodeToString(gen[:8]))
+	refundID, refStatus, refundErr := s.refunder.CreateRefund(ctx, inv.StripePaymentIntentID, cn.RefundAmountCents, idempotencyKey, cn.ID)
 	if refundErr != nil {
 		// Persist the still-failed state so the next retry has the latest error
 		// context and the dashboard surfaces accurate status. It rides the same
@@ -1692,7 +1801,8 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 		//
 		// The persist error is LOGGED, never discarded, and the Stripe error stays
 		// primary.
-		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, domain.RefundFailed, cn.StripeRefundID, emit); perr != nil {
+		failEmit := retryEmit(map[string]any{"provider_error": refundErr.Error()})
+		if perr := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, domain.RefundFailed, cn.StripeRefundID, failEmit); perr != nil {
 			slog.ErrorContext(ctx, "persist failed refund status after retry",
 				"credit_note_id", id, "error", perr)
 		}
@@ -1703,10 +1813,11 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 	// (still settling), not necessarily succeeded; the refund webhook settles it.
 	// Recording a blanket succeeded here would re-introduce the false-success lie
 	// and permanently 409 a legitimate later retry.
-	if err := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, refStatus, refundID, emit); err != nil {
+	if err := s.store.UpdateRefundStatusAudited(ctx, tenantID, id, refStatus, refundID, retryEmit(nil)); err != nil {
 		// Stripe call succeeded but local persist (or its audit emission —
-		// shared fate) failed. The idempotency key on the next retry converges
-		// (Stripe returns the same refund_id, local persist runs again).
+		// shared fate) failed. Convergence is the METADATA, not the key: the
+		// next retry's FindRefundForCreditNote finds this refund by
+		// velox_cn_id and adopts it — no duplicate even after the key ages out.
 		return domain.CreditNote{}, fmt.Errorf("persist refund status: %w", err)
 	}
 
@@ -1719,7 +1830,7 @@ func (s *Service) RetryRefund(ctx context.Context, tenantID, id string) (domain.
 // a terminal). This is the source of truth for the async refund outcome
 // (pending→succeeded/failed) that the create-call cannot observe. Returns
 // ErrNotFound for an unknown/foreign refund id — the caller decides ack vs retry.
-func (s *Service) ApplyRefundWebhook(ctx context.Context, tenantID, stripeRefundID string, status domain.RefundStatus) error {
+func (s *Service) ApplyRefundWebhook(ctx context.Context, tenantID, stripeRefundID string, status domain.RefundStatus, failureReason string) error {
 	// ADR-090 in-tx emission: the refund-status transition and its audit
 	// row commit together; the store fires the emission ONLY when the
 	// monotonic guard actually flipped a row, so stale redeliveries never
@@ -1734,13 +1845,14 @@ func (s *Service) ApplyRefundWebhook(ctx context.Context, tenantID, stripeRefund
 				ResourceType:  "credit_note",
 				ResourceID:    cn.ID,
 				ResourceLabel: cn.CreditNoteNumber,
-				Metadata: map[string]any{
-					"action":           "refund_status_changed",
-					"refund_status":    string(status),
-					"stripe_refund_id": stripeRefundID,
-					"invoice_id":       cn.InvoiceID,
-					"customer_id":      cn.CustomerID,
-				},
+				Metadata: withoutEmpty(map[string]any{
+					"action":                  "refund_status_changed",
+					"refund_status":           string(status),
+					"stripe_refund_id":        stripeRefundID,
+					"invoice_id":              cn.InvoiceID,
+					"customer_id":             cn.CustomerID,
+					"provider_failure_reason": failureReason,
+				}),
 			})
 		}
 	}

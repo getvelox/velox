@@ -40,19 +40,34 @@ func (s *seqNumbers) NextCreditNoteNumber(context.Context, string) (string, erro
 }
 
 // stubRefunder returns a scripted Stripe refund outcome for the retry path.
+// getStatus scripts what the pre-create provider reconcile reports for an
+// already-known refund id; it defaults to failed so retry tests fall through
+// to the create leg the way the pre-reconcile flow did.
 type stubRefunder struct {
-	refundID string
-	status   domain.RefundStatus
-	err      error
-	calls    int
+	refundID  string
+	status    domain.RefundStatus
+	err       error
+	calls     int
+	getStatus domain.RefundStatus
 }
 
-func (r *stubRefunder) CreateRefund(_ context.Context, _ string, _ int64, _ string) (string, domain.RefundStatus, error) {
+func (r *stubRefunder) CreateRefund(_ context.Context, _ string, _ int64, _, _ string) (string, domain.RefundStatus, error) {
 	r.calls++
 	if r.err != nil {
 		return "", "", r.err
 	}
 	return r.refundID, r.status, nil
+}
+
+func (r *stubRefunder) GetRefund(_ context.Context, _ string) (domain.RefundStatus, string, error) {
+	if r.getStatus == "" {
+		return domain.RefundFailed, "expired_or_canceled_card", nil
+	}
+	return r.getStatus, "", nil
+}
+
+func (r *stubRefunder) FindRefundForCreditNote(_ context.Context, _, _, _ string) (string, domain.RefundStatus, error) {
+	return "", "", nil
 }
 
 // seedInvoiceForCN creates a customer + invoice in the given state. When

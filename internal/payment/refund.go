@@ -63,7 +63,12 @@ func NewStripeRefunder(clients *StripeClients) *StripeRefunder {
 // synchronously; ACH/balance-constrained refunds legitimately return `pending`,
 // whose terminal outcome (succeeded/failed) lands later via a refund webhook —
 // so the caller must record what Stripe actually said, not a blanket success.
-func (r *StripeRefunder) CreateRefund(ctx context.Context, paymentIntentID string, amountCents int64, idempotencyKey string) (string, domain.RefundStatus, error) {
+// creditNoteID stamps metadata velox_cn_id on the refund. That metadata is
+// the ADOPTION key: Stripe v1 idempotency keys expire after ~24h, so the key
+// alone cannot make a late retry converge on an earlier attempt — but a
+// metadata-stamped refund can always be found again by FindRefundForCreditNote
+// and adopted instead of duplicated.
+func (r *StripeRefunder) CreateRefund(ctx context.Context, paymentIntentID string, amountCents int64, idempotencyKey, creditNoteID string) (string, domain.RefundStatus, error) {
 	sc := r.clients.ForCtx(ctx)
 	if sc == nil {
 		return "", "", ErrStripeNotConfigured
@@ -71,6 +76,9 @@ func (r *StripeRefunder) CreateRefund(ctx context.Context, paymentIntentID strin
 	params := &stripe.RefundCreateParams{
 		PaymentIntent: stripe.String(paymentIntentID),
 		Amount:        stripe.Int64(amountCents),
+	}
+	if creditNoteID != "" {
+		params.Metadata = map[string]string{"velox_cn_id": creditNoteID}
 	}
 	if idempotencyKey != "" {
 		params.IdempotencyKey = stripe.String(idempotencyKey)
@@ -81,4 +89,57 @@ func (r *StripeRefunder) CreateRefund(ctx context.Context, paymentIntentID strin
 	}
 
 	return ref.ID, mapStripeRefundStatus(string(ref.Status)), nil
+}
+
+// GetRefund reads a refund's CURRENT provider state. This is a plain read —
+// unlike an idempotency-key replay of the create call, it can never return a
+// stale saved response, which is what makes it safe to consult before a
+// retry. The second return is Stripe's failure_reason (empty unless failed).
+func (r *StripeRefunder) GetRefund(ctx context.Context, refundID string) (domain.RefundStatus, string, error) {
+	sc := r.clients.ForCtx(ctx)
+	if sc == nil {
+		return "", "", ErrStripeNotConfigured
+	}
+	ref, err := sc.V1Refunds.Retrieve(ctx, refundID, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("stripe get refund: %s", stripeErrorMessage(err))
+	}
+	return mapStripeRefundStatus(string(ref.Status)), string(ref.FailureReason), nil
+}
+
+// FindRefundForCreditNote searches the PaymentIntent's refunds for one minted
+// for this credit note (metadata velox_cn_id). Returns ("", "", nil) when none
+// exists. This is the search half of search-and-adopt (ADR-108's pattern,
+// applied to refunds): it recovers the lost-response shapes — a create that
+// errored on the wire after Stripe minted the refund, in either the original
+// Issue leg (Velox holds no id) or a later re-drive (Velox still holds the
+// dead predecessor's id, passed as excludeRefundID).
+//
+// Preference among matches: a LIVE refund (succeeded/pending) wins over a
+// failed one — adopting a live twin is what prevents a duplicate; adopting a
+// failed twin merely records the truer id, so it is the fallback.
+func (r *StripeRefunder) FindRefundForCreditNote(ctx context.Context, paymentIntentID, creditNoteID, excludeRefundID string) (string, domain.RefundStatus, error) {
+	sc := r.clients.ForCtx(ctx)
+	if sc == nil {
+		return "", "", ErrStripeNotConfigured
+	}
+	params := &stripe.RefundListParams{PaymentIntent: stripe.String(paymentIntentID)}
+	var failedID string
+	var failedStatus domain.RefundStatus
+	for ref, err := range sc.V1Refunds.List(ctx, params) {
+		if err != nil {
+			return "", "", fmt.Errorf("stripe list refunds: %s", stripeErrorMessage(err))
+		}
+		if ref.ID == excludeRefundID || ref.Metadata["velox_cn_id"] != creditNoteID {
+			continue
+		}
+		status := mapStripeRefundStatus(string(ref.Status))
+		if status != domain.RefundFailed {
+			return ref.ID, status, nil
+		}
+		if failedID == "" {
+			failedID, failedStatus = ref.ID, status
+		}
+	}
+	return failedID, failedStatus, nil
 }

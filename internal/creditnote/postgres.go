@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -652,6 +653,38 @@ func (s *PostgresStore) UpdateRefundStatusAudited(ctx context.Context, tenantID,
 		return err
 	}
 
+	// Same-identity regressions are refused HERE, not only in the webhook
+	// writer (ADR-063 amendment, 2026-08-04). The window this closes:
+	// RetryRefund reads provider truth (GetRefund) and then persists it —
+	// a refund.failed webhook landing between the read and this write
+	// would be overwritten by the now-stale non-terminal answer, and no
+	// webhook would ever correct it back (event-id dedup swallows the
+	// redelivery). Before the reconcile-first flow the same overwrite
+	// happened through an idempotency-key replay's SAVED create response.
+	// Three deliberate asymmetries with the webhook guard:
+	//   - a NEW provider identity (different refund id) may write ANY
+	//     status: a fresh attempt legitimately restarts the lifecycle
+	//     (failed → pending is exactly what a successful re-drive looks
+	//     like);
+	//   - a SAME-VALUE persist still runs the UPDATE so updated_at moves —
+	//     the "stuck pending >72h" attention window resets on a fresh
+	//     provider confirmation, per the contract above;
+	//   - the refusal still EMITS (changed=false): the operator action or
+	//     reconcile that hit the provider is the fact, even when its stale
+	//     answer was discarded.
+	sameIdentity := stripeRefundID == "" || stripeRefundID == cur.StripeRefundID
+	if sameIdentity && refundStatusRegression(cur.RefundStatus, status) {
+		slog.WarnContext(ctx, "refused same-refund status regression",
+			"credit_note_id", id, "stripe_refund_id", cur.StripeRefundID,
+			"current", string(cur.RefundStatus), "attempted", string(status))
+		if emit != nil {
+			if err := emit(tx, cur, cur.RefundStatus, false); err != nil {
+				return fmt.Errorf("audit emission: %w", err)
+			}
+		}
+		return tx.Commit()
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE credit_notes SET refund_status=$1, stripe_refund_id=COALESCE(NULLIF($2,''), stripe_refund_id),
 			updated_at=$3
@@ -679,6 +712,23 @@ func (s *PostgresStore) UpdateRefundStatusAudited(ctx context.Context, tenantID,
 		}
 	}
 	return tx.Commit()
+}
+
+// refundStatusRegression reports whether writing next over prior — for the
+// SAME provider refund — would rewind provider truth. Mirrors the webhook
+// guard's precedence (failed absorbing > succeeded > pending) minus the
+// same-value case, which is a benign re-confirmation, not a regression.
+func refundStatusRegression(prior, next domain.RefundStatus) bool {
+	if prior == next {
+		return false
+	}
+	if prior == domain.RefundFailed {
+		return true // failed is absorbing for one refund id
+	}
+	if prior == domain.RefundSucceeded && next != domain.RefundFailed {
+		return true // succeeded yields only to failed (bank reject)
+	}
+	return false
 }
 
 func (s *PostgresStore) ApplyRefundWebhookStatus(ctx context.Context, tenantID, stripeRefundID string, status domain.RefundStatus) error {
