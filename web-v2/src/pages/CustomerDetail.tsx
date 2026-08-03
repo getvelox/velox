@@ -1129,9 +1129,12 @@ export default function CustomerDetailPage() {
                           </Link>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground truncate">to {em.recipient}</p>
+                      {/* Both carry a title because neither string is restated
+                          anywhere else on the page: a clipped recipient and a
+                          clipped provider error had ZERO recovery channels. */}
+                      <p className="text-xs text-muted-foreground truncate" title={em.recipient}>to {em.recipient}</p>
                       {em.status === 'failed' && em.last_error && (
-                        <p className="mt-1 text-xs text-destructive truncate">{em.last_error}</p>
+                        <p className="mt-1 text-xs text-destructive truncate" title={em.last_error}>{em.last_error}</p>
                       )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
