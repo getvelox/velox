@@ -685,6 +685,12 @@ func (s *Service) ListEvents(ctx context.Context, tenantID string, limit int) ([
 	return s.store.ListEvents(ctx, tenantID, limit)
 }
 
+// EventDeliveryStatuses rolls each event's deliveries up to one dashboard
+// status — see the Store method for the precedence contract.
+func (s *Service) EventDeliveryStatuses(ctx context.Context, tenantID string, eventIDs []string) (map[string]string, error) {
+	return s.store.EventDeliveryStatuses(ctx, tenantID, eventIDs)
+}
+
 // GetEvent fetches a single event by id (tenant-scoped via RLS at the
 // store layer). Surfaced for the SSE handler's deliveries-list path so
 // it can resolve the replay root before walking the timeline.

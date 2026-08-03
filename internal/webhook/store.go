@@ -46,6 +46,10 @@ type Store interface {
 	// for an EXISTING event (the replay path — the clone commits first).
 	CreateDeliveriesForEvent(ctx context.Context, tenantID, eventID string, endpointIDs []string, birthLease time.Duration) ([]domain.WebhookDelivery, error)
 	ListEvents(ctx context.Context, tenantID string, limit int) ([]domain.WebhookEvent, error)
+	// EventDeliveryStatuses rolls each event's deliveries up to one status:
+	// any pending → "pending", else any failed → "failed", else "delivered".
+	// Events with no deliveries are absent from the map (no endpoint matched).
+	EventDeliveryStatuses(ctx context.Context, tenantID string, eventIDs []string) (map[string]string, error)
 	GetEvent(ctx context.Context, tenantID, id string) (domain.WebhookEvent, error)
 	// CreateReplayEvent clones an existing event into a fresh event row
 	// with replay_of_event_id pointing back at the original. The clone

@@ -281,6 +281,47 @@ func (m *memStore) ListDeliveries(_ context.Context, _, eventID string) ([]domai
 	return result, nil
 }
 
+// EventDeliveryStatuses mirrors the real store's roll-up (any pending →
+// pending, else any failed → failed, else delivered; absent when no
+// deliveries) — a drifted fake here would let the SSE snapshot assert
+// against a double that agrees with itself.
+func (m *memStore) EventDeliveryStatuses(_ context.Context, tenantID string, eventIDs []string) (map[string]string, error) {
+	want := make(map[string]struct{}, len(eventIDs))
+	for _, id := range eventIDs {
+		want[id] = struct{}{}
+	}
+	pending := map[string]bool{}
+	failed := map[string]bool{}
+	seen := map[string]bool{}
+	for _, d := range m.deliveries {
+		if d.TenantID != tenantID {
+			continue
+		}
+		if _, ok := want[d.WebhookEventID]; !ok {
+			continue
+		}
+		seen[d.WebhookEventID] = true
+		switch d.Status {
+		case "pending":
+			pending[d.WebhookEventID] = true
+		case "failed":
+			failed[d.WebhookEventID] = true
+		}
+	}
+	out := map[string]string{}
+	for id := range seen {
+		switch {
+		case pending[id]:
+			out[id] = "pending"
+		case failed[id]:
+			out[id] = "failed"
+		default:
+			out[id] = "delivered"
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) GetEndpointStats(_ context.Context, tenantID string) ([]EndpointStats, error) {
 	counts := make(map[string]*EndpointStats)
 	for _, d := range m.deliveries {

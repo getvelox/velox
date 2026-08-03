@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/auth"
-	"github.com/sagarsuperuser/velox/internal/domain"
 )
 
 // streamEvents serves the live-tail SSE feed for a tenant's webhook
@@ -85,8 +84,24 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.ErrorContext(r.Context(), "sse snapshot failed", "error", err)
 	}
+	// One roll-up query for the whole snapshot: each event's status is
+	// derived from its actual deliveries, not guessed from its age. An
+	// event with no deliveries (no endpoint matched) gets "no_endpoints" —
+	// the dashboard renders unknown statuses neutrally by design.
+	ids := make([]string, 0, len(snapshot))
 	for _, e := range snapshot {
-		writeFrame(w, FrameFromEvent(e, frameStatusFromEvent(e), nil))
+		ids = append(ids, e.ID)
+	}
+	statuses, serr := h.svc.EventDeliveryStatuses(r.Context(), tenantID, ids)
+	if serr != nil {
+		slog.ErrorContext(r.Context(), "sse snapshot status roll-up failed", "error", serr)
+	}
+	for _, e := range snapshot {
+		status, ok := statuses[e.ID]
+		if !ok {
+			status = "no_endpoints"
+		}
+		writeFrame(w, FrameFromEvent(e, status, nil))
 	}
 	flusher.Flush()
 
@@ -136,22 +151,6 @@ func writeFrame(w http.ResponseWriter, frame StreamFrame) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "event: webhook_event\ndata: %s\n\n", blob)
-}
-
-// frameStatusFromEvent infers the dashboard status for a snapshot
-// event. Real-time frames carry status from the deliver result; the
-// snapshot path doesn't have that handy without a JOIN, so we surface
-// "delivered" for events that are old enough that any retries would
-// have either succeeded or DLQ'd, and "pending" otherwise. The
-// dashboard treats both as informational — clicking the row hits
-// /deliveries to see the per-attempt truth.
-func frameStatusFromEvent(e domain.WebhookEvent) string {
-	// 24h+ old: any deliver retry would have completed by now (the
-	// retry ramp tops out at ~24h cumulative — see retryBackoffs).
-	if time.Since(e.CreatedAt) > 24*time.Hour {
-		return "delivered"
-	}
-	return "pending"
 }
 
 // hashPayload computes the canonical SHA-256 of an event payload's
