@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -82,6 +83,18 @@ type Service struct {
 	client      HTTPClient
 	bus         *EventBus
 	syncDeliver bool // When true, deliver synchronously (for tests)
+	// allowLoopback is the development exception to the SSRF posture:
+	// loopback endpoint URLs (localhost / 127.x / ::1) are accepted at
+	// create AND dialable at delivery. It must be one flag read by BOTH
+	// layers — this shipped as two independent decisions once (the
+	// validator allowed localhost "for local development" while the
+	// egress-hardened dialer refused all loopback unconditionally), and
+	// the result was an endpoint the operator could create but Velox
+	// could never deliver to: every delivery sat pending with the refusal
+	// visible only in the delivery detail. In production the exception is
+	// OFF at both layers, because a tenant-supplied loopback URL is SSRF
+	// against the deployment itself (velox's own :8080 included).
+	allowLoopback bool
 }
 
 // HTTPClient is the interface for making HTTP requests (mockable in tests).
@@ -90,13 +103,14 @@ type HTTPClient interface {
 }
 
 func NewService(store Store, client HTTPClient) *Service {
+	allowLoopback := !strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
 	if client == nil {
 		client = &http.Client{
 			Timeout:   10 * time.Second,
-			Transport: ssrfHardenedTransport(),
+			Transport: ssrfHardenedTransport(allowLoopback),
 		}
 	}
-	return &Service{store: store, client: client, bus: NewEventBus()}
+	return &Service{store: store, client: client, bus: NewEventBus(), allowLoopback: allowLoopback}
 }
 
 // ssrfHardenedTransport returns an http.Transport whose DialContext rejects
@@ -105,21 +119,23 @@ func NewService(store Store, client HTTPClient) *Service {
 // that resolved publicly then could be re-pointed at an internal address
 // (DNS rebinding) by the time delivery POSTs to the stored URL. Checking the
 // resolved dial target on every connection closes that window.
-func ssrfHardenedTransport() *http.Transport {
+func ssrfHardenedTransport(allowLoopback bool) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.DialContext = ssrfSafeDialContext
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return ssrfSafeDialContext(ctx, network, addr, allowLoopback)
+	}
 	return t
 }
 
 // ssrfSafeDialContext is the dial predicate wired into the delivery client.
 // It resolves the host portion of addr and refuses to dial if the target
 // address is a blocked (private/internal) IP.
-func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+func ssrfSafeDialContext(ctx context.Context, network, addr string, allowLoopback bool) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	if err := assertDialAddrAllowed(host); err != nil {
+	if err := assertDialAddrAllowed(host, allowLoopback); err != nil {
 		return nil, err
 	}
 	d := &net.Dialer{Timeout: 10 * time.Second}
@@ -132,8 +148,16 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 // blocked — a partially-poisoned DNS answer must not slip an internal hop
 // through. Reuses the same isBlockedIP predicate that the CreateEndpoint
 // validation path relies on.
-func assertDialAddrAllowed(host string) error {
+//
+// allowLoopback carves out exactly ONE class in development: an address whose
+// every resolution is loopback. Private/link-local/metadata ranges stay
+// blocked even in dev — the exception exists so a local receiver on
+// 127.0.0.1 is reachable, not so a dev deployment can probe its LAN.
+func assertDialAddrAllowed(host string, allowLoopback bool) error {
 	if ip := net.ParseIP(host); ip != nil {
+		if allowLoopback && ip.IsLoopback() {
+			return nil
+		}
 		if isBlockedIP(ip) {
 			return fmt.Errorf("refusing to dial private/internal address %s", ip)
 		}
@@ -144,6 +168,9 @@ func assertDialAddrAllowed(host string) error {
 		return fmt.Errorf("resolve %q: %w", host, err)
 	}
 	for _, ip := range ips {
+		if allowLoopback && ip.IsLoopback() {
+			continue
+		}
 		if isBlockedIP(ip) {
 			return fmt.Errorf("refusing to dial private/internal address %s (resolved from %q)", ip, host)
 		}
@@ -219,21 +246,44 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// validateWebhookURL checks that a webhook URL uses HTTPS (or http for localhost)
-// and does not resolve to a private/internal IP address (SSRF protection).
-func validateWebhookURL(rawURL string) error {
+// isLoopbackHost reports whether host names the local machine: the literal
+// "localhost" or a loopback IP (127.0.0.0/8, ::1). Exact semantics matter —
+// the previous check was strings.HasPrefix(host, "localhost"), which waved
+// "localhost.evil.com" through the HTTPS requirement as plaintext HTTP to an
+// arbitrary public host.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// validateWebhookURL checks that a webhook URL uses HTTPS and does not
+// resolve to a private/internal IP address (SSRF protection). allowLoopback
+// (development only) admits plain-http loopback URLs; it is the SAME flag the
+// delivery dialer honors, so what create accepts, delivery can reach — and in
+// production a loopback URL is refused HERE, loudly, instead of minting an
+// endpoint whose every delivery would die in the dialer.
+func validateWebhookURL(rawURL string, allowLoopback bool) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" {
 		return errs.Invalid("url", "must be a valid URL")
 	}
-	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !strings.HasPrefix(parsed.Host, "localhost")) {
-		return errs.Invalid("url", "must use HTTPS (except localhost)")
-	}
-
-	// Skip SSRF check for localhost (local development).
 	host := parsed.Hostname()
-	if host == "localhost" {
+	loopback := isLoopbackHost(host)
+
+	if loopback {
+		if !allowLoopback {
+			return errs.Invalid("url", "loopback addresses are not deliverable in production — use a publicly reachable HTTPS URL")
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return errs.Invalid("url", "must be an http(s) URL")
+		}
 		return nil
+	}
+	if parsed.Scheme != "https" {
+		return errs.Invalid("url", "must use HTTPS (loopback is exempt in development)")
 	}
 
 	// Resolve hostname and check all IPs against blocked ranges.
@@ -316,7 +366,7 @@ func (s *Service) UpdateEndpoint(ctx context.Context, tenantID, id string, input
 		if rawURL == "" {
 			return domain.WebhookEndpoint{}, errs.Required("url")
 		}
-		if err := validateWebhookURL(rawURL); err != nil {
+		if err := validateWebhookURL(rawURL, s.allowLoopback); err != nil {
 			return domain.WebhookEndpoint{}, err
 		}
 		ep.URL = rawURL
@@ -350,7 +400,7 @@ func (s *Service) CreateEndpoint(ctx context.Context, tenantID string, input Cre
 	if rawURL == "" {
 		return CreateEndpointResult{}, errs.Required("url")
 	}
-	if err := validateWebhookURL(rawURL); err != nil {
+	if err := validateWebhookURL(rawURL, s.allowLoopback); err != nil {
 		return CreateEndpointResult{}, err
 	}
 
