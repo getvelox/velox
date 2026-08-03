@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
@@ -27,6 +27,7 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { VeloxLogo } from '@/components/VeloxLogo'
 import { OnboardingLauncher } from '@/components/OnboardingLauncher'
 import { useOnboardingSteps } from '@/hooks/useOnboardingSteps'
+import { scrollEdges, type ScrollEdges } from '@/lib/scrollAffordance'
 
 const billingNav = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -168,6 +169,59 @@ function ModeToggle({ livemode, busy, onToggle }: { livemode: boolean; busy: boo
   )
 }
 
+
+// SidebarNav — the scrollable nav pane plus its scroll-edge fades.
+//
+// It owns its own ref and edge state because the sidebar content is rendered
+// TWICE (the desktop aside and the mobile drawer). A single ref hoisted into
+// Layout binds to whichever instance mounts last — the hidden drawer, whose
+// clientHeight is 0 — so the visible sidebar would never show a fade at all.
+// One component, two independent instances, each measuring itself.
+function SidebarNav({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLElement | null>(null)
+  const [edges, setEdges] = useState<ScrollEdges>({ top: false, bottom: false })
+  const sync = useCallback(() => {
+    const el = ref.current
+    if (el) setEdges(scrollEdges(el))
+  }, [])
+  useEffect(() => {
+    sync()
+    const el = ref.current
+    if (!el) return
+    // Observe the pane AND its content: the window resizing changes
+    // clientHeight, but a count badge appearing changes scrollHeight without
+    // the pane resizing at all. Watching only one strands the fade.
+    const ro = new ResizeObserver(sync)
+    ro.observe(el)
+    for (const child of Array.from(el.children)) ro.observe(child)
+    return () => ro.disconnect()
+  }, [sync])
+  return (
+    <div className="relative flex-1 min-h-0">
+      {edges.top && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-card to-transparent"
+        />
+      )}
+      {edges.bottom && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-6 bg-gradient-to-t from-card to-transparent"
+        />
+      )}
+      <nav
+        ref={ref}
+        onScroll={sync}
+        aria-label="Main navigation"
+        className="h-full p-3 space-y-1 overflow-y-auto"
+      >
+        {children}
+      </nav>
+    </div>
+  )
+}
+
 export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation()
   const navigate = useNavigate()
@@ -281,8 +335,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </button>
       </div>
 
-      {/* Navigation */}
-      <nav aria-label="Main navigation" className="flex-1 p-3 space-y-1 overflow-y-auto">
+      <SidebarNav>
         <p className="text-xs uppercase text-muted-foreground tracking-wider px-3 pt-2 pb-1">
           Billing
         </p>
@@ -317,7 +370,7 @@ export function Layout({ children }: { children: ReactNode }) {
             ))}
           </>
         )}
-      </nav>
+      </SidebarNav>
 
       {/* Footer — enterprise account menu. Trigger row shows identity +
           chevron; dropdown (opens upward) surfaces theme toggle and sign-out
