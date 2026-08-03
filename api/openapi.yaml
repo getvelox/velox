@@ -1345,6 +1345,79 @@ paths:
       responses:
         "200":
           description: Projection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customer_id: { type: string }
+                  tenant_id: { type: string }
+                  livemode: { type: boolean }
+                  billing_period:
+                    type: object
+                    properties:
+                      start: { type: string, format: date-time }
+                      end: { type: string, format: date-time }
+                      source:
+                        type: string
+                        enum: [subscription, no_subscription]
+                  subscriptions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        plan_name: { type: string }
+                        currency: { type: string }
+                        current_period_start: { type: string, format: date-time }
+                        current_period_end: { type: string, format: date-time }
+                  usage:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        meter_key: { type: string }
+                        meter_name: { type: string }
+                        unit: { type: string }
+                        currency: { type: string }
+                        total_quantity: { type: string }
+                        total_amount_cents: { type: integer, format: int64 }
+                        rules:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              rule_key: { type: string }
+                              dimension_match:
+                                type: object
+                                additionalProperties: { type: string }
+                              quantity: { type: string }
+                              amount_cents: { type: integer, format: int64 }
+                              unit_amount_decimal:
+                                type: string
+                                description: >
+                                  Per-unit price in DECIMAL CENTS (ADR-045,
+                                  the Stripe unit_amount_decimal model) — NOT
+                                  dollars. "0.0003" is 0.0003 CENTS per unit
+                                  ($3.00 per 1M units); multiplying it by
+                                  `quantity` yields CENTS, matching the
+                                  sibling `amount_cents`. Reading it as dollars
+                                  overstates the cost 100x.
+                  totals:
+                    type: array
+                    description: One entry per currency present in `usage`.
+                    items:
+                      type: object
+                      properties:
+                        currency: { type: string }
+                        amount_cents: { type: integer, format: int64 }
+                  projected_total_cents:
+                    type: integer
+                    format: int64
+                    description: >
+                      Projected METERED cost for the current period, in cents.
+                      Recurring base fees are not included — an in_advance base
+                      is already invoiced at period open.
         "401":
           description: Invalid token
         "429":

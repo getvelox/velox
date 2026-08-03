@@ -219,7 +219,61 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": {
+                            customer_id?: string;
+                            tenant_id?: string;
+                            livemode?: boolean;
+                            billing_period?: {
+                                /** Format: date-time */
+                                start?: string;
+                                /** Format: date-time */
+                                end?: string;
+                                /** @enum {string} */
+                                source?: "subscription" | "no_subscription";
+                            };
+                            subscriptions?: {
+                                id?: string;
+                                plan_name?: string;
+                                currency?: string;
+                                /** Format: date-time */
+                                current_period_start?: string;
+                                /** Format: date-time */
+                                current_period_end?: string;
+                            }[];
+                            usage?: {
+                                meter_key?: string;
+                                meter_name?: string;
+                                unit?: string;
+                                currency?: string;
+                                total_quantity?: string;
+                                /** Format: int64 */
+                                total_amount_cents?: number;
+                                rules?: {
+                                    rule_key?: string;
+                                    dimension_match?: {
+                                        [key: string]: string;
+                                    };
+                                    quantity?: string;
+                                    /** Format: int64 */
+                                    amount_cents?: number;
+                                    /** @description Per-unit price in DECIMAL CENTS (ADR-045, the Stripe unit_amount_decimal model) — NOT dollars. "0.0003" is 0.0003 CENTS per unit ($3.00 per 1M units); multiplying it by `quantity` yields CENTS, matching the sibling `amount_cents`. Reading it as dollars overstates the cost 100x. */
+                                    unit_amount_decimal?: string;
+                                }[];
+                            }[];
+                            /** @description One entry per currency present in `usage`. */
+                            totals?: {
+                                currency?: string;
+                                /** Format: int64 */
+                                amount_cents?: number;
+                            }[];
+                            /**
+                             * Format: int64
+                             * @description Projected METERED cost for the current period, in cents. Recurring base fees are not included — an in_advance base is already invoiced at period open.
+                             */
+                            projected_total_cents?: number;
+                        };
+                    };
                 };
                 /** @description Invalid token */
                 401: {
