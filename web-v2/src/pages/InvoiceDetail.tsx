@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { invalidateMoneySurfaces } from '@/lib/invalidateMoney'
 import { api, downloadPDF, formatCents, formatRate, formatDate, formatDateTime, formatTaxRate, getCurrencySymbol, pollIntervalForInvoice, type TenantSettings, type DunningRun, type TimelineEvent, type Invoice as ApiInvoice, type CreditNote } from '@/lib/api'
 import { formatCivilPeriod } from '@/lib/dates'
+import { creditNoteCeilings, hasCardPayment } from '@/lib/creditNoteCeilings'
 import { InvoiceAttention } from '@/components/InvoiceAttention'
 import { TestClockBanner } from '@/components/TestClockBanner'
 import { useGetInvoice } from '@/lib/gen/queries.gen'
@@ -1785,33 +1786,10 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
 }) {
   const isPaid = invoice.status === 'paid'
 
-  // Composition-aware caps for the paid path. Refund to PM is bounded
-  // by what the customer actually paid via card (minus prior CN
-  // refunds). Credit-balance and out-of-band have no per-channel cap;
-  // the only invariant is sum == total.
-  const priorRefunds = existingCreditNotes
-    .filter(cn => cn.status !== 'voided')
-    .reduce((sum, cn) => sum + cn.refund_amount_cents, 0)
   // An offline-recorded payment (Record payment) carries a NON-empty PI field
   // holding a synthetic "out_of_band:<ts>" marker, so `amount_paid_cents > 0`
   // does not imply a card was charged. Mirrors domain.Invoice.HasCardPayment.
-  const hasCardPayment =
-    !!invoice.stripe_payment_intent_id &&
-    !invoice.stripe_payment_intent_id.startsWith('out_of_band:')
-  const pmRefundableCents = hasCardPayment
-    ? Math.max(0, invoice.amount_paid_cents - priorRefunds)
-    : 0
-
-  // How much of this invoice is still creditable at all. The server enforces
-  // this (`credit note amount exceeds remaining creditable amount (X)`), but
-  // the field used to advertise no ceiling whatsoever — so the operator typed
-  // a number, hit Issue, and learned the limit only by being rejected. Mirror
-  // the server's own sum (every non-voided note's TOTAL, drafts included) so
-  // the ceiling is visible BEFORE typing, exactly like the refund field's.
-  const alreadyCreditedCents = existingCreditNotes
-    .filter(cn => cn.status !== 'voided')
-    .reduce((sum, cn) => sum + cn.total_cents, 0)
-  const creditableRemainingCents = Math.max(0, invoice.total_amount_cents - alreadyCreditedCents)
+  const hasCard = hasCardPayment(invoice.stripe_payment_intent_id)
 
   const [amount, setAmount] = useState('')
   const [refund, setRefund] = useState('')
@@ -1831,6 +1809,24 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
   const creditCents = parseDollarsToCents(credit)
   const outOfBandCents = parseDollarsToCents(outOfBand)
   const allocatedCents = refundCents + creditCents + outOfBandCents
+
+  // Every ceiling the dialog advertises, derived in one tested place
+  // (lib/creditNoteCeilings). The refund ceiling depends on `amountCents`, so
+  // it recomputes as the operator types: a refund can never exceed the note it
+  // belongs to, and a `max` that ignores that is a promise the field won't keep.
+  const {
+    alreadyCreditedCents,
+    creditableRemainingCents,
+    cardRefundableCents,
+    refundCeilingCents,
+    refundBoundBy,
+  } = creditNoteCeilings({
+    invoiceTotalCents: invoice.total_amount_cents,
+    amountPaidCents: invoice.amount_paid_cents,
+    stripePaymentIntentId: invoice.stripe_payment_intent_id,
+    creditNotes: existingCreditNotes,
+    amountCents,
+  })
 
   // Auto-balance: typing in Refund auto-fills Credit with the
   // remainder so the simple case stays one input + Save. The user
@@ -1870,7 +1866,7 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
 
   // Live invariants for the Save gate.
   const allocationMatches = isPaid ? allocatedCents === amountCents : true
-  const refundOverCap = refundCents > pmRefundableCents
+  const refundOverCap = refundCents > cardRefundableCents
   const reasonOk = reason.trim().length > 0
   const amountOk = amountCents > 0
   const amountOverCreditable = amountCents > creditableRemainingCents
@@ -1968,7 +1964,7 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
                 <Label htmlFor="cn-refund" className="flex items-center justify-between">
                   <span>Refund to card</span>
                   <span className="text-xs text-muted-foreground font-normal">
-                    {hasCardPayment ? `max ${fmt(pmRefundableCents)}` : 'not paid by card'}
+                    {hasCard ? `max ${fmt(refundCeilingCents)}` : 'not paid by card'}
                   </span>
                 </Label>
                 <Input
@@ -1976,20 +1972,43 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
                   type="number"
                   step="0.01"
                   min={0}
+                  max={refundCeilingCents / 100}
                   value={refund}
                   onChange={(e) => handleRefundChange(e.target.value)}
-                  disabled={!hasCardPayment}
+                  disabled={!hasCard}
                 />
-                {!hasCardPayment && (
+                {!hasCard && (
                   <p className="text-xs text-muted-foreground">
                     This invoice was paid outside Stripe, so there is no card to refund. Use
                     Credit balance or Outside Stripe.
                   </p>
                 )}
-                {hasCardPayment && refundOverCap && (
+                {/* Name the rule that actually binds. Deliberately NOT phrased
+                    as "$X still refundable to card": when the invoice's
+                    remaining creditable amount is the floor, leftover card
+                    headroom can never be refunded on this invoice at all, and
+                    advertising it as available is the same false-ceiling defect
+                    this field just had. */}
+                {refundBoundBy === 'note-total' && (
+                  <p className="text-xs text-muted-foreground">
+                    Limited by this note&apos;s {fmt(amountCents)} total — raise it to refund up to{' '}
+                    {fmt(creditableRemainingCents)}, all that is still creditable.
+                  </p>
+                )}
+                {refundBoundBy === 'creditable' && (
+                  <p className="text-xs text-muted-foreground">
+                    Limited by the invoice, not the card — {fmt(creditableRemainingCents)} is all
+                    that is still creditable. The {fmt(cardRefundableCents)} left on the card can no
+                    longer be refunded.
+                  </p>
+                )}
+                {hasCard && refundOverCap && (
                   <p className="text-xs text-destructive">
-                    Refund cannot exceed {fmt(pmRefundableCents)} paid via card
-                    {priorRefunds > 0 ? ` (after ${fmt(priorRefunds)} prior refunds)` : ''}.
+                    Refund cannot exceed {fmt(cardRefundableCents)} paid via card
+                    {cardRefundableCents < invoice.amount_paid_cents
+                      ? ` (after ${fmt(invoice.amount_paid_cents - cardRefundableCents)} prior refunds)`
+                      : ''}
+                    .
                   </p>
                 )}
               </div>
