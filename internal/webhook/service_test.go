@@ -1162,7 +1162,9 @@ func TestRetryPendingDeliveries_DeletedEventFails(t *testing.T) {
 // TestAssertDialAddrAllowed is the SSRF dial-control regression guard. The
 // delivery client's DialContext rejects private/link-local/loopback/metadata
 // targets at the actual dial address, closing the DNS-rebinding window that
-// CreateEndpoint-time validation alone leaves open.
+// CreateEndpoint-time validation alone leaves open. In production mode
+// (allowLoopback=false) loopback is blocked like everything else; the dev
+// exception is covered by its own test below.
 func TestAssertDialAddrAllowed(t *testing.T) {
 	blocked := []string{
 		"10.0.0.1",        // RFC 1918
@@ -1176,8 +1178,8 @@ func TestAssertDialAddrAllowed(t *testing.T) {
 		"fd00::1",         // IPv6 ULA (private)
 	}
 	for _, ipStr := range blocked {
-		if err := assertDialAddrAllowed(ipStr); err == nil {
-			t.Errorf("assertDialAddrAllowed(%q) = nil, want blocked", ipStr)
+		if err := assertDialAddrAllowed(ipStr, false); err == nil {
+			t.Errorf("assertDialAddrAllowed(%q, prod) = nil, want blocked", ipStr)
 		}
 	}
 
@@ -1187,8 +1189,52 @@ func TestAssertDialAddrAllowed(t *testing.T) {
 		"2606:4700:4700::1111", // public IPv6
 	}
 	for _, ipStr := range allowed {
-		if err := assertDialAddrAllowed(ipStr); err != nil {
-			t.Errorf("assertDialAddrAllowed(%q) = %v, want allowed", ipStr, err)
+		if err := assertDialAddrAllowed(ipStr, false); err != nil {
+			t.Errorf("assertDialAddrAllowed(%q, prod) = %v, want allowed", ipStr, err)
+		}
+	}
+}
+
+// TestLoopbackException_SameFlagAtBothLayers pins the fix for the walk find
+// (FLOW W0, 2026-08-03): the create-time validator advertised "except
+// localhost" while the egress-hardened dialer refused all loopback, so an
+// endpoint the operator could create was one Velox could never deliver to —
+// every delivery sat pending with the refusal buried in the delivery detail.
+// The exception must be ONE flag honored by BOTH layers, per environment.
+func TestLoopbackException_SameFlagAtBothLayers(t *testing.T) {
+	loopbacks := []string{"http://localhost:9099/hook", "http://127.0.0.1:9099/hook", "http://[::1]:9099/hook"}
+
+	// Development: both layers admit loopback.
+	for _, u := range loopbacks {
+		if err := validateWebhookURL(u, true); err != nil {
+			t.Errorf("dev validate(%q) = %v, want allowed", u, err)
+		}
+	}
+	for _, h := range []string{"localhost", "127.0.0.1", "::1"} {
+		if err := assertDialAddrAllowed(h, true); err != nil {
+			t.Errorf("dev dial(%q) = %v, want allowed", h, err)
+		}
+	}
+	// Development: the exception is loopback ONLY — private/metadata stay blocked.
+	for _, h := range []string{"10.0.0.1", "169.254.169.254", "fd00::1"} {
+		if err := assertDialAddrAllowed(h, true); err == nil {
+			t.Errorf("dev dial(%q) = nil, want blocked — the dev exception must not widen past loopback", h)
+		}
+	}
+
+	// Production: BOTH layers refuse, and the validator refuses LOUDLY at
+	// create instead of minting an endpoint the dialer will starve.
+	for _, u := range loopbacks {
+		if err := validateWebhookURL(u, false); err == nil {
+			t.Errorf("prod validate(%q) = nil, want refused — create must not promise what delivery refuses", u)
+		}
+	}
+
+	// The prefix bypass stays dead in both modes: "localhost.evil.com" is a
+	// public host and must meet the HTTPS bar, not ride the loopback carve-out.
+	for _, allow := range []bool{true, false} {
+		if err := validateWebhookURL("http://localhost.evil.com/hook", allow); err == nil {
+			t.Errorf("validate(localhost.evil.com, allowLoopback=%v) = nil — plaintext HTTP to a public host via the localhost prefix trick", allow)
 		}
 	}
 }
