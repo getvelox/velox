@@ -118,7 +118,7 @@ func (s *PostgresStore) GetEndpoint(ctx context.Context, tenantID, id string) (d
 		SELECT id, tenant_id, livemode, url, COALESCE(description,''), secret_encrypted, secret_last4,
 			secondary_secret_encrypted, secondary_secret_last4, secondary_secret_expires_at,
 			events, active, created_at, updated_at
-		FROM webhook_endpoints WHERE id = $1
+		FROM webhook_endpoints WHERE id = $1 AND deleted_at IS NULL
 	`, id).Scan(&ep.ID, &ep.TenantID, &ep.Livemode, &ep.URL, &ep.Description,
 		&secretEncrypted, &ep.SecretLast4,
 		&secondaryEncrypted, &secondaryLast4, &ep.SecondarySecretExpiresAt,
@@ -199,11 +199,19 @@ func (s *PostgresStore) ListEndpoints(ctx context.Context, tenantID string) ([]d
 	}
 	defer postgres.Rollback(tx)
 
+	// No active filter: both dispatch paths skip inactive endpoints in
+	// their own match loops (ep.Active), and hiding inactive rows here made
+	// them UNREACHABLE from the dashboard — a deactivated endpoint (or a
+	// recipe-created one, born inactive with a placeholder URL) vanished
+	// from the Endpoints page with no way to edit, activate, or delete it,
+	// while the FE's "paused" badge sat as dead code. Found walking FLOW W0
+	// (2026-08-03): the recipe flow tells the operator to bring the
+	// endpoint live, and the list refused to show it.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, tenant_id, livemode, url, COALESCE(description,''), secret_encrypted, secret_last4,
 			secondary_secret_encrypted, secondary_secret_last4, secondary_secret_expires_at,
 			events, active, created_at, updated_at
-		FROM webhook_endpoints WHERE active = true ORDER BY created_at DESC
+		FROM webhook_endpoints WHERE deleted_at IS NULL ORDER BY created_at DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -247,7 +255,10 @@ func (s *PostgresStore) DeleteEndpoint(ctx context.Context, tenantID, id string)
 	}
 	defer postgres.Rollback(tx)
 
-	result, err := tx.ExecContext(ctx, `UPDATE webhook_endpoints SET active = false WHERE id = $1`, id)
+	// Delete is an intent distinct from pause (migration 0168): it stamps
+	// deleted_at, which removes the row from every list and Get. Pause is
+	// active=false with deleted_at NULL — visible as "paused", reversible.
+	result, err := tx.ExecContext(ctx, `UPDATE webhook_endpoints SET active = false, deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id)
 	if err != nil {
 		return err
 	}

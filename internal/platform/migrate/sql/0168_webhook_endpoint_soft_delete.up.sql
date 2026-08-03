@@ -1,0 +1,16 @@
+-- 0168: split "deleted" from "paused" on webhook endpoints.
+--
+-- DeleteEndpoint was SET active=false — the same state the Edit dialog's
+-- Active toggle writes. The endpoints list hid inactive rows, which masked
+-- the conflation: a "deleted" endpoint and a "paused" endpoint were both
+-- simply invisible. Un-hiding inactive rows (FLOW W0 walk, 2026-08-03 —
+-- recipe-born endpoints must be findable to activate) would have resurrected
+-- every past deletion as "paused". deleted_at records the delete intent;
+-- pause remains active=false with deleted_at NULL.
+--
+-- No backfill: existing inactive rows cannot be told apart mechanically
+-- (delete and pause wrote identical states), so all pre-migration inactive
+-- rows surface once as paused — an operator re-deletes any that were meant
+-- to be gone, and from then on the intent is recorded. Honest one-time cost
+-- on pre-launch local databases only.
+ALTER TABLE webhook_endpoints ADD COLUMN deleted_at timestamptz;
