@@ -10,7 +10,7 @@
 // leaves the original problem in place.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { scrollEdges, scrollFadeMask } from '../src/lib/scrollAffordance.ts'
+import { scrollEdges, scrollEdgeShadow } from '../src/lib/scrollAffordance.ts'
 
 // The real sidebar measurement at a 1440x800 window, walked 2026-08-03.
 const SIDEBAR_800 = { scrollTop: 0, clientHeight: 628, scrollHeight: 857 }
@@ -71,29 +71,32 @@ test('zero-height pane (hidden / not yet laid out) claims no edges', () => {
   )
 })
 
-// The mask is what actually renders the affordance. An overlay gradient would
-// have to match each surface's background (card / popover / muted, light and
-// dark); masking the content is background-agnostic, so a new caller cannot get
-// it subtly wrong.
-test('no mask when nothing overflows — the style is dropped, not an identity mask', () => {
-  assert.equal(scrollFadeMask({ top: false, bottom: false }, 24), undefined)
+// The shadow is what renders the affordance. A fade was the first attempt and
+// was replaced: it dims the edge, which ghosts a real row on a dense list and
+// fights a sticky header (the webhook event picker's "Select all · 0 of 37"
+// bar). A shadow leaves content legible and is the conventional cue.
+test('no shadow when nothing overflows — the style is dropped, not a no-op', () => {
+  assert.equal(scrollEdgeShadow({ top: false, bottom: false }), undefined)
 })
 
-test('bottom-only fades the bottom edge and leaves the top solid', () => {
-  const m = scrollFadeMask({ top: false, bottom: true }, 24)
-  assert.equal(m, 'linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%)')
+test('bottom-only marks just the bottom edge', () => {
+  assert.equal(scrollEdgeShadow({ top: false, bottom: true }),
+    'inset 0 -9px 7px -8px var(--scroll-shadow)')
 })
 
-test('top-only fades the top edge and leaves the bottom solid', () => {
-  const m = scrollFadeMask({ top: true, bottom: false }, 24)
-  assert.equal(m, 'linear-gradient(to bottom, transparent 0, #000 24px, #000 100%)')
+test('top-only marks just the top edge', () => {
+  assert.equal(scrollEdgeShadow({ top: true, bottom: false }),
+    'inset 0 9px 7px -8px var(--scroll-shadow)')
 })
 
-test('mid-scroll fades both edges', () => {
-  const m = scrollFadeMask({ top: true, bottom: true }, 24)
-  assert.equal(m, 'linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%)')
+test('mid-scroll marks both edges', () => {
+  assert.equal(scrollEdgeShadow({ top: true, bottom: true }),
+    'inset 0 9px 7px -8px var(--scroll-shadow), inset 0 -9px 7px -8px var(--scroll-shadow)')
 })
 
-test('the fade depth is honoured', () => {
-  assert.match(scrollFadeMask({ top: false, bottom: true }, 8)!, /calc\(100% - 8px\)/)
+test('the shadow colour is a theme token, not a hardcoded black', () => {
+  // A black shadow is invisible on a dark surface; the token carries a
+  // different alpha per theme.
+  assert.match(scrollEdgeShadow({ top: true, bottom: true })!, /var\(--scroll-shadow\)/)
+  assert.doesNotMatch(scrollEdgeShadow({ top: true, bottom: true })!, /#000|rgba?\(/)
 })

@@ -408,7 +408,7 @@ function ObjectsList({ preview }: { preview: RecipePreviewResult }) {
             {s.label}
             {s.items.length > 8 && <span className="ml-1.5 normal-case tracking-normal">({s.items.length})</span>}
           </p>
-          <ScrollPane as="ul" fadePx={12} className="text-xs text-foreground space-y-0.5 font-mono max-h-48 pr-1">
+          <ScrollPane as="ul" className="text-xs text-foreground space-y-0.5 font-mono max-h-48 pr-1">
             {s.items.map((it, i) => <li key={i}>· {it}</li>)}
           </ScrollPane>
         </div>

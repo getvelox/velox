@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { cn } from '@/lib/utils'
-import { scrollEdges, scrollFadeMask, type ScrollEdges } from '@/lib/scrollAffordance'
+import { scrollEdges, scrollEdgeShadow, type ScrollEdges } from '@/lib/scrollAffordance'
 
 /**
  * ScrollPane — the one scrollable pane in the app.
@@ -20,32 +20,32 @@ import { scrollEdges, scrollFadeMask, type ScrollEdges } from '@/lib/scrollAffor
  * silent one, and it repeats anywhere a `max-h-*` meets a list of unknown
  * length. Auditing found ten such panes; this is the fix applied once.
  *
- * The affordance is a MASK on the pane's own content, not an overlaid gradient.
- * An overlay must match the surface's background (card / popover / muted, in
- * both themes), so every new caller is a fresh chance to mismatch it — and a
- * mismatched overlay reads as a rendering bug. A mask is background-agnostic
- * and cannot intercept clicks.
+ * The affordance is an inset SHADOW at whichever edge has more beyond it — the
+ * conventional cue, and the one that needs no learning. Two alternatives were
+ * built and rejected on the way here: an overlaid gradient (must match each
+ * surface's background in both themes, so every caller is a chance to mismatch
+ * it), and a content mask (background-agnostic, but it DIMS the edge — on a
+ * dense list that ghosts a real row, and it fights a sticky header whose whole
+ * job is to own that band). A shadow leaves content legible and composes with
+ * a sticky header exactly as the platform convention does.
  */
 export function ScrollPane({
   children,
   className,
   as: Tag = 'div',
-  fadePx = 24,
   ...rest
 }: {
   children: ReactNode
   className?: string
   /** Element to render. Panes carry real semantics — nav, ul, pre — keep them. */
   as?: 'div' | 'nav' | 'ul' | 'pre'
-  /** Depth of the fade. Smaller for short panes so it doesn't swallow a row. */
-  fadePx?: number
 } & React.HTMLAttributes<HTMLElement>) {
   const ref = useRef<HTMLElement | null>(null)
   const [edges, setEdges] = useState<ScrollEdges>({ top: false, bottom: false })
-
   const sync = useCallback(() => {
     const el = ref.current
-    if (el) setEdges(scrollEdges(el))
+    if (!el) return
+    setEdges(scrollEdges(el))
   }, [])
 
   useEffect(() => {
@@ -62,7 +62,7 @@ export function ScrollPane({
     return () => ro.disconnect()
   }, [sync, children])
 
-  const mask = scrollFadeMask(edges, fadePx)
+  const shadow = scrollEdgeShadow(edges)
 
   return (
     <Tag
@@ -70,7 +70,7 @@ export function ScrollPane({
       ref={ref as never}
       onScroll={sync}
       className={cn('overflow-y-auto', className)}
-      style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+      style={shadow ? { boxShadow: shadow } : undefined}
       {...rest}
     >
       {children}

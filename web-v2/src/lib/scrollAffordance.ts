@@ -45,20 +45,23 @@ export function scrollEdges(m: ScrollMetrics): ScrollEdges {
 }
 
 /**
- * The CSS mask that fades the pane's own content at whichever edge has more
- * beyond it. Returns undefined when nothing should fade, so the caller can drop
- * the style entirely rather than paint an identity mask.
+ * The inset shadow that marks whichever edge has content beyond it. Returns
+ * undefined when nothing should be marked, so the caller drops the style
+ * rather than painting a no-op.
  *
- * A mask rather than an overlaid gradient div, deliberately: an overlay has to
- * match the pane's background colour, which differs per surface (card, popover,
- * muted) and per theme, so every new caller is a chance to get it subtly wrong
- * — and a mismatched overlay looks like a rendering bug. Masking the content
- * itself is background-agnostic and cannot be mismatched. It also cannot
- * intercept clicks, which an overlay can if anyone forgets pointer-events-none.
+ * A SHADOW rather than a fade, per the established affordance pattern: a fade
+ * dims the content at the edge, which on a dense list ghosts a real row and
+ * reads as a rendering artifact — and it fights a sticky header, whose whole
+ * job is to own that band. A shadow leaves content legible, and composes with
+ * a sticky header the way the platform convention already does (content
+ * scrolling under a header that casts a shadow).
+ *
+ * Inset on the container, so it pins to the pane's edges rather than scrolling
+ * with the content, and it paints beneath the text rather than over it.
  */
-export function scrollFadeMask(edges: ScrollEdges, fadePx: number): string | undefined {
-  if (!edges.top && !edges.bottom) return undefined
-  const from = edges.top ? `transparent 0, #000 ${fadePx}px` : '#000 0'
-  const to = edges.bottom ? `#000 calc(100% - ${fadePx}px), transparent 100%` : '#000 100%'
-  return `linear-gradient(to bottom, ${from}, ${to})`
+export function scrollEdgeShadow(edges: ScrollEdges): string | undefined {
+  const parts: string[] = []
+  if (edges.top) parts.push('inset 0 9px 7px -8px var(--scroll-shadow)')
+  if (edges.bottom) parts.push('inset 0 -9px 7px -8px var(--scroll-shadow)')
+  return parts.length ? parts.join(', ') : undefined
 }

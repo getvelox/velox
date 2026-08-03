@@ -407,7 +407,7 @@ function DeliveryRow({
         )}
       </div>
       {showBody && (delivery.response_body || delivery.error) && (
-        <ScrollPane as="pre" fadePx={12} className="mt-3 p-2 bg-muted rounded text-xs font-mono whitespace-pre-wrap break-all max-h-48">
+        <ScrollPane as="pre" className="mt-3 p-2 bg-muted rounded text-xs font-mono whitespace-pre-wrap break-all max-h-48">
           {delivery.response_body || delivery.error}
         </ScrollPane>
       )}
