@@ -10,7 +10,7 @@
 // leaves the original problem in place.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { scrollEdges } from '../src/lib/scrollAffordance.ts'
+import { scrollEdges, scrollFadeMask } from '../src/lib/scrollAffordance.ts'
 
 // The real sidebar measurement at a 1440x800 window, walked 2026-08-03.
 const SIDEBAR_800 = { scrollTop: 0, clientHeight: 628, scrollHeight: 857 }
@@ -69,4 +69,31 @@ test('zero-height pane (hidden / not yet laid out) claims no edges', () => {
     scrollEdges({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 }),
     { top: false, bottom: false },
   )
+})
+
+// The mask is what actually renders the affordance. An overlay gradient would
+// have to match each surface's background (card / popover / muted, light and
+// dark); masking the content is background-agnostic, so a new caller cannot get
+// it subtly wrong.
+test('no mask when nothing overflows — the style is dropped, not an identity mask', () => {
+  assert.equal(scrollFadeMask({ top: false, bottom: false }, 24), undefined)
+})
+
+test('bottom-only fades the bottom edge and leaves the top solid', () => {
+  const m = scrollFadeMask({ top: false, bottom: true }, 24)
+  assert.equal(m, 'linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%)')
+})
+
+test('top-only fades the top edge and leaves the bottom solid', () => {
+  const m = scrollFadeMask({ top: true, bottom: false }, 24)
+  assert.equal(m, 'linear-gradient(to bottom, transparent 0, #000 24px, #000 100%)')
+})
+
+test('mid-scroll fades both edges', () => {
+  const m = scrollFadeMask({ top: true, bottom: true }, 24)
+  assert.equal(m, 'linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%)')
+})
+
+test('the fade depth is honoured', () => {
+  assert.match(scrollFadeMask({ top: false, bottom: true }, 8)!, /calc\(100% - 8px\)/)
 })

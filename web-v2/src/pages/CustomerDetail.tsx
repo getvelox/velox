@@ -57,6 +57,7 @@ import {
   postalPlaceholderForCountry,
 } from '@/lib/geo'
 import { TAX_ID_HINTS, taxIdTypeOptions } from '@/lib/taxIdTypes'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 const statusVariant = statusBadgeVariant
 
@@ -1113,7 +1114,7 @@ export default function CustomerDetailPage() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <div className={sentEmailsExpanded && sentEmails.length > 5 ? 'max-h-96 overflow-y-auto' : ''}>
+            <ScrollPane className={sentEmailsExpanded && sentEmails.length > 5 ? 'max-h-96' : ''}>
               <div className="divide-y divide-border">
                 {(sentEmailsExpanded ? sentEmails : sentEmails.slice(0, 5)).map(em => (
                   <div key={em.id} className="px-6 py-3 flex items-start justify-between gap-3">
@@ -1145,7 +1146,7 @@ export default function CustomerDetailPage() {
                   <p className="px-6 py-4 text-sm text-muted-foreground">No emails sent in the last 30 days</p>
                 )}
               </div>
-            </div>
+            </ScrollPane>
             {sentEmails.length > 5 && (
               <div className="border-t border-border px-6 py-2 flex justify-center">
                 <button
@@ -1408,6 +1409,7 @@ function EditBillingProfileDialog({ customerId, customer, profile, onClose, onSa
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      {/* eslint-disable-next-line no-restricted-syntax -- DialogContent scrolls as ONE box including its own close button, so a content mask would fade that button. Giving dialogs a scrolling BODY inside a fixed shell is a redesign of every dialog; tracked, not bundled here. */}
       <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{profile ? 'Edit Billing Profile' : 'Set Up Billing Profile'}</DialogTitle>
@@ -1953,6 +1955,7 @@ function NewInvoiceDialog({ customerId, customer, billingProfile, onClose, onCre
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !isBusy) onClose() }}>
+      {/* eslint-disable-next-line no-restricted-syntax -- DialogContent scrolls as ONE box including its own close button, so a content mask would fade that button. Giving dialogs a scrolling BODY inside a fixed shell is a redesign of every dialog; tracked, not bundled here. */}
       <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>New invoice</DialogTitle>

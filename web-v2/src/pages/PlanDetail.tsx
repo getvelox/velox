@@ -37,6 +37,7 @@ import { Loader2, Pencil, Plus } from 'lucide-react'
 import { CopyButton } from '@/components/CopyButton'
 import { DetailBreadcrumb } from '@/components/DetailBreadcrumb'
 import { DetailSkeleton } from '@/components/ui/DetailSkeleton'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 const statusVariant = statusBadgeVariant
 
@@ -428,7 +429,7 @@ export default function PlanDetailPage() {
           </DialogHeader>
           <p className="text-sm text-muted-foreground mb-4">Select a meter to attach to this plan.</p>
           {unattachedMeters.length > 0 ? (
-            <div className="divide-y divide-border border border-border rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+            <ScrollPane className="divide-y divide-border border border-border rounded-lg max-h-64">
               {unattachedMeters.map(meter => (
                 <button
                   key={meter.id}
@@ -446,7 +447,7 @@ export default function PlanDetailPage() {
                   </div>
                 </button>
               ))}
-            </div>
+            </ScrollPane>
           ) : (
             <p className="text-sm text-muted-foreground text-center py-4">All meters are already attached</p>
           )}

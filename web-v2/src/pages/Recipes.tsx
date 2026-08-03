@@ -29,6 +29,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { TableSkeleton } from '@/components/ui/TableSkeleton'
 
 import { Box, Loader2, Eye, Sparkles, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 export default function RecipesPage() {
   usePageTitle('Recipes')
@@ -228,6 +229,7 @@ function RecipeDialog({ recipe, onClose }: { recipe: RecipeListItem; onClose: ()
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      {/* eslint-disable-next-line no-restricted-syntax -- DialogContent scrolls as ONE box including its own close button, so a content mask would fade that button. Giving dialogs a scrolling BODY inside a fixed shell is a redesign of every dialog; tracked, not bundled here. */}
       <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -406,9 +408,9 @@ function ObjectsList({ preview }: { preview: RecipePreviewResult }) {
             {s.label}
             {s.items.length > 8 && <span className="ml-1.5 normal-case tracking-normal">({s.items.length})</span>}
           </p>
-          <ul className="text-xs text-foreground space-y-0.5 font-mono max-h-48 overflow-y-auto pr-1">
+          <ScrollPane as="ul" fadePx={12} className="text-xs text-foreground space-y-0.5 font-mono max-h-48 pr-1">
             {s.items.map((it, i) => <li key={i}>· {it}</li>)}
-          </ul>
+          </ScrollPane>
         </div>
       ))}
     </div>

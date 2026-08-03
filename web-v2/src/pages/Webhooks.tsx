@@ -48,6 +48,7 @@ import { TableSkeleton } from '@/components/ui/TableSkeleton'
 
 import { Loader2, Plus, Webhook, Activity } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 const createEndpointSchema = z.object({
   url: z.string().min(1, 'URL is required').refine(v => {
@@ -446,7 +447,7 @@ function EventPicker({ selected, setSelected }: {
     })
   }
   return (
-    <div className="border border-border rounded-lg max-h-72 overflow-y-auto">
+    <ScrollPane className="border border-border rounded-lg max-h-72">
       <div className="flex items-center justify-between px-4 py-2.5 bg-muted border-b border-border sticky top-0 z-10">
         <label className="flex items-center gap-2 cursor-pointer">
           <Checkbox
@@ -488,7 +489,7 @@ function EventPicker({ selected, setSelected }: {
           </div>
         )
       })}
-    </div>
+    </ScrollPane>
   )
 }
 

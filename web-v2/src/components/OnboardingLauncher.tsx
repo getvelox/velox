@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Check, X, ChevronUp, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useOnboardingSteps, type OnboardingStep } from '@/hooks/useOnboardingSteps'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 // OnboardingLauncher — floating bottom-right pill that expands into a
 // 360px side panel. Mirrors the dominant 2026 dev-tool pattern (Intercom,
@@ -99,7 +100,7 @@ export function OnboardingLauncher() {
         </div>
       </div>
 
-      <ul className="max-h-[60vh] overflow-y-auto border-t border-border">
+      <ScrollPane as="ul" className="max-h-[60vh] border-t border-border">
         {steps.map((step) => (
           <StepRow
             key={step.key}
@@ -108,7 +109,7 @@ export function OnboardingLauncher() {
             onNavigate={() => setOpen(false)}
           />
         ))}
-      </ul>
+      </ScrollPane>
 
     </div>
   )
