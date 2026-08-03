@@ -11,6 +11,7 @@ import {
 import { toast } from 'sonner'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { cn } from '@/lib/utils'
+import { CONTENT_BAND } from '@/lib/contentBand'
 import { api, setActiveCurrency } from '@/lib/api'
 import { getLastRequestId } from '@/lib/lastRequestId'
 import { useAuth } from '@/contexts/AuthContext'
@@ -470,29 +471,36 @@ export function Layout({ children }: { children: ReactNode }) {
             </div>
           )}
           {/* Top bar — always visible. Mobile adds a hamburger, desktop leaves
-              the left empty; the right carries the Test/Live toggle. */}
-          <div className="flex items-center gap-3 px-4 py-3 border-b border-border bg-card">
-            <button
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Open menu"
-              className="md:hidden text-muted-foreground hover:text-foreground"
-            >
-              <Menu size={22} />
-            </button>
-            <div className="md:hidden">
-              <VeloxLogo size="sm" />
+              the left empty; the right carries the Test/Live toggle.
+              The BAR spans full width (its border is the chrome's edge), but
+              its CONTENTS ride the same band as the page below — otherwise the
+              mode toggle drifts to the viewport edge and reads as belonging to
+              nothing. Measured before this: toggle right edge 2544 vs content
+              right edge 2040 on a 2560px viewport. */}
+          <div className="border-b border-border bg-card">
+            <div className={cn(CONTENT_BAND, 'flex items-center gap-3 px-4 md:px-8 py-3')}>
+              <button
+                onClick={() => setSidebarOpen(true)}
+                aria-label="Open menu"
+                className="md:hidden text-muted-foreground hover:text-foreground"
+              >
+                <Menu size={22} />
+              </button>
+              <div className="md:hidden">
+                <VeloxLogo size="sm" />
+              </div>
+              <div className="flex-1" />
+              {user && (
+                <ModeToggle
+                  livemode={user.livemode}
+                  busy={modeBusy}
+                  onToggle={handleToggleMode}
+                />
+              )}
             </div>
-            <div className="flex-1" />
-            {user && (
-              <ModeToggle
-                livemode={user.livemode}
-                busy={modeBusy}
-                onToggle={handleToggleMode}
-              />
-            )}
           </div>
         </div>
-        <div className="max-w-7xl mx-auto p-4 md:p-8">
+        <div className={cn(CONTENT_BAND, 'p-4 md:p-8')}>
           {children}
         </div>
       </main>

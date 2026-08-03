@@ -49,6 +49,7 @@ import {
 
 import { Building2, CreditCard, FileText, Receipt, Check, AlertCircle, Loader2, Trash2, Copy, ExternalLink, X, Users } from 'lucide-react'
 import { TeamTab } from '@/components/TeamTab'
+import { CONTENT_BAND } from '@/lib/contentBand'
 
 const settingsSchema = z.object({
   company_name: z.string().max(255, 'Must be at most 255 characters'),
@@ -856,15 +857,16 @@ export default function SettingsPage() {
         </div>
       </Tabs>
 
-      {/* Sticky save bar. pr-44 reserves the right edge so the
-          Save button doesn't sit under the OnboardingLauncher pill
-          (also fixed bottom-right, z-30). Both elements stay
-          accessible side-by-side — Stripe/Linear use the same
-          right-edge-reserve pattern when a floating help/onboarding
-          element coexists with a save bar. */}
+      {/* Sticky save bar. pr-44 reserves the right edge so the Save button
+          doesn't sit under the OnboardingLauncher pill (also fixed
+          bottom-right, z-30), keeping both accessible side-by-side. The
+          geometry is self-evident; a previous version of this comment also
+          claimed "Stripe/Linear use the same right-edge-reserve pattern",
+          which an anchoring pass could find no citable documentation for —
+          removed rather than left as an unsourced parity assertion. */}
       {hasChanges && (
         <div className="fixed bottom-0 left-0 right-0 z-30 md:left-60 pr-44">
-          <div className="max-w-7xl mx-auto px-4 md:px-8">
+          <div className={cn(CONTENT_BAND, 'px-4 md:px-8')}>
             <div className="bg-card border-t border-border shadow-[0_-4px_12px_rgba(0,0,0,0.05)] rounded-t-xl px-6 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
