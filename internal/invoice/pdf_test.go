@@ -614,3 +614,47 @@ func TestParseBrandColor(t *testing.T) {
 		}
 	}
 }
+
+// TestCNChannelDescription_RefundStateAnnotated guards the customer-visible
+// channel line against asserting cash movement the refund status disproves.
+// A mixed-allocation CN enters the POST-PAYMENT ADJUSTMENTS list via its
+// settled credit / out-of-band leg, so its card leg can be present in any
+// state; printing "to card" bare for a failed leg told the customer money
+// came back when no refund object even exists at Stripe (found live
+// 2026-08-03, sibling of the dashboard's "Refunded to Card" stat fix).
+func TestCNChannelDescription_RefundStateAnnotated(t *testing.T) {
+	base := CreditNoteInfo{
+		RefundAmountCents:    1000,
+		CreditAmountCents:    2000,
+		OutOfBandAmountCents: 500,
+	}
+
+	cases := []struct {
+		name       string
+		status     string
+		wantCard   string
+		forbidBare bool
+	}{
+		{"succeeded is bare", string(domain.RefundSucceeded), "$10.00 to card |", false},
+		{"failed is annotated", string(domain.RefundFailed), "$10.00 to card (refund failed)", true},
+		{"pending is annotated", string(domain.RefundPending), "$10.00 to card (refund pending)", true},
+		{"legacy empty status reads as pending, never settled", "", "$10.00 to card (refund pending)", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cn := base
+			cn.RefundStatus = tc.status
+			got := cnChannelDescription(cn, "$")
+			if !strings.Contains(got, tc.wantCard) {
+				t.Errorf("channel line = %q, want it to contain %q", got, tc.wantCard)
+			}
+			if tc.forbidBare && strings.Contains(got, "to card |") {
+				t.Errorf("channel line = %q asserts an unannotated card settlement", got)
+			}
+			// The settled legs render regardless of the card leg's state.
+			if !strings.Contains(got, "$20.00 to credit") || !strings.Contains(got, "$5.00 out of band") {
+				t.Errorf("channel line = %q lost a settled channel", got)
+			}
+		})
+	}
+}
