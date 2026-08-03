@@ -28,6 +28,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { EmptyState } from '@/components/EmptyState'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 // Live-tail buffer cap. The dashboard's table re-renders on every frame
 // flip; capping at 200 keeps the list snappy on a busy production tenant
@@ -406,9 +407,9 @@ function DeliveryRow({
         )}
       </div>
       {showBody && (delivery.response_body || delivery.error) && (
-        <pre className="mt-3 p-2 bg-muted rounded text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-auto">
+        <ScrollPane as="pre" className="mt-3 p-2 bg-muted rounded text-xs font-mono whitespace-pre-wrap break-all max-h-48">
           {delivery.response_body || delivery.error}
-        </pre>
+        </ScrollPane>
       )}
     </div>
   )

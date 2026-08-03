@@ -27,6 +27,7 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { VeloxLogo } from '@/components/VeloxLogo'
 import { OnboardingLauncher } from '@/components/OnboardingLauncher'
 import { useOnboardingSteps } from '@/hooks/useOnboardingSteps'
+import { ScrollPane } from '@/components/ui/scroll-pane'
 
 const billingNav = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -168,6 +169,7 @@ function ModeToggle({ livemode, busy, onToggle }: { livemode: boolean; busy: boo
   )
 }
 
+
 export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation()
   const navigate = useNavigate()
@@ -281,8 +283,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </button>
       </div>
 
-      {/* Navigation */}
-      <nav aria-label="Main navigation" className="flex-1 p-3 space-y-1 overflow-y-auto">
+      <ScrollPane as="nav" aria-label="Main navigation" className="flex-1 min-h-0 p-3 space-y-1">
         <p className="text-xs uppercase text-muted-foreground tracking-wider px-3 pt-2 pb-1">
           Billing
         </p>
@@ -317,7 +318,7 @@ export function Layout({ children }: { children: ReactNode }) {
             ))}
           </>
         )}
-      </nav>
+      </ScrollPane>
 
       {/* Footer — enterprise account menu. Trigger row shows identity +
           chevron; dropdown (opens upward) surfaces theme toggle and sign-out

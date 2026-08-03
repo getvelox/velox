@@ -30,6 +30,27 @@ const noWallClockNow = [
   },
 ]
 
+// Scroll-affordance gate (2026-08-03). macOS overlay scrollbars are invisible
+// until the user is already scrolling, so a capped pane whose content exceeds
+// the cap renders IDENTICALLY to one whose content ended there. Nothing looks
+// broken; the hidden rows are simply never discovered. The sidebar hid five
+// entries including Settings at a laptop window height, and an operator reading
+// a screenshot concluded those pages did not exist.
+//
+// The fix is <ScrollPane> (components/ui/scroll-pane.tsx), which fades whichever
+// edge has content beyond it. This rule stops the next hand-rolled pane from
+// silently reintroducing the defect — the failure is invisible to whoever
+// writes it, which is exactly the kind that needs a machine to catch.
+//
+// Menu-shaped surfaces are exempted below: scrolling a dropdown is a universally
+// understood affordance, they carry keyboard navigation that reveals the rest,
+// and they are vendored primitives where divergence costs more than it buys.
+const noRawScrollPane = {
+  selector: "JSXAttribute[name.name='className'] Literal[value=/overflow-(y-)?(auto|scroll)/]",
+  message:
+    'A hand-rolled scroll pane gives no sign there is more content (macOS hides scrollbars until you scroll). Use <ScrollPane> from @/components/ui/scroll-pane, which fades the edge that has more. If this genuinely is a menu/vendored primitive, add `// eslint-disable-next-line no-restricted-syntax -- <reason>`.',
+}
+
 export default defineConfig([
   globalIgnores(['dist']),
   {
@@ -45,12 +66,33 @@ export default defineConfig([
       globals: globals.browser,
     },
     rules: {
-      'no-restricted-syntax': noWallClockNow,
+      'no-restricted-syntax': [...noWallClockNow, noRawScrollPane],
       // HMR ergonomics only (fast-refresh works best when component files
       // export only components) — zero runtime correctness. shadcn-style
       // component files and context/hook co-location trip it ~40×; the
       // industry-standard posture for this template is warn, not error.
       'react-refresh/only-export-components': 'warn',
+    },
+  },
+  {
+    // Menu-shaped surfaces and the dialog shell. A dropdown/select/command
+    // palette that scrolls is a universally understood affordance, they carry
+    // keyboard navigation that reveals the rest, and they are vendored
+    // primitives where divergence costs more than it buys. DialogContent scrolls
+    // as one box including its own close button, so masking it would fade that
+    // button — giving dialogs a proper scrolling BODY is a redesign of every
+    // dialog in the app, deliberately not bundled into this fix.
+    files: [
+      'src/components/ui/dropdown-menu.tsx',
+      'src/components/ui/select.tsx',
+      'src/components/ui/command.tsx',
+      'src/components/ui/dialog.tsx',
+      'src/components/ui/scroll-pane.tsx',
+      'src/components/Combobox.tsx',
+      'src/components/Layout.tsx',
+    ],
+    rules: {
+      'no-restricted-syntax': noWallClockNow,
     },
   },
   {
