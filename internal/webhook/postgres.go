@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -581,6 +582,52 @@ func (s *PostgresStore) GetEvent(ctx context.Context, tenantID, id string) (doma
 		e.ReplayOfEventID = &s
 	}
 	return e, nil
+}
+
+// EventDeliveryStatuses rolls each event's deliveries up to one status.
+// Precedence: any pending → "pending" (work in flight), else any failed →
+// "failed" (something needs attention — a partial success must not read as
+// done), else "delivered". Replaces the age heuristic the SSE snapshot used
+// to guess with ("<24h old ⇒ pending"), which showed a settled event as
+// pending all day and would have shown a permanently-failed delivery as
+// delivered once it aged past the ladder.
+func (s *PostgresStore) EventDeliveryStatuses(ctx context.Context, tenantID string, eventIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return out, nil
+	}
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+
+	// string_to_array instead of a driver array type: ids are vlx_whevt_…
+	// (no commas by construction), and the repo's database/sql driver has
+	// no native []string binding.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT webhook_event_id,
+			CASE
+				WHEN COUNT(*) FILTER (WHERE status = 'pending') > 0 THEN 'pending'
+				WHEN COUNT(*) FILTER (WHERE status = 'failed')  > 0 THEN 'failed'
+				ELSE 'delivered'
+			END
+		FROM webhook_deliveries
+		WHERE webhook_event_id = ANY(string_to_array($1, ','))
+		GROUP BY webhook_event_id
+	`, strings.Join(eventIDs, ","))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, err
+		}
+		out[id] = status
+	}
+	return out, rows.Err()
 }
 
 func (s *PostgresStore) ListEvents(ctx context.Context, tenantID string, limit int) ([]domain.WebhookEvent, error) {
