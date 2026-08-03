@@ -2136,11 +2136,46 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				total := cn.TotalCents
+				// RefundAmountCents is what was ALLOCATED to the card;
+				// RefundStatus is whether that money actually moved. Labelling
+				// from the allocation alone reported an intention as an outcome:
+				// a credit note whose Stripe refund failed still read "Refund
+				// issued" on the invoice an operator opens to ask what happened
+				// (found walking FLOW C2 2026-08-03 on CN-000027 —
+				// refund_status=failed, no stripe_refund_id, no money moved,
+				// timeline said "Refund issued · $10.00"). The credit note row
+				// and the needs-attention queue both already carry the truth;
+				// this surface simply wasn't reading it.
 				desc := "Credit note issued"
-				if cn.RefundAmountCents > 0 && cn.RefundAmountCents == cn.TotalCents {
-					desc = "Refund issued"
-				} else if cn.RefundAmountCents > 0 {
-					desc = "Credit note issued — part refunded to card"
+				if cn.RefundAmountCents > 0 {
+					full := cn.RefundAmountCents == cn.TotalCents
+					// Exhaustive on purpose: "money moved" is the ONLY state
+					// that may render as issued. `none` with an allocation is a
+					// real stored state (a leg that never executed — e.g. no
+					// refunder configured), and it must not borrow the
+					// success wording just because it isn't an explicit failure.
+					switch cn.RefundStatus {
+					case domain.RefundSucceeded, "":
+						desc = "Refund issued"
+						if !full {
+							desc = "Credit note issued — part refunded to card"
+						}
+					case domain.RefundFailed:
+						desc = "Refund failed"
+						if !full {
+							desc = "Credit note issued — card refund failed"
+						}
+					case domain.RefundPending:
+						desc = "Refund pending"
+						if !full {
+							desc = "Credit note issued — card refund pending"
+						}
+					default:
+						desc = "Refund not processed"
+						if !full {
+							desc = "Credit note issued — card refund not processed"
+						}
+					}
 				}
 				detail := cn.CreditNoteNumber
 				if cn.Reason != "" {
