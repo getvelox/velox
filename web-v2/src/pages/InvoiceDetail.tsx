@@ -233,11 +233,21 @@ export default function InvoiceDetailPage() {
     queryKey: ['invoice-credit-notes', id],
     queryFn: async () => {
       const cn = await api.listCreditNotes(`invoice_id=${id}`)
-      return (cn.data || []).filter(n => n.status === 'issued')
+      // Fetch unfiltered: the money SUMMARY wants issued-only (a draft has
+      // reduced nothing yet), but the allocation CAPS must count every
+      // non-voided note, because that is what the server counts. Filtering
+      // to issued here made the dialog's ceilings disagree with the API —
+      // a draft holding a card refund was invisible to `max` while the
+      // server was already subtracting it.
+      return cn.data || []
     },
     enabled: !!id,
   })
-  const creditNotes = creditNotesData ?? []
+  const allCreditNotes = creditNotesData ?? []
+  // Money summary: only notes that actually took effect.
+  const creditNotes = allCreditNotes.filter(n => n.status === 'issued')
+  // Allocation ceilings: mirrors the server, which skips only voided.
+  const capCreditNotes = allCreditNotes.filter(n => n.status !== 'voided')
 
   // Timeline shares the invoice's polling cadence — both surfaces
   // change in lock-step (webhook lands → invoice state flips +
@@ -1418,7 +1428,7 @@ export default function InvoiceDetailPage() {
       {showCreditModal && (
         <IssueCreditDialog
           invoice={invoice}
-          existingCreditNotes={creditNotes}
+          existingCreditNotes={capCreditNotes}
           onClose={() => setShowCreditModal(false)}
           onCreated={() => { setShowCreditModal(false); toast.success('Credit note issued'); invalidateAll() }}
         />
@@ -1792,6 +1802,17 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
     ? Math.max(0, invoice.amount_paid_cents - priorRefunds)
     : 0
 
+  // How much of this invoice is still creditable at all. The server enforces
+  // this (`credit note amount exceeds remaining creditable amount (X)`), but
+  // the field used to advertise no ceiling whatsoever — so the operator typed
+  // a number, hit Issue, and learned the limit only by being rejected. Mirror
+  // the server's own sum (every non-voided note's TOTAL, drafts included) so
+  // the ceiling is visible BEFORE typing, exactly like the refund field's.
+  const alreadyCreditedCents = existingCreditNotes
+    .filter(cn => cn.status !== 'voided')
+    .reduce((sum, cn) => sum + cn.total_cents, 0)
+  const creditableRemainingCents = Math.max(0, invoice.total_amount_cents - alreadyCreditedCents)
+
   const [amount, setAmount] = useState('')
   const [refund, setRefund] = useState('')
   const [credit, setCredit] = useState('')
@@ -1852,7 +1873,9 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
   const refundOverCap = refundCents > pmRefundableCents
   const reasonOk = reason.trim().length > 0
   const amountOk = amountCents > 0
-  const canSubmit = reasonOk && amountOk && allocationMatches && !refundOverCap && !submitting
+  const amountOverCreditable = amountCents > creditableRemainingCents
+  const canSubmit =
+    reasonOk && amountOk && allocationMatches && !refundOverCap && !amountOverCreditable && !submitting
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1905,16 +1928,35 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="cn-amount">Amount ({getCurrencySymbol()})</Label>
+            <Label htmlFor="cn-amount" className="flex items-center justify-between">
+              <span>Amount ({getCurrencySymbol()})</span>
+              <span className="text-xs text-muted-foreground font-normal">
+                max {fmt(creditableRemainingCents)}
+              </span>
+            </Label>
             <Input
               id="cn-amount"
               type="number"
               step="0.01"
               min={0.01}
-              max={999999.99}
+              max={creditableRemainingCents / 100}
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
             />
+            {amountOverCreditable && (
+              <p className="text-xs text-destructive">
+                Credit note cannot exceed {fmt(creditableRemainingCents)} still creditable
+                {alreadyCreditedCents > 0
+                  ? ` (${fmt(alreadyCreditedCents)} of ${fmt(invoice.total_amount_cents)} already credited)`
+                  : ''}.
+              </p>
+            )}
+            {!amountOverCreditable && alreadyCreditedCents > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {fmt(alreadyCreditedCents)} of {fmt(invoice.total_amount_cents)} already credited by
+                earlier credit notes.
+              </p>
+            )}
           </div>
 
           {isPaid && (
