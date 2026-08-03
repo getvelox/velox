@@ -11,6 +11,7 @@ import { api, downloadCreditNotePDF, formatCents, formatDate, formatDateTime, ge
 import type { CreditNote, Invoice, Customer } from '@/lib/api'
 import { applyApiError, showApiError } from '@/lib/formErrors'
 import { downloadCSV } from '@/lib/csv'
+import { creditNoteStats } from '@/lib/creditNoteStats'
 import { Layout } from '@/components/Layout'
 import { SimulatedBadge } from '@/components/TestClockBadge'
 import { useSortable, type SortDir } from '@/hooks/useSortable'
@@ -211,17 +212,9 @@ export default function CreditNotesPage() {
     onError: (err) => showApiError(err, 'Failed to retry refund'),
   })
 
-  // Stats
-  const stats = useMemo(() => {
-    const draft = notes.filter(n => n.status === 'draft').length
-    const issued = notes.filter(n => n.status === 'issued')
-    const voided = notes.filter(n => n.status === 'voided').length
-    const totalCredited = issued.reduce((sum, n) => sum + n.credit_amount_cents, 0)
-    const totalRefunded = issued.reduce((sum, n) => sum + n.refund_amount_cents, 0)
-    const totalOutOfBand = issued.reduce((sum, n) => sum + (n.out_of_band_amount_cents ?? 0), 0)
-    const totalAmount = issued.reduce((sum, n) => sum + n.total_cents, 0)
-    return { draft, issued: issued.length, voided, totalCredited, totalRefunded, totalOutOfBand, totalAmount }
-  }, [notes])
+  // Stats — extracted to creditNoteStats so the "Refunded to Card" gating is
+  // unit-tested: only refund_status=succeeded counts as money returned.
+  const stats = useMemo(() => creditNoteStats(notes), [notes])
 
   // Filter + search
   const filtered = useMemo(() => notes.filter(n => {
@@ -257,13 +250,16 @@ export default function CreditNotesPage() {
       invoiceMap[n.invoice_id]?.invoice_number || '',
       n.status,
       (n.refund_amount_cents / 100).toFixed(2),
+      // Without this column a failed refund's amount reads as returned money
+      // in the spreadsheet — the same lie the stat card told on screen.
+      n.refund_amount_cents > 0 ? (n.refund_status || '') : '',
       (n.credit_amount_cents / 100).toFixed(2),
       ((n.out_of_band_amount_cents ?? 0) / 100).toFixed(2),
       n.reason,
       (n.total_cents / 100).toFixed(2),
       n.issued_at || n.created_at,
     ])
-    downloadCSV('credit-notes.csv', ['Number', 'Customer', 'Invoice', 'Status', 'Refund', 'Credit', 'Out of band', 'Reason', 'Amount', 'Date'], rows)
+    downloadCSV('credit-notes.csv', ['Number', 'Customer', 'Invoice', 'Status', 'Refund', 'Refund status', 'Credit', 'Out of band', 'Reason', 'Amount', 'Date'], rows)
   }
 
   return (
@@ -299,6 +295,13 @@ export default function CreditNotesPage() {
             <CardContent className="px-5 py-4">
               <p className="text-xs font-medium text-muted-foreground">Refunded to Card</p>
               <p className="text-xl font-semibold text-primary mt-1 tabular-nums">{formatCents(stats.totalRefunded)}</p>
+              {(stats.refundPendingCents > 0 || stats.refundFailedCents > 0) && (
+                <p className="text-xs mt-0.5">
+                  {stats.refundPendingCents > 0 && <span className="text-amber-600">{formatCents(stats.refundPendingCents)} pending</span>}
+                  {stats.refundPendingCents > 0 && stats.refundFailedCents > 0 && <span className="text-muted-foreground"> · </span>}
+                  {stats.refundFailedCents > 0 && <span className="text-red-600">{formatCents(stats.refundFailedCents)} failed — not returned</span>}
+                </p>
+              )}
             </CardContent>
           </Card>
           <Card>
