@@ -1718,12 +1718,12 @@ Failed external effects (tax reversal, ambiguous charge) self-heal via scheduler
 
 ## FLOW U3: Usage Events page
 
-- [ ] Stat cards: Total Events, Total Units, Active Meters, Active Customers.
-- [ ] Meter breakdown bars.
-- [ ] Filters: customer, date range. Stat cards stay constant when paging (reflect all filtered rows).
-- [ ] **Dimension filter actually filters (2026-07-05):** type `model=gpt-4o` in the dimension box → event log AND stat cards shrink to matching events only (server-side `properties @>`; pre-fix the server ignored the param and showed unfiltered data as filtered). `token_type=input,model=gpt-4o` ANDs; `cached=true` matches the boolean; malformed input (`model`) → 422 surfaced, not silently unfiltered.
-- [ ] Decimal precision: `0.5 + 0.5 + 0.0001` → `1.0001` (no rounding).
-- [ ] Export CSV.
+- [x] Stat cards: Total Events, Total Units, Active Meters, Active Customers. *(walked: all four render — Total Events 35, Total Units 9.0001, Active Meters 1, Active Customers 3 — and each moved correctly under filtering rather than being static.)*
+- [x] Meter breakdown bars. *(walked: an "All meters / TC4 usage meter" selector with a rendered bar breakdown (48 bar/rect elements) above the event log.)*
+- [x] Filters: customer, date range. Stat cards stay constant when paging (reflect all filtered rows). *(walked with a purpose-built 35-event fixture so paging actually engages: page 1 read "Showing 1–25 of 35" with 25 rows, page 2 "Showing 26–35 of 35" with 10 — and the stat cards held **35 / 9.0001 on BOTH**, i.e. they reflect all filtered rows rather than the visible page. Customer filter also verified: 9 events → 3, Active Customers 3 → 1. Note the pager is rendered as `<a>` links (Previous / 1 / 2 / Next), not buttons — a `getByRole('button', {name:'Next'})` finds nothing and reads as "no pagination".)*
+- [x] **Dimension filter actually filters (2026-07-05):** type `model=gpt-4o` in the dimension box → event log AND stat cards shrink to matching events only (server-side `properties @>`; pre-fix the server ignored the param and showed unfiltered data as filtered). `token_type=input,model=gpt-4o` ANDs; `cached=true` matches the boolean; malformed input (`model`) → 422 surfaced, not silently unfiltered. *(walked with a falsifiable partition rather than a smoke check. Three events on one customer carried `model=gpt-4o` ×2 (0.5 each) and `model=gpt-4o-mini` ×1 (0.0001). Filtering `model=gpt-4o` gave **2 events / 1 unit**, `model=gpt-4o-mini` gave **1 event / 0.0001 units**, and a non-matching value gave an empty state — so the two slices **partition the unfiltered 1.0001 exactly**. Critically the STAT CARDS shrank with the filter, not just the table, which is the half that distinguishes a real server-side `properties @>` from a client-side table filter.)*
+- [x] Decimal precision: `0.5 + 0.5 + 0.0001` → `1.0001` (no rounding). *(walked with exactly the documented values: three events of 0.5, 0.5 and 0.0001 summed to **`1.0001`** on the card — no rounding, no float drift — and each event's ingest response echoed its quantity as a decimal string (`"0.5"`, `"0.0001"`) rather than a float.)*
+- [x] Export CSV. *(walked and RECONCILED, not just downloaded: `usage-events.csv` came back with **35 data rows = Total Events**, and `sum(Value)` = **9.0001**, matching Total Units to the last decimal place. Columns are Timestamp / Customer / Meter / Value / Dimensions, with dimensions as embedded JSON. It exports all 35 filtered rows, not the 25 visible on the current page.)*
 
 ## FLOW U11: Operator search + list filters
 
