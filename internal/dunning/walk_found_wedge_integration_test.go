@@ -194,7 +194,10 @@ func TestProcessDueRuns_TerminalInvoiceResolvesWithoutPolicy(t *testing.T) {
 	if run.State != domain.DunningResolved {
 		t.Fatalf("run state = %q, want resolved — a terminal invoice's run must resolve even when its policy row is gone", run.State)
 	}
-	if run.Resolution != domain.ResolutionManuallyResolved {
-		t.Errorf("resolution = %q, want manually_resolved (the invoice_<status> terminal branch)", run.Resolution)
+	// The fixture wrote the invoice off (InvoiceUncollectible above), so the
+	// terminal branch must record the write-off successor — not the void one,
+	// and not the legacy value that used to mean either (m0170).
+	if run.Resolution != domain.ResolutionInvoiceNotCollectible {
+		t.Errorf("resolution = %q, want invoice_not_collectible — the invoice was marked UNCOLLECTIBLE, and the terminal branch must name which terminal state it found", run.Resolution)
 	}
 }

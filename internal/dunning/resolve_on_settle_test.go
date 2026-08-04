@@ -239,24 +239,47 @@ func TestProcessRun_GatesOnStatusNotAmountDue(t *testing.T) {
 	}
 }
 
-// TestProcessRun_VoidedInvoice_ResolvesManually: a voided invoice resolves the
-// run as manually_resolved without retrying.
-func TestProcessRun_VoidedInvoice_ResolvesManually(t *testing.T) {
-	store := newMemStore()
-	retrier := &recordingRetrier{}
-	svc := NewService(store, retrier, nil)
-	inv := domain.Invoice{ID: "inv_1", TenantID: "t1", Status: domain.InvoiceVoided}
-	svc.SetSubscriptionPauser(&recordingPauser{}, stubInvGet{inv: inv})
-
-	run := dueRunAt(t, store, svc, 1)
-	svc.ProcessDueRuns(context.Background(), "t1", 20)
-
-	got := store.runs[run.ID]
-	if got.State != domain.DunningResolved || got.Resolution != domain.ResolutionManuallyResolved {
-		t.Errorf("voided invoice: got state=%q resolution=%q, want resolved/manually_resolved", got.State, got.Resolution)
+// TestProcessRun_TerminalInvoice_ResolutionNamesWhichTerminal: the engine's
+// terminal floor resolves without retrying — and the resolution says WHICH
+// terminal state it found.
+//
+// The two arms are the whole point of the 0170 split. Before it, both wrote
+// manually_resolved, so a resolved run could not tell you whether the invoice
+// had been annulled or written off — two different things for revenue. Run
+// them together: one arm alone passes on an implementation that ignores
+// inv.Status and hardcodes either value.
+func TestProcessRun_TerminalInvoice_ResolutionNamesWhichTerminal(t *testing.T) {
+	cases := []struct {
+		name   string
+		status domain.InvoiceStatus
+		want   domain.DunningResolution
+	}{
+		{"voided", domain.InvoiceVoided, domain.ResolutionInvoiceVoided},
+		{"uncollectible", domain.InvoiceUncollectible, domain.ResolutionInvoiceNotCollectible},
 	}
-	if retrier.calls != 0 {
-		t.Errorf("retrier must not run on a voided invoice: calls=%d", retrier.calls)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemStore()
+			retrier := &recordingRetrier{}
+			svc := NewService(store, retrier, nil)
+			inv := domain.Invoice{ID: "inv_1", TenantID: "t1", Status: tc.status}
+			svc.SetSubscriptionPauser(&recordingPauser{}, stubInvGet{inv: inv})
+
+			run := dueRunAt(t, store, svc, 1)
+			svc.ProcessDueRuns(context.Background(), "t1", 20)
+
+			got := store.runs[run.ID]
+			if got.State != domain.DunningResolved || got.Resolution != tc.want {
+				t.Errorf("%s invoice: got state=%q resolution=%q, want resolved/%s",
+					tc.status, got.State, got.Resolution, tc.want)
+			}
+			if got.Resolution == domain.ResolutionManuallyResolved {
+				t.Errorf("no writer may emit the legacy manually_resolved value (0170)")
+			}
+			if retrier.calls != 0 {
+				t.Errorf("retrier must not run on a %s invoice: calls=%d", tc.status, retrier.calls)
+			}
+		})
 	}
 }
 

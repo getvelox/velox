@@ -332,9 +332,18 @@ func (h *Handler) resolveRun(w http.ResponseWriter, r *http.Request) {
 	// column is written by multiple flows, so the operator endpoint
 	// rejects early with a teaching message).
 	switch domain.DunningResolution(input.Resolution) {
-	case domain.ResolutionPaymentRecovered, domain.ResolutionManuallyResolved, domain.ResolutionInvoiceNotCollectible:
+	case domain.ResolutionPaymentRecovered, domain.ResolutionInvoiceVoided, domain.ResolutionInvoiceNotCollectible:
 	default:
-		respond.ValidationField(w, r, "resolution", "resolution must be one of payment_recovered, manually_resolved, invoice_not_collectible")
+		// manually_resolved is deliberately NOT accepted: it is the legacy
+		// pre-0170 value that meant "voided OR uncollectible", and accepting
+		// it would reintroduce exactly the ambiguity the split removed. The
+		// message names it explicitly rather than letting an integrator who
+		// still sends it read a generic refusal and guess.
+		if domain.DunningResolution(input.Resolution) == domain.ResolutionManuallyResolved {
+			respond.ValidationField(w, r, "resolution", "manually_resolved is no longer accepted — it meant both 'voided' and 'written off'. Use invoice_voided to annul the invoice, or invoice_not_collectible to write it off.")
+			return
+		}
+		respond.ValidationField(w, r, "resolution", "resolution must be one of payment_recovered, invoice_voided, invoice_not_collectible")
 		return
 	}
 
@@ -386,7 +395,7 @@ func (h *Handler) resolveRun(w http.ResponseWriter, r *http.Request) {
 			if _, err := h.invoiceVoider.RecordOfflinePayment(r.Context(), tenantID, run.InvoiceID, "Recovered via dunning resolution"); err != nil {
 				slog.WarnContext(r.Context(), "failed to record recovered payment after dunning resolution", "invoice_id", run.InvoiceID, "error", err)
 			}
-		case domain.ResolutionManuallyResolved:
+		case domain.ResolutionInvoiceVoided:
 			// Void through the invoice SERVICE (single void writer): status flip
 			// + atomic consumed-credit reversal + tax reversal + in-flight guard
 			// + single-writer invoice.voided event. The PI-cancel below is gated

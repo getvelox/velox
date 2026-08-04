@@ -55,11 +55,25 @@ import { Loader2 } from 'lucide-react'
 // effectiveNowMs resolves the "now" baseline for relative-time
 // Human labels for the resolution enum — raw values like
 // "payment_recovered" are backend identifiers, not operator copy.
+// EVERY value the column can hold, including the two the ENGINE writes.
+// retries_exhausted and action_failed were missing, so the badge fell through
+// to `run.resolution` raw — and retries_exhausted is the most common
+// resolution there is (174 of 215 rows when this was found), which meant the
+// majority case rendered a snake_case backend identifier to an operator, in a
+// map whose whole purpose is preventing exactly that.
+//
+// `write_off` was also here and is not a resolution at all — no writer can
+// produce it and the CHECK constraint forbids it. It looks like a confusion
+// with dunning_policies.final_action, which does have `write_off_later`.
 const RESOLUTION_LABELS: Record<string, string> = {
   payment_recovered: 'Payment recovered',
-  manually_resolved: 'Voided',
-  write_off: 'Written off',
-  invoice_not_collectible: 'Uncollectible',
+  invoice_voided: 'Voided',
+  invoice_not_collectible: 'Written off',
+  retries_exhausted: 'Retries exhausted',
+  action_failed: 'Final action failed',
+  // LEGACY, pre-0170: meant voided OR written off. Rows that could not be
+  // mapped from their invoice's status keep it, so the label must too.
+  manually_resolved: 'Closed unpaid',
 }
 
 function relativeTime(dateStr: string, now: EffectiveNow): string {
@@ -350,7 +364,7 @@ function RunsTab() {
                             <div className="flex items-center gap-2">
                               <Badge variant={statusBadgeVariant(run.state)}>{run.state}</Badge>
                               {run.resolution && run.resolution !== run.state && (
-                                <Badge variant={run.resolution === 'payment_recovered' ? 'success' : run.resolution === 'manually_resolved' ? 'info' : run.resolution === 'write_off' ? 'warning' : 'outline'}>{RESOLUTION_LABELS[run.resolution] ?? run.resolution}</Badge>
+                                <Badge variant={run.resolution === 'payment_recovered' ? 'success' : run.resolution === 'invoice_voided' || run.resolution === 'manually_resolved' ? 'info' : run.resolution === 'invoice_not_collectible' ? 'warning' : 'outline'}>{RESOLUTION_LABELS[run.resolution] ?? run.resolution}</Badge>
                               )}
                               {!isFinished && (
                                 <Button variant="outline" size="sm" className="h-6 text-xs ml-1"
@@ -538,7 +552,7 @@ function ResolveDialog({ run, invoiceMap, onClose, onResolved }: {
 
   const resolutionOptions = [
     { value: 'payment_recovered', label: 'Payment recovered', description: 'Customer has paid -- mark invoice as paid and close dunning.', variant: 'default' as const },
-    { value: 'manually_resolved', label: 'Void invoice', description: 'Annul the invoice and stop collection — e.g. billed in error or waived. Reverses any applied credits and cancels the pending charge; the invoice no longer counts as revenue. For a payment collected offline, use "Payment recovered" instead.', variant: 'destructive' as const },
+    { value: 'invoice_voided', label: 'Void invoice', description: 'Annul the invoice and stop collection — e.g. billed in error or waived. Reverses any applied credits and cancels the pending charge; the invoice no longer counts as revenue. For a payment collected offline, use "Payment recovered" instead.', variant: 'destructive' as const },
     { value: 'invoice_not_collectible', label: 'Write off invoice', description: 'Marks the invoice as uncollectible (bad debt). Halts dunning automation. The invoice stays on the books for audit. Subscription stays active — cancel separately if needed.', variant: 'destructive' as const },
   ]
 

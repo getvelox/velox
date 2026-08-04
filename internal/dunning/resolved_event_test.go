@@ -98,7 +98,7 @@ func TestServiceResolveRun_Idempotent_AfterAutomatedResolve(t *testing.T) {
 	}
 	// The operator then hits Resolve on the same (now-resolved) run — must no-op, not
 	// fire a second webhook.
-	if _, err := svc.ResolveRun(ctx, "t1", run.ID, domain.ResolutionManuallyResolved); err != nil {
+	if _, err := svc.ResolveRun(ctx, "t1", run.ID, domain.ResolutionInvoiceVoided); err != nil {
 		t.Fatalf("operator ResolveRun must no-op, not error: %v", err)
 	}
 

@@ -497,8 +497,15 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 			case inv.Status == domain.InvoicePaid || inv.PaymentStatus == domain.PaymentSucceeded:
 				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered")
 				return rerr
-			case inv.Status == domain.InvoiceVoided || inv.Status == domain.InvoiceUncollectible:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionManuallyResolved, "invoice_"+string(inv.Status))
+			// The resolution names WHICH terminal state closed the run. The
+			// event reason below already derived it from inv.Status; before
+			// the 0170 split the resolution column threw that away and wrote
+			// one value for both outcomes.
+			case inv.Status == domain.InvoiceVoided:
+				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceVoided, "invoice_"+string(inv.Status))
+				return rerr
+			case inv.Status == domain.InvoiceUncollectible:
+				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceNotCollectible, "invoice_"+string(inv.Status))
 				return rerr
 			}
 		}
@@ -806,8 +813,15 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 			case inv.Status == domain.InvoicePaid || inv.PaymentStatus == domain.PaymentSucceeded:
 				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered")
 				return rerr
-			case inv.Status == domain.InvoiceVoided || inv.Status == domain.InvoiceUncollectible:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionManuallyResolved, "invoice_"+string(inv.Status))
+			// The resolution names WHICH terminal state closed the run. The
+			// event reason below already derived it from inv.Status; before
+			// the 0170 split the resolution column threw that away and wrote
+			// one value for both outcomes.
+			case inv.Status == domain.InvoiceVoided:
+				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceVoided, "invoice_"+string(inv.Status))
+				return rerr
+			case inv.Status == domain.InvoiceUncollectible:
+				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceNotCollectible, "invoice_"+string(inv.Status))
 				return rerr
 			}
 		}
