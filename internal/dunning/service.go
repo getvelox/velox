@@ -295,6 +295,19 @@ func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, 
 		return domain.InvoiceDunningRun{}, fmt.Errorf("get effective dunning policy: %w", err)
 	}
 	if !policy.Enabled {
+		// Logged at the same volume as the no-policy skip above: both end
+		// with "this invoice will never dun", and an operator debugging that
+		// needs the same evidence either way. Silence here was a real trap
+		// (found walking FLOW TC5, 2026-08-04): POST /v1/dunning/policies
+		// omitting `enabled` creates a DISABLED policy — and the first policy
+		// a tenant creates is auto-promoted to default — so an API caller
+		// ends up with a policy that is simultaneously the tenant default and
+		// inert, with no error at create, no run, and (before this) no log.
+		// The dashboard is unaffected: its form sends enabled:true, and the
+		// recipe installer sets Enabled explicitly.
+		slog.WarnContext(ctx, "dunning policy is disabled — skipping enrollment; the invoice will not dun",
+			"tenant_id", tenantID, "invoice_id", invoiceID, "customer_id", customerID,
+			"policy_id", policy.ID, "policy_name", policy.Name, "is_default", policy.IsDefault)
 		return domain.InvoiceDunningRun{}, errs.InvalidState("dunning is disabled (assigned policy or tenant default is not enabled)")
 	}
 
