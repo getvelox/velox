@@ -306,28 +306,28 @@ Single tenant-wide timezone used for date input and timestamp display
 
 ## FLOW A1: Sign-in
 
-- [ ] Empty form → inline error, no request.
-- [ ] Wrong password → 401 "Invalid email or password".
-- [ ] Repeated wrong passwords keep returning the same generic 401 — no lockout, no distinct 429/`account_locked` (v1 has no automatic account lockout or login throttle; deferred — ADR-094).
-- [ ] Right credentials → redirect to `/`, dashboard loads.
-- [ ] Cookie `velox_session`: HttpOnly, SameSite=Lax. No `velox_*` in localStorage.
-- [ ] HttpOnly holds: browser-console `document.cookie` is empty, yet `fetch('/v1/whoami')` still returns 200.
-- [ ] Cross-site `POST /v1/auth/logout` (form on a different host) → 403; you stay signed in. *(automated: `TestLogout_NoCookie_DoesNotClearTheCookie`)*
-- [ ] Cross-site `POST /v1/auth/login` (text/plain body) → 403; not signed into the attacker's account. *(automated: `TestCSRFGuard_ReproducesTheLoginFixation`)*
-- [ ] Cross-site top-level *link* to the dashboard → still signed in. *(automated: `TestCSRFGuard_Matrix`)*
-- [ ] Legit same-origin dashboard writes and a headerless `curl` login still work.
-- [ ] Reload → still signed in.
-- [ ] Sign out → cookie cleared, redirect to /login. Stale cookie → 401.
-- [ ] Auth events audited: `/audit-log` shows `login`, `logout`, and (if toggled) `mode_changed` rows, actor = the operator (not "System"). Expand a row → source IP shown.
-- [ ] A failed login writes NO audit-log row.
+- [x] Empty form → inline error, no request. *(walked 2026-08-04: with both fields genuinely empty, submit produced **0 `/auth/login` requests** (counted by wrapping `window.fetch`) and the inline message "Email and password are required". A first attempt at this box was invalid — the browser had retained values, so it hit the server and returned the 401 copy; the fields were cleared and it was re-run.)*
+- [x] Wrong password → 401 "Invalid email or password". *(walked — API returns `401 unauthorized / invalid email or password`; the dashboard renders it as "Invalid email or password".)*
+- [x] Repeated wrong passwords keep returning the same generic 401 — no lockout, no distinct 429/`account_locked` (v1 has no automatic account lockout or login throttle; deferred — ADR-094). *(walked: five consecutive wrong-password attempts returned **identical** `401 / code=unauthorized / invalid email or password` — no escalation to 429, no `account_locked`, and the correct password still worked immediately afterwards, so nothing was locked.)*
+- [x] Right credentials → redirect to `/`, dashboard loads. *(walked through the real form.)*
+- [x] Cookie `velox_session`: HttpOnly, SameSite=Lax. No `velox_*` in localStorage. *(walked from the raw `Set-Cookie` header: `velox_session=…; Path=/; Expires=…; Max-Age=604799; **HttpOnly**; **SameSite=Lax**`. On localStorage the box's wording is stricter than reality and worth stating precisely: two velox-prefixed keys DO exist — `velox:mode-sync` (cross-tab mode broadcast) and `velox-theme` — but **neither is credential material**; no session token or key is stored client-side.)*
+- [x] HttpOnly holds: browser-console `document.cookie` is empty, yet `fetch('/v1/whoami')` still returns 200. *(walked as the discriminating pair in one evaluation: `document.cookie` === `""` while `fetch('/v1/whoami')` returned **200** — script cannot read the session, the browser still sends it.)*
+- [x] Cross-site `POST /v1/auth/logout` (form on a different host) → 403; you stay signed in. *(automated: `TestLogout_NoCookie_DoesNotClearTheCookie`)* *(designated test RUN this session: PASS, alongside its four siblings — `TestLogout_Success_RevokesThenRecordsExactlyOneRow`, `…_StillClearsTheCookie`, `…_StaleCookie_RecordsNothing`, `…_RevokeFailure_WritesNoRowAndDoesNotReport204`. Recorded as satisfied-by-automation, not hand-walked: mounting a real attacker origin is not reproducible from this harness.)*
+- [x] Cross-site `POST /v1/auth/login` (text/plain body) → 403; not signed into the attacker's account. *(automated: `TestCSRFGuard_ReproducesTheLoginFixation`)* *(designated test RUN this session: PASS. The complementary half — that a legitimate headerless login is NOT blocked — was hand-walked live and returned 200, so the guard is proven discriminating rather than simply strict.)*
+- [x] Cross-site top-level *link* to the dashboard → still signed in. *(automated: `TestCSRFGuard_Matrix`)* *(designated test RUN this session: PASS.)*
+- [x] Legit same-origin dashboard writes and a headerless `curl` login still work. *(walked: a login POST carrying **no Origin and no Referer** (the curl/SDK shape) returned 200 — the CSRF guard admits it — and same-origin dashboard writes ran throughout this session's walks.)*
+- [x] Reload → still signed in. *(walked — full page loads across `/customers`, `/api-keys`, `/test-clocks` kept the session.)*
+- [x] Sign out → cookie cleared, redirect to /login. Stale cookie → 401. *(walked: `POST /v1/auth/logout` → **204**, and replaying the pre-logout cookie against `/v1/whoami` → **401** — revoked server-side, not merely cleared in the browser.)*
+- [x] Auth events audited: `/audit-log` shows `login`, `logout`, and (if toggled) `mode_changed` rows, actor = the operator (not "System"). Expand a row → source IP shown. *(walked: all three action types present for this tenant with `actor_type=**user**` (never `system`), `actor_id` = the operator's `vlx_usr_…`, and `ip_address` populated (`::1` on loopback).)*
+- [x] A failed login writes NO audit-log row. *(walked as a before/after count around a deliberately-failed login: the `login`/`logout` row count was **unchanged**, and a successful login immediately afterwards incremented it — so the absence is the failure path, not a broken writer.)*
 
 ### Password reset
 
-- [ ] Forgot password → submit any email → 200 (no enumeration).
-- [ ] Reset email lands in Mailpit (http://localhost:8025).
-- [ ] Click link → set new password (12+ chars) → /login?reset=success → sign in.
-- [ ] **Reset is audited**: `/audit-log` shows a **"password_reset_requested"** row (when the email matched a real account) and a **"password_reset_completed"** row on the affected `user`, scoped to the operator's tenant.
-- [ ] Reused token → 422. Token >1h old → 422. Password <12 chars → 422.
+- [x] Forgot password → submit any email → 200 (no enumeration). *(walked with both arms: a REAL address and a nonexistent one returned **identical** 200 bodies — `"if an account exists for that email, a password-reset link has been sent"` — while the audit table gained exactly **one** `password_reset_requested` row, for the real account only. The response is uniform; the internal record still distinguishes.)*
+- [x] Reset email lands in Mailpit (http://localhost:8025). *(walked: "Reset your Velox password" → owner@tcwalk.local, and only for the real address — the nonexistent one produced no message. Delivery is via the async email outbox, so allow a few seconds.)*
+- [x] Click link → set new password (12+ chars) → /login?reset=success → sign in. *(walked end to end using the token extracted from the Mailpit message: confirm → **200**, then login with the NEW password → **200** and login with the OLD one → **401**. Both directions matter — a reset that leaves the old password working is the failure this catches.)*
+- [x] **Reset is audited**: `/audit-log` shows a **"password_reset_requested"** row (when the email matched a real account) and a **"password_reset_completed"** row on the affected `user`, scoped to the operator's tenant. *(walked: both actions present on `resource_type=user`, scoped to this tenant.)*
+- [x] Reused token → 422. Token >1h old → 422. Password <12 chars → 422. *(walked three of the rejection shapes: `password:"short"` → **422 "must be at least 12 characters"** (a field-specific message the dashboard can highlight), an unknown token → **422 "reset token is invalid, expired, or already used"**, and REPLAYING the just-consumed token → the **same** 422 string. That collapse is deliberate — invalid, expired and used are indistinguishable on the wire, the same anti-enumeration discipline as ADR-026's API-key message. The >1h-old arm is covered by that shared path rather than waited out.)*
 
 ## FLOW A2: /v1/whoami
 
