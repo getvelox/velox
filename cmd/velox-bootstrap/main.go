@@ -122,6 +122,17 @@ func main() {
 	fmt.Println("========================================")
 }
 
+// suggestFreeEmail returns an example owner address that is guaranteed to
+// differ from the one that just collided, so the printed remedy is always
+// runnable as-is.
+func suggestFreeEmail(taken string) string {
+	const preferred = "tenant-b@local"
+	if !strings.EqualFold(strings.TrimSpace(taken), preferred) {
+		return preferred
+	}
+	return "tenant-c@local"
+}
+
 // printEmailExistsGuidance keeps the CLI's actionable re-run options on
 // the owner-email conflict — the one bootstrap failure a dev hits
 // routinely (re-running `make bootstrap` with the default email).
@@ -133,9 +144,14 @@ func printEmailExistsGuidance(email string) {
 	fmt.Fprintln(os.Stderr, "Velox is already bootstrapped for this email. Pick one:")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  1. Sign in with the existing credentials at http://localhost:5173/login")
-	fmt.Fprintln(os.Stderr, "  2. Create an ADDITIONAL tenant in the same deployment:")
+	fmt.Fprintln(os.Stderr, "  2. Create an ADDITIONAL tenant in the same deployment — each tenant")
+	fmt.Fprintln(os.Stderr, "     needs its OWN owner email, so pick one you have not used yet:")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, `       make bootstrap VELOX_BOOTSTRAP_EMAIL=tenant-b@local \`)
+	// Suggest an address that differs from the one that just failed. The
+	// example used to be a hardcoded tenant-b@local, so whenever THAT was
+	// the conflicting email the remedy told the operator to re-run the
+	// exact command that had just errored.
+	fmt.Fprintf(os.Stderr, "       make bootstrap VELOX_BOOTSTRAP_EMAIL=%s \\\n", suggestFreeEmail(email))
 	fmt.Fprintln(os.Stderr, `         VELOX_BOOTSTRAP_PASSWORD='choose-a-password' \`)
 	fmt.Fprintln(os.Stderr, `         VELOX_BOOTSTRAP_TENANT='Tenant B'`)
 	fmt.Fprintln(os.Stderr, "")
