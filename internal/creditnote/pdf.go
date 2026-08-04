@@ -500,28 +500,39 @@ func RenderPDF(
 	return buf.Bytes(), nil
 }
 
-// settlementLines describes where the credited amount went. The copy is
-// explicit about refund status so a customer reading a CN whose Stripe
-// refund failed still sees the honest state rather than a misleading
-// "refunded" line.
+// settlementLines describes where the credited amount went, one line per
+// NONZERO channel — composed, not first-match: the old early-return shape
+// made a mixed CN describe only its card leg (the credit/out-of-band money
+// silently unexplained), and an out-of-band-only CN fell through to the
+// "applied to reduce the amount due" fallback — false, since out-of-band
+// means the money was handled entirely outside Velox and the invoice's
+// amount due was never touched. The fallback is now reachable only by a
+// true adjustment CN (all three channels zero). Refund copy stays explicit
+// about status so a failed leg never reads as settled.
 func settlementLines(cn domain.CreditNote, symbol string) []string {
+	var lines []string
 	if cn.RefundAmountCents > 0 {
 		switch cn.RefundStatus {
 		case domain.RefundSucceeded:
-			return []string{fmt.Sprintf("Refunded %s to the original payment method.", cnFormatCents(cn.RefundAmountCents, symbol))}
+			lines = append(lines, fmt.Sprintf("Refunded %s to the original payment method.", cnFormatCents(cn.RefundAmountCents, symbol)))
 		case domain.RefundPending:
-			return []string{fmt.Sprintf("%s refund is pending — please allow up to 10 business days.", cnFormatCents(cn.RefundAmountCents, symbol))}
+			lines = append(lines, fmt.Sprintf("%s refund is pending — please allow up to 10 business days.", cnFormatCents(cn.RefundAmountCents, symbol)))
 		case domain.RefundFailed:
-			return []string{
+			lines = append(lines,
 				fmt.Sprintf("%s refund attempt failed.", cnFormatCents(cn.RefundAmountCents, symbol)),
-				"Our team will reach out to resolve the refund manually.",
-			}
+				"Our team will reach out to resolve the refund manually.")
 		default:
-			return []string{fmt.Sprintf("Refund of %s scheduled to the original payment method.", cnFormatCents(cn.RefundAmountCents, symbol))}
+			lines = append(lines, fmt.Sprintf("Refund of %s scheduled to the original payment method.", cnFormatCents(cn.RefundAmountCents, symbol)))
 		}
 	}
 	if cn.CreditAmountCents > 0 {
-		return []string{fmt.Sprintf("%s added to your account credit balance. Applied automatically to future invoices.", cnFormatCents(cn.CreditAmountCents, symbol))}
+		lines = append(lines, fmt.Sprintf("%s added to your account credit balance. Applied automatically to future invoices.", cnFormatCents(cn.CreditAmountCents, symbol)))
+	}
+	if cn.OutOfBandAmountCents > 0 {
+		lines = append(lines, fmt.Sprintf("%s settled outside this billing system (recorded for your records).", cnFormatCents(cn.OutOfBandAmountCents, symbol)))
+	}
+	if len(lines) > 0 {
+		return lines
 	}
 	return []string{fmt.Sprintf("%s applied to reduce the amount due on the original invoice.", cnFormatCents(cn.TotalCents, symbol))}
 }

@@ -190,6 +190,26 @@ func TestSettlementLines(t *testing.T) {
 			want:    "amount due",
 			wantAll: 1,
 		},
+		{
+			// An out-of-band-only CN used to fall through to the
+			// "applied to reduce the amount due" line — false: OOB means
+			// the money was handled entirely outside Velox and the
+			// invoice's amount due was never touched (2026-08-04 census).
+			name:    "out-of-band only says outside, not amount-due",
+			cn:      domain.CreditNote{OutOfBandAmountCents: 1000, TotalCents: 1000, Currency: "USD"},
+			want:    "outside this billing system",
+			wantAll: 1,
+		},
+		{
+			// A mixed CN used to describe ONLY its card leg (first-match
+			// early return); each nonzero channel now gets its own line —
+			// and the failed card leg keeps its honest wording beside the
+			// settled credit line.
+			name:    "mixed failed-card + credit describes both channels",
+			cn:      domain.CreditNote{RefundAmountCents: 1000, RefundStatus: domain.RefundFailed, CreditAmountCents: 2000, TotalCents: 3000, Currency: "USD"},
+			want:    "account credit",
+			wantAll: 3, // failed line + reach-out line + credit line
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
