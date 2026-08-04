@@ -171,6 +171,11 @@ function ModeToggle({ livemode, busy, onToggle }: { livemode: boolean; busy: boo
 }
 
 
+// Query params that select a view rather than reference a row, and so
+// remain valid across a test/live switch. Everything else is dropped on
+// toggle — see handleToggleMode.
+const MODE_INDEPENDENT_PARAMS = ['tab'] as const
+
 export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation()
   const navigate = useNavigate()
@@ -186,14 +191,28 @@ export function Layout({ children }: { children: ReactNode }) {
     try {
       await setMode(next)
       toast.success(next ? 'Switched to live mode' : 'Switched to test mode')
-      // Strip the query string before staying on the page. URL
-      // params like ?cursor=cus_test_xxx and ?status=active reference
-      // the prior mode's dataset; carrying them across produces
-      // empty pages or mode-mismatched filters. Pathname stays so
-      // detail-page IDs surface the existing "Not found" branch
-      // for entities that don't exist in the new mode.
+      // Strip mode-scoped query params before staying on the page. Params
+      // like ?cursor=cus_test_xxx and ?status=active reference the prior
+      // mode's dataset; carrying them across produces empty pages or
+      // mode-mismatched filters. Pathname stays so detail-page IDs surface
+      // the existing "Not found" branch for entities that don't exist in
+      // the new mode.
+      //
+      // MODE_INDEPENDENT_PARAMS survives the strip: ?tab= selects a pane,
+      // not a row. Dropping it bounced the operator off Settings→Payments,
+      // Pricing→meters/rules and Webhooks→events on every toggle — the
+      // three surfaces whose whole point is comparing test against live.
       if (location.search) {
-        navigate(location.pathname, { replace: true })
+        const kept = new URLSearchParams()
+        const current = new URLSearchParams(location.search)
+        for (const name of MODE_INDEPENDENT_PARAMS) {
+          const value = current.get(name)
+          if (value !== null) kept.set(name, value)
+        }
+        const search = kept.toString()
+        if (search !== current.toString()) {
+          navigate({ pathname: location.pathname, search: search ? `?${search}` : '' }, { replace: true })
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to switch mode'

@@ -180,9 +180,15 @@ const App = () => (
             </Routes>
           </Suspense>
         </BrowserRouter>
-        <Toaster position="bottom-right" richColors closeButton />
       </TooltipProvider>
       </ModeAwareQueryProvider>
+      {/* Outside ModeAwareQueryProvider on purpose. That provider is
+          keyed on livemode to force a remount when the mode flips; a
+          Toaster inside it is unmounted in the same commit that the
+          mode-toggle handler fires its "Switched to live mode" toast,
+          so the toast never renders. Sonner keeps its queue in a
+          module-level store, so a remounted Toaster starts empty. */}
+      <Toaster position="bottom-right" richColors closeButton />
     </AuthProvider>
   </ErrorBoundary>
 )
