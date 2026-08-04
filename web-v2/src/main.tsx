@@ -180,9 +180,18 @@ const App = () => (
             </Routes>
           </Suspense>
         </BrowserRouter>
-        <Toaster position="bottom-right" richColors closeButton />
       </TooltipProvider>
       </ModeAwareQueryProvider>
+      {/* Outside ModeAwareQueryProvider on purpose. That provider is
+          keyed on livemode to force a remount when the mode flips; a
+          Toaster inside it is unmounted in the same commit that the
+          mode-toggle handler fires its "Switched to live mode" toast,
+          so the toast never renders. A remounted Toaster starts empty
+          because its list is local component state seeded to [] and
+          filled only by the subscription it registers on mount — it
+          never reads sonner's module-level store back, so toasts
+          published to the outgoing instance are simply lost. */}
+      <Toaster position="bottom-right" richColors closeButton />
     </AuthProvider>
   </ErrorBoundary>
 )
