@@ -1214,3 +1214,39 @@ func TestStartDunning_CauseStamped(t *testing.T) {
 		t.Fatal("unknown cause must be refused")
 	}
 }
+
+// TestStartDunning_DisabledPolicy_SkipsSameClassAsNoPolicy pins the sibling of
+// TestStartDunning_NoPolicyConfigured. Both end in "this invoice will never
+// dun", so both must be the same DELIBERATE-SKIP class the enrollment sweeps
+// swallow — never a raw error that poisons a catchup.
+//
+// Why this exists (FLOW TC5 walk, 2026-08-04): POST /v1/dunning/policies
+// decodes straight into the domain struct, so omitting `enabled` creates a
+// DISABLED policy — and the first policy a tenant creates is auto-promoted to
+// default. An API caller therefore ends up with a policy that is
+// simultaneously the tenant default and inert: no error at create, no dunning
+// run, and — before the fix this test guards — no log line either, while the
+// no-policy path next door logged a WARN. The dashboard never hits it (its
+// form sends enabled:true) and the recipe installer sets Enabled explicitly,
+// so this is the API/SDK-caller trap specifically.
+func TestStartDunning_DisabledPolicy_SkipsSameClassAsNoPolicy(t *testing.T) {
+	store := newMemStore()
+	p := store.policies["dpol_1"]
+	p.Enabled = false // the shape POST /v1/dunning/policies produces without `enabled`
+	store.policies["dpol_1"] = p
+	svc := NewService(store, &noopRetrier{}, nil)
+
+	_, err := svc.StartDunning(context.Background(), "t1", "inv_disabled", "cus_1", time.Now(), domain.DunningCausePaymentFailed)
+	if err == nil {
+		t.Fatal("expected a deliberate-skip error when the effective policy is disabled")
+	}
+	if !errors.Is(err, errs.ErrInvalidState) {
+		t.Errorf("disabled policy must map to ErrInvalidState (deliberate skip, swallowed by the sweeps); got %v", err)
+	}
+	if errors.Is(err, errs.ErrNotFound) {
+		t.Errorf("disabled policy must NOT surface ErrNotFound — that is the no-policy signal; got %v", err)
+	}
+	if _, runErr := store.GetRunByInvoice(context.Background(), "t1", "inv_disabled"); runErr == nil {
+		t.Error("a disabled policy must not create a dunning run")
+	}
+}
