@@ -2177,6 +2177,29 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+				// The row's STATUS drives the UI's verdict dot, and it must
+				// agree with the words beside it: the description switch
+				// above tells the truth per refund_status, but the status
+				// was hardcoded "succeeded" — so a CN whose card refund
+				// FAILED rendered an emerald success dot next to the words
+				// "Refund failed" (2026-08-04 failed-refund invoice census;
+				// the text channel was fixed 2026-08-03, the visual channel
+				// was not). Refund-less CNs (credit / out-of-band / pure
+				// adjustment) settle inside the Issue transaction, so
+				// "succeeded" stays true for them.
+				cnStatus := "succeeded"
+				if cn.RefundAmountCents > 0 {
+					switch cn.RefundStatus {
+					case domain.RefundSucceeded, "":
+						cnStatus = "succeeded"
+					case domain.RefundFailed:
+						cnStatus = "failed"
+					default:
+						// pending, and none-with-allocation ("not
+						// processed"): money has not moved — never green.
+						cnStatus = "pending"
+					}
+				}
 				detail := cn.CreditNoteNumber
 				if cn.Reason != "" {
 					detail = cn.CreditNoteNumber + " — " + cn.Reason
@@ -2199,7 +2222,7 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					RecordedAt:   rfc3339OrEmpty(cnRecorded),
 					recordedSort: cnRecorded,
 					EventType:    "credit_note.issued",
-					Status:       "succeeded",
+					Status:       cnStatus,
 					Description:  desc,
 					AmountCents:  &total,
 					Currency:     cn.Currency,

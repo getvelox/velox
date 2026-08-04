@@ -70,31 +70,38 @@ func TestPaymentTimeline_RefundRowReportsOutcomeNotIntent(t *testing.T) {
 		return resp
 	}
 
-	descFor := func(t *testing.T, resp timelineResp, wantDetail string) string {
+	rowFor := func(t *testing.T, resp timelineResp, wantDetail string) (string, string) {
 		t.Helper()
 		for _, e := range resp.Events {
 			d, _ := e["detail"].(string)
 			if d == wantDetail || (d != "" && len(d) >= len(wantDetail) && d[:len(wantDetail)] == wantDetail) {
-				s, _ := e["description"].(string)
-				return s
+				desc, _ := e["description"].(string)
+				status, _ := e["status"].(string)
+				return desc, status
 			}
 		}
 		t.Fatalf("no timeline row for %q; events=%v", wantDetail, resp.Events)
-		return ""
+		return "", ""
+	}
+	descFor := func(t *testing.T, resp timelineResp, wantDetail string) string {
+		t.Helper()
+		desc, _ := rowFor(t, resp, wantDetail)
+		return desc
 	}
 
 	// Full-amount refund: the label is the whole story of the row.
 	t.Run("full refund", func(t *testing.T) {
 		cases := []struct {
-			status domain.RefundStatus
-			want   string
+			status     domain.RefundStatus
+			want       string
+			wantStatus string
 		}{
-			{domain.RefundSucceeded, "Refund issued"},
-			{domain.RefundFailed, "Refund failed"},
-			{domain.RefundPending, "Refund pending"},
+			{domain.RefundSucceeded, "Refund issued", "succeeded"},
+			{domain.RefundFailed, "Refund failed", "failed"},
+			{domain.RefundPending, "Refund pending", "pending"},
 			// Allocated but never executed. Must not borrow the success
 			// wording merely because it is not an explicit failure.
-			{domain.RefundNone, "Refund not processed"},
+			{domain.RefundNone, "Refund not processed", "pending"},
 		}
 		for _, tc := range cases {
 			t.Run(string(tc.status), func(t *testing.T) {
@@ -102,7 +109,17 @@ func TestPaymentTimeline_RefundRowReportsOutcomeNotIntent(t *testing.T) {
 					CreditNoteNumber: "CN-FULL", TotalCents: 1000,
 					RefundAmountCents: 1000, RefundStatus: tc.status,
 				})
-				got := descFor(t, resp, "CN-FULL")
+				got, gotStatus := rowFor(t, resp, "CN-FULL")
+				// The status field drives the UI's verdict dot. It was
+				// hardcoded "succeeded" for every CN row, so a failed
+				// refund wore an emerald success dot beside the words
+				// "Refund failed" — the visual channel contradicting the
+				// text channel this test already pinned (2026-08-04
+				// invoice census). Both channels are asserted together
+				// now so they can never diverge again.
+				if gotStatus != tc.wantStatus {
+					t.Errorf("refund_status=%q: timeline status %q, want %q — the verdict dot must agree with the words", tc.status, gotStatus, tc.wantStatus)
+				}
 				if got != tc.want {
 					t.Errorf("refund_status=%q rendered %q, want %q", tc.status, got, tc.want)
 				}
