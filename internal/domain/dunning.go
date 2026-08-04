@@ -87,6 +87,25 @@ type DunningResolution string
 
 const (
 	ResolutionPaymentRecovered DunningResolution = "payment_recovered"
+	// ResolutionInvoiceVoided: the run closed because its invoice was
+	// VOIDED — annulled, applied credits reversed, collection stopped at
+	// Stripe. Written by the operator's "Void invoice" resolution, by the
+	// invoice-void handler, and by the engine's terminal floor when it finds
+	// an already-voided invoice.
+	//
+	// Split out of ResolutionManuallyResolved (migration 0170) because that
+	// one value was written for voided AND uncollectible invoices alike, so
+	// the column could not answer which of the two had happened — while
+	// ResolutionInvoiceNotCollectible, which names the write-off exactly,
+	// sat right beside it being avoided.
+	ResolutionInvoiceVoided DunningResolution = "invoice_voided"
+	// ResolutionManuallyResolved is LEGACY — no writer emits it. It stays
+	// legal so the rows written before the 0170 split remain readable, and
+	// so the operator endpoint can name it in a rejection rather than
+	// pretending it never existed. One row survives the backfill by design:
+	// a run resolved with this value whose invoice never transitioned
+	// (best-effort propagation failed), where neither successor is true and
+	// guessing would fabricate an outcome.
 	ResolutionManuallyResolved DunningResolution = "manually_resolved"
 	ResolutionRetriesExhausted DunningResolution = "retries_exhausted"
 	// ResolutionInvoiceNotCollectible is the operator-driven equivalent

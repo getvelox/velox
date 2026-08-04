@@ -315,15 +315,34 @@ Documented operator-side actions for incidents:
 
 ### Force-resolve a stuck dunning run
 
+Pick the resolution that names what actually happened to the invoice — the
+column is how finance later answers "why did we stop collecting this?", and
+these writes bypass the endpoint that would otherwise enforce it:
+
+| Invoice ended up | Use |
+|---|---|
+| paid outside Velox | `payment_recovered` |
+| annulled / billed in error | `invoice_voided` |
+| written off as bad debt | `invoice_not_collectible` |
+
 ```sql
 UPDATE invoice_dunning_runs
-SET state = 'resolved', resolution = 'manually_resolved',
+SET state = 'resolved', resolution = 'invoice_voided',  -- see table above
     resolved_at = now(), next_action_at = NULL
 WHERE id = '<run_id>';
 
 INSERT INTO invoice_dunning_events (tenant_id, run_id, invoice_id, event_type, state, reason)
-VALUES ('<tenant_id>', '<run_id>', '<invoice_id>', 'resolved', 'resolved', 'manually_resolved');
+VALUES ('<tenant_id>', '<run_id>', '<invoice_id>', 'resolved', 'resolved', 'invoice_voided');
 ```
+
+Do NOT write `manually_resolved` — it is the legacy pre-0170 value that meant
+"voided OR written off", and the CHECK constraint keeps it legal only so rows
+predating the split stay readable.
+
+**This SQL resolves the RUN only — it does not touch the invoice.** The
+endpoint propagates (void / mark-uncollectible / record-payment); this does
+not. Flip the invoice too, or you leave the pair disagreeing — which is
+exactly the one row the 0170 backfill could not map.
 
 Use only when dashboard "Resolve" action is unavailable. Audit log
 this action.

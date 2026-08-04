@@ -49,7 +49,7 @@ func (c *recordingCanceler) StopCollection(_ context.Context, _ string, _ domain
 
 func resolveManually(t *testing.T, h *Handler, runID string) {
 	t.Helper()
-	body, _ := json.Marshal(resolveInput{Resolution: string(domain.ResolutionManuallyResolved)})
+	body, _ := json.Marshal(resolveInput{Resolution: string(domain.ResolutionInvoiceVoided)})
 	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", runID)

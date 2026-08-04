@@ -722,9 +722,10 @@ func (h *Handler) void(w http.ResponseWriter, r *http.Request) {
 	// Consumed-credit reversal now happens atomically inside svc.Void (status
 	// flip + reversal in one tx) — single-writer, no separate best-effort step.
 
-	// Resolve any active dunning runs for this invoice
+	// Resolve any active dunning runs for this invoice. The resolution names
+	// the outcome — this path voids, so the run records invoice_voided (0170).
 	if h.dunning != nil {
-		if err := h.dunning.ResolveByInvoice(r.Context(), tenantID, id, domain.ResolutionManuallyResolved); err != nil {
+		if err := h.dunning.ResolveByInvoice(r.Context(), tenantID, id, domain.ResolutionInvoiceVoided); err != nil {
 			slog.WarnContext(r.Context(), "failed to resolve dunning on void", "invoice_id", id, "error", err)
 		} else {
 			slog.InfoContext(r.Context(), "dunning resolved on invoice void", "invoice_id", id)
@@ -848,12 +849,17 @@ func (h *Handler) markUncollectible(w http.ResponseWriter, r *http.Request) {
 	// Halt dunning automation. Best-effort — failure is logged not
 	// surfaced; the invoice transition is the authoritative state
 	// change, and dunning runs scan the invoice status on next tick
-	// anyway. Using ResolutionManuallyResolved (not the
-	// invoice_not_collectible resolution) because the invoice flip
-	// already happened above; passing the matching resolution would
-	// recurse via ResolveRun's cross-flow branch we just added.
+	// anyway.
+	//
+	// The resolution NAMES this outcome (0170 split). This site used to pass
+	// ResolutionManuallyResolved on the written grounds that "passing the
+	// matching resolution would recurse via ResolveRun's cross-flow branch" —
+	// which was false, and cost the column its precision for months: the
+	// cross-flow branch that calls MarkUncollectible lives on ResolveRun, and
+	// this calls ResolveByInvoice, which has no such branch and cannot
+	// recurse. Pinned by TestMarkUncollectible_ResolvesRunAsNotCollectible.
 	if h.dunning != nil {
-		if err := h.dunning.ResolveByInvoice(r.Context(), tenantID, id, domain.ResolutionManuallyResolved); err != nil {
+		if err := h.dunning.ResolveByInvoice(r.Context(), tenantID, id, domain.ResolutionInvoiceNotCollectible); err != nil {
 			slog.WarnContext(r.Context(), "failed to resolve dunning on mark-uncollectible", "invoice_id", id, "error", err)
 		}
 	}
@@ -1902,11 +1908,22 @@ func describeDunningEvent(eventType, reason string, attemptCount int) (desc, sta
 		}
 		return desc, "processing", ""
 	case "resolved":
-		switch reason {
-		case "payment_recovered":
+		// Substring, not equality: this one reason field carries three
+		// spellings by construction — ResolveRun writes the bare resolution
+		// ("invoice_voided"), ResolveByInvoice prefixes it ("invoice
+		// invoice_voided"), and the engine floor derives its own from the
+		// invoice status ("invoice_voided" / "invoice_uncollectible"). The
+		// equality version below silently fell through to the generic label
+		// for two of the three. Unlike the ADR-020 FOLD — which must never
+		// key on this string — a missed spelling here only costs a less
+		// specific label, and the default arm catches it.
+		switch {
+		case strings.Contains(reason, "payment_recovered"):
 			return "Payment recovered via retry", "succeeded", ""
-		case "manually_resolved":
-			return "Resolved by operator", "resolved", ""
+		case strings.Contains(reason, "not_collectible"), strings.Contains(reason, "uncollectible"):
+			return "Invoice written off", "resolved", ""
+		case strings.Contains(reason, "voided"), reason == string(domain.ResolutionManuallyResolved):
+			return "Invoice voided", "resolved", ""
 		default:
 			return "Dunning resolved", "resolved", ""
 		}

@@ -708,9 +708,13 @@ func TestResolveRun_InvoiceNotCollectible_CascadesToInvoice(t *testing.T) {
 
 // TestResolveRun_OtherResolutionsDoNotCascade ensures the cross-flow
 // branch is gated exclusively to invoice_not_collectible. The other
-// resolutions (payment_recovered, manually_resolved, retries_exhausted)
+// resolutions (payment_recovered, invoice_voided, retries_exhausted)
 // must leave the invoice alone — they're audit signals, not state
 // transitions on the invoice.
+//
+// invoice_voided is here deliberately post-0170: ResolveRun must NOT
+// mark-uncollectible on it. Its void propagation lives in the handler, and a
+// cross-flow branch that fired on both would write two terminal states.
 func TestResolveRun_OtherResolutionsDoNotCascade(t *testing.T) {
 	store := newMemStore()
 	svc := NewService(store, &noopRetrier{}, nil)
@@ -720,7 +724,7 @@ func TestResolveRun_OtherResolutionsDoNotCascade(t *testing.T) {
 
 	for _, res := range []domain.DunningResolution{
 		domain.ResolutionPaymentRecovered,
-		domain.ResolutionManuallyResolved,
+		domain.ResolutionInvoiceVoided,
 		domain.ResolutionRetriesExhausted,
 	} {
 		run, _ := svc.StartDunning(ctx, "t1", "inv_"+string(res), "cus_1", time.Now(), domain.DunningCausePaymentFailed)
