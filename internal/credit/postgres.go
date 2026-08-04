@@ -900,6 +900,67 @@ func (s *PostgresStore) LockCommitGrantTx(ctx context.Context, tx *sql.Tx, tenan
 	return g, true, nil
 }
 
+// CommitGrantExposure reports the prepaid-commit grant funded by invoiceID:
+// how much of it the customer can still spend, and how much they already have.
+// Both zero when the invoice funded no commit. Satisfies
+// invoice.CommitGrantReader — the attention banner for credit that went out
+// against cash that never arrived (ADR-078 D3's named fast-follow).
+//
+// Deliberately takes NO LOCK — neither the customer advisory lock that
+// LockCommitGrantTx takes nor a FOR UPDATE. That is a real divergence from its
+// neighbour and the next reader will be tempted to copy the locked shape, so:
+// this runs once per unpaid manual invoice on every dashboard list render, and
+// taking the advisory lock would serialize those renders behind every
+// concurrent drawdown on the same customer. What it returns is a sentence in a
+// banner, not a figure money is about to move against; a drain racing this read
+// makes it a moment stale, which is the right trade for a display. Every path
+// that actually MOVES commit credit still goes through the locked reader.
+//
+// Drawability mirrors drainPositiveBlocks' liveness predicate exactly —
+// positive, not exhausted, not past expires_at at `now` — because the one thing
+// this must never do is promise the operator spendable credit that the drawdown
+// would refuse to spend. `now` is the caller's resolver-bound instant for the
+// same reason the drain takes one: on a clock-pinned invoice, wall-clock is the
+// wrong axis to judge expiry on.
+//
+// Consumed is reported even when the grant is exhausted or expired, because it
+// is the half that no recovery can claw back and the half that decides how
+// urgent the banner is.
+func (s *PostgresStore) CommitGrantExposure(
+	ctx context.Context, tenantID, invoiceID string, now time.Time,
+) (int64, int64, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer postgres.Rollback(tx)
+
+	var drawable, consumed int64
+	// At most one row: idx_credit_ledger_commit_fund_dedup is UNIQUE on
+	// (tenant_id, source_invoice_id) WHERE grant_kind='commit' (migration 0136),
+	// which is also what makes this an index probe rather than a scan.
+	err = tx.QueryRowContext(ctx, `
+		SELECT
+			CASE
+				WHEN amount_cents > 0
+				 AND consumed_cents < amount_cents
+				 AND (expires_at IS NULL OR expires_at > $3)
+				THEN amount_cents - consumed_cents
+				ELSE 0
+			END,
+			GREATEST(consumed_cents, 0)
+		FROM customer_credit_ledger
+		WHERE tenant_id = $1 AND source_invoice_id = $2 AND grant_kind = 'commit'
+	`, tenantID, invoiceID, now).Scan(&drawable, &consumed)
+	if err == sql.ErrNoRows {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("read commit grant exposure for invoice %s: %w", invoiceID, err)
+	}
+	return drawable, consumed, nil
+}
+
 // retireCommitSliceTx is the single retirement core both commit-unwind
 // writers share (invoice void + CN relief — the complete writer set).
 // Retires exactly `slice` credits from the locked grant: CAS-guarded

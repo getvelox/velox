@@ -765,12 +765,17 @@ export type AttentionReason =
   | 'tax_location_required'
   | 'payment_failed'
   | 'payment_unconfirmed'
+  // payment_anomaly was shipped to the Go enum and the OpenAPI spec (ADR-068)
+  // but never added here — this hand-maintained mirror had silently drifted
+  // from the contract it claims to mirror one-for-one.
+  | 'payment_anomaly'
   | 'payment_processing'
   | 'payment_scheduled'
   | 'awaiting_payment'
   | 'no_payment_method'
   | 'dunning_exhausted'
   | 'collection_paused'
+  | 'commit_exposure'
 
 export type AttentionAction =
   | 'edit_billing_profile'
@@ -785,6 +790,7 @@ export type AttentionAction =
   | 'add_payment_method'
   | 'update_payment_method'
   | 'connect_tax_provider'
+  | 'void_invoice'
 
 export interface AttentionActionItem {
   code: AttentionAction

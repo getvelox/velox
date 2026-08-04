@@ -151,6 +151,7 @@ type Service struct {
 	customerReader CustomerReader
 	dunningReader  DunningRunReader
 	subPauseReader SubscriptionPauseReader
+	commitGrants   CommitGrantReader
 	creditApplier  CreditApplier
 	settings       TenantSettingsReader
 	audit          AuditLogger
@@ -344,6 +345,30 @@ type SubscriptionPauseReader interface {
 // since a stuck draft is the state operators complain about.
 func (s *Service) SetSubscriptionPauseReader(r SubscriptionPauseReader) {
 	s.subPauseReader = r
+}
+
+// CommitGrantReader is the narrow prepaid-commit lookup the attention
+// classifier uses to report credit that is live against an invoice nobody
+// paid (ADR-078 D3's named fast-follow). Satisfied by *credit.PostgresStore.
+//
+// Consumer-defined here rather than imported from `credit`: the arch boundary
+// (internal/arch/boundaries_test.go) allows `invoice` only {audit, auth,
+// payment, tax}, and this is a read for a banner — nowhere near enough reason
+// to open a new edge between two money domains.
+//
+// Returns the two figures separately because only one of them is recoverable:
+// drawable is what void still cancels, consumed is gone for good. `now` is the
+// caller's resolver-bound instant, not wall-clock, so a clock-pinned invoice
+// judges its grant's expiry on the same axis the drawdown does.
+type CommitGrantReader interface {
+	CommitGrantExposure(ctx context.Context, tenantID, invoiceID string, now time.Time) (drawableCents, consumedCents int64, err error)
+}
+
+// SetCommitGrantReader wires the prepaid-commit lookup (see
+// CommitGrantReader). Optional: when nil the exposure fields stay zero and no
+// exposure is claimed — the same safe default as an unwired dunning reader.
+func (s *Service) SetCommitGrantReader(r CommitGrantReader) {
+	s.commitGrants = r
 }
 
 // collectionPaused reports whether the invoice's subscription has
@@ -744,6 +769,32 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 	if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized &&
 		inv.PaymentStatus == domain.PaymentPending {
 		atc.CollectionPaused = s.collectionPaused(ctx, inv.TenantID, inv.SubscriptionID)
+	}
+	// Prepaid-commit exposure: credit this invoice already handed the customer
+	// while the cash never arrived (ADR-078 D3 fast-follow). Same lazy shape as
+	// the siblings above, with the tightest guard of any of them — commit lines
+	// are manual-invoice-only and funded at finalize (ADR-078 D2/D3), so a
+	// draft, a subscription-cycle invoice, or a paid one can never carry a live
+	// grant and never pays for the lookup. What remains is one hit on the
+	// unique partial index idx_credit_ledger_commit_fund_dedup.
+	//
+	// The clock here is the RESOLVER's, deliberately unlike atc.Now a few lines
+	// above: that one ages an in-flight payment, which settles in the real
+	// world, while this one decides whether a grant has expired — and expiry is
+	// a billing-domain instant that a test clock moves. drainPositiveBlocks
+	// judges the same grant against the same axis, so a banner and a drawdown
+	// can never disagree about whether credit is still live.
+	//
+	// A read error leaves both figures zero and claims no exposure. The
+	// alternative — a banner asserting a balance we could not read — is the
+	// failure worth avoiding, and the invoice's own cause banner still renders.
+	if s.commitGrants != nil && inv.ID != "" &&
+		inv.BillingReason == domain.BillingReasonManual &&
+		(inv.Status == domain.InvoiceFinalized || inv.Status == domain.InvoiceUncollectible) {
+		if drawable, consumed, err := s.commitGrants.CommitGrantExposure(ctx, inv.TenantID, inv.ID, s.clock.Now(ctx)); err == nil {
+			atc.CommitGrantDrawableCents = drawable
+			atc.CommitGrantConsumedCents = consumed
+		}
 	}
 	if s.stripeChecker != nil && inv.TenantID != "" {
 		// Livemode comes off ctx (auth middleware set it) — invoice

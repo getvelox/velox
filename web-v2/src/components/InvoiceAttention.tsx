@@ -31,6 +31,7 @@ export function InvoiceAttention({
   onRetryTax,
   onChargeNow,
   onSendReminder,
+  onVoidInvoice,
   retrying,
   charging,
   sending,
@@ -40,6 +41,10 @@ export function InvoiceAttention({
   onRetryTax?: () => void
   onChargeNow?: () => void
   onSendReminder?: () => void
+  // Opens the invoice's existing void confirmation. Surfaced only on
+  // prepaid-commit exposure, where voiding is the sole way to stop credit
+  // going out against an invoice nobody paid (ADR-078).
+  onVoidInvoice?: () => void
   retrying?: boolean
   charging?: boolean
   sending?: boolean
@@ -118,6 +123,7 @@ export function InvoiceAttention({
                 onRetryTax={onRetryTax}
                 onChargeNow={onChargeNow}
                 onSendReminder={onSendReminder}
+                onVoidInvoice={onVoidInvoice}
                 retrying={retrying}
                 charging={charging}
                 sending={sending}
@@ -192,6 +198,7 @@ function ActionButton({
   onRetryTax,
   onChargeNow,
   onSendReminder,
+  onVoidInvoice,
   retrying,
   charging,
   sending,
@@ -203,6 +210,7 @@ function ActionButton({
   onRetryTax?: () => void
   onChargeNow?: () => void
   onSendReminder?: () => void
+  onVoidInvoice?: () => void
   retrying?: boolean
   charging?: boolean
   sending?: boolean
@@ -211,6 +219,21 @@ function ActionButton({
   const display = label ?? defaultLabel(action)
 
   switch (action) {
+    case 'void_invoice':
+      // Destructive styling regardless of `primary`: void annuls an invoice,
+      // and it is never the primary CTA here (it is appended after whatever
+      // the cause banner already recommended). Rendering it in the same
+      // neutral outline as "Retry tax" would understate what it does.
+      return (
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={onVoidInvoice}
+          disabled={!onVoidInvoice}
+        >
+          {display}
+        </Button>
+      )
     case 'edit_billing_profile':
     case 'add_payment_method':
       return (
@@ -394,6 +417,10 @@ function humanReason(reason: string, code?: string): string {
     no_payment_method: 'No payment method',
     dunning_exhausted: 'Payment recovery ended',
     collection_paused: 'Collection paused',
+    // Operator language, not ledger language. "Commit exposure" is the term the
+    // ADR and the schema use; a finance operator reading a chip needs the plain
+    // fact — an invoice went unpaid and the credit it bought is already live.
+    commit_exposure: 'Unpaid prepaid credit',
   }
   return map[reason] ?? reason
 }
@@ -420,6 +447,7 @@ function defaultLabel(action: AttentionAction): string {
     add_payment_method: 'Add payment method',
     update_payment_method: 'Update payment method',
     connect_tax_provider: 'Connect Stripe',
+    void_invoice: 'Void invoice',
   }
   return map[action] ?? action
 }

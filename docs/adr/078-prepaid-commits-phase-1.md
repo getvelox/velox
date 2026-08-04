@@ -32,9 +32,9 @@ Ship the prepaid-commit primitive on the existing credit-block ledger:
    loud, retryable. The **payment gate** (pending-until-paid) and the
    markPaid funder hook are **phase 2** (trigger: first DP
    pending-until-paid ask, or the self-serve/auto-top-up build which
-   hard-defaults to gated). Grant-on-issue is the verified negotiated-B2B
-   default (Metronome term-start-at-issue; Orb `require_successful_payment`
-   defaults off).
+   hard-defaults to gated). Grant-on-issue is the negotiated-B2B default
+   — see the 2026-08-04 amendment for the verified peer evidence, which
+   supports the decision but not the sentence originally written here.
 4. **Retire on VOID only.** Voiding a commit funding invoice retires the
    grant's remaining balance in the void tx (`RetireCommitGrantForInvoiceTx`
    — ExpireGrantAtomic's locked shape on the caller's tx, entry stamped at
@@ -113,3 +113,81 @@ Ship the prepaid-commit primitive on the existing credit-block ledger:
 - Deferred: payment gate + paid-hook, auto-recharge, CN-retire leg,
   recipe commits + term-aligned expiry, drain-priority override,
   per-customer thresholds, pending-block visibility, true-up.
+
+## Amendment 2026-08-04 — exposure is surfaced; the payment gate stays deferred
+
+Triggered by a live observation on VLX-000060: $96.52 invoiced, $0.00
+collected, dunning since Jul 30, and **$100.00 of the customer's credit
+fully spendable** — with nothing anywhere in the product saying so.
+
+**1. D3's fast-follow is shipped.** `docs/design-prepaid-commits.md` listed
+"surfacing unpaid-funded grants in the attention dashboard" as a fast-follow
+candidate; it is now built. A `commit_exposure` reason + `void_invoice`
+action report an unpaid invoice whose commit credit is still live, on
+finalized AND uncollectible rows.
+
+The classifier **folds** rather than competing: when a cause banner already
+won, its reason, its actions and their order are preserved and the exposure
+is appended to the message. Two reasons, both of which a naive version gets
+wrong. A commit invoice is unpaid-with-live-credit from finalize until
+payment — on Net-30 that is thirty days of the deal working as agreed, so a
+reason that fired there would cry wolf on every commit sale. And
+`ClassifyInvoiceAttention` returns the FIRST match, so winning the chain
+would have replaced "the customer's card was declined" with a restatement of
+the deal terms on exactly the invoices that most need the card fixed.
+
+**2. The payment gate is NOT built, and this amendment records why** — so it
+is not re-derived from scratch next time.
+
+D3's own trigger (first DP pending-until-paid ask, or the self-serve /
+auto-top-up build) **has not fired**. The peer evidence, now verified with
+quotes rather than recollection, points the same way: Orb attaches
+`require_successful_payment` to credit *increments and top-ups*, and
+Metronome attaches payment-gating to *"threshold billing and auto-recharge"*
+while documenting full-term access — "the entire committed amount is
+available on day one" — as typical for negotiated prepaid. Velox has neither
+self-serve nor auto-recharge. Building the gate now is building for a
+customer shape that does not exist.
+
+**A design finding worth keeping.** The obvious implementation — a
+`funding_state` column on the grant row, filtered in the drawdown and
+flipped at the paid chokepoint — is a **denormalized copy of a fact the
+database already holds**: `invoices.status` of the grant's own
+`source_invoice_id`, which is already indexed and unique
+(`idx_credit_ledger_commit_fund_dedup`). A join answers "is this spendable?"
+with no column, no flip, no chokepoint, no migration — and unlike a flag it
+cannot fail open on a missing INSERT column, cannot be left stale by a
+settle path that bypasses the chokepoint, and needs no self-heal. An
+adversarial pass over the flag design produced 21 findings, four of them
+existing *only* because the truth would be copied instead of read. So the
+"we will need the column eventually" argument is false. **If the gate is
+ever built, start from the join.**
+
+The one argument the join does not answer is per-line gating independent of
+the invoice's status — which is exactly what auto-top-up will want. That is
+the trigger: **build the gate when the self-serve / auto-top-up build lands,
+and only then decide join-vs-flag on that build's requirements.**
+
+**3. D2's peer-parity sentence was wrong and is corrected.** It read "Orb
+`require_successful_payment` defaults off". Orb documents the flag as
+something you *pass* to enable the gate and **states no default**; the
+inference is reasonable but it was written as a citation. Verified 2026-08-04:
+
+> "If successful payment is a requirement for credits to be effective, then
+> pass `invoice_settings.require_successful_payment` when creating a credit
+> increment… the credit block will be initialized with a status of
+> `pending_payment` until the relevant invoice is paid. Although the block
+> will be returned when fetching the customer credit balance, it will not be
+> eligible to be drawn from until it's in `status=active`."
+> — https://docs.withorb.com/product-catalog/prepurchase
+
+Metronome, same date: access schedules are separate from invoice schedules;
+"full-term access: the entire committed amount is available on day one —
+typical for prepaid deals", with payment-gating offered for threshold
+billing and auto-recharge —
+https://docs.metronome.com/launch-guides/prepaid-credits/
+
+**The at-issue default stands**, on the stronger of the two grounds it could
+have rested on: for negotiated Net-30 B2B the invoice is the commercial
+event and the customer expects to draw on day one. The peer evidence now
+corroborates that rather than being asked to carry it.

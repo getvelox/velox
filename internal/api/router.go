@@ -851,6 +851,9 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// pause_collection lookup for the tax-retry auto-finalize gate: a paused
 	// subscription's draft stays a draft even once its tax resolves.
 	invoiceSvc.SetSubscriptionPauseReader(subStore)
+	// Prepaid-commit exposure for the attention classifier: credit already
+	// spendable against an invoice nobody paid (ADR-078 D3 fast-follow).
+	invoiceSvc.SetCommitGrantReader(creditStore)
 	invoiceSvc.SetCreditApplier(creditSvc)
 	// Tenant net-terms fallback: a manual invoice created without an explicit
 	// net_payment_term_days inherits the tenant's configured default (then 30),

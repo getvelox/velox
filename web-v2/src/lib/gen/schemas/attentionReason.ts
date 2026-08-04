@@ -22,7 +22,14 @@ without collecting (2026-07-22). `collection_paused` reports an
 invoice that is queued for auto-charge but whose subscription
 has `pause_collection` set, so the charge sweeps deliberately
 skip it — it will not be charged automatically until
-collection resumes (2026-07-28).
+collection resumes (2026-07-28). `commit_exposure` reports an
+unpaid invoice that funded a prepaid commit whose credit is
+already spendable (ADR-078 funds commits at issue, not at
+payment) — note this reason is only returned when no other
+reason applies; when one does, the exposure is folded into that
+reason's `message` and its `actions` instead, so clients must
+not treat the reason code as the presence test for exposure
+(2026-08-04).
 
  */
 export type AttentionReason = typeof AttentionReason[keyof typeof AttentionReason];
@@ -40,4 +47,5 @@ export const AttentionReason = {
   no_payment_method: 'no_payment_method',
   dunning_exhausted: 'dunning_exhausted',
   collection_paused: 'collection_paused',
+  commit_exposure: 'commit_exposure',
 } as const;
