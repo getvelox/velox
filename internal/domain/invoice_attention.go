@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -76,6 +77,30 @@ const (
 	// operators benefit from a quiet "the system has it" signal rather
 	// than silence.
 	AttentionReasonPaymentUnconfirmed AttentionReason = "payment_unconfirmed"
+
+	// AttentionReasonCommitExposure: this invoice funded a prepaid-commit
+	// grant that is still live, and the invoice was never paid. ADR-078 funds
+	// commits at ISSUE (finalize), not at payment — the negotiated-B2B default,
+	// deliberately chosen and unchanged — which means the customer holds
+	// spendable credit against cash that has not arrived.
+	//
+	// That disposition is fine; its INVISIBILITY was not. The only recovery is
+	// operator void, which retires the REMAINING balance only (consumed stays
+	// consumed), so every hour the customer keeps drawing is recovery
+	// permanently lost. Nothing surfaced the state, so nobody could void in
+	// time — observed live on VLX-000060: $96.52 invoiced, $0.00 collected,
+	// $100.00 still drawable, dunning since Jul 30, and no surface said so.
+	// docs/design-prepaid-commits.md D3 named this exact surfacing a
+	// "fast-follow candidate"; this is that fast-follow.
+	//
+	// This reason is only ever SYNTHESIZED when nothing else fired — see
+	// withCommitExposure, which folds the exposure into whichever cause banner
+	// won rather than competing with it. A commit invoice is unpaid-with-live-
+	// grant from finalize until payment, so a reason that pre-empted the chain
+	// would fire on every healthy Net-30 commit sale AND mask the declined card
+	// underneath it. The fold is what makes it safe to report a state that is,
+	// most of the time, simply the deal working as agreed.
+	AttentionReasonCommitExposure AttentionReason = "commit_exposure"
 
 	// AttentionReasonPaymentAnomaly: the settle path detected money that
 	// does not reconcile — a second different PaymentIntent succeeded on an
@@ -189,6 +214,17 @@ const (
 	// provider's credentials. Distinct from RotateAPIKey: nothing
 	// to rotate, the connection has never been made.
 	AttentionActionConnectTaxProvider AttentionAction = "connect_tax_provider"
+	// AttentionActionVoidInvoice opens the invoice's void confirmation. It is
+	// the ONLY recovery for an unpaid invoice whose prepaid credit is still
+	// live: voiding retires the unspent balance inside the void tx (ADR-078
+	// D3). Offered on commit exposure alone — void destroys an invoice, so it
+	// must never become a generic "something is wrong here" suggestion.
+	//
+	// Reusing an existing code with a relabelled button was rejected: audit
+	// logs key off the code, so an action reading `add_payment_method` on a
+	// credit-exposure banner would be a lie in the machine-readable field, and
+	// unlike the label nothing downstream would ever correct it.
+	AttentionActionVoidInvoice AttentionAction = "void_invoice"
 )
 
 // AttentionActionItem is one entry in Attention.Actions. Frontend
@@ -353,6 +389,34 @@ type AttentionContext struct {
 	// where nothing is paused.
 	CollectionPaused bool
 
+	// CommitGrantDrawableCents and CommitGrantConsumedCents describe the
+	// prepaid-commit grant this invoice funded (ADR-078). Drawable is what the
+	// customer can still spend right now; Consumed is what they already spent
+	// and which no recovery can claw back. Both zero when the invoice funded no
+	// commit.
+	//
+	// TWO numbers, not one "outstanding", because they drive different
+	// sentences and only one of them is recoverable. A single figure next to a
+	// Void button misrepresents what Void does: void retires the UNSPENT
+	// balance in the void tx and leaves consumed credit consumed (ADR-078 D3),
+	// so an operator shown one number reads it as the amount voiding gets back.
+	//
+	// Drawable applies the SAME liveness predicate the drawdown itself uses
+	// (drainPositiveBlocks: positive, not exhausted, not past expires_at,
+	// evaluated against the resolver's now) — so an expired-but-unswept grant
+	// reports 0 and the banner cannot claim spendable credit the drain would
+	// refuse to spend.
+	//
+	// Populated lazily, only for the finalized/uncollectible manual invoices
+	// that can carry a commit line: one hit on the unique partial index
+	// idx_credit_ledger_commit_fund_dedup (tenant_id, source_invoice_id WHERE
+	// grant_kind='commit'), never a scan. Zero values yield no attention, which
+	// is the safe default for every caller that does not supply the signal and
+	// for a read that errored — the alternative, a banner asserting a balance
+	// we could not read, is the failure mode worth avoiding.
+	CommitGrantDrawableCents int64
+	CommitGrantConsumedCents int64
+
 	// Now is wall-clock now, used only to age the in-flight payment banner
 	// (processing → Info under the expected-settle window, Warning past it).
 	// Staleness is a REAL-WORLD duration (the provider settles in wall-clock),
@@ -402,6 +466,20 @@ const docBaseURL = "https://docs.velox.dev/errors/"
 // generic awaiting_payment classification — backwards-compat for
 // internal call sites that don't have a PaymentMethodReader handy.
 func ClassifyInvoiceAttention(inv Invoice, atc AttentionContext) *Attention {
+	return withCommitExposure(classifyAttentionCause(inv, atc), inv, atc)
+}
+
+// classifyAttentionCause is the single-winner priority chain: the CAUSE of the
+// invoice's trouble, one reason, highest urgency first.
+//
+// Split out from ClassifyInvoiceAttention so commit exposure can be folded onto
+// its result instead of competing inside it. Exposure is not a cause — it is a
+// consequence that co-occurs with any of these, and it is present on healthy
+// invoices too (a Net-30 commit is unpaid-with-live-credit by design for its
+// whole term). A reason that answered "why does this need attention?" with
+// "because credit is live" would be both wrong and, since the chain returns the
+// FIRST match, would suppress the declined card that is the actual answer.
+func classifyAttentionCause(inv Invoice, atc AttentionContext) *Attention {
 	// Terminal-ish statuses produce no attention surface. Uncollectible
 	// is technically forward-transitionable (operator can still record
 	// an offline payment or void it) but Stripe-parity treats it as a
@@ -453,6 +531,115 @@ func ClassifyInvoiceAttention(inv Invoice, atc AttentionContext) *Attention {
 		return classifyAwaitingPayment(inv)
 	}
 	return nil
+}
+
+// attentionSeverityRank orders severity for max(). Kept next to the fold that
+// needs it — nothing else in the file compares two severities.
+func attentionSeverityRank(s AttentionSeverity) int {
+	switch s {
+	case AttentionSeverityCritical:
+		return 3
+	case AttentionSeverityWarning:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// withCommitExposure reports that this invoice bought prepaid credit and the
+// cash never arrived (ADR-078 D3's named fast-follow).
+//
+// It FOLDS rather than competes. When a cause banner already won, its reason,
+// its actions and their order are preserved and the exposure is appended to the
+// message; only when nothing else fired does this synthesize a banner of its
+// own. Two reasons, both learned the hard way:
+//
+//   - A commit invoice is unpaid-with-live-credit from finalize until payment.
+//     On Net-30 that is thirty days of the deal working exactly as agreed. A
+//     reason that fired there would cry wolf on every commit sale Velox makes.
+//   - The chain returns the FIRST match. Winning it would have replaced
+//     "the customer's card was declined" — the actionable answer — with a
+//     restatement of the deal terms, on precisely the invoices that most need
+//     the card fixed.
+//
+// Severity is raised to a floor, never lowered: exposure can make an existing
+// banner more urgent, but a Critical cause stays Critical.
+//
+// The message goes in Message, deliberately, not Detail: the dashboard renders
+// detail inside a collapsed <details> (InvoiceAttention.tsx), and money leaving
+// the building behind a disclosure triangle is not surfaced.
+func withCommitExposure(att *Attention, inv Invoice, atc AttentionContext) *Attention {
+	drawable, spent := atc.CommitGrantDrawableCents, atc.CommitGrantConsumedCents
+	if drawable <= 0 && spent <= 0 {
+		// No commit grant on this invoice — the overwhelmingly common case, and
+		// the reason this costs nothing on ordinary invoices.
+		return att
+	}
+	// Paid: the cash arrived, which is the whole point — nothing to report.
+	// Voided: the operator already took the one recovery action there is, and
+	// the void tx retired the unspent balance. Draft: a grant is funded at
+	// finalize, so a draft cannot have one; if it somehow does, that is a
+	// corruption for the ledger's own guards to raise, not a banner.
+	switch inv.Status {
+	case InvoicePaid, InvoiceVoided, InvoiceDraft:
+		return att
+	}
+
+	// Spent credit is unrecoverable — void retires only what is left (ADR-078
+	// D3). Money that is already gone is the more serious state, so it, not the
+	// mere existence of a grant, is what escalates.
+	floor := AttentionSeverityWarning
+	if spent > 0 {
+		floor = AttentionSeverityCritical
+	}
+
+	amount := FormatMoneyMinor(drawable, inv.Currency)
+	var sentence string
+	switch {
+	case spent <= 0:
+		sentence = "This invoice hasn't been paid, and the prepaid credit it bought is already available for the customer to spend: " +
+			amount + ". Voiding this invoice cancels the unspent balance."
+	case drawable > 0:
+		sentence = "This invoice hasn't been paid, and the prepaid credit it bought is already available for the customer to spend: " +
+			amount + " left, " + FormatMoneyMinor(spent, inv.Currency) + " already spent. " +
+			"Voiding this invoice cancels the unspent balance — credit the customer has already spent stays spent."
+	default:
+		sentence = "This invoice hasn't been paid, and the prepaid credit it bought — " +
+			FormatMoneyMinor(spent, inv.Currency) + " — has already been spent in full. Voiding this invoice cannot recover it."
+	}
+
+	// Void is offered only when there is something left to cancel. On a
+	// fully-spent grant the button would destroy the invoice and recover
+	// nothing, which is a worse outcome than no button at all.
+	var voidAction []AttentionActionItem
+	if drawable > 0 {
+		voidAction = []AttentionActionItem{{Code: AttentionActionVoidInvoice, Label: "Void invoice"}}
+	}
+
+	if att == nil {
+		since := attentionSince(inv)
+		return &Attention{
+			Severity: floor,
+			Reason:   AttentionReasonCommitExposure,
+			Code:     "credit.commit_exposure",
+			Message:  sentence,
+			DocURL:   docBaseURL + "commit-exposure",
+			Actions:  voidAction,
+			Since:    &since,
+			DueBy:    inv.DueAt,
+		}
+	}
+
+	folded := *att
+	if attentionSeverityRank(floor) > attentionSeverityRank(folded.Severity) {
+		folded.Severity = floor
+	}
+	folded.Message = strings.TrimSpace(folded.Message) + " " + sentence
+	// Appended, never prepended: the cause banner's first action is its primary
+	// CTA (fix the card, add a payment method), and that is still the right
+	// first move. Void is the fallback for when collection has failed.
+	folded.Actions = append(append([]AttentionActionItem{}, folded.Actions...), voidAction...)
+	return &folded
 }
 
 // classifyTaxAttention branches on the typed tax_error_code persisted
@@ -1003,8 +1190,12 @@ func classifyPaymentAnomaly(inv Invoice) *Attention {
 		msg = fmt.Sprintf("A second payment (%s) succeeded on this invoice after it was already paid%s. The extra charge exists only in Stripe — review and refund it.",
 			inv.PaymentAnomalyPaymentIntentID, recordedPISuffix(inv))
 	case EventPaymentAmountMismatch:
-		msg = fmt.Sprintf("Stripe captured %d (minor units) for payment %s but this invoice booked %d. Reconcile the difference — the recorded paid amount drives refund limits.",
-			inv.PaymentAnomalyCapturedCents, inv.PaymentAnomalyPaymentIntentID, inv.AmountPaidCents)
+		// Formatted, not raw minor units: this sentence used to read "Stripe
+		// captured 9652 (minor units) … booked 10000", handing an operator two
+		// unlabelled integers and a unit they do not think in, in the one banner
+		// whose entire job is comparing two amounts.
+		msg = fmt.Sprintf("Stripe captured %s for payment %s but this invoice booked %s. Reconcile the difference — the recorded paid amount drives refund limits.",
+			FormatMoneyMinor(inv.PaymentAnomalyCapturedCents, inv.Currency), inv.PaymentAnomalyPaymentIntentID, FormatMoneyMinor(inv.AmountPaidCents, inv.Currency))
 	case EventPaymentReceivedOnVoidedInvoice:
 		msg = fmt.Sprintf("Payment %s succeeded against this voided invoice. The customer paid money that is not owed — refund it in Stripe.",
 			inv.PaymentAnomalyPaymentIntentID)

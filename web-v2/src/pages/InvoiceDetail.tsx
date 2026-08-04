@@ -816,6 +816,10 @@ export default function InvoiceDetailPage() {
             ? resendSetupLinkMutation.mutate()
             : setShowEmailModal(true)
         }
+        // Reuses the page's existing void confirmation rather than voiding
+        // straight from the banner: void is irreversible, and the dialog is
+        // where the consequences are spelled out.
+        onVoidInvoice={() => setShowVoidConfirm(true)}
         retrying={retryTaxMutation.isPending}
         charging={collectMutation.isPending}
         // ADR-030 / simulated-time discipline: anchor "since X ago" on the
@@ -1343,7 +1347,20 @@ export default function InvoiceDetailPage() {
         open={showVoidConfirm}
         onOpenChange={setShowVoidConfirm}
         title="Void Invoice"
-        description="Voiding annuls the invoice — it'll be treated as if it was never owed. Any applied credits are returned and any open charge attempt is cancelled. Voiding is blocked while a payment is unresolved: if the charge is still being confirmed the server will refuse until it reports an outcome, and if its outcome can never be identified the invoice must be marked uncollectible instead. Use this when the invoice was created in error. For 'we tried to collect and failed', use Mark Uncollectible instead. This action cannot be undone."
+        // The commit clause is CONDITIONAL, keyed on the server's own
+        // void_invoice action — present exactly when this invoice funded
+        // prepaid credit that is still unspent. Two reasons it can't be
+        // unconditional: it would be noise on the ordinary invoices that are
+        // the overwhelming majority, and the sentence already there ("any
+        // applied credits are returned") points the OTHER WAY — that is credit
+        // applied to PAY this invoice coming back. An operator voiding a
+        // commit invoice would otherwise read it as the customer getting
+        // credit back, when voiding is what takes their credit away.
+        description={
+          (invoice?.attention?.actions ?? []).some((a) => a.code === 'void_invoice')
+            ? "Voiding annuls the invoice — it'll be treated as if it was never owed. This invoice bought prepaid credit, and voiding cancels whatever the customer has not spent yet; credit they have already spent is not clawed back. Any open charge attempt is cancelled. Voiding is blocked while a payment is unresolved: if the charge is still being confirmed the server will refuse until it reports an outcome, and if its outcome can never be identified the invoice must be marked uncollectible instead. This action cannot be undone."
+            : "Voiding annuls the invoice — it'll be treated as if it was never owed. Any applied credits are returned and any open charge attempt is cancelled. Voiding is blocked while a payment is unresolved: if the charge is still being confirmed the server will refuse until it reports an outcome, and if its outcome can never be identified the invoice must be marked uncollectible instead. Use this when the invoice was created in error. For 'we tried to collect and failed', use Mark Uncollectible instead. This action cannot be undone."
+        }
         confirmWord="VOID"
         confirmLabel="Void Invoice"
         onConfirm={() => voidMutation.mutate()}

@@ -11,7 +11,12 @@ usage metering, invoice generation, Stripe payments, dunning, and credits.
 /**
  * Operator's recommended next step. Closed enum because every
 code maps to a concrete server endpoint or frontend route,
-and audit logs key off the code.
+and audit logs key off the code. `void_invoice` is offered only
+on prepaid-commit exposure, and only while some of the granted
+credit is still unspent: voiding retires the unspent balance
+(ADR-078) and is the sole recovery for an unpaid invoice whose
+credit is already live. Credit the customer has already spent
+is never clawed back (2026-08-04).
 
  */
 export type AttentionAction = typeof AttentionAction[keyof typeof AttentionAction];
@@ -30,4 +35,5 @@ export const AttentionAction = {
   add_payment_method: 'add_payment_method',
   update_payment_method: 'update_payment_method',
   connect_tax_provider: 'connect_tax_provider',
+  void_invoice: 'void_invoice',
 } as const;

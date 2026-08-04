@@ -809,3 +809,181 @@ func TestClassify_CollectionPaused_BeatsPaymentScheduled(t *testing.T) {
 		t.Error("paused banner must still offer Charge now — the pause governs automation, not the operator")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Commit exposure (ADR-078 D3 fast-follow)
+//
+// The property under test is the FOLD: exposure must enrich whatever cause the
+// chain found without replacing it. A commit invoice is unpaid-with-live-credit
+// for its whole Net-30 term, so a version of this that won the priority chain
+// would both cry wolf on healthy deals and mask the declined card underneath.
+// ---------------------------------------------------------------------------
+
+// commitInv is a finalized invoice that funded a commit grant.
+func commitInv() Invoice {
+	inv := draft()
+	inv.Status = InvoiceFinalized
+	inv.Currency = "USD"
+	return inv
+}
+
+// liveGrant is the context for a grant with `drawable` unspent and `spent` gone.
+func liveGrant(drawable, spent int64) AttentionContext {
+	return AttentionContext{
+		CommitGrantDrawableCents: drawable,
+		CommitGrantConsumedCents: spent,
+	}
+}
+
+func TestCommitExposure_NoGrantLeavesChainUntouched(t *testing.T) {
+	// Negative control: the same invoice, with and without grant context, must
+	// classify identically. Without this the fold could be firing on every
+	// invoice and the other tests would still pass.
+	inv := commitInv()
+	inv.PaymentStatus = PaymentFailed
+
+	bare := ClassifyInvoiceAttention(inv, AttentionContext{})
+	withCtx := ClassifyInvoiceAttention(inv, liveGrant(0, 0))
+	if bare == nil || withCtx == nil {
+		t.Fatalf("expected a banner in both cases, got %+v / %+v", bare, withCtx)
+	}
+	if bare.Message != withCtx.Message || bare.Severity != withCtx.Severity ||
+		len(bare.Actions) != len(withCtx.Actions) {
+		t.Fatalf("zero-grant context changed the banner:\n bare = %+v\n with = %+v", bare, withCtx)
+	}
+}
+
+func TestCommitExposure_FoldsOntoPaymentFailedWithoutMasking(t *testing.T) {
+	inv := commitInv()
+	inv.PaymentStatus = PaymentFailed
+	inv.LastPaymentError = "Your card was declined"
+
+	got := ClassifyInvoiceAttention(inv, liveGrant(10000000, 0))
+	if got == nil {
+		t.Fatal("expected a banner")
+	}
+	// The cause survives — this is the masking regression the fold exists to
+	// prevent.
+	if got.Reason != AttentionReasonPaymentFailed {
+		t.Fatalf("exposure masked the cause: reason = %q, want %q", got.Reason, AttentionReasonPaymentFailed)
+	}
+	// The primary CTA is still "fix the card", not "void the invoice".
+	if len(got.Actions) == 0 || got.Actions[0].Code != AttentionActionUpdatePaymentMethod {
+		t.Fatalf("primary action displaced: %+v", got.Actions)
+	}
+	if got.Actions[len(got.Actions)-1].Code != AttentionActionVoidInvoice {
+		t.Fatalf("void action not appended: %+v", got.Actions)
+	}
+	// Both facts are in the operator-visible message.
+	if !strings.Contains(got.Message, "card was declined") {
+		t.Fatalf("cause sentence lost: %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "100,000.00 USD") {
+		t.Fatalf("exposure amount missing or unformatted: %q", got.Message)
+	}
+}
+
+func TestCommitExposure_SpentCreditEscalatesSeverity(t *testing.T) {
+	inv := commitInv()
+	inv.PaymentStatus = PaymentPending // → no_payment_method, a Warning
+
+	unspent := ClassifyInvoiceAttention(inv, liveGrant(10000000, 0))
+	if unspent == nil || unspent.Severity != AttentionSeverityWarning {
+		t.Fatalf("nothing spent should stay Warning, got %+v", unspent)
+	}
+	spent := ClassifyInvoiceAttention(inv, liveGrant(5620000, 4380000))
+	if spent == nil || spent.Severity != AttentionSeverityCritical {
+		t.Fatalf("spent credit should escalate to Critical, got %+v", spent)
+	}
+	// Escalation must not rewrite the reason.
+	if spent.Reason != unspent.Reason {
+		t.Fatalf("escalation changed the reason: %q → %q", unspent.Reason, spent.Reason)
+	}
+	if !strings.Contains(spent.Message, "43,800.00 USD already spent") {
+		t.Fatalf("spent amount missing: %q", spent.Message)
+	}
+}
+
+func TestCommitExposure_NeverLowersSeverity(t *testing.T) {
+	// A Critical cause with an unspent grant (whose floor is only Warning)
+	// must stay Critical.
+	inv := commitInv()
+	inv.PaymentStatus = PaymentFailed
+	got := ClassifyInvoiceAttention(inv, liveGrant(10000000, 0))
+	if got == nil || got.Severity != AttentionSeverityCritical {
+		t.Fatalf("severity was lowered: %+v", got)
+	}
+}
+
+func TestCommitExposure_SynthesizesOnUncollectible(t *testing.T) {
+	// Write-off does NOT retire the grant (ADR-078 D3) — the chain returns nil
+	// for uncollectible, so this is the state that would otherwise be entirely
+	// unlit while credit keeps going out the door.
+	inv := commitInv()
+	inv.Status = InvoiceUncollectible
+
+	if bare := ClassifyInvoiceAttention(inv, AttentionContext{}); bare != nil {
+		t.Fatalf("precondition: uncollectible without a grant should be silent, got %+v", bare)
+	}
+	got := ClassifyInvoiceAttention(inv, liveGrant(10000000, 0))
+	if got == nil {
+		t.Fatal("uncollectible with a live grant must raise a banner")
+	}
+	if got.Reason != AttentionReasonCommitExposure {
+		t.Fatalf("reason = %q, want %q", got.Reason, AttentionReasonCommitExposure)
+	}
+	if len(got.Actions) != 1 || got.Actions[0].Code != AttentionActionVoidInvoice {
+		t.Fatalf("void should be the only action: %+v", got.Actions)
+	}
+}
+
+func TestCommitExposure_FullySpentOffersNoVoid(t *testing.T) {
+	// Void retires only the unspent balance. With nothing left, the button
+	// would destroy the invoice and recover nothing.
+	inv := commitInv()
+	inv.Status = InvoiceUncollectible
+	got := ClassifyInvoiceAttention(inv, liveGrant(0, 10000000))
+	if got == nil {
+		t.Fatal("a fully-spent unpaid grant is still worth reporting")
+	}
+	if len(got.Actions) != 0 {
+		t.Fatalf("no action should be offered when void recovers nothing: %+v", got.Actions)
+	}
+	if !strings.Contains(got.Message, "cannot recover it") {
+		t.Fatalf("message should say void cannot recover: %q", got.Message)
+	}
+	if got.Severity != AttentionSeverityCritical {
+		t.Fatalf("fully-spent-and-unpaid is the worst case, want Critical, got %q", got.Severity)
+	}
+}
+
+func TestCommitExposure_SuppressedOnResolvedStatuses(t *testing.T) {
+	// paid    — the cash arrived; that is the whole point.
+	// voided  — the operator already took the one recovery action there is.
+	// draft   — grants are funded at finalize; a draft cannot hold one.
+	for _, status := range []InvoiceStatus{InvoicePaid, InvoiceVoided, InvoiceDraft} {
+		t.Run(string(status), func(t *testing.T) {
+			inv := commitInv()
+			inv.Status = status
+			if got := ClassifyInvoiceAttention(inv, liveGrant(10000000, 4380000)); got != nil {
+				t.Fatalf("status %s must suppress exposure, got %+v", status, got)
+			}
+		})
+	}
+}
+
+func TestCommitExposure_ExpiredGrantReportsNothing(t *testing.T) {
+	// Expiry is applied by the READER (it mirrors drainPositiveBlocks' liveness
+	// predicate), so an expired-but-unswept grant reaches the classifier as
+	// drawable=0. With nothing ever spent there is no exposure to report — and
+	// critically, no banner claiming spendable credit the drain would refuse.
+	inv := commitInv()
+	inv.PaymentStatus = PaymentFailed
+	got := ClassifyInvoiceAttention(inv, liveGrant(0, 0))
+	if got == nil {
+		t.Fatal("expected the underlying payment_failed banner")
+	}
+	if strings.Contains(got.Message, "available for the customer to spend") {
+		t.Fatalf("expired grant claimed spendable credit: %q", got.Message)
+	}
+}

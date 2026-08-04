@@ -33,6 +33,7 @@ const (
 	RotateApiKey        AttentionAction = "rotate_api_key"
 	SendReminder        AttentionAction = "send_reminder"
 	UpdatePaymentMethod AttentionAction = "update_payment_method"
+	VoidInvoice         AttentionAction = "void_invoice"
 	WaitProvider        AttentionAction = "wait_provider"
 )
 
@@ -61,6 +62,8 @@ func (e AttentionAction) Valid() bool {
 		return true
 	case UpdatePaymentMethod:
 		return true
+	case VoidInvoice:
+		return true
 	case WaitProvider:
 		return true
 	default:
@@ -72,6 +75,7 @@ func (e AttentionAction) Valid() bool {
 const (
 	AwaitingPayment      AttentionReason = "awaiting_payment"
 	CollectionPaused     AttentionReason = "collection_paused"
+	CommitExposure       AttentionReason = "commit_exposure"
 	DunningExhausted     AttentionReason = "dunning_exhausted"
 	NoPaymentMethod      AttentionReason = "no_payment_method"
 	PaymentAnomaly       AttentionReason = "payment_anomaly"
@@ -89,6 +93,8 @@ func (e AttentionReason) Valid() bool {
 	case AwaitingPayment:
 		return true
 	case CollectionPaused:
+		return true
+	case CommitExposure:
 		return true
 	case DunningExhausted:
 		return true
@@ -903,7 +909,14 @@ type Attention struct {
 	// invoice that is queued for auto-charge but whose subscription
 	// has `pause_collection` set, so the charge sweeps deliberately
 	// skip it — it will not be charged automatically until
-	// collection resumes (2026-07-28).
+	// collection resumes (2026-07-28). `commit_exposure` reports an
+	// unpaid invoice that funded a prepaid commit whose credit is
+	// already spendable (ADR-078 funds commits at issue, not at
+	// payment) — note this reason is only returned when no other
+	// reason applies; when one does, the exposure is folded into that
+	// reason's `message` and its `actions` instead, so clients must
+	// not treat the reason code as the presence test for exposure
+	// (2026-08-04).
 	Reason AttentionReason `json:"reason"`
 
 	// Severity Urgency of an Attention surface. Operators sort/filter on this
@@ -919,14 +932,24 @@ type Attention struct {
 
 // AttentionAction Operator's recommended next step. Closed enum because every
 // code maps to a concrete server endpoint or frontend route,
-// and audit logs key off the code.
+// and audit logs key off the code. `void_invoice` is offered only
+// on prepaid-commit exposure, and only while some of the granted
+// credit is still unspent: voiding retires the unspent balance
+// (ADR-078) and is the sole recovery for an unpaid invoice whose
+// credit is already live. Credit the customer has already spent
+// is never clawed back (2026-08-04).
 type AttentionAction string
 
 // AttentionActionItem defines model for AttentionActionItem.
 type AttentionActionItem struct {
 	// Code Operator's recommended next step. Closed enum because every
 	// code maps to a concrete server endpoint or frontend route,
-	// and audit logs key off the code.
+	// and audit logs key off the code. `void_invoice` is offered only
+	// on prepaid-commit exposure, and only while some of the granted
+	// credit is still unspent: voiding retires the unspent balance
+	// (ADR-078) and is the sole recovery for an unpaid invoice whose
+	// credit is already live. Credit the customer has already spent
+	// is never clawed back (2026-08-04).
 	Code AttentionAction `json:"code"`
 
 	// Label Default rendering label. UIs are free to substitute
@@ -947,7 +970,14 @@ type AttentionActionItem struct {
 // invoice that is queued for auto-charge but whose subscription
 // has `pause_collection` set, so the charge sweeps deliberately
 // skip it — it will not be charged automatically until
-// collection resumes (2026-07-28).
+// collection resumes (2026-07-28). `commit_exposure` reports an
+// unpaid invoice that funded a prepaid commit whose credit is
+// already spendable (ADR-078 funds commits at issue, not at
+// payment) — note this reason is only returned when no other
+// reason applies; when one does, the exposure is folded into that
+// reason's `message` and its `actions` instead, so clients must
+// not treat the reason code as the presence test for exposure
+// (2026-08-04).
 type AttentionReason string
 
 // AttentionSeverity Urgency of an Attention surface. Operators sort/filter on this

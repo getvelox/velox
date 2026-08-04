@@ -267,8 +267,12 @@ under concurrent grant+drain (post-D6).
   customers. Phase-2 trigger: first DP with expiring commits → design
   per-block drain attribution on usage entries.
 - **Uncollectible/pause/cancel leave commit blocks live** (D3) —
-  collections stance; surfacing unpaid-funded grants in the attention
-  dashboard is a fast-follow candidate.
+  collections stance. The fast-follow named here (surfacing unpaid-funded
+  grants in the attention dashboard) **shipped 2026-08-04**: a
+  `commit_exposure` reason + `void_invoice` action, folded onto whatever
+  banner the invoice already raises rather than competing with it. The
+  block still stays live — that part is unchanged and deliberate; it is no
+  longer invisible. See the ADR-078 amendment of the same date.
 - **Reporting stays face-value-aggregate** (dashboard credit balance =
   raw SUM across kinds; a discounted commit's cash≠face gap is not
   surfaced). Phase-2: kind-split in GetBalance/overview when a DP asks.

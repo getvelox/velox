@@ -3386,17 +3386,29 @@ export interface components {
          *     invoice that is queued for auto-charge but whose subscription
          *     has `pause_collection` set, so the charge sweeps deliberately
          *     skip it — it will not be charged automatically until
-         *     collection resumes (2026-07-28).
+         *     collection resumes (2026-07-28). `commit_exposure` reports an
+         *     unpaid invoice that funded a prepaid commit whose credit is
+         *     already spendable (ADR-078 funds commits at issue, not at
+         *     payment) — note this reason is only returned when no other
+         *     reason applies; when one does, the exposure is folded into that
+         *     reason's `message` and its `actions` instead, so clients must
+         *     not treat the reason code as the presence test for exposure
+         *     (2026-08-04).
          * @enum {string}
          */
-        AttentionReason: "tax_calculation_failed" | "tax_location_required" | "payment_failed" | "payment_unconfirmed" | "payment_anomaly" | "payment_processing" | "payment_scheduled" | "awaiting_payment" | "no_payment_method" | "dunning_exhausted" | "collection_paused";
+        AttentionReason: "tax_calculation_failed" | "tax_location_required" | "payment_failed" | "payment_unconfirmed" | "payment_anomaly" | "payment_processing" | "payment_scheduled" | "awaiting_payment" | "no_payment_method" | "dunning_exhausted" | "collection_paused" | "commit_exposure";
         /**
          * @description Operator's recommended next step. Closed enum because every
          *     code maps to a concrete server endpoint or frontend route,
-         *     and audit logs key off the code.
+         *     and audit logs key off the code. `void_invoice` is offered only
+         *     on prepaid-commit exposure, and only while some of the granted
+         *     credit is still unspent: voiding retires the unspent balance
+         *     (ADR-078) and is the sole recovery for an unpaid invoice whose
+         *     credit is already live. Credit the customer has already spent
+         *     is never clawed back (2026-08-04).
          * @enum {string}
          */
-        AttentionAction: "edit_billing_profile" | "retry_tax" | "retry_payment" | "wait_provider" | "rotate_api_key" | "reconcile_payment" | "review_registration" | "charge_now" | "send_reminder" | "add_payment_method" | "update_payment_method" | "connect_tax_provider";
+        AttentionAction: "edit_billing_profile" | "retry_tax" | "retry_payment" | "wait_provider" | "rotate_api_key" | "reconcile_payment" | "review_registration" | "charge_now" | "send_reminder" | "add_payment_method" | "update_payment_method" | "connect_tax_provider" | "void_invoice";
         AttentionActionItem: {
             code: components["schemas"]["AttentionAction"];
             /**
