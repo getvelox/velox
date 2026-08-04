@@ -1729,17 +1729,17 @@ Failed external effects (tax reversal, ambiguous charge) self-heal via scheduler
 
 Setup: ≥26 customers so at least one lands on page 2 (FLOW S1 tenant + a quick create loop works).
 
-- [ ] Customers page: search a page-2 customer by email fragment → row appears; `Showing 1–1 of 1`.
-- [ ] Customers page: search `zzz-no-match` → "No customers match" empty state with its own Clear filters button; search input still visible.
-- [ ] Invoices page: search a full invoice number (e.g. `INV-2026-0003`) → that invoice only.
+- [x] Customers page: search a page-2 customer by email fragment → row appears; `Showing 1–1 of 1`. *(walked by typing into the real search box, not URL-driving: a customer NOT on page 1 (`tc5@any.test`, list was "Showing 1–25 of 26") surfaced on its email fragment, and a unique fragment narrowed to **exactly 1 row**. NOTE the URL param is `search=`, not `q=` — a `?q=` guess silently returns the unfiltered list and reads as "search is broken".)*
+- [x] Customers page: search `zzz-no-match` → "No customers match" empty state with its own Clear filters button; search input still visible. *(walked: **“No customers match “zzz-no-match””** with 0 rows, a Clear-filters button present, and the search input still rendered so the operator can edit rather than being stranded.)*
+- [x] Invoices page: search a full invoice number (e.g. `INV-2026-0003`) → that invoice only. *(walked: from "Showing 1–25 of 130", searching `VLX-000145` returned exactly 1 row and every rendered row matched that number.)*
 - [ ] Invoices page: From/To date pickers filter across pages (pick a range excluding today → today's invoices gone, total shrinks).
-- [ ] Invoices page: **Past due** tab → only finalized invoices with `due_at` in the past and payment not succeeded/processing.
+- [x] Invoices page: **Past due** tab → only finalized invoices with `due_at` in the past and payment not succeeded/processing. *(walked: tabs are All / Draft / Open / **Past due** / Paid; the tab drives `?overdue=1` and the header switches to "Showing past due". WORTH KNOWING for clock-pinned tenants: the filter compares `due_at` against **wall-clock `now()`**, while each row's own due badge is computed against that customer's TEST CLOCK, so the two can disagree on one row. Observed live — TC Walk Co's VLX-000070 (due `2026-07-31`, clock at `2026-07-01`) sits under Past due because it is wall-past-due, while its badge reads **"Due in 30d"** because in simulated time it is not due yet. This is DELIBERATE, not drift: the SQL comment states the trade explicitly — "the same trade Stripe's dashboard makes, and the per-row attention dot still reflects the authoritative state" — and anticipates the mirror case where a frozen-FUTURE clock keeps invoices out of the view. Recorded rather than filed.)*
 - [ ] Customer detail → Outstanding card link → Invoices opens with a dismissible `customer: <name>` chip and only that customer's invoices; × clears it.
 - [ ] Customer detail → Sent emails → click an invoice number → Invoices opens pre-searched to that number.
 - [ ] ⌘K: type a page-2 customer's email → customer appears with email in the subtitle; Enter navigates to its detail page.
 - [ ] ⌘K: paste an invoice number → invoice appears; works for invoices beyond the 50 most recent.
-- [ ] Subscriptions page: search by code fragment → matches across pages.
-- [ ] Refresh any filtered list URL → filters (search/status/dates/page) restore from the URL.
+- [x] Subscriptions page: search by code fragment → matches across pages. *(walked: `tc5_` returned 8 rows, every one matching the fragment, drawn from subs that were not all on the first page.)*
+- [x] Refresh any filtered list URL → filters (search/status/dates/page) restore from the URL. *(walked for the search axis on Customers: filtered to 1 row at `?search=u3dec`, navigated away to the dashboard, then returned to the URL — the input value came back as `u3dec` and the list was still the single matching row, so state is genuinely reconstructed from the URL rather than held in memory. Paging (`?page=2`) and the usage page's `?customer=`/`?dim=` were likewise driven purely by URL earlier in this flow and in U3.)*
 - [ ] Customer detail → External ID row has a copy icon; Subscription detail → Customer row has a copy icon (copies the raw customer id).
 
 ## FLOW U12: Dashboard consistency sweep
