@@ -53,11 +53,26 @@ func TestRateLimitKey_APIKeyWinsOverTenant(t *testing.T) {
 func TestRateLimitKey_UnauthenticatedFallsBackToIP(t *testing.T) {
 	// Wholly-unauthenticated paths (login, bootstrap) still get a bucket,
 	// so a flood can't bypass the limiter by simply not authenticating.
-	r := httptest.NewRequest("POST", "/v1/auth/login", nil)
-	r.RemoteAddr = "203.0.113.7:54321"
-
-	if got, want := rateLimitKey(r), "ip:203.0.113.7"; got != want {
-		t.Errorf("bucket = %q, want %q", got, want)
+	//
+	// Both RemoteAddr shapes matter. Go's server sets host:port, but
+	// TrustedRealIP runs ahead of every limiter group and rewrites
+	// RemoteAddr to a BARE ip when the request came through a trusted
+	// proxy — the production shape. That takes SplitHostPort's error
+	// branch, and without the bare case a regression collapsing it (say
+	// to a constant) would leave every proxied client sharing one global
+	// bucket while this test still passed.
+	for _, tc := range []struct{ name, remoteAddr, want string }{
+		{"host:port from the Go server", "203.0.113.7:54321", "ip:203.0.113.7"},
+		{"bare ip rewritten by TrustedRealIP", "203.0.113.7", "ip:203.0.113.7"},
+		{"IPv6 host:port", "[2001:db8::1]:54321", "ip:2001:db8::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/v1/auth/login", nil)
+			r.RemoteAddr = tc.remoteAddr
+			if got := rateLimitKey(r); got != tc.want {
+				t.Errorf("bucket = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
