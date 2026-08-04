@@ -331,12 +331,12 @@ Single tenant-wide timezone used for date input and timestamp display
 
 ## FLOW A2: /v1/whoami
 
-- [ ] Cookie path: `curl -b /tmp/c.txt $API/v1/whoami` → `{tenant_id, user_id, email, livemode}`.
-- [ ] Bearer path: `curl -H "Authorization: Bearer $KEY" $API/v1/whoami` → `{tenant_id, key_id, key_type, livemode}`.
-- [ ] No credentials → 401.
-- [ ] Cookie + Bearer with disagreeing identities → cookie wins.
-- [ ] Revoked API key on Bearer → 401 immediately. Cookie sessions unaffected.
-- [ ] Publishable key on Bearer → `key_type:"publishable"`. Every tenant-scoped endpoint — reads included — → 403 (empty scope set); only `/whoami` answers.
+- [x] Cookie path: `curl -b /tmp/c.txt $API/v1/whoami` → `{tenant_id, user_id, email, livemode}`. *(walked 2026-08-04 on tenant TC Walk Co: exactly those four keys.)*
+- [x] Bearer path: `curl -H "Authorization: Bearer $KEY" $API/v1/whoami` → `{tenant_id, key_id, key_type, livemode}`. *(walked: exactly those four keys, `key_type: secret` — and note it returns `key_id`, NOT `user_id`, which is what makes the cookie-precedence box below decidable.)*
+- [x] No credentials → 401. *(walked.)*
+- [x] Cookie + Bearer with disagreeing identities → cookie wins. *(walked the **decidable** way: the Bearer sent alongside the cookie was a key that had just been REVOKED, so it would 401 on its own. The request returned **200 with `user_id`** — the cookie identity — proving precedence rather than merely that both were accepted. A first attempt at this box used a still-valid key and was thrown out: with two working credentials the response is 200 either way and the assertion is untestable.)*
+- [x] Revoked API key on Bearer → 401 immediately. Cookie sessions unaffected. *(walked: same key 200 before `DELETE /v1/api-keys/{id}` and **401** on the very next request after, with the dashboard cookie session still 200 throughout.)*
+- [x] Publishable key on Bearer → `key_type:"publishable"`. Every tenant-scoped endpoint — reads included — → 403 (empty scope set); only `/whoami` answers. *(walked with a control: publishable → `/whoami` 200 (`key_type: publishable`) but **403** on `GET /v1/customers`, `/v1/invoices`, `/v1/plans` and `POST /v1/customers`; the tenant's secret key returned **200** on those same three reads in the same run, so the 403s are the key's scope and not a broken route.)*
 
 ## FLOW A3: Test/Live mode toggle
 
@@ -361,20 +361,20 @@ Single tenant-wide timezone used for date input and timestamp display
 
 ## FLOW K1: API key permissions
 
-- [ ] Secret key: full read/write everywhere.
-- [ ] Publishable key: deny-all (empty scope) — `GET /v1/customers` → 403, POST → 403; only `/v1/whoami` succeeds.
-- [ ] Revoked key: any request → 401 `invalid or expired API key`.
+- [x] Secret key: full read/write everywhere. *(walked as the control for the publishable row below — 200 on customers/invoices/plans reads and on customer create.)*
+- [x] Publishable key: deny-all (empty scope) — `GET /v1/customers` → 403, POST → 403; only `/v1/whoami` succeeds. *(walked — see the paired secret-key control above.)*
+- [x] Revoked key: any request → 401 `invalid or expired API key`. *(walked, and the ADR-026 convention checked by CONTRAST: a revoked key and a syntactically-valid-but-unknown key returned **byte-identical** bodies — `invalid or expired API key` — so the response cannot be used to distinguish revoked from never-existed. An expired key (K2) returns the same string again.)*
 - [ ] Create dialog: raw key shown once, copy button, "you won't see this again" warning.
 
 > **Wire-message convention (ADR-026):** the API never reveals *why* a key failed — revoked, expired, and unknown all return the same generic 401 `invalid or expired API key`. The specific reason is logged server-side only. Don't assert revoked-vs-expired-vs-unknown from the response body.
 
 ## FLOW K2: Expiration
 
-- [ ] Create key with presets: No expiration / 30d / 90d / 1y / Custom.
-- [ ] Custom: today is disabled in calendar grid + Today button (tooltip explains minDate).
-- [ ] Tenant TZ consistency: pick "30d" → hint "Key will expire on <date> at 11:59 PM <TenantTZ>". Stored UTC matches "23:59:59.999 in tenant TZ".
-- [ ] Create with `expires_at = now+90s` via API → 200 until expiry, then 401 `invalid or expired API key` (generic — see K1 note).
-- [ ] Backdate `expires_at` via psql → 401 `invalid or expired API key`.
+- [x] Create key with presets: No expiration / 30d / 90d / 1y / Custom. *(walked — all five offered, alongside Secret/Publishable each carrying a one-line consequence ("Full access. Server-side only." / "Authenticate-only. No data access.").)*
+- [x] Custom: today is disabled in calendar grid + Today button (tooltip explains minDate). *(walked: the calendar opens on the CURRENT month (August 2026) with today and every earlier day disabled, and the footer **Today** button is `disabled` inside a `cursor-not-allowed` tooltip host. Worth noting this is the same `DatePicker` whose all-disabled-month bug was fixed earlier in this campaign — the wall-clock case confirms the fix didn't regress the ordinary path.)*
+- [x] Tenant TZ consistency: pick "30d" → hint "Key will expire on <date> at 11:59 PM <TenantTZ>". Stored UTC matches "23:59:59.999 in tenant TZ". *(walked: the dialog rendered **"Key will expire on September 3, 2026 at 11:59 PM (UTC)"** and the stored column came back **`2026-09-03 23:59:59.999+00`** — the hint and the persisted instant agree to the millisecond.)*
+- [x] Create with `expires_at = now+90s` via API → 200 until expiry, then 401 `invalid or expired API key` (generic — see K1 note). *(walked against the real clock: 200 at creation, 200 again at T-10s (a first check I nearly misread as a failure until I compared timestamps), then **401 `invalid or expired API key` at 10:50:28Z for an expiry of 10:50:21Z** — enforced within seconds of the instant, no caching window.)*
+- [x] Backdate `expires_at` via psql → 401 `invalid or expired API key`. *(walked with a before/after on the SAME key: 200, then `UPDATE api_keys SET expires_at = now() - interval '1 hour'`, then 401.)*
 - [ ] Keys ≤7 days from expiry → yellow "Expires in Xd" badge.
 - [ ] Expired keys collapsed under "Expired keys" section; Revoke still enabled.
 
@@ -386,10 +386,10 @@ Single tenant-wide timezone used for date input and timestamp display
 
 ## FLOW K4: Rotate
 
-- [ ] Rotate with `expires_in_seconds=300` → new raw_key returned; old key works ~5 min.
-- [ ] Rotate with `expires_in_seconds=0` → old key 401 `invalid or expired API key` immediately.
-- [ ] Rotate revoked key → 409 `cannot rotate a revoked key`.
-- [ ] `expires_in_seconds > 604800` → 422.
+- [x] Rotate with `expires_in_seconds=300` → new raw_key returned; old key works ~5 min. *(walked: rotate returned a raw key **different** from the original, and in the same run the OLD key still returned 200 while the NEW key also returned 200 — both halves of the grace window asserted, not just the new key.)*
+- [x] Rotate with `expires_in_seconds=0` → old key 401 `invalid or expired API key` immediately. *(walked on a separate key so it contrasts with the 300s grace above: the old key 401'd on the next request.)*
+- [x] Rotate revoked key → 409 `cannot rotate a revoked key`. *(walked — message verbatim.)*
+- [x] `expires_in_seconds > 604800` → 422. *(walked at the boundary+1 (604801) → **422 "must be <= 604800 (7 days)"**, which names the limit in both units.)*
 
 ---
 
