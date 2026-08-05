@@ -1,0 +1,54 @@
+# Keep the build context to the Go sources the root Dockerfile actually needs.
+#
+# The Dockerfile does `COPY . .`, so without this file the context is the whole
+# working tree — measured at over 1GB and still climbing on a developer machine
+# (web-v2/node_modules alone is ~465MB, .git ~249MB), none of which the Go build
+# reads. That cost was invisible while deploy/compose only ever PULLED a
+# published image; it became the first thing a self-hoster waits on once that
+# service learned to build locally.
+#
+# Anything the build genuinely needs must NOT be listed here: go.mod, go.sum,
+# cmd/, internal/, and any embedded assets.
+
+# VCS
+.git
+.gitignore
+.github
+
+# Frontend — the dashboard is a separate image (deploy/compose/Dockerfile.dashboard)
+# and nothing in the Go build reads it.
+web-v2/node_modules
+web-v2/dist
+web-v2/.vite
+node_modules
+
+# Local tooling / agent scratch
+.claude
+.vscode
+.idea
+
+# Build outputs and local binaries (the repo tracks a prebuilt velox-bootstrap;
+# the image builds its own from source)
+velox-bootstrap
+bin/
+dist/
+*.test
+*.out
+coverage*
+
+# Docs, screenshots and walk artifacts — large and irrelevant to the binary
+*.md
+docs/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+
+# Local env / secrets must never enter an image layer
+.env
+.env.*
+!.env.example
+
+# OS noise
+.DS_Store
