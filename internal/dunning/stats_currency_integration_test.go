@@ -33,7 +33,7 @@ func TestGetStats_AtRiskScopedToDefaultCurrency(t *testing.T) {
 	policy, err := store.UpsertPolicy(ctx, tenantID, domain.DunningPolicy{
 		Name: "default", Enabled: true,
 		RetrySchedule: []string{"72h", "120h"}, MaxRetryAttempts: 3,
-		FinalAction: domain.DunningFinalAction("mark_uncollectible"), GracePeriodDays: 3,
+		FinalSubscriptionAction: domain.SubActionNone, FinalInvoiceAction: domain.InvActionMarkUncollectible, GracePeriodDays: 3,
 	})
 	if err != nil {
 		t.Fatalf("upsert policy: %v", err)

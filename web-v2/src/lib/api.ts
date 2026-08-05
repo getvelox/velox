@@ -1402,7 +1402,11 @@ export interface DunningPolicy {
   is_default: boolean
   retry_schedule: string[]
   max_retry_attempts: number
-  final_action: string
+  // The two terminal decisions (ADR-112): 'none' | 'pause' | 'cancel' and
+  // 'none' | 'mark_uncollectible'. They replaced a single `final_action`,
+  // which could not express "cancel and write off".
+  final_subscription_action: string
+  final_invoice_action: string
   grace_period_days: number
   created_at?: string
   updated_at?: string

@@ -23,7 +23,7 @@ func TestUpsertPolicy_AutoDefaultFirst(t *testing.T) {
 	policy := func(name string) domain.DunningPolicy {
 		return domain.DunningPolicy{
 			Name: name, Enabled: true, MaxRetryAttempts: 3, GracePeriodDays: 3,
-			RetrySchedule: []string{"72h", "120h"}, FinalAction: domain.DunningActionManualReview,
+			RetrySchedule: []string{"72h", "120h"}, FinalSubscriptionAction: domain.SubActionNone, FinalInvoiceAction: domain.InvActionNone,
 		}
 	}
 

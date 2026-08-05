@@ -1,5 +1,5 @@
 key: replicate_style
-version: 2.0.0
+version: 3.0.0
 name: GPU compute pricing (per-second)
 summary: |
   Ready-made pricing for reselling GPU compute. Bills each customer per
@@ -114,7 +114,8 @@ dunning:
     name: GPU compute retry
     max_retries: 4
     intervals_hours: [24, 72, 168, 336]
-    final_action: pause
+    final_subscription_action: pause
+    final_invoice_action: none
 
 webhook:
   events:

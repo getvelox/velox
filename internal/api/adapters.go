@@ -537,6 +537,28 @@ func (a *subscriptionCancelerAdapter) Cancel(ctx context.Context, tenantID, id s
 	return err
 }
 
+// subscriptionStateAdapter bridges subscription.Service →
+// dunning.SubscriptionStateReader — the skip-if-done read that lets a
+// re-attempted exhaustion converge instead of failing forever on the half
+// that already landed (ADR-112).
+type subscriptionStateAdapter struct {
+	svc *subscription.Service
+}
+
+func (a *subscriptionStateAdapter) GetTerminalState(ctx context.Context, tenantID, id string) (dunning.SubscriptionTerminalState, error) {
+	sub, err := a.svc.Get(ctx, tenantID, id)
+	if err != nil {
+		return dunning.SubscriptionTerminalState{}, err
+	}
+	// The two states in which BOTH movers refuse: cancelSpec() allows only
+	// draft/trialing/active, and SetPauseCollection rejects canceled and
+	// archived outright.
+	return dunning.SubscriptionTerminalState{
+		Terminated: sub.Status == domain.SubscriptionCanceled ||
+			sub.Status == domain.SubscriptionArchived,
+	}, nil
+}
+
 // invoiceUncollectibleAdapter bridges invoice.Service →
 // dunning.InvoiceUncollectibleMarker. Stripe-standard dunning
 // terminal action (ADR-036 amendment).

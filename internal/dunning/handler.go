@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -177,11 +178,38 @@ func (h *Handler) getPolicy(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, r, http.StatusOK, policy)
 }
 
+// decodePolicyBody decodes a policy payload and REFUSES the pre-ADR-112
+// `final_action` key by name.
+//
+// encoding/json drops unknown fields silently, so a caller still sending
+// `final_action: "cancel_subscription"` would have stored a policy that
+// pauses and never writes off — a terminal action they did not choose,
+// applied to real money, with a 200 on the way out. DisallowUnknownFields
+// would be the blunt version and would also reject harmless extra keys.
+func decodePolicyBody(r *http.Request) (domain.DunningPolicy, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return domain.DunningPolicy{}, errors.New("invalid JSON body")
+	}
+	var legacy struct {
+		FinalAction *string `json:"final_action"`
+	}
+	if err := json.Unmarshal(body, &legacy); err == nil && legacy.FinalAction != nil {
+		return domain.DunningPolicy{}, errs.Invalid("final_action",
+			"final_action was split in ADR-112 — send final_subscription_action (none|pause|cancel) and final_invoice_action (none|mark_uncollectible)")
+	}
+	var policy domain.DunningPolicy
+	if err := json.Unmarshal(body, &policy); err != nil {
+		return domain.DunningPolicy{}, errors.New("invalid JSON body")
+	}
+	return policy, nil
+}
+
 func (h *Handler) createPolicy(w http.ResponseWriter, r *http.Request) {
 	tenantID := auth.TenantID(r.Context())
-	var policy domain.DunningPolicy
-	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
-		respond.BadRequest(w, r, "invalid JSON body")
+	policy, err := decodePolicyBody(r)
+	if err != nil {
+		respond.FromError(w, r, err, "dunning_policy")
 		return
 	}
 	policy.ID = "" // server-assigned
@@ -199,9 +227,9 @@ func (h *Handler) createPolicy(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	tenantID := auth.TenantID(r.Context())
 	id := chi.URLParam(r, "id")
-	var policy domain.DunningPolicy
-	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
-		respond.BadRequest(w, r, "invalid JSON body")
+	policy, err := decodePolicyBody(r)
+	if err != nil {
+		respond.FromError(w, r, err, "dunning_policy")
 		return
 	}
 	policy.ID = id

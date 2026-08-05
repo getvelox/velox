@@ -28,8 +28,9 @@ func newMemStore() *memStore {
 		ID: "dpol_1", TenantID: "t1", Name: "Default",
 		Enabled: true, IsDefault: true,
 		MaxRetryAttempts: 3, GracePeriodDays: 3,
-		RetrySchedule: []string{"72h", "120h"},
-		FinalAction:   domain.DunningActionManualReview,
+		RetrySchedule:           []string{"72h", "120h"},
+		FinalSubscriptionAction: domain.SubActionNone,
+		FinalInvoiceAction:      domain.InvActionNone,
 	}
 	return &memStore{
 		policies:  map[string]domain.DunningPolicy{"dpol_1": policy},
@@ -585,7 +586,7 @@ func (r *recordingEmailNotifier) SendDunningWarning(context.Context, string, str
 	r.warnings++
 	return nil
 }
-func (r *recordingEmailNotifier) SendDunningEscalation(context.Context, string, string, []string, string, string, string, string) error {
+func (r *recordingEmailNotifier) SendDunningEscalation(context.Context, string, string, []string, string, string, domain.DunningEscalationOutcome, string) error {
 	r.escalations++
 	return nil
 }
@@ -761,8 +762,15 @@ func TestUpsertPolicy(t *testing.T) {
 	// Default flipped from manual_review → pause in migration 0071 so
 	// dunning-exhausted subs go into pause_collection.keep_as_draft
 	// automatically instead of stacking finalized invoices each cycle.
-	if policy.FinalAction != domain.DunningActionPause {
-		t.Errorf("default final_action: got %q, want pause", policy.FinalAction)
+	// ADR-112 split the axes and kept this default exactly.
+	if policy.FinalSubscriptionAction != domain.SubActionPause {
+		t.Errorf("default final_subscription_action: got %q, want pause", policy.FinalSubscriptionAction)
+	}
+	// The invoice half deliberately does NOT default to a write-off, even
+	// though Recurly defaults its equivalent on: writing off asserts bad
+	// debt, and a machine must not make that assertion unasked (ADR-112).
+	if policy.FinalInvoiceAction != domain.InvActionNone {
+		t.Errorf("default final_invoice_action: got %q, want none — defaulting to a write-off would assert bad debt on the tenant's behalf", policy.FinalInvoiceAction)
 	}
 
 	// Save-time validation rejects under-spec'd schedules — drops the
@@ -844,10 +852,11 @@ func TestUpsertPolicyTx_ValidationParity(t *testing.T) {
 	// A valid recipe-shaped policy (the embedded recipes' 4/4 shape) still
 	// persists, and the shared normalize applies the same defaults.
 	p, err := svc.UpsertPolicyTx(ctx, nil, "t1", domain.DunningPolicy{
-		Name:          "Good Recipe",
-		Enabled:       true,
-		RetrySchedule: []string{"24h", "72h", "168h", "336h"},
-		FinalAction:   domain.DunningActionPause,
+		Name:                    "Good Recipe",
+		Enabled:                 true,
+		RetrySchedule:           []string{"24h", "72h", "168h", "336h"},
+		FinalSubscriptionAction: domain.SubActionPause,
+		FinalInvoiceAction:      domain.InvActionNone,
 		// MaxRetryAttempts / GracePeriodDays unset → shared defaults (3 / 3).
 	})
 	if err != nil {

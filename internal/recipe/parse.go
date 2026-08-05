@@ -94,7 +94,13 @@ type rawDunningPolicy struct {
 	Name           string `yaml:"name"`
 	MaxRetries     int    `yaml:"max_retries"`
 	IntervalsHours []int  `yaml:"intervals_hours"`
-	FinalAction    string `yaml:"final_action"`
+	// The two terminal decisions (ADR-112).
+	FinalSubscriptionAction string `yaml:"final_subscription_action"`
+	FinalInvoiceAction      string `yaml:"final_invoice_action"`
+	// LegacyFinalAction is decoded ONLY so parse can reject a recipe still
+	// using the pre-ADR-112 key by name. Silently ignoring an unknown key
+	// would apply a policy the recipe author did not write.
+	LegacyFinalAction string `yaml:"final_action"`
 }
 
 type rawWebhook struct {
@@ -300,16 +306,23 @@ func parseRecipe(data []byte) (domain.Recipe, error) {
 
 	if raw.Dunning != nil {
 		dp := raw.Dunning.Policy
-		switch domain.DunningFinalAction(dp.FinalAction) {
-		case domain.DunningActionManualReview, domain.DunningActionPause, domain.DunningActionMarkUncollectible, domain.DunningActionCancelSubscription:
-		case "":
-			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_action is required", raw.Key)
-		default:
-			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_action %q must be one of manual_review, pause, mark_uncollectible, cancel_subscription", raw.Key, dp.FinalAction)
+		// Reject the pre-ADR-112 key by name. Ignoring it would silently
+		// apply (pause, none) to a recipe whose author wrote
+		// `final_action: cancel_subscription` — a policy they did not choose.
+		if dp.LegacyFinalAction != "" {
+			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_action was split in ADR-112 — use final_subscription_action (none|pause|cancel) and final_invoice_action (none|mark_uncollectible)", raw.Key)
+		}
+		if !domain.DunningSubscriptionAction(dp.FinalSubscriptionAction).Valid() {
+			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_subscription_action %q must be one of none, pause, cancel", raw.Key, dp.FinalSubscriptionAction)
+		}
+		if !domain.DunningInvoiceAction(dp.FinalInvoiceAction).Valid() {
+			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_invoice_action %q must be one of none, mark_uncollectible", raw.Key, dp.FinalInvoiceAction)
 		}
 		out.DunningPolicy = &domain.RecipeDunningPolicy{
 			Name: dp.Name, MaxRetries: dp.MaxRetries,
-			IntervalsHours: dp.IntervalsHours, FinalAction: dp.FinalAction,
+			IntervalsHours:          dp.IntervalsHours,
+			FinalSubscriptionAction: dp.FinalSubscriptionAction,
+			FinalInvoiceAction:      dp.FinalInvoiceAction,
 		}
 	}
 

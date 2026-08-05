@@ -3873,7 +3873,17 @@ export interface components {
             name: string;
             max_retries: number;
             intervals_hours: number[];
-            final_action: string;
+            /**
+             * @description What exhausting all retries does to the subscription behind the unpaid invoice. `pause` pauses collection only (the cycle keeps drafting invoices); `cancel` cancels the subscription. No-op on a one-off invoice, which has no subscription.
+             * @enum {string}
+             */
+            final_subscription_action: "none" | "pause" | "cancel";
+            /**
+             * @description What exhausting all retries does to the unpaid invoice. `mark_uncollectible` writes it off as bad debt — the receivable closes, the invoice stays on the books for audit, and it remains settleable out of band. `none` leaves it finalized and due, which means it stays open until a human closes or collects it.
+             *     Independent of `final_subscription_action` (ADR-112): the two were one enum until 2026-08-05, which made "cancel and write off" inexpressible.
+             * @enum {string}
+             */
+            final_invoice_action: "none" | "mark_uncollectible";
         };
         RecipeWebhook: {
             events: string[];

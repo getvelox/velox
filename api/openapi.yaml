@@ -1048,7 +1048,7 @@ components:
 
     RecipeDunningPolicy:
       type: object
-      required: [name, max_retries, intervals_hours, final_action]
+      required: [name, max_retries, intervals_hours, final_subscription_action, final_invoice_action]
       properties:
         name:
           type: string
@@ -1058,8 +1058,27 @@ components:
           type: array
           items:
             type: integer
-        final_action:
+        final_subscription_action:
           type: string
+          enum: [none, pause, cancel]
+          description: >
+            What exhausting all retries does to the subscription behind the
+            unpaid invoice. `pause` pauses collection only (the cycle keeps
+            drafting invoices); `cancel` cancels the subscription. No-op on a
+            one-off invoice, which has no subscription.
+        final_invoice_action:
+          type: string
+          enum: [none, mark_uncollectible]
+          description: >
+            What exhausting all retries does to the unpaid invoice.
+            `mark_uncollectible` writes it off as bad debt — the receivable
+            closes, the invoice stays on the books for audit, and it remains
+            settleable out of band. `none` leaves it finalized and due, which
+            means it stays open until a human closes or collects it.
+
+            Independent of `final_subscription_action` (ADR-112): the two were
+            one enum until 2026-08-05, which made "cancel and write off"
+            inexpressible.
 
     RecipeWebhook:
       type: object

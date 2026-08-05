@@ -18,10 +18,15 @@ import (
 //
 // To update after a deliberate change: bump `version:` in the YAML, then
 // replace the pin with the value from the test's failure message.
+// MAJOR bumps on 2026-08-05: ADR-112 replaced the dunning block's
+// `final_action` key with `final_subscription_action` +
+// `final_invoice_action`, and parseRecipe REJECTS the old key by name. A
+// recipe pinned at the previous version no longer parses, which is a
+// breaking DSL change, not an edit.
 var pinnedCatalog = map[string]string{
-	"anthropic_style@4.0.0": "b0a81eb74d40b831e68da5edca15d377abd707a548d17d06ff950b8fc6677b09",
-	"openai_style@4.0.0":    "4abf6fd59385fefb39b1eb19b2111a8d6f790c92248b77bcddb173b5b1506fa4",
-	"replicate_style@2.0.0": "b88b8c6481f9e4128a2ed244861208bde138857c8a859cfc575d530fc1694239",
+	"anthropic_style@5.0.0": "dc1d147c8ace6fcbeb31d7a232b2d214ed0dee1c8492a329b7de586dff08f5b2",
+	"openai_style@5.0.0":    "9e340351b37677c8e79215e9bd8fcd90d198756ecdf4b5a34bd5a706af28af58",
+	"replicate_style@3.0.0": "8abd33097c29909d3bc53c51b0aacab9b9f8c27b984c94724030247b05b8796a",
 }
 
 // TestRecipeCatalog_VersionMovesWithContent asserts every embedded recipe's

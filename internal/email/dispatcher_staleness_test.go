@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/sagarsuperuser/velox/internal/domain"
 )
 
 // recordingDeliverer counts sends per type; every send succeeds.
@@ -21,7 +23,7 @@ func (r *recordingDeliverer) SendDunningWarning(_ context.Context, _, _ string, 
 	r.sent = append(r.sent, TypeDunningWarning)
 	return nil
 }
-func (r *recordingDeliverer) SendDunningEscalation(_ context.Context, _, _ string, _ []string, _, _, _, _ string) error {
+func (r *recordingDeliverer) SendDunningEscalation(_ context.Context, _, _ string, _ []string, _, _ string, _ domain.DunningEscalationOutcome, _ string) error {
 	r.sent = append(r.sent, TypeDunningEscalation)
 	return nil
 }

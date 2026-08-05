@@ -57,6 +57,7 @@ import {
   postalPlaceholderForCountry,
 } from '@/lib/geo'
 import { TAX_ID_HINTS, taxIdTypeOptions } from '@/lib/taxIdTypes'
+import { finalActionSummary } from '@/lib/dunningActions'
 import { ScrollPane } from '@/components/ui/scroll-pane'
 
 const statusVariant = statusBadgeVariant
@@ -803,7 +804,7 @@ export default function CustomerDetailPage() {
               </div>
               <div className="flex items-center justify-between px-6 py-3">
                 <span className="text-sm text-muted-foreground">Final action</span>
-                <Badge variant="outline">{effectiveDunningPolicy.final_action}</Badge>
+                <Badge variant="outline">{finalActionSummary(effectiveDunningPolicy)}</Badge>
               </div>
             </div>
           ) : (
@@ -1680,7 +1681,7 @@ function AssignDunningPolicyDialog({ customerId, currentPolicyID, policies, onCl
               <div className="flex justify-between"><span className="text-muted-foreground">Max retries</span><span>{selectedPolicy.max_retry_attempts}</span></div>
               <div className="flex justify-between"><span className="text-muted-foreground">Grace period</span><span>{selectedPolicy.grace_period_days} days</span></div>
               <div className="flex justify-between"><span className="text-muted-foreground">Retry schedule</span><span>{selectedPolicy.retry_schedule.join(' · ') || '—'}</span></div>
-              <div className="flex justify-between"><span className="text-muted-foreground">Final action</span><span>{selectedPolicy.final_action}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">On exhaustion</span><span>{finalActionSummary(selectedPolicy)}</span></div>
             </div>
           )}
           <div className="flex justify-end gap-2 pt-2">

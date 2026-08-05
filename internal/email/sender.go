@@ -481,11 +481,11 @@ func (s *Sender) SendDunningWarning(ctx context.Context, tenantID, to string, cc
 }
 
 // SendDunningEscalation emails the "retries exhausted" escalation.
-func (s *Sender) SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, action, publicToken string) error {
+func (s *Sender) SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error {
 	brand := s.brandingFor(ctx, tenantID)
 	hostedURL := s.hostedInvoiceURL(publicToken)
 
-	subject, contentHTML, ctaURL, ctaLabel := renderDunningEscalationHTML(customerName, invoiceNumber, action, hostedURL)
+	subject, contentHTML, ctaURL, ctaLabel := renderDunningEscalationHTML(customerName, invoiceNumber, outcome, hostedURL)
 	htmlBody, err := renderLayout(layoutInputs{
 		Subject: subject, CompanyName: brand.CompanyName, LogoURL: brand.LogoURL,
 		BrandColor: brand.BrandColor, SupportURL: brand.SupportURL,
@@ -494,7 +494,7 @@ func (s *Sender) SendDunningEscalation(ctx context.Context, tenantID, to string,
 	if err != nil {
 		return fmt.Errorf("render dunning escalation html: %w", err)
 	}
-	textBody := dunningEscalationTextBody(customerName, invoiceNumber, action, hostedURL)
+	textBody := dunningEscalationTextBody(customerName, invoiceNumber, outcome, hostedURL)
 
 	return s.sendRich(ctx, richMessage{
 		TenantID: tenantID, To: to, Cc: cc, Subject: subject,
@@ -718,13 +718,13 @@ func dunningWarningTextBody(customerName, invoiceNumber string, attemptNumber, m
 	return b.String()
 }
 
-func dunningEscalationTextBody(customerName, invoiceNumber, action, hostedURL string) string {
+func dunningEscalationTextBody(customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, hostedURL string) string {
 	// Same customer copy as the HTML alternative (dunningEscalationCopy).
 	// Pre-fix this text part still rendered the raw internal enum —
 	// "Action taken: mark_uncollectible", the exact P13 symptom, shown to
 	// every text-only client — and offered a "Resolve invoice" link even
 	// for invoices the hosted page refuses payment on.
-	sentence, stillPayable := dunningEscalationCopy(action)
+	sentence, stillPayable := dunningEscalationCopy(outcome)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Hi %s,\n\nAll payment attempts for invoice %s were unsuccessful.\n\n%s\n\n", customerName, invoiceNumber, sentence)
 	if hostedURL != "" {

@@ -117,10 +117,11 @@ type RecipePlan struct {
 }
 
 type RecipeDunningPolicy struct {
-	Name           string `json:"name"`
-	MaxRetries     int    `json:"max_retries"`
-	IntervalsHours []int  `json:"intervals_hours"`
-	FinalAction    string `json:"final_action"`
+	Name                    string `json:"name"`
+	MaxRetries              int    `json:"max_retries"`
+	IntervalsHours          []int  `json:"intervals_hours"`
+	FinalSubscriptionAction string `json:"final_subscription_action"`
+	FinalInvoiceAction      string `json:"final_invoice_action"`
 }
 
 type RecipeWebhook struct {
