@@ -20,6 +20,13 @@ type memStore struct {
 	// the runtime pin that lines travel in the same call (one tx) as the
 	// header, not in a post-commit loop (the orphan-CN shape).
 	lastLockLines []domain.CreditNoteLineItem
+	// setPendingCalls counts SetTaxReversalPending writes. The real store
+	// bumps updated_at on every UPDATE, and the reversal scan's 24h window
+	// keys on updated_at — so a write issued when the marker is ALREADY
+	// false is not harmless: it refreshes the row's own eligibility and the
+	// sweep never converges. This fake cannot model updated_at, so the
+	// write count is the faithful stand-in.
+	setPendingCalls int
 }
 
 func newMemStore() *memStore {
@@ -356,6 +363,7 @@ func (m *memStore) UpdateAllocationTx(ctx context.Context, _ *sql.Tx, tenantID, 
 }
 
 func (m *memStore) SetTaxReversalPending(_ context.Context, tenantID, id string, pending bool) error {
+	m.setPendingCalls++
 	cn, ok := m.notes[id]
 	if !ok || cn.TenantID != tenantID {
 		return errs.ErrNotFound
