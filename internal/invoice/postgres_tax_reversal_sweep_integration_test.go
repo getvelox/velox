@@ -141,3 +141,80 @@ func TestListPendingTaxReversal_ExcludesSimulatedAndIncludesOneOff(t *testing.T)
 		t.Error("a one-off invoice (NULL subscription_id) must be included in the reversal sweep")
 	}
 }
+
+// TestListPendingTaxReversal_AgedOrphanIsNotStranded is the ADR-111 follow-up:
+// the sweep used to carry `updated_at > now() - interval '24 hours'`, copied
+// from ListPendingTaxCommit where it matches a real ceiling (the Stripe Tax
+// calculation TTL). A reversal has no such ceiling, so the window only ever
+// discarded work — measured on the live database at 4 voided invoices holding
+// $46.69 of committed tax, over-remitted permanently and named by nothing.
+//
+// The negative control is load-bearing. Removing a WHERE clause is exactly the
+// kind of fix that "works" by sweeping everything, so the second half asserts
+// that an equally OLD invoice which needs no reversal — same age, same
+// provider, tax_reversed_at already stamped — still stays out. Without it a
+// sweep that reversed already-reversed invoices every tick would pass.
+func TestListPendingTaxReversal_AgedOrphanIsNotStranded(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	store := invoice.NewPostgresStore(db)
+	// Two tenants because seedDraftInvoice pins one external_id per tenant.
+	// The sweep scans cross-tenant (TxBypass), so both rows are in range.
+	strandedTenant := testutil.CreateTestTenant(t, db, "Tax Reversal Aged Stranded")
+	settledTenant := testutil.CreateTestTenant(t, db, "Tax Reversal Aged Settled")
+
+	strandedID := seedDraftInvoice(t, db, strandedTenant)
+	settledID := seedDraftInvoice(t, db, settledTenant)
+
+	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		t.Fatalf("begin seed tx: %v", err)
+	}
+	// Both voided, both stripe_tax, both committed, both far outside the old
+	// 24h window. They differ ONLY in whether the reversal was confirmed.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE invoices
+		   SET status = 'voided', voided_at = now() - interval '40 days',
+		       tax_provider = 'stripe_tax', tax_status = 'ok',
+		       tax_transaction_id = 'tx_aged',
+		       total_amount_cents = 4669, amount_due_cents = 4669,
+		       tax_reversed_at = NULL,
+		       updated_at = now() - interval '40 days'
+		 WHERE id = $1`, strandedID); err != nil {
+		t.Fatalf("seed stranded invoice: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE invoices
+		   SET status = 'voided', voided_at = now() - interval '40 days',
+		       tax_provider = 'stripe_tax', tax_status = 'ok',
+		       tax_transaction_id = 'tx_aged_done',
+		       total_amount_cents = 4669, amount_due_cents = 4669,
+		       tax_reversed_at = now() - interval '40 days',
+		       updated_at = now() - interval '40 days'
+		 WHERE id = $1`, settledID); err != nil {
+		t.Fatalf("seed settled invoice: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+
+	pending, err := store.ListPendingTaxReversal(ctx, 200, false)
+	if err != nil {
+		t.Fatalf("ListPendingTaxReversal: %v", err)
+	}
+	var sawStranded, sawSettled bool
+	for _, inv := range pending {
+		switch inv.ID {
+		case strandedID:
+			sawStranded = true
+		case settledID:
+			sawSettled = true
+		}
+	}
+	if !sawStranded {
+		t.Error("a 40-day-old unreversed void was not swept — it is over-remitted tax with no recovery path, and nothing else in the product names it")
+	}
+	if sawSettled {
+		t.Error("a 40-day-old ALREADY-REVERSED void was swept — the fix must widen the age bound, not drop the tax_reversed_at guard, or every tick re-reverses settled invoices")
+	}
+}

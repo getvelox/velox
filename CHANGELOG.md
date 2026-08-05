@@ -27,6 +27,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Fixed
 
+- **Tax reversals that failed for more than a day are no longer abandoned (2026-08-05).** When you void an invoice, Velox reverses the tax it had reported for it. If that call to the tax provider fails, a background sweep retries it — but the sweep only looked at invoices touched in the last 24 hours, so anything that stayed broken past a day was dropped and never looked at again. The invoice keeps its tax reported as collected, you keep remitting tax on a sale that was cancelled, and nothing in the product tells you. Four invoices on this instance were sitting in exactly that state, holding $46.69 between them.
+
+  The 24-hour limit had been copied from the sibling sweep that finishes *reporting* tax, where it is correct — after a day the provider's calculation has expired and the work genuinely cannot be completed. A reversal has no such deadline; it stays possible indefinitely. The limit is removed. Retries are safe to repeat (the provider recognises a repeat and ignores it), and an invoice drops out of the sweep for good once its reversal is confirmed.
+
 - **Three reporting gaps around recovered bad debt (2026-08-05).** When a written-off invoice is later paid, three surfaces told a slightly wrong story. The CSV export carried no record of the write-off at all, so a recovered invoice was indistinguishable from one that had never been written off — an accountant could not locate a single bad-debt recovery in the file. The invoice timeline credited the *failed* dunning campaign for the operator's manual recovery, showing "paid after N retry attempts" where all N of those attempts had failed and were the reason the invoice was written off in the first place. And on a prepaid-commit invoice being recovered, the credit-exposure notice offered a **Void invoice** button that the server refuses while a payment is in flight — a control that could only fail.
 
 ### Added
