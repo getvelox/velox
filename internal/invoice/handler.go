@@ -1120,30 +1120,24 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 	// exist to answer WHY, because a bare claim miss is indistinguishable from
 	// "someone else is charging it right now".
 	if inv.Status == domain.InvoiceUncollectible {
-		if inv.TaxTransactionID != "" {
-			respond.Error(w, r, http.StatusConflict, "invalid_state", "tax_reversed_unrecoverable",
-				"This invoice's tax was reversed with the tax provider when it was written off, and it cannot be re-reported automatically. Charging now would collect tax that has already been reported as not collected. Record the payment as an offline payment instead, and correct the tax with your provider.")
-			return
-		}
-		if inv.BillingReason == domain.BillingReasonThreshold {
-			respond.Error(w, r, http.StatusConflict, "invalid_state", "recovery_superseded",
-				"This invoice was billed on a usage threshold, and writing it off did not stop that usage being re-billed on a later invoice. Charging it now would bill the same usage twice — collect the newer invoice instead.")
-			return
-		}
+		var unrelieved int64
 		if h.svc.creditNotes != nil {
-			unrelieved, cerr := h.svc.creditNotes.UnreliefedClawbackCents(r.Context(), tenantID, inv.ID)
+			var cerr error
+			unrelieved, cerr = h.svc.creditNotes.UnreliefedClawbackCents(r.Context(), tenantID, inv.ID)
 			if cerr != nil {
 				// Fail loud: we cannot prove the amount is right, and this is a
-				// card charge we are choosing to make.
+				// card charge we are CHOOSING to make.
 				slog.ErrorContext(r.Context(), "recovery blocked: could not read unrelieved clawback relief", "invoice_id", inv.ID, "error", cerr)
 				respond.InternalError(w, r)
 				return
 			}
-			if unrelieved > 0 {
-				respond.Error(w, r, http.StatusConflict, "invalid_state", "relief_not_reissued",
-					"This invoice is owed a credit that was never applied, so the amount shown is higher than what the customer owes. Re-issue the credit before charging, or the customer will be over-collected.")
-				return
-			}
+		}
+		// ONE source, shared with the read path that lets the dashboard disable
+		// its button with the same reason instead of letting an operator
+		// confirm a charge that answers 409.
+		if b := domain.RecoveryBlocksCharge(inv, unrelieved); b.Blocked {
+			respond.Error(w, r, http.StatusConflict, "invalid_state", b.Code, b.Message)
+			return
 		}
 	}
 	if inv.PaymentStatus == domain.PaymentUnknown {

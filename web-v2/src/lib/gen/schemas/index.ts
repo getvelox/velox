@@ -151,6 +151,8 @@ export * from './recipeRatingRule';
 export * from './recipeRatingRuleGraduatedTiersItem';
 export * from './recipeRatingRuleMode';
 export * from './recipeWebhook';
+export * from './recoveryBlock';
+export * from './recoveryBlockCode';
 export * from './subscription';
 export * from './subscriptionBillingTime';
 export * from './subscriptionStatus';

@@ -251,7 +251,16 @@ type Invoice struct {
 	// due_at. Nil when the invoice is healthy
 	// (terminal-state or no failure mode active). See
 	// docs/adr/009-invoice-attention.md for the wire-shape contract.
-	Attention           *Attention `json:"attention,omitempty"`
+	Attention *Attention `json:"attention,omitempty"`
+	// RecoveryBlock explains why a WRITTEN-OFF invoice cannot be charged, when
+	// it cannot. Computed on read like Attention, never persisted, and nil for
+	// every invoice that is not uncollectible.
+	//
+	// It exists so the dashboard can disable "Charge customer" WITH ITS REASON
+	// rather than letting an operator confirm a charge that answers 409. The
+	// refusals are server-truth (enforced in the claim CAS); this is the same
+	// truth, published, so the UI never promises what the server will refuse.
+	RecoveryBlock       *PaymentBlock `json:"recovery_block,omitempty"`
 	TotalAmountCents    int64      `json:"total_amount_cents"`
 	AmountDueCents      int64      `json:"amount_due_cents"`
 	AmountPaidCents     int64      `json:"amount_paid_cents"`

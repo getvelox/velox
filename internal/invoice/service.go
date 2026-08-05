@@ -651,7 +651,15 @@ func (s *Service) ApplyCreditBalance(ctx context.Context, tenantID, id string) (
 	if err != nil {
 		return domain.Invoice{}, err
 	}
-	if s.creditApplier == nil || inv.AmountDueCents <= 0 || inv.Status != domain.InvoiceFinalized {
+	// Written-off invoices included: a bad-debt recovery must drain the balance
+	// FIRST so the card is charged the remainder, not the gross (ADR-088 order).
+	// Missing this made the uncollectible arm in credit.ApplyToInvoiceAtomic
+	// unreachable and made the recovery dialog's "Any credit balance is applied
+	// first" a written promise the code did not keep — and the population that
+	// gets written off is exactly the one carrying credit-note and clawback
+	// relief on the way down.
+	if s.creditApplier == nil || inv.AmountDueCents <= 0 ||
+		(inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible) {
 		return inv, nil
 	}
 	if _, err := s.creditApplier.ApplyToInvoiceAt(ctx, tenantID, inv.CustomerID, inv.ID, inv.AmountDueCents, s.clock.Now(ctx), inv.InvoiceNumber); err != nil {
@@ -679,8 +687,17 @@ func (s *Service) SettleZeroDue(ctx context.Context, tenantID, id string) (domai
 	// Written-off invoices settle here too: a recovery whose credit balance
 	// covers the whole amount never reaches Stripe, and without this the
 	// operator gets a 200 with an invoice still marked uncollectible.
+	// payment_status mirrors what ClaimChargeForManualCollect admits
+	// ('pending','failed'), NOT just 'pending'. `failed` is the DOMINANT
+	// written-off shape — every dunning exhaustion carries it — so requiring
+	// 'pending' here would let a fully-credit-covered recovery debit the
+	// customer's ledger, answer 200, and leave the invoice uncollectible with
+	// no revenue booked and no way to retry (amount_due is now 0, which the
+	// handler rejects). A claim that admits a state the settle refuses is a
+	// stuck state by construction.
 	if (inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible) ||
-		inv.AmountDueCents > 0 || inv.PaymentStatus != domain.PaymentPending {
+		inv.AmountDueCents > 0 ||
+		(inv.PaymentStatus != domain.PaymentPending && inv.PaymentStatus != domain.PaymentFailed) {
 		return inv, nil // nothing to settle — not an error, the caller keeps the invoice as-is
 	}
 	return s.store.MarkPaid(ctx, tenantID, id, "", s.clock.Now(ctx))
@@ -814,6 +831,29 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 		atc.StripeConnected = s.stripeChecker.HasFor(ctx, inv.TenantID, postgres.Livemode(ctx))
 	}
 	inv.Attention = domain.ClassifyInvoiceAttention(inv, atc)
+
+	// Publish WHY a written-off invoice cannot be charged, so the dashboard can
+	// disable its button with the reason instead of letting an operator confirm
+	// a charge the server will refuse. Same source the collect handler uses —
+	// the UI and the refusal can never disagree.
+	//
+	// Guarded to uncollectible invoices, which is the tightest guard on this
+	// function: no other status can carry a recovery block, and the credit-note
+	// read below is the only cost. A read error leaves the block nil — the
+	// permissive direction, which is safe because the claim CAS refuses
+	// independently; the operator sees an enabled button and a typed 409 rather
+	// than a disabled button with no explanation.
+	if inv.Status == domain.InvoiceUncollectible {
+		var unrelieved int64
+		if s.creditNotes != nil && inv.ID != "" {
+			if n, err := s.creditNotes.UnreliefedClawbackCents(ctx, inv.TenantID, inv.ID); err == nil {
+				unrelieved = n
+			}
+		}
+		if b := domain.RecoveryBlocksCharge(inv, unrelieved); b.Blocked {
+			inv.RecoveryBlock = &b
+		}
+	}
 
 	// Compute the inclusive display end ("Jun 1 – Jun 30") on the read path
 	// (ADR-058 follow-up). Storage stays half-open; this is the single
