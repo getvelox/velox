@@ -853,10 +853,11 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 		if b := domain.RecoveryBlocksCharge(inv, unrelieved); b.Blocked {
 			inv.RecoveryBlock = &b
 		}
-		// The offline twin: what an operator must know BEFORE recording a wire
-		// against this invoice. Not a refusal — the money arrived — but the
-		// consequence goes unreconciled and nothing downstream will flag it.
-		inv.RecoveryWarning = domain.RecoveryWarnsOnOfflinePayment(inv)
+		// The offline twin, from the SAME credit-note read: what an operator must
+		// know BEFORE recording a wire against this invoice. Not a refusal — the
+		// money arrived — but the consequence goes unreconciled and nothing
+		// downstream will flag it.
+		inv.RecoveryWarning = domain.RecoveryWarnsOnOfflinePayment(inv, unrelieved)
 	}
 
 	// Compute the inclusive display end ("Jun 1 – Jun 30") on the read path
@@ -1437,7 +1438,13 @@ func (s *Service) RecordOfflinePayment(ctx context.Context, tenantID, id, note s
 	// the tax-reversal sweep's predicate (status IN ('voided','uncollectible')),
 	// so the discrepancy becomes permanently invisible the instant it is
 	// created.
-	if w := domain.RecoveryWarnsOnOfflinePayment(inv); w != nil {
+	var unrelievedRelief int64
+	if s.creditNotes != nil {
+		if n, cerr := s.creditNotes.UnreliefedClawbackCents(ctx, tenantID, inv.ID); cerr == nil {
+			unrelievedRelief = n
+		}
+	}
+	if w := domain.RecoveryWarnsOnOfflinePayment(inv, unrelievedRelief); w != nil {
 		slog.WarnContext(ctx, "offline payment recorded on a written-off invoice with an unreconciled consequence — "+w.Message,
 			"invoice_id", inv.ID, "invoice_number", inv.InvoiceNumber, "code", w.Code,
 			"amount_cents", inv.AmountDueCents, "currency", inv.Currency)
