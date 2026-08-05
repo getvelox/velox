@@ -404,7 +404,20 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 	// that would hold the invoice FOR UPDATE across StartDunning's ~600ms retry
 	// sleep + a cross-domain policy read on every failed charge (see the design
 	// panel — dunning-start is a schedule, not a money artifact).
-	if s.dunning != nil {
+	// A failed BAD-DEBT RECOVERY must not open a fresh campaign. The invoice is
+	// already written off — dunning ran, exhausted, and the policy's final
+	// action fired. Re-enrolling it would restart escalation emails (and, under
+	// a cancel-subscription final action, cancel a subscription) on a debt the
+	// business already gave up on, triggered by an operator trying to RECOVER
+	// it. The invoice simply stays written off, which is the honest outcome.
+	//
+	// Guarded here rather than inside StartDunning because StartDunning is
+	// idempotent-by-invoice and has no status opinion; this caller is the one
+	// that knows a charge just failed and holds `inv`.
+	if s.dunning != nil && inv.Status != domain.InvoiceFinalized {
+		slog.InfoContext(ctx, "dunning not started for failed charge on a non-finalized invoice — bad-debt recovery does not restart collection",
+			"invoice_id", inv.ID, "status", inv.Status)
+	} else if s.dunning != nil {
 		failureAt := simulatedFailureAt(inv)
 		if started, err := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt, domain.DunningCausePaymentFailed); err != nil {
 			slog.Error("payment failure StartDunning failed after retries — no action needed: the dunning backfill sweep starts the run automatically on a later scheduler tick (clock-pinned invoices on their next advance)",

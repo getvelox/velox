@@ -183,3 +183,47 @@ func TestChargeLease_ReleasedOnDefinitiveOutcomes(t *testing.T) {
 		t.Fatalf("processing: %d lease releases, want 0", len(inv.leaseReleases))
 	}
 }
+
+// TestChargeInvoice_FailedRecoveryDoesNotRestartDunning: a failed BAD-DEBT
+// RECOVERY charge must not open a fresh dunning campaign.
+//
+// The invoice is already written off — dunning ran, exhausted, and the policy's
+// final action fired. Re-enrolling it would restart escalation emails and, under
+// a cancel-subscription final action, cancel a subscription — all triggered by
+// an operator TRYING TO RECOVER the debt. The invoice simply stays written off.
+//
+// Both arms in one test: the finalized invoice must still enroll, or the guard
+// would have silently disabled dunning for every ordinary failed charge.
+func TestChargeInvoice_FailedRecoveryDoesNotRestartDunning(t *testing.T) {
+	t.Run("written-off invoice does NOT start dunning", func(t *testing.T) {
+		inv := finalizedPendingInvoice()
+		inv.Status = domain.InvoiceUncollectible
+
+		client := &mockStripeClient{piID: "pi_declined", shouldFail: true}
+		invoices := newMockInvoiceUpdater()
+		invoices.invoices["inv_1"] = inv
+		dunning := &recordingDunningStarter{}
+		s := NewStripe(client, invoices, newMockWebhookStore(), nil, dunning)
+
+		_, _ = s.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe_abc", "pm_test")
+
+		if len(dunning.calls) != 0 {
+			t.Errorf("a failed recovery charge started dunning on a WRITTEN-OFF invoice: %+v — recovery must not restart collection the business already gave up on", dunning.calls)
+		}
+	})
+
+	t.Run("finalized invoice still starts dunning", func(t *testing.T) {
+		inv := finalizedPendingInvoice()
+		client := &mockStripeClient{piID: "pi_declined", shouldFail: true}
+		invoices := newMockInvoiceUpdater()
+		invoices.invoices["inv_1"] = inv
+		dunning := &recordingDunningStarter{}
+		s := NewStripe(client, invoices, newMockWebhookStore(), nil, dunning)
+
+		_, _ = s.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe_abc", "pm_test")
+
+		if len(dunning.calls) == 0 {
+			t.Error("regression: an ordinary failed charge no longer starts dunning — the recovery guard is too wide")
+		}
+	})
+}
