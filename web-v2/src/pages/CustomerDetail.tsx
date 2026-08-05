@@ -877,7 +877,7 @@ export default function CustomerDetailPage() {
           or fetch) without an API key. Rotation invalidates the previous
           token immediately. */}
       <div className="mt-6">
-        <PublicCostDashboardCard customerId={id!} />
+        <PublicCostDashboardCard customerId={id!} readOnly={isArchived} />
       </div>
 
       {/* Payment methods — multi-card operator panel.
@@ -996,7 +996,7 @@ export default function CustomerDetailPage() {
           override exists purely as unexplained math on the usage card
           and the invoice. */}
       <div className="mt-6">
-        <PriceOverridesCard customerId={id!} customerTestClockId={customer?.test_clock_id} />
+        <PriceOverridesCard customerId={id!} customerTestClockId={customer?.test_clock_id} readOnly={isArchived} />
       </div>
 
       <SendSetupLinkDialog
@@ -2277,7 +2277,11 @@ function NewInvoiceDialog({ customerId, customer, billingProfile, onClose, onCre
 // fetch call from the customer's app — no API key needed. Rotating
 // invalidates the previous token immediately (read-only surface; the
 // rotate intent is "stop the previous URL right now").
-function PublicCostDashboardCard({ customerId }: { customerId: string }) {
+// readOnly follows the page's archived gate. Rotating mints a NEW token and
+// invalidates the previous one, so it is a write in both directions — leaving
+// it live under the "All data is read-only" banner let an operator revoke a
+// customer's working dashboard URL on a record the page called frozen.
+function PublicCostDashboardCard({ customerId, readOnly = false }: { customerId: string; readOnly?: boolean }) {
   const [latest, setLatest] = useState<{ token: string; public_url: string } | null>(null)
   const [rotating, setRotating] = useState(false)
 
@@ -2337,9 +2341,11 @@ function PublicCostDashboardCard({ customerId }: { customerId: string }) {
             )}
           </div>
         ) : null}
-        <Button onClick={onRotate} disabled={rotating} size="sm">
-          {rotating ? <><Loader2 size={14} className="animate-spin mr-2" />Rotating…</> : (latest ? 'Rotate again' : 'Generate URL')}
-        </Button>
+        {!readOnly && (
+          <Button onClick={onRotate} disabled={rotating} size="sm">
+            {rotating ? <><Loader2 size={14} className="animate-spin mr-2" />Rotating…</> : (latest ? 'Rotate again' : 'Generate URL')}
+          </Button>
+        )}
       </CardContent>
     </Card>
   )
