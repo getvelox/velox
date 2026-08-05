@@ -158,9 +158,9 @@ var (
 	parkedInvoices = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "velox_parked_invoices",
-			Help: "Finalized invoices whose charge attempt could not be identified with the provider (ADR-107). The search sweep (ADR-108) adopts any it can find at the provider; the rest need an operator — resolve at the provider or write off.",
+			Help: "Invoices whose charge attempt could not be identified with the provider (ADR-107), by disposition. open = still awaiting an operator decision; written_off = already decided, retained only because the ADR-108 search may still name the PaymentIntent. Alert on `open` growing — summing both hides a decision that was already made.",
 		},
-		[]string{"mode"},
+		[]string{"mode", "disposition"},
 	)
 
 	scheduledCleanupRows = promauto.NewCounterVec(
@@ -200,8 +200,8 @@ func RecordParkedSearchError(mode, class string) {
 // the given mode. Called from the payment reconciler each tick — the sweep that
 // deliberately no longer PROCESSES them is still the right place to REPORT
 // them, so excluding them from the queue did not also make them invisible.
-func RecordParkedInvoices(mode string, n int) {
-	parkedInvoices.WithLabelValues(mode).Set(float64(n))
+func RecordParkedInvoices(mode, disposition string, n int) {
+	parkedInvoices.WithLabelValues(mode, disposition).Set(float64(n))
 }
 
 // Metrics returns middleware that records HTTP request metrics.

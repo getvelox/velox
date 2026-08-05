@@ -2272,9 +2272,16 @@ func (s *PostgresStore) ListUnknownPayments(ctx context.Context, olderThan time.
 	return s.listInflightPayments(ctx, domain.PaymentUnknown, olderThan, limit)
 }
 
-// CountParkedInvoices counts invoices parked by ADR-107 — finalized, payment
-// unresolved, and carrying no PaymentIntent id, so nothing can name the attempt
-// and no sweep will resolve them.
+// CountParkedInvoices counts invoices parked by ADR-107 — payment unresolved
+// and carrying no PaymentIntent id, so nothing can name the attempt and no
+// ordinary sweep will resolve them.
+//
+// Counts written-off rows too, because writing a parked invoice off is the
+// exit the product ADVISES ("mark this invoice uncollectible to close it out",
+// invoice_attention.go) — and until 2026-08-05 doing so silently dropped the
+// row out of this count AND out of the ADR-108 search that is the only thing
+// that could ever name its PaymentIntent. Taking the advice made the money
+// permanently unaccounted for. Split by disposition below.
 //
 // It exists because ListUnknownPayments deliberately EXCLUDES these rows (they
 // are not reconcilable, and leaving them in starved the queue). That exclusion
@@ -2344,7 +2351,7 @@ func (s *PostgresStore) ListParkedSearchable(ctx context.Context, olderThan time
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+invCols+` FROM invoices
-		WHERE status = 'finalized'
+		WHERE status IN ('finalized', 'uncollectible')
 		  AND payment_status = 'unknown'
 		  AND COALESCE(stripe_payment_intent_id, '') = ''
 		  AND livemode = $1
@@ -2407,7 +2414,7 @@ func (s *PostgresStore) AdoptPaymentIntentIfParked(ctx context.Context, tenantID
 		WHERE id = $2
 		  AND payment_status = 'unknown'
 		  AND COALESCE(stripe_payment_intent_id, '') = ''
-		  AND status = 'finalized'
+		  AND status IN ('finalized', 'uncollectible')
 	`, paymentIntentID, id)
 	if err != nil {
 		return false, err
@@ -2422,23 +2429,30 @@ func (s *PostgresStore) AdoptPaymentIntentIfParked(ctx context.Context, tenantID
 	return n == 1, nil
 }
 
-func (s *PostgresStore) CountParkedInvoices(ctx context.Context) (int, error) {
+// Split by disposition because the two halves are different alerts. An `open`
+// parked invoice is an unmade decision; a `written_off` one has been decided by
+// a human and is only still here because the ADR-108 search might yet name its
+// PaymentIntent. Summing them into one number made a growing pile of
+// already-handled rows look like a growing pile of unhandled ones.
+func (s *PostgresStore) CountParkedInvoices(ctx context.Context) (open int, writtenOff int, err error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer postgres.Rollback(tx)
 
-	var n int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM invoices
-		WHERE status = 'finalized'
+		SELECT
+			COUNT(*) FILTER (WHERE status = 'finalized'),
+			COUNT(*) FILTER (WHERE status = 'uncollectible')
+		FROM invoices
+		WHERE status IN ('finalized', 'uncollectible')
 		  AND payment_status = 'unknown'
 		  AND COALESCE(stripe_payment_intent_id, '') = ''
-		  AND livemode = $1`, postgres.Livemode(ctx)).Scan(&n); err != nil {
-		return 0, err
+		  AND livemode = $1`, postgres.Livemode(ctx)).Scan(&open, &writtenOff); err != nil {
+		return 0, 0, err
 	}
-	return n, tx.Commit()
+	return open, writtenOff, tx.Commit()
 }
 
 // ListProcessingPayments returns invoices stuck in payment_status 'processing'

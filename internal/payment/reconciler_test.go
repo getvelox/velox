@@ -133,16 +133,20 @@ func (m *mockReconcileStore) ListProcessingPayments(_ context.Context, _ time.Ti
 // zero. A fake that always answers 0 would let the gauge silently report "no
 // parked invoices" forever — the exact drift class that gave an earlier fix zero
 // executing coverage.
-func (m *mockReconcileStore) CountParkedInvoices(_ context.Context) (int, error) {
-	n := 0
+func (m *mockReconcileStore) CountParkedInvoices(_ context.Context) (int, int, error) {
+	open, writtenOff := 0, 0
 	for _, inv := range m.byID {
-		if inv.Status == domain.InvoiceFinalized &&
-			inv.PaymentStatus == domain.PaymentUnknown &&
-			inv.StripePaymentIntentID == "" {
-			n++
+		if inv.PaymentStatus != domain.PaymentUnknown || inv.StripePaymentIntentID != "" {
+			continue
+		}
+		switch inv.Status {
+		case domain.InvoiceFinalized:
+			open++
+		case domain.InvoiceUncollectible:
+			writtenOff++
 		}
 	}
-	return n, nil
+	return open, writtenOff, nil
 }
 
 func (m *mockReconcileStore) Get(_ context.Context, _, id string) (domain.Invoice, error) {

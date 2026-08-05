@@ -40,9 +40,10 @@ type ReconcileInvoiceStore interface {
 	// CountParkedInvoices reports invoices this sweep deliberately does NOT
 	// process (ADR-107) — excluding them from the queue must not also make
 	// them invisible.
-	CountParkedInvoices(ctx context.Context) (int, error)
+	CountParkedInvoices(ctx context.Context) (open int, writtenOff int, err error)
 	// ListParkedSearchable is the ADR-108 sweep's input: parked invoices
-	// (unknown, empty PI id, finalized) old enough to search and not searched
+	// (unknown, empty PI id, finalized OR written off) old enough to search
+	// and not searched
 	// within the cool-off. Rotation, rate-pacing and the re-search interval
 	// all live in its predicate.
 	ListParkedSearchable(ctx context.Context, olderThan time.Time, limit int) ([]domain.Invoice, error)
@@ -171,12 +172,13 @@ func (r *Reconciler) Run(ctx context.Context, limit int) (int, []error) {
 	// Report the parked set before sweeping. These rows are excluded from the
 	// queries below by design; publishing the count is what keeps "stuck and
 	// loud" (ADR-107) actually loud, instead of log-only.
-	if n, err := r.invoices.CountParkedInvoices(ctx); err == nil {
+	if open, writtenOff, err := r.invoices.CountParkedInvoices(ctx); err == nil {
 		mode := "live"
 		if !postgres.Livemode(ctx) {
 			mode = "test"
 		}
-		mw.RecordParkedInvoices(mode, n)
+		mw.RecordParkedInvoices(mode, "open", open)
+		mw.RecordParkedInvoices(mode, "written_off", writtenOff)
 	} else {
 		slog.WarnContext(ctx, "could not count parked invoices for the gauge", "error", err)
 	}
