@@ -181,13 +181,21 @@ payment that already happened, not initiating one.
 - **Re-report on recovery** (Stripe's model). Only needed if the above ships,
   since relief-then-recovery is what creates the repayment obligation.
 
-## Separate defect found while measuring, NOT fixed here
+## Separate defect found while measuring — FIXED in its own PR
 
-`ListPendingTaxReversal` is bounded by `updated_at > now() - interval '24
-hours'`. A reversal that fails and is not retried inside that window is
+`ListPendingTaxReversal` was bounded by `updated_at > now() - interval '24
+hours'`. A reversal that failed and was not retried inside that window was
 **stranded permanently**. Measured on the live database: **4 voided invoices
-carrying $46.69 of tax** have a committed transaction, no `tax_reversed_at`,
-and are past the window. For *voided* invoices the reversal is unambiguously
-correct, so that is a live over-remittance with no recovery path. This ADR
-narrows the sweep to voided-only, which does not touch the window; the window
-is its own defect and needs its own fix.
+carrying $46.69 of tax** with a committed transaction, no `tax_reversed_at`,
+and past the window. For *voided* invoices the reversal is unambiguously
+correct, so that was a live over-remittance with no recovery path.
+
+The window had been copied from `ListPendingTaxCommit`, where 24h matches a
+HARD ceiling (the Stripe Tax calculation TTL, after which a re-commit is
+impossible). A reversal has no such ceiling, so the window only ever
+discarded work. It is removed: the set is self-draining (success stamps
+`tax_reversed_at`) and the drive is idempotent at Stripe (the invoice-stable
+`inv_taxrev_<id>` reference dedups), so nothing needs the bound.
+
+This ADR's own change — narrowing the sweep to voided-only — is unrelated to
+the window and unaffected.

@@ -2754,19 +2754,38 @@ func (s *PostgresStore) ListPendingTaxCommit(ctx context.Context, batch int, liv
 // upstream transaction reported as collected → the tenant over-remits. Powers
 // RetryPendingTaxReversal, the symmetric sibling of the #267 commit reconciler.
 //
-// Bounded to invoices touched in the last 24h. Unlike ListPendingTaxCommit —
-// whose 24h matches a HARD limit (the Stripe Tax calc TTL, after which a
-// re-commit is impossible) — a reversal has no such ceiling; here the window is
-// purely (a) anti-churn and (b) a grandfather for pre-0122 voids (whose
-// tax_reversed_at is NULL by default but were almost certainly reversed inline
-// already), avoiding a one-time re-reversal burst on first deploy WITHOUT a data
-// backfill. A transient failure resolves in seconds-to-minutes, well inside the
-// window. A SUSTAINED (>24h) failure ages out to manual reconcile — the loud
-// ERROR at the inline failure (raised from WARN) is the operator signal, same
-// recovery model as ListPendingTaxCommit's aged-out orphans. Re-reversal is
-// idempotent at Stripe (the invoice-stable `inv_taxrev_<id>` reference dedups),
-// so a row that WAS reversed but failed to stamp tax_reversed_at re-confirms
-// harmlessly and stamps out next tick.
+// NOT time-bounded, and that is the difference from ListPendingTaxCommit.
+//
+// The commit sweep's `updated_at > now() - 24h` matches a HARD ceiling — the
+// Stripe Tax calculation TTL, after which a re-commit is impossible, so rows
+// outside the window are genuinely unrecoverable and skipping them costs
+// nothing. A REVERSAL has no such ceiling: it stays possible forever.
+//
+// This sweep carried the same 24h anyway, for anti-churn plus a one-time
+// grandfather of pre-0122 voids. The cost of that was measured on the live
+// database while writing ADR-111: 4 voided invoices holding $46.69 of
+// committed tax, each with tax_reversed_at NULL and each past the window —
+// permanently stranded, silently, with the tenant over-remitting real money
+// and no surface anywhere naming them. The "loud ERROR at the inline
+// failure" the window relied on as the operator signal had scrolled out of
+// the logs months earlier; aging out is not a recovery model when nothing
+// durable records what aged out.
+//
+// Removing the window is safe because the set is self-draining and the drive
+// is idempotent: success stamps tax_reversed_at and the row leaves for good,
+// and the invoice-stable `inv_taxrev_<id>` reference dedups at Stripe, so a
+// row that WAS reversed but failed to stamp re-confirms harmlessly and stamps
+// out on the next tick. That also retires the grandfather rationale — a
+// pre-0122 void reversed inline simply re-confirms once and drops out. The
+// remaining predicates (voided + committed transaction + NULL stamp) already
+// bound the set to what genuinely needs work, and ORDER BY + LIMIT bound the
+// batch.
+//
+// The one case that now retries forever instead of aging out is the
+// mode-drift limitation below, which Stripe rejects on every re-drive. That
+// is a permanent per-tick ERROR rather than silent money loss — the honest
+// trade, and the same direction as every other no-silent-fallback call on
+// this path.
 //
 // LIMITATION (mode-drift): reverseInvoiceTax recomputes the reversal amount
 // (total − credited) on each re-drive. If the invoice's credit-noted total
@@ -2811,7 +2830,6 @@ func (s *PostgresStore) ListPendingTaxReversal(ctx context.Context, batch int, l
 		  AND COALESCE(i.tax_transaction_id, '') <> ''
 		  AND i.tax_reversed_at IS NULL
 		  AND i.is_simulated = false
-		  AND i.updated_at > now() - interval '24 hours'
 		ORDER BY i.updated_at ASC
 		LIMIT $2
 	`, livemode, batch)
