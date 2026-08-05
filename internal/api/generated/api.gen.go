@@ -464,6 +464,45 @@ func (e RatingRuleMode) Valid() bool {
 	}
 }
 
+// Defines values for RecipeDunningPolicyFinalInvoiceAction.
+const (
+	RecipeDunningPolicyFinalInvoiceActionMarkUncollectible RecipeDunningPolicyFinalInvoiceAction = "mark_uncollectible"
+	RecipeDunningPolicyFinalInvoiceActionNone              RecipeDunningPolicyFinalInvoiceAction = "none"
+)
+
+// Valid indicates whether the value is a known member of the RecipeDunningPolicyFinalInvoiceAction enum.
+func (e RecipeDunningPolicyFinalInvoiceAction) Valid() bool {
+	switch e {
+	case RecipeDunningPolicyFinalInvoiceActionMarkUncollectible:
+		return true
+	case RecipeDunningPolicyFinalInvoiceActionNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RecipeDunningPolicyFinalSubscriptionAction.
+const (
+	RecipeDunningPolicyFinalSubscriptionActionCancel RecipeDunningPolicyFinalSubscriptionAction = "cancel"
+	RecipeDunningPolicyFinalSubscriptionActionNone   RecipeDunningPolicyFinalSubscriptionAction = "none"
+	RecipeDunningPolicyFinalSubscriptionActionPause  RecipeDunningPolicyFinalSubscriptionAction = "pause"
+)
+
+// Valid indicates whether the value is a known member of the RecipeDunningPolicyFinalSubscriptionAction enum.
+func (e RecipeDunningPolicyFinalSubscriptionAction) Valid() bool {
+	switch e {
+	case RecipeDunningPolicyFinalSubscriptionActionCancel:
+		return true
+	case RecipeDunningPolicyFinalSubscriptionActionNone:
+		return true
+	case RecipeDunningPolicyFinalSubscriptionActionPause:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RecipeOverrideType.
 const (
 	Int    RecipeOverrideType = "int"
@@ -1510,11 +1549,23 @@ type RecipeDetail struct {
 
 // RecipeDunningPolicy defines model for RecipeDunningPolicy.
 type RecipeDunningPolicy struct {
-	FinalAction    string `json:"final_action"`
-	IntervalsHours []int  `json:"intervals_hours"`
-	MaxRetries     int    `json:"max_retries"`
-	Name           string `json:"name"`
+	// FinalInvoiceAction What exhausting all retries does to the unpaid invoice. `mark_uncollectible` writes it off as bad debt — the receivable closes, the invoice stays on the books for audit, and it remains settleable out of band. `none` leaves it finalized and due, which means it stays open until a human closes or collects it.
+	// Independent of `final_subscription_action` (ADR-112): the two were one enum until 2026-08-05, which made "cancel and write off" inexpressible.
+	FinalInvoiceAction RecipeDunningPolicyFinalInvoiceAction `json:"final_invoice_action"`
+
+	// FinalSubscriptionAction What exhausting all retries does to the subscription behind the unpaid invoice. `pause` pauses collection only (the cycle keeps drafting invoices); `cancel` cancels the subscription. No-op on a one-off invoice, which has no subscription.
+	FinalSubscriptionAction RecipeDunningPolicyFinalSubscriptionAction `json:"final_subscription_action"`
+	IntervalsHours          []int                                      `json:"intervals_hours"`
+	MaxRetries              int                                        `json:"max_retries"`
+	Name                    string                                     `json:"name"`
 }
+
+// RecipeDunningPolicyFinalInvoiceAction What exhausting all retries does to the unpaid invoice. `mark_uncollectible` writes it off as bad debt — the receivable closes, the invoice stays on the books for audit, and it remains settleable out of band. `none` leaves it finalized and due, which means it stays open until a human closes or collects it.
+// Independent of `final_subscription_action` (ADR-112): the two were one enum until 2026-08-05, which made "cancel and write off" inexpressible.
+type RecipeDunningPolicyFinalInvoiceAction string
+
+// RecipeDunningPolicyFinalSubscriptionAction What exhausting all retries does to the subscription behind the unpaid invoice. `pause` pauses collection only (the cycle keeps drafting invoices); `cancel` cancels the subscription. No-op on a one-off invoice, which has no subscription.
+type RecipeDunningPolicyFinalSubscriptionAction string
 
 // RecipeInstance The install badge: the record of a recipe being applied for a tenant (scoped per livemode since m0157). Field names are `recipe_key` / `recipe_version` — NOT `key`/`version`, which the recipe template itself uses.
 type RecipeInstance struct {
