@@ -569,6 +569,32 @@ func (s *Service) GetDunningPolicyID(ctx context.Context, tenantID, customerID s
 	return c.DunningPolicyID, nil
 }
 
+// deriveProfileStatus answers exactly one question: can the invoice
+// Bill-To block be rendered in full from this profile? That block prints
+// legal name, address_line1, city, and country (the BILL TO block in
+// internal/invoice/pdf.go RenderPDF), so those four are the completeness
+// set.
+//
+// Deliberately NOT required: postal_code and state. Both are legitimately
+// absent in real jurisdictions — Hong Kong and the UAE issue no postal
+// codes, and most countries have no state/province — so requiring them
+// would mark correct profiles incomplete. tax_id is likewise excluded: it
+// is only mandatory under reverse_charge, which UpsertBillingProfile
+// already hard-rejects above, so a stored profile always satisfies its own
+// tax_status requirements.
+//
+// BillingProfileMissing is not reachable here: it means "no profile row at
+// all", which the API surfaces as a 404 from GetBillingProfile, not as a
+// status on an existing row.
+func deriveProfileStatus(bp domain.CustomerBillingProfile) domain.BillingProfileStatus {
+	for _, required := range []string{bp.LegalName, bp.AddressLine1, bp.City, bp.Country} {
+		if strings.TrimSpace(required) == "" {
+			return domain.BillingProfileIncomplete
+		}
+	}
+	return domain.BillingProfileReady
+}
+
 func (s *Service) UpsertBillingProfile(ctx context.Context, tenantID string, bp domain.CustomerBillingProfile) (domain.CustomerBillingProfile, error) {
 	if bp.CustomerID == "" {
 		return domain.CustomerBillingProfile{}, errs.Required("customer_id")
@@ -671,9 +697,14 @@ func (s *Service) UpsertBillingProfile(ctx context.Context, tenantID string, bp 
 			return domain.CustomerBillingProfile{}, errs.Invalid("tax_id", "a buyer tax ID is required when tax_status is 'reverse_charge'")
 		}
 	}
-	if bp.ProfileStatus == "" {
-		bp.ProfileStatus = domain.BillingProfileIncomplete
-	}
+	// Derived, never caller-asserted. profile_status names a verdict about
+	// the stored data, so accepting it from the request body let a client
+	// PUT {profile_status:'ready'} onto a profile with no legal name and no
+	// address and have the API echo "ready" back. It was also the one enum
+	// on this endpoint with no service-side validation, so an unknown value
+	// fell through to the DB CHECK and surfaced as a 500 rather than the
+	// clean 400 tax_status gets above.
+	bp.ProfileStatus = deriveProfileStatus(bp)
 	result, err := s.store.UpsertBillingProfile(ctx, tenantID, bp)
 	if err != nil {
 		return result, err
