@@ -228,7 +228,14 @@ func RecoveryBlocksCharge(inv Invoice, unreliefedClawbackCents int64) PaymentBlo
 	if inv.Status != InvoiceUncollectible {
 		return PaymentBlock{} // not a recovery — ordinary rules apply
 	}
-	if inv.TaxTransactionID != "" {
+	// Keys on tax_reversed_at — the reversal HAVING HAPPENED — not on
+	// tax_transaction_id, which is set on every taxed invoice and never
+	// cleared. Under ADR-111 a write-off no longer reverses, so this fires
+	// only on invoices reversed BEFORE that change, or reversed by a future
+	// operator-initiated bad-debt-relief claim. Keyed on the transaction id it
+	// would refuse every taxed invoice forever and make recovery structurally
+	// unavailable to tax-registered tenants — the defect this replaces.
+	if inv.TaxReversedAt != nil {
 		return PaymentBlock{
 			Blocked: true,
 			Code:    "tax_reversed_unrecoverable",
@@ -280,8 +287,11 @@ func RecoveryWarnsOnOfflinePayment(inv Invoice) *PaymentBlock {
 	// Keyed on the reversal having HAPPENED (stamp set, or a stripe_tax invoice
 	// carrying tax whose committed transaction is gone), not on the invoice
 	// merely having tax.
-	if inv.TaxProvider == "stripe_tax" && inv.TaxAmountCents > 0 &&
-		(inv.TaxReversedAt != nil || inv.TaxTransactionID == "") {
+	// Same key as the block above: the reversal having happened. The old
+	// `|| TaxTransactionID == ""` arm fired on invoices whose tax was never
+	// COMMITTED (a commit orphan) — a different defect with a different fix,
+	// and warning about a reversal that never happened is a false statement.
+	if inv.TaxProvider == "stripe_tax" && inv.TaxAmountCents > 0 && inv.TaxReversedAt != nil {
 		return &PaymentBlock{
 			Code:    "tax_reversed_unrecoverable",
 			Message: "This invoice's tax was reversed with the tax provider when it was written off. Recording this payment does not re-report it, so the tax collected here will not appear in your provider's records — correct it with your provider.",
