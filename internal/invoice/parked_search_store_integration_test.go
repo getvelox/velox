@@ -172,3 +172,92 @@ func TestAdoptPaymentIntentIfParked_CAS(t *testing.T) {
 		}
 	})
 }
+
+// TestParkedSweep_WrittenOffRowsStayVisible pins the scan-exclusion sink closed
+// (2026-08-05).
+//
+// Writing a parked invoice off is the exit the product ADVISES — the attention
+// banner tells the operator to "mark this invoice uncollectible to close it
+// out". Taking that advice used to drop the row out of BOTH the ADR-108 search
+// (`status = 'finalized'`) and the gauge, so the one sweep that could ever name
+// its PaymentIntent stopped looking, silently, at the exact moment a human
+// acted. Money that may or may not have moved became permanently unaccounted.
+//
+// Both directions in one test on purpose: the written-off row must be visible,
+// AND the finalized row must still be, so a predicate that simply swapped one
+// status for the other fails here.
+func TestParkedSweep_WrittenOffRowsStayVisible(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Parked WriteOff Sink")
+	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{ExternalID: "cus_wo", DisplayName: "WO"})
+	if err != nil {
+		t.Fatalf("create customer: %v", err)
+	}
+	store := invoice.NewPostgresStore(db)
+
+	stillOpen := mkParked(t, ctx, db, store, tenantID, cust.ID, "INV-WO-OPEN", 2*time.Hour, 0)
+	writtenOff := mkParked(t, ctx, db, store, tenantID, cust.ID, "INV-WO-OFF", 2*time.Hour, 0)
+
+	// Write it off the way the product does — status only. payment_status stays
+	// 'unknown' deliberately (ADR-107: a write-off closes the INVOICE, it does
+	// not answer whether the card was charged).
+	tx, _ := db.BeginTx(context.Background(), postgres.TxBypass, "")
+	if _, err := tx.ExecContext(context.Background(),
+		`UPDATE invoices SET status = 'uncollectible' WHERE id = $1`, writtenOff); err != nil {
+		t.Fatalf("write off: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// 1. The search sweep still sees BOTH.
+	rows, err := store.ListParkedSearchable(ctx, time.Now().UTC().Add(-time.Hour), 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		seen[r.ID] = true
+	}
+	if !seen[writtenOff] {
+		t.Error("a WRITTEN-OFF parked invoice is not searchable — the sink is still open: writing it off stops the only sweep that could name its PaymentIntent")
+	}
+	if !seen[stillOpen] {
+		t.Error("regression: the finalized parked invoice is no longer searchable")
+	}
+
+	// 2. The gauge splits them rather than summing — an already-decided row must
+	//    not read as an unmade decision.
+	open, off, err := store.CountParkedInvoices(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if open != 1 {
+		t.Errorf("open parked count = %d, want 1", open)
+	}
+	if off != 1 {
+		t.Errorf("written-off parked count = %d, want 1 — the write-off disposition is invisible to the gauge", off)
+	}
+
+	// 3. Adoption works on the written-off row, which is the whole point: the
+	//    search found the PaymentIntent, so the invoice can rejoin the ordinary
+	//    reconciler and settle uncollectible -> paid.
+	adopted, err := store.AdoptPaymentIntentIfParked(ctx, tenantID, writtenOff, "pi_found_after_writeoff")
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if !adopted {
+		t.Fatal("a written-off parked invoice could not adopt a found PaymentIntent — it can never resolve")
+	}
+	got, err := store.Get(ctx, tenantID, writtenOff)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != domain.InvoiceUncollectible {
+		t.Errorf("adoption changed status to %q — it must leave the write-off standing; only payment_status moves", got.Status)
+	}
+	if got.PaymentStatus != domain.PaymentProcessing {
+		t.Errorf("payment_status = %q, want processing", got.PaymentStatus)
+	}
+}
