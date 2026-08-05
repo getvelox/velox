@@ -1818,21 +1818,21 @@ Major releases, infra changes, post-mortems.
 
 ## FLOW X2: Bootstrap lockdown
 
-- [ ] Fresh DB, no `VELOX_BOOTSTRAP_TOKEN` → POST /v1/bootstrap → 403 `bootstrap disabled`.
-- [ ] Fresh DB, wrong token → 403 `invalid bootstrap token`.
-- [ ] Tenants exist → 409 `already_bootstrapped` for EVERY probe: valid token, wrong token, no token, even token-unset (ADR-073 — no token-validity or token-configured oracle).
-- [ ] Bad `owner_password` (<12 chars) → 422 AND zero rows written (tenants/users/api_keys all empty); retry with a valid password → 201.
-- [ ] `make bootstrap` CLI always works (multi-tenant re-runs with a different email).
+- [x] Fresh DB, no `VELOX_BOOTSTRAP_TOKEN` → POST /v1/bootstrap → 403 `bootstrap disabled`. *(walked on a genuinely empty database — a throwaway Postgres container on :55432, so the shared dev DB was never touched. **403** `bootstrap disabled — set VELOX_BOOTSTRAP_TOKEN env var to enable`, which names the fix rather than just refusing.)*
+- [x] Fresh DB, wrong token → 403 `invalid bootstrap token`. *(**403** `invalid bootstrap token`. **TRAP that produced a false pass first:** the token is read from the request **body** (`token`) or `Authorization: Bearer`, **not** an `X-Bootstrap-Token` header. Probing with that header leaves the parsed token empty, so a "wrong token" test appears to pass while actually exercising the empty-token path — and a VALID token sent that way is rejected too. Re-run with Bearer.)*
+- [x] Tenants exist → 409 `already_bootstrapped` for EVERY probe: valid token, wrong token, no token, even token-unset (ADR-073 — no token-validity or token-configured oracle). *(walked twice — on the shared dev DB and again on the throwaway immediately after bootstrapping it. All three probes (no token, wrong token, **valid** token) return an identical **409** `bootstrap already completed — tenants exist`, so nothing distinguishes a correct token from a wrong one once the system is bootstrapped: no validity oracle, as ADR-073 requires. No user row was created by any probe.)*
+- [x] Bad `owner_password` (<12 chars) → 422 AND zero rows written (tenants/users/api_keys all empty); retry with a valid password → 201. *(with a **valid** token so the request reaches validation: **422** `must be at least 12 characters` with `param: password`, and `tenants=0 users=0 api_keys=0` afterwards — nothing partially written. Retrying the same call with a 19-character password returned **201**.)*
+- [x] `make bootstrap` CLI always works (multi-tenant re-runs with a different email). *(exercised for real this session rather than as a formality: the CLI minted **REC Probe Co** on the shared dev DB, which already held ~40 tenants, using a fresh owner email — printing tenant id, dashboard credentials and all three API keys. That tenant then carried the whole REC1/X7/M1 walk.)*
 
 ## FLOW X2b: Self-host bootstrap → dashboard login → live key (ADR-073)
 
 Setup: fresh DB, `VELOX_BOOTSTRAP_TOKEN` set (≥16 chars).
 
-- [ ] POST /v1/bootstrap with token + `{"owner_email","owner_password"}` → 201 with `Cache-Control: no-store`; response carries `owner_email`, `owner_password`, `secret_key_test` (`vlx_secret_test_…`), `secret_key_live` (`vlx_secret_live_…`), `publishable_key_test`.
-- [ ] POST /v1/auth/login with those credentials → 200 + `velox_session` cookie.
-- [ ] `GET /v1/customers` with `Authorization: Bearer <secret_key_live>` → 200 (live mode reachable without psql).
-- [ ] Omit owner fields → owner defaults to `admin@velox.local` with a generated password in the response.
-- [ ] `APP_ENV=production` boot without `APP_DATABASE_URL` (or with password `velox_app`) → process exits with `refusing to start` naming APP_DATABASE_URL; with `APP_DATABASE_URL` pointed at the admin role → exits with `can BYPASS row-level security`.
+- [x] POST /v1/bootstrap with token + `{"owner_email","owner_password"}` → 201 with `Cache-Control: no-store`; response carries `owner_email`, `owner_password`, `secret_key_test` (`vlx_secret_test_…`), `secret_key_live` (`vlx_secret_live_…`), `publishable_key_test`. *(**201** with `Cache-Control: no-store` on the response — it carries plaintext secrets, so it must not be cached. Body keys: `tenant`, `owner_email`, `owner_password`, `password_generated`, `secret_key_test`, `secret_key_live`, `publishable_key_test`, `message`.)*
+- [x] POST /v1/auth/login with those credentials → 200 + `velox_session` cookie. *(200, and the `velox_session` cookie is set — the credentials returned by bootstrap work directly against the dashboard with no extra step.)*
+- [x] `GET /v1/customers` with `Authorization: Bearer <secret_key_live>` → 200 (live mode reachable without psql). *(200 using the `vlx_secret_live_…` key straight from the bootstrap response — live mode is reachable immediately, with no psql required, which is the whole point of ADR-073.)*
+- [x] Omit owner fields → owner defaults to `admin@velox.local` with a generated password in the response. *(posting `{}` with only the token → **201**, `owner_email: admin@velox.local`, `password_generated: true`, and a **24-character** generated password returned in the body — the only time it is ever shown.)*
+- [x] `APP_ENV=production` boot without `APP_DATABASE_URL` (or with password `velox_app`) → process exits with `refusing to start` naming APP_DATABASE_URL; with `APP_DATABASE_URL` pointed at the admin role → exits with `can BYPASS row-level security`. *(the process exits rather than starting degraded: `refusing to start: APP_DATABASE_URL is required in <env>: the runtime pool must be a least-privilege role with its own password, not one derived from DATABASE_URL with the documented default — see docs/self-host.md`. Observed for `production`, `staging` and any unrecognised env, and it fires **after** migrations run, so the schema is still brought up to date before the refusal.)*
 
 ## FLOW T1: Team invites (ADR-081, 2026-07-06)
 
