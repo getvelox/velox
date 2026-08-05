@@ -1679,7 +1679,7 @@ Verifies the 2026-05-26 audit sweep wired every state-changing flow into `audit_
 
 ## FLOW P3: Usage summary
 
-- [ ] `GET /v1/usage-summary/{customer_id}?from=…&to=…` → per-meter aggregated totals matching ingestion.
+- [x] `GET /v1/usage-summary/{customer_id}?from=…&to=…` → per-meter aggregated totals matching ingestion. *(checked against the database rather than against itself. Three events were ingested for one customer on one meter — two via `/usage-events`, one via `/usage-events/backfill`, quantity 1 each — and the DB confirms `api 2 / backfill 1`. The API returns `meters: {vlx_mtr_…: "3"}, total_events: 3`, so the totals match and **backfill-origin events are included** in the summary. The window is real, not decorative: narrowing `from` to the last 2 hours drops it to `1`, the only event inside that range.)*
 
 ## FLOW P4: Empty billing cycle
 
@@ -1693,11 +1693,11 @@ Verifies the 2026-05-26 audit sweep wired every state-changing flow into `audit_
 
 ## FLOW P6: Tax deferral metrics
 
-- [ ] **Late live usage events are observable** — POST a live-origin usage event timestamped >24h in the past (inside an open period): `GET /metrics` shows `velox_usage_late_event_total` incremented and a WARN log names the customer/meter/timestamp; a backfill-origin event does NOT increment it.
+- [x] **Late live usage events are observable** — POST a live-origin usage event timestamped >24h in the past (inside an open period): `GET /metrics` shows `velox_usage_late_event_total` incremented and a WARN log names the customer/meter/timestamp; a backfill-origin event does NOT increment it. *(walked with both controls. A 3-day-old event through `POST /v1/usage-events` → `velox_usage_late_event_total{origin="api"} 1`, plus a WARN naming customer_id, meter_id, timestamp and origin: "late usage event (>24h past) — may fall in an already-finalized period and go unbilled". A same-instant event left the counter at 1, and a **4-day-old** event through `POST /v1/usage-events/backfill` — accepted 201 — also left it at 1, so the exclusion really is by origin and not by age.)*
 
-- [ ] `curl -H "Authorization: Bearer $METRICS_TOKEN" /metrics | grep velox_tax_outcome_total` → counter registered (the legacy `velox_tax_fallback_total` was renamed when the zero-tax fallback was cut — ADR-041; outcome is now `deferred`). <!-- currency-ok: documents the metric rename -->
-- [ ] Reasons increment correctly: `velox_tax_outcome_total{outcome="deferred",reason=...}` for `no_country` (customer missing country), `no_client_for_mode` (Stripe not connected for the active livemode), `api_error` (invalid Stripe key).
-- [ ] Happy path → counter unchanged.
+- [x] `curl -H "Authorization: Bearer $METRICS_TOKEN" /metrics | grep velox_tax_outcome_total` → counter registered (the legacy `velox_tax_fallback_total` was renamed when the zero-tax fallback was cut — ADR-041; outcome is now `deferred`). <!-- currency-ok: documents the metric rename --> *(registered and emitting once provoked; the legacy name is confirmed **absent** — zero occurrences. Worth recording because it cost time here: this and `velox_usage_late_event_total` are both **labelled** counter vectors, so they emit **nothing at all** until their first increment. Grepping an idle server returns empty, and that is not evidence the counter is missing — each has to be provoked before it can be seen.)*
+- [~] Reasons increment correctly: `velox_tax_outcome_total{outcome="deferred",reason=...}` for `no_country` (customer missing country), `no_client_for_mode` (Stripe not connected for the active livemode), `api_error` (invalid Stripe key). *(**`no_country` walked:** with the tenant temporarily switched to `stripe_tax`, a customer whose billing profile carries no country produced `velox_tax_outcome_total{outcome="deferred",reason="no_country"} 1` and the matching WARN — `stripe tax failed, deferring invoice for retry … reason=no_country … "stripe tax: customer has no country on billing profile"`. The other two are **not** walked and are not being claimed: `no_client_for_mode` needs the request to execute in live mode, and this tenant holds credentials for test only (confirmed: one row, `livemode=f`); `api_error` needs an invalid Stripe key, which would mean overwriting this tenant's stored credential — off-limits here because its webhook signing secret cannot be retrieved once replaced. Both want a throwaway tenant with disposable Stripe credentials. Tenant restored to `manual`.)*
+- [x] Happy path → counter unchanged. *(the successful Stripe Tax calculation earlier in this session — the CU1 tax-retry flush that recomputed an invoice to `tax_status=ok` — added no series at all: across everything above the vector holds exactly one sample, the `no_country` deferral. The counter really is a failure-mode-only signal, as its help text claims.)*
 
 ---
 
@@ -1800,9 +1800,11 @@ Major releases, infra changes, post-mortems.
 
 ## FLOW X1: RLS multi-tenant isolation
 
-- [ ] Bootstrap Tenant A + key A; create "Alpha Corp". Bootstrap Tenant B + key B; list customers with key B → Alpha NOT visible.
-- [ ] `GET /v1/customers/{alpha_id}` with key B → 404.
-- [ ] Same check for invoices, subs, credits — cross-tenant reads must 404.
+- [x] Bootstrap Tenant A + key A; create "Alpha Corp". Bootstrap Tenant B + key B; list customers with key B → Alpha NOT visible. *(walked with two real tenants — TC Walk Co and X3 Tenant B — using per-owner sessions, which resolve a tenant through the same RLS path as keys. Tenant B's customer list returned **0 rows** and did not contain tenant A's customer id.)*
+- [x] `GET /v1/customers/{alpha_id}` with key B → 404. *(404 for tenant B. The control is what makes this mean anything: tenant A gets **200** on the exact same id, so the 404 is RLS refusing the row, not a bad identifier.)*
+- [x] Same check for invoices, subs, credits — cross-tenant reads must 404. *(invoice `vlx_inv_d9p35gjmajdv0h4pvd00` and subscription `vlx_sub_d9ore3bmajdh730gppc0`: 404 for tenant B, 200 for tenant A on both. Tenant B's own list endpoints for invoices and subscriptions returned 0 rows. Credit notes could not be exercised as a cross-tenant read — tenant A has none — so the credit assertion rests on the ledger being reached only through customer-scoped routes, which are covered below.*
+
+  *One inconsistency found, and it is **not** a leak. `/v1/customer-portal/{customer_id}/overview|invoices|subscriptions` return **200** for another tenant's customer id where every other endpoint 404s. The body is empty in every field — tenant A sees `outstanding_balance 1331 / 2 unpaid` and two invoices, tenant B sees zeros and empty arrays — because each field comes from a tenant-scoped query. Nor is it an existence oracle: a **made-up** id also returns 200-empty, for the owning tenant too, so a caller cannot distinguish "exists elsewhere" from "does not exist". The real cost is honesty — the handler never looks the customer up, so a typo'd id reads as "this customer has nothing". Recorded at `internal/api/customer_portal.go`; fixing it needs a customer store wired into that handler.)*
 
 ## FLOW X2: Bootstrap lockdown
 
