@@ -1275,7 +1275,19 @@ func (s *Service) UnreliefedClawbackCents(ctx context.Context, tenantID, invoice
 	}
 	var total int64
 	for _, cn := range cns {
-		if cn.IssuePending && cn.Status == domain.CreditNoteVoided {
+		// Voided WITHOUT ever having been issued. Issue() is what applies the
+		// relief, so a credit note that reached 'voided' with issued_at still
+		// NULL never reduced amount_due — the invoice is owed that money and
+		// its amount is stale-HIGH by exactly this sum.
+		//
+		// This used to test `IssuePending && voided`, which is UNSATISFIABLE:
+		// TransitionStatusAudited sets `issue_pending=false` in the same
+		// statement that sets status (creditnote/postgres.go), so no row can
+		// ever hold both. The gate built on it could never fire. It was
+		// written from domain.CreditNote's own comment claiming the flag is
+		// "NEVER cleared" — a comment the clearing writer contradicts, and
+		// which is corrected in the same commit as this.
+		if cn.Status == domain.CreditNoteVoided && cn.IssuedAt == nil {
 			total += cn.TotalCents
 		}
 	}

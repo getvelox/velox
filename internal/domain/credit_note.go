@@ -62,7 +62,14 @@ type CreditNote struct {
 	// IssuePending marks an AUTO-ISSUE clawback draft: created IN-TRANSACTION
 	// with a subscription downgrade / item-removal / qty-decrease (so the item
 	// change and the clawback obligation commit atomically), then issued
-	// post-commit. Set true ONLY at create; NEVER cleared. RetryPendingClawback
+	// post-commit. Set true ONLY at create, and CLEARED on any exit from draft
+	// (creditnote/postgres.go's status transition sets issue_pending=false
+	// alongside the new status — added 2026-07-21 because the API was serving
+	// issue_pending=true on issued CNs forever). This comment previously said
+	// "NEVER cleared", which was false, and a later gate was built on it: a
+	// predicate testing `issue_pending AND status='voided'` is UNSATISFIABLE
+	// and could never fire. To find a credit note whose relief never applied,
+	// test `status='voided' AND issued_at IS NULL` instead. RetryPendingClawback
 	// Issue recovers a draft whose post-commit Issue() never ran (e.g. a crash
 	// before issuance) — it scans status='draft' AND issue_pending, so an
 	// issued CN drops out via its status, not via this flag. (As of ADR-061 the

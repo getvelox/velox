@@ -279,7 +279,7 @@ func RecoveryBlocksCharge(inv Invoice, unreliefedClawbackCents int64) PaymentBlo
 // BEFORE they act, on the invoice, not in a log line an engineer reads later.
 //
 // Returns nil when there is nothing to say — the overwhelming majority.
-func RecoveryWarnsOnOfflinePayment(inv Invoice) *PaymentBlock {
+func RecoveryWarnsOnOfflinePayment(inv Invoice, unreliefedClawbackCents int64) *PaymentBlock {
 	if inv.Status != InvoiceUncollectible {
 		return nil
 	}
@@ -301,6 +301,18 @@ func RecoveryWarnsOnOfflinePayment(inv Invoice) *PaymentBlock {
 		return &PaymentBlock{
 			Code:    "recovery_superseded",
 			Message: "This invoice was billed on a usage threshold, and writing it off did not stop that usage being re-billed on a later invoice. Check that this payment is not settling usage the customer has already been billed for.",
+		}
+	}
+	if unreliefedClawbackCents > 0 {
+		return &PaymentBlock{
+			Code: "relief_not_reissued",
+			// Phrased for the moment it is READ. By the time an operator is
+			// recording a wire the customer has already sent whatever they were
+			// invoiced — so the over-collection has happened and cannot be
+			// prevented here. What IS still actionable is the debt it creates in
+			// the other direction, which is why the sentence ends on issuing the
+			// credit rather than on stopping the payment.
+			Message: "This invoice is owed a credit that was never applied, so the amount shown is higher than what the customer actually owed. If they paid this amount they have overpaid — issue the credit so it is returned or offset against their next invoice.",
 		}
 	}
 	return nil

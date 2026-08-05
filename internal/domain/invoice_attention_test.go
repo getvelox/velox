@@ -1089,7 +1089,7 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 	}
 
 	t.Run("tax reversed warns", func(t *testing.T) {
-		w := RecoveryWarnsOnOfflinePayment(taxReversed())
+		w := RecoveryWarnsOnOfflinePayment(taxReversed(), 0)
 		if w == nil || w.Code != "tax_reversed_unrecoverable" {
 			t.Fatalf("got %+v, want a tax_reversed_unrecoverable warning", w)
 		}
@@ -1098,14 +1098,14 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 	t.Run("threshold warns", func(t *testing.T) {
 		i := writtenOff()
 		i.BillingReason = BillingReasonThreshold
-		w := RecoveryWarnsOnOfflinePayment(i)
+		w := RecoveryWarnsOnOfflinePayment(i, 0)
 		if w == nil || w.Code != "recovery_superseded" {
 			t.Fatalf("got %+v, want a recovery_superseded warning", w)
 		}
 	})
 
 	t.Run("ordinary written-off invoice says nothing", func(t *testing.T) {
-		if w := RecoveryWarnsOnOfflinePayment(writtenOff()); w != nil {
+		if w := RecoveryWarnsOnOfflinePayment(writtenOff(), 0); w != nil {
 			t.Fatalf("warned on a clean recovery: %+v — a warning on every offline payment is a warning nobody reads", w)
 		}
 	})
@@ -1113,7 +1113,7 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 	t.Run("a FINALIZED invoice never warns", func(t *testing.T) {
 		i := taxReversed()
 		i.Status = InvoiceFinalized
-		if w := RecoveryWarnsOnOfflinePayment(i); w != nil {
+		if w := RecoveryWarnsOnOfflinePayment(i, 0); w != nil {
 			t.Fatalf("warned on an ordinary invoice: %+v", w)
 		}
 	})
@@ -1124,12 +1124,28 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 		// with — warning there would train the operator to ignore this.
 		i := writtenOff()
 		i.TaxProvider, i.TaxAmountCents = "stripe_tax", 0
-		if w := RecoveryWarnsOnOfflinePayment(i); w != nil {
+		if w := RecoveryWarnsOnOfflinePayment(i, 0); w != nil {
 			t.Fatalf("warned with zero tax: %+v", w)
 		}
 		i.TaxProvider, i.TaxAmountCents = "manual", 725
-		if w := RecoveryWarnsOnOfflinePayment(i); w != nil {
+		if w := RecoveryWarnsOnOfflinePayment(i, 0); w != nil {
 			t.Fatalf("warned on a manual-provider invoice: %+v — the tenant files that tax themselves", w)
+		}
+	})
+
+	t.Run("unapplied credit warns — the arm that was UNSATISFIABLE until 2026-08-05", func(t *testing.T) {
+		// The predicate behind this sum used to test `issue_pending AND
+		// status='voided'`, which no row can satisfy: the status transition
+		// clears issue_pending in the same statement. The gate built on it
+		// could never fire, and it was written from a domain comment claiming
+		// the flag is "NEVER cleared" — itself false. Corrected to
+		// `voided AND issued_at IS NULL`.
+		w := RecoveryWarnsOnOfflinePayment(writtenOff(), 2500)
+		if w == nil || w.Code != "relief_not_reissued" {
+			t.Fatalf("got %+v, want a relief_not_reissued warning", w)
+		}
+		if RecoveryWarnsOnOfflinePayment(writtenOff(), 0) != nil {
+			t.Error("warned with zero unapplied relief — the negative control")
 		}
 	})
 
