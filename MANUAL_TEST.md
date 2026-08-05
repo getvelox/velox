@@ -1344,6 +1344,23 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ---
 
+## FLOW D6: Bad-debt recovery — charging a written-off invoice
+
+The customer comes back after the invoice was written off. Operator-only: the
+invoice is charged in place and never reopened.
+
+- [ ] A written-off invoice's banner offers **Charge customer**; a finalized one does not (the button belongs to the write-off state, not the page).
+- [ ] Clicking it charges the saved card and the invoice reads **Paid** — with the "Marked uncollectible" row still in its timeline, showing the write-off was kept rather than erased.
+- [ ] The confirm dialog names the customer, the amount, and states that credit balance is applied first and that dunning does not restart.
+- [ ] A written-off invoice whose tax was reversed refuses with **409 `tax_reversed_unrecoverable`**, naming that charging would collect tax already reported as not collected. *(walked 2026-08-05 live on TC Walk Co VLX-000132.)*
+- [ ] A written-off **threshold** invoice refuses with **409 `recovery_superseded`**, naming that the usage was re-billed. *(walked 2026-08-05 live on TC Walk Co VLX-000136.)*
+- [ ] A recoverable written-off invoice gets **past** the status gate — it fails only on a later check (e.g. no payment method), proving the gate opened rather than the refusals being blanket. *(walked 2026-08-05 live on TC Walk Co VLX-000152 → 422 "customer has no payment method set up".)*
+- [ ] A **parked** written-off invoice still refuses with `payment_unidentifiable`, and the message does NOT advise marking it uncollectible (it already is).
+- [ ] A declined recovery charge leaves the invoice written off, with **no new dunning campaign** on the Dunning tab.
+- [ ] While a recovery charge is in flight the invoice shows an **info** banner saying it stays written off until the payment settles; a written-off invoice at `failed` shows **no** such banner.
+- [ ] A written-off invoice for a customer with a credit balance charges the card only the remainder shown in the dialog.
+- [ ] The public payment link for that invoice still shows "This invoice is closed" with no Pay button — recovery is operator-only.
+
 ## FLOW D5: Dunning policy admin (CRUD + assignment + terminal actions)
 
 Policy configuration surface — distinct from the dunning state machine under catchup (FLOW TC5).

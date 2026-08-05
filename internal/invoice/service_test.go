@@ -1185,10 +1185,17 @@ func TestVoid_PartialTaxReversalAfterPriorCreditNote(t *testing.T) {
 	}
 }
 
-type fakeCreditNoteTotaler struct{ credited int64 }
+type fakeCreditNoteTotaler struct {
+	credited   int64
+	unrelieved int64
+}
 
 func (f *fakeCreditNoteTotaler) CreditedCents(_ context.Context, _, _ string) (int64, error) {
 	return f.credited, nil
+}
+
+func (f *fakeCreditNoteTotaler) UnreliefedClawbackCents(_ context.Context, _, _ string) (int64, error) {
+	return f.unrelieved, nil
 }
 
 // TestVoid_CreditApplied_TaxNotUnderReversed is the audit's void-tax regression:

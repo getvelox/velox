@@ -11,6 +11,14 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **A written-off invoice can now be charged when the customer comes back (2026-08-05).** When automatic retries give up, Velox writes the invoice off as bad debt — usually on a timer, without anyone deciding it. Until now that was a dead end for card payments: if the customer returned weeks later with a working card, the only way to take their money was for them to pay by wire and for someone to type it in by hand. An operator can now charge the card directly from the invoice. **The invoice is not reopened** — it stays written off until the payment actually settles, then shows as paid, so the write-off remains visible in its history rather than being quietly erased. If the card declines, it simply stays written off, and no new collection campaign starts.
+
+  This stays an **operator** action. The customer-facing pages still say collection is closed, and the automatic retry machinery still refuses written-off invoices — nothing re-charges a debt the business gave up on without a person deciding to.
+
+  Three situations refuse the charge outright, each because collecting would be wrong rather than merely awkward: when the tax on the invoice was already reported to the tax authority as not collected (charging would collect tax that can't be re-reported); when the invoice was billed on a usage threshold and that usage has since been re-billed on a newer invoice (charging would bill it twice); and when the invoice is owed a credit that was never applied, so the amount shown is higher than what's actually due. Each answers with a specific reason rather than a generic failure.
+
 ### Fixed
 
 - **Writing off an invoice with an unidentifiable payment no longer hides it from the search that could still resolve it (2026-08-05).** When a charge attempt can't be identified at the payment provider, Velox parks the invoice and keeps searching for the attempt in the background — and the banner tells the operator that if it can't be found, marking the invoice uncollectible is how to close it out. Taking that advice stopped the search: the sweep only looked at invoices that were still open, so writing one off silently ended the one process that could ever match it to a real payment. Money that may or may not have left the customer's account became permanently unaccounted for, at the exact moment a person tried to deal with it. Written-off invoices now stay in the search, and a payment found later still settles them. The count operators alert on is also split now — invoices still awaiting a decision are reported separately from ones already written off, because a growing pile of handled cases used to read as a growing pile of unhandled ones.

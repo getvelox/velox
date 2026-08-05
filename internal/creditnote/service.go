@@ -1258,6 +1258,30 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.CreditN
 // billing engine's headroom-aware multi-invoice credit fan-out uses it so a
 // share never overruns an invoice whose creditable amount a prior credit note
 // (e.g. an earlier downgrade clawback) already consumed.
+// UnreliefedClawbackCents sums relief this invoice was OWED but never received:
+// auto-issue clawback drafts (issue_pending) that ended up voided, so their
+// Issue() never ran and never reduced amount_due.
+//
+// Consumed by the bad-debt recovery gate. A written-off invoice carrying one of
+// these has an amount_due that is stale-HIGH — charging it would over-collect
+// by exactly this sum. Relief that was properly issued has already moved
+// amount_due and must not be counted, which is why status discriminates:
+// IssuePending is set only at create and NEVER cleared (see domain.CreditNote),
+// so an issued clawback drops out by its status, not by the flag.
+func (s *Service) UnreliefedClawbackCents(ctx context.Context, tenantID, invoiceID string) (int64, error) {
+	cns, err := s.store.List(ctx, ListFilter{TenantID: tenantID, InvoiceID: invoiceID})
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, cn := range cns {
+		if cn.IssuePending && cn.Status == domain.CreditNoteVoided {
+			total += cn.TotalCents
+		}
+	}
+	return total, nil
+}
+
 func (s *Service) CreditedCents(ctx context.Context, tenantID, invoiceID string) (int64, error) {
 	cns, err := s.store.List(ctx, ListFilter{TenantID: tenantID, InvoiceID: invoiceID})
 	if err != nil {
