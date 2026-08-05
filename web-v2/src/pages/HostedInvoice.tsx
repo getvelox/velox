@@ -3,7 +3,7 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { formatCents, formatRate, formatDate, formatTaxRate } from '@/lib/api'
-import { isTerminalInvoiceStatus, invoiceAmountLabel } from '@/lib/invoiceTerminal'
+import { invoiceAmountLabel } from '@/lib/invoiceTerminal'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -597,7 +597,7 @@ export default function HostedInvoicePage() {
                     the payment-update page, 2026-07-28). */}
                 <div className="flex justify-between pt-2 border-t font-semibold">
                   <dt className="text-foreground">
-                    {isTerminalInvoiceStatus(invoice.status) ? 'Invoice amount' : 'Amount due'}
+                    {invoiceAmountLabel(invoice.status)}
                   </dt>
                   <dd className="text-foreground tabular-nums">
                     {formatCents(invoice.amount_due_cents, invoice.currency)}
