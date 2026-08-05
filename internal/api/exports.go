@@ -385,7 +385,12 @@ func (h *exportsHandler) exportInvoices(w http.ResponseWriter, r *http.Request) 
 		"total_amount_cents", "amount_due_cents", "amount_paid_cents",
 		"credits_applied_cents",
 		"billing_period_start", "billing_period_end",
-		"issued_at", "due_at", "paid_at", "voided_at",
+		// uncollectible_at sits beside its siblings: a written-off invoice that
+		// is later RECOVERED reaches status='paid', and without this column the
+		// row is byte-identical to one that was never written off. Bad-debt
+		// recovery is a distinct accounting event; the export was the only
+		// durable place an accountant could locate one, and it could not.
+		"issued_at", "due_at", "paid_at", "voided_at", "uncollectible_at",
 		"created_at",
 	}); err != nil {
 		return
@@ -409,6 +414,7 @@ func (h *exportsHandler) exportInvoices(w http.ResponseWriter, r *http.Request) 
 			timePtrCSV(inv.DueAt),
 			timePtrCSV(inv.PaidAt),
 			timePtrCSV(inv.VoidedAt),
+			timePtrCSV(inv.UncollectibleAt),
 			inv.CreatedAt.UTC().Format(time.RFC3339),
 		}); err != nil {
 			return err

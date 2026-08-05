@@ -649,8 +649,15 @@ func withCommitExposure(att *Attention, inv Invoice, atc AttentionContext) *Atte
 	// Void is offered only when there is something left to cancel. On a
 	// fully-spent grant the button would destroy the invoice and recover
 	// nothing, which is a worse outcome than no button at all.
+	//
+	// ...and never while a payment is in flight, because PaymentBlocksAction
+	// refuses void in that state — the button would answer 409. Reachable
+	// since bad-debt recovery shipped: a written-off commit invoice being
+	// recovered sits at uncollectible+processing, where this banner folds onto
+	// the recovery banner and would otherwise say "don't charge it again"
+	// immediately above a Void button that cannot run.
 	var voidAction []AttentionActionItem
-	if drawable > 0 {
+	if drawable > 0 && !inv.PaymentStatus.IsInFlight() {
 		voidAction = []AttentionActionItem{{Code: AttentionActionVoidInvoice, Label: "Void invoice"}}
 	}
 
