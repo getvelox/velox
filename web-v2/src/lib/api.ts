@@ -1,4 +1,6 @@
 import { setLastRequestId } from './lastRequestId'
+// status.ts has ZERO imports, so this cannot cycle back into api.ts.
+import { paymentIsUnresolved } from './status'
 // Recipe wire types are GENERATED from api/openapi.yaml (single source of
 // truth) — the hand-written versions drifted from the server (`key` vs
 // `recipe_key`, a phantom `products` role) until the 2026-07-26 recipe
@@ -797,6 +799,16 @@ export interface AttentionActionItem {
   label?: string
 }
 
+// Why a WRITTEN-OFF invoice cannot be charged. Computed server-side and
+// published so the dashboard disables "Charge customer" WITH its reason,
+// instead of letting an operator confirm a charge the server will refuse.
+// Absent on every invoice that is not uncollectible, and on recoverable ones.
+export interface RecoveryBlock {
+  blocked: boolean
+  code?: string
+  message?: string
+}
+
 export interface InvoiceAttention {
   severity: AttentionSeverity
   reason: AttentionReason
@@ -872,6 +884,9 @@ export interface Invoice {
   // payment_status / due_at. Omitted entirely when
   // the invoice is healthy. See ADR-009.
   attention?: InvoiceAttention
+  // Present only when this written-off invoice CANNOT be charged, and says
+  // why. Absent means recoverable (or not written off at all).
+  recovery_block?: RecoveryBlock
   total_amount_cents: number
   amount_due_cents: number
   amount_paid_cents: number
@@ -927,10 +942,19 @@ export interface Invoice {
 // when an operator complains about latency, not before.
 export function pollIntervalForInvoice(invoice?: Invoice): number | false {
   if (!invoice) return false
-  // Drafts + voided + uncollectible are terminal-no-trailing-events.
-  // (uncollectible was missing — a written-off invoice's page polled
-  // the timeline forever.)
-  if (invoice.status === 'draft' || invoice.status === 'voided' || invoice.status === 'uncollectible') return false
+  // Drafts + voided are terminal-no-trailing-events.
+  //
+  // uncollectible is terminal ONLY while nothing is charging it. A bad-debt
+  // recovery leaves the invoice written off with a live PaymentIntent, and
+  // treating that as terminal froze the page at the exact moment money was
+  // moving: the operator clicked Charge customer, one refetch drew the
+  // in-flight banner, and nothing updated again until a manual reload — no
+  // settle, no paid row, no status flip. The banner that exists to stop a
+  // second operator charging again could never clear on its own.
+  //
+  // paymentIsUnresolved is the shared predicate, never re-typed here.
+  if (invoice.status === 'draft' || invoice.status === 'voided') return false
+  if (invoice.status === 'uncollectible' && !paymentIsUnresolved(invoice.payment_status)) return false
   // Just-paid invoices keep polling slowly for ~30s to catch trailing
   // events: receipt email lands 1-5s after MarkPaid (outbox dispatcher
   // drains async), dunning resolution fires after MarkPaid for

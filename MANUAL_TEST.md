@@ -1344,6 +1344,25 @@ Multipart text+HTML with tenant chrome. Configure tenant `company_name`, `logo_u
 
 ---
 
+## FLOW D6: Bad-debt recovery — charging a written-off invoice
+
+The customer comes back after the invoice was written off. Operator-only: the
+invoice is charged in place and never reopened.
+
+- [ ] A written-off invoice's banner offers **Charge customer**; a finalized one does not (the button belongs to the write-off state, not the page).
+- [x] A recovery settles the invoice to **Paid** with the "Marked uncollectible" row still in its timeline — the write-off is kept, not erased. *(walked 2026-08-05 live on TC Walk Co VLX-000154: uncollectible+failed, $40 due → collect → **200** → `status=paid`, `payment_status=succeeded`, `amount_due=0`, and BOTH `uncollectible_at` and `paid_at` set. Timeline in order: "Marked uncollectible — written off as bad debt" → "Invoice paid". Page header reads **Paid**. After recovery the timeline is the ONLY surface still telling the write-off story — the banner goes with the status flip and the PDF never says it — which is why this box asserts the timeline and not the banner.)*
+- [x] A recovery drains the customer's credit balance FIRST and charges only the remainder — and a fully-covered one settles with **no card at all**. *(walked 2026-08-05, and this is the box that catches the worst defect this arc shipped and fixed: pre-fix `ApplyCreditBalance` skipped written-off invoices entirely, so the card was charged the GROSS while the balance sat unconsumed — under a confirm dialog promising "Any credit balance is applied first". Walked on VLX-000153: written off at $30 due with $20 already applied, then $30 of goodwill credit granted AFTER the write-off → collect → credits went **2000 → 5000**, `amount_due=0`, **no PaymentIntent**, paid. Re-walked on VLX-000154 in the `failed` shape (every dunning exhaustion) — same result, which the pre-fix settle would have refused.)*
+- [x] A recovery covered entirely by credit does not require a payment method. *(walked 2026-08-05. Both fixtures above had NO card on file. Pre-fix the handler demanded one BEFORE applying credit, so an invoice a customer's balance covered entirely was refused for want of a card it never needed — and the zero-due branch below it, whose premise is "settle without a card charge", was unreachable without one. The engine sweep has always applied credit first and settled fully-covered invoices with no payment method; this handler's comment claimed to "mirror the sweep" while doing the opposite.)*
+- [ ] The confirm dialog names the customer, the amount, and states that credit balance is applied first and that dunning does not restart.
+- [ ] A written-off invoice whose tax was reversed refuses with **409 `tax_reversed_unrecoverable`**, naming that charging would collect tax already reported as not collected. *(walked 2026-08-05 live on TC Walk Co VLX-000132.)*
+- [ ] A written-off **threshold** invoice refuses with **409 `recovery_superseded`**, naming that the usage was re-billed. *(walked 2026-08-05 live on TC Walk Co VLX-000136.)*
+- [ ] A recoverable written-off invoice gets **past** the status gate — it fails only on a later check (e.g. no payment method), proving the gate opened rather than the refusals being blanket. *(walked 2026-08-05 live on TC Walk Co VLX-000152 → 422 "customer has no payment method set up".)*
+- [ ] A **parked** written-off invoice still refuses with `payment_unidentifiable`, and the message does NOT advise marking it uncollectible (it already is).
+- [ ] A declined recovery charge leaves the invoice written off, with **no new dunning campaign** on the Dunning tab.
+- [ ] While a recovery charge is in flight the invoice shows an **info** banner saying it stays written off until the payment settles; a written-off invoice at `failed` shows **no** such banner.
+- [ ] A written-off invoice for a customer with a credit balance charges the card only the remainder shown in the dialog.
+- [ ] The public payment link for that invoice still shows "This invoice is closed" with no Pay button — recovery is operator-only.
+
 ## FLOW D5: Dunning policy admin (CRUD + assignment + terminal actions)
 
 Policy configuration surface — distinct from the dunning state machine under catchup (FLOW TC5).

@@ -54,7 +54,7 @@ func TestEmailClause(t *testing.T) {
 		{"dispatched", "complained", "reminder sent — recipient marked it as spam"},
 		{"failed", "unknown", "reminder failed to send"},
 		{"pending", "unknown", "reminder queued"},
-		{"skipped", "unknown", "reminder skipped — invoice settled first"},
+		{"skipped", "unknown", "reminder skipped — the invoice was already closed"},
 	}
 	for _, c := range cases {
 		got := emailClause("reminder", EmailEventRow{Status: c.status, DeliveryState: c.delivery})

@@ -3398,6 +3398,40 @@ export interface components {
          */
         AttentionReason: "tax_calculation_failed" | "tax_location_required" | "payment_failed" | "payment_unconfirmed" | "payment_anomaly" | "payment_processing" | "payment_scheduled" | "awaiting_payment" | "no_payment_method" | "dunning_exhausted" | "collection_paused" | "commit_exposure";
         /**
+         * @description Why a WRITTEN-OFF invoice (`status = uncollectible`) cannot be charged.
+         *
+         *     Velox lets an OPERATOR charge a written-off invoice when the customer
+         *     comes back — bad-debt recovery via `POST /v1/invoices/{id}/collect`.
+         *     The invoice is not reopened: it stays `uncollectible` until the payment
+         *     settles, then becomes `paid`, so the write-off remains in its history.
+         *     This is never a customer-facing capability; the public pages continue
+         *     to show the invoice as closed (ADR-110).
+         *
+         *     Present ONLY when such a charge would be refused, and absent both on
+         *     recoverable written-off invoices and on every other status — so
+         *     `recovery_block == null` does NOT mean "chargeable", it means "no
+         *     recovery-specific refusal applies".
+         *
+         *     The same three refusals are enforced in the charge claim's SQL; this
+         *     field publishes them so a UI can disable the action with its reason
+         *     rather than surfacing a 409 after the operator has confirmed an amount.
+         *
+         *     `tax_reversed_unrecoverable` — the invoice's tax was reversed with the
+         *     tax provider at write-off and cannot be re-reported automatically;
+         *     charging would collect tax already reported as not collected.
+         *     `recovery_superseded` — the invoice was billed on a usage threshold and
+         *     that usage has since been re-billed; charging would bill it twice.
+         *     `relief_not_reissued` — a credit the invoice was owed was never
+         *     applied, so `amount_due_cents` is higher than what is owed.
+         */
+        RecoveryBlock: {
+            blocked: boolean;
+            /** @enum {string} */
+            code?: "tax_reversed_unrecoverable" | "recovery_superseded" | "relief_not_reissued";
+            /** @description Operator-facing sentence naming both why the charge is refused and what to do instead. */
+            message?: string;
+        };
+        /**
          * @description Operator's recommended next step. Closed enum because every
          *     code maps to a concrete server endpoint or frontend route,
          *     and audit logs key off the code. `void_invoice` is offered only
@@ -3554,6 +3588,7 @@ export interface components {
              */
             tax_error_code?: string;
             attention?: components["schemas"]["Attention"];
+            recovery_block?: components["schemas"]["RecoveryBlock"];
             /** Format: int64 */
             total_amount_cents: number;
             /** Format: int64 */

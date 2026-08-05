@@ -35,6 +35,17 @@ import {
 } from '@/components/ui/dialog'
 import { TypedConfirmDialog } from '@/components/TypedConfirmDialog'
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import {
@@ -787,9 +798,57 @@ export default function InvoiceDetailPage() {
                 ) : 'cancel it separately'} if you also want to stop future billing.
               </p>
               <p className="text-xs text-muted-foreground mt-2">
-                If the customer pays after all, use <strong>Record Payment</strong> above. To reclassify as
-                cancelled (rather than written-off), use <strong>Void</strong>.
+                If the customer pays after all, charge their card below or use <strong>Record Payment</strong> above
+                for money received offline. To reclassify as cancelled (rather than written-off), use <strong>Void</strong>.
               </p>
+              {/* Bad-debt recovery. The invoice is NOT reopened — it stays
+                  written off until the payment settles, then shows as paid,
+                  keeping the write-off in its history. Gated on the same
+                  conditions the server enforces; the three money refusals (tax
+                  already reversed / threshold usage re-billed / unapplied
+                  credit) are server-side and answer with a specific 409, since
+                  the client cannot see any of them.
+                  paymentIsUnresolved is imported, never re-typed — four call
+                  sites drifting apart is the bug that seam exists to stop. */}
+              {!paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0 && hasPaymentMethod && (
+                invoice.recovery_block?.blocked ? (
+                  /* The server published WHY this one cannot be charged (tax
+                     already reversed / usage re-billed / unapplied credit).
+                     Show the reason instead of an enabled button that answers
+                     409 after the operator has confirmed an amount — a control
+                     that promises what the server refuses is a defect, not a
+                     rough edge. Same source the endpoint refuses from, so the
+                     two can never disagree. */
+                  <p className="text-xs text-muted-foreground mt-3 border-l-2 border-border pl-3">
+                    <strong className="text-foreground">Can't charge this invoice.</strong>{' '}
+                    {invoice.recovery_block.message}
+                  </p>
+                ) : (
+                <div className="mt-3">
+                  <AlertDialog>
+                    <AlertDialogTrigger render={<Button size="sm" disabled={acting} />}>
+                      {collectMutation.isPending ? 'Charging…' : 'Charge customer'}
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Charge customer</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Charge {customer?.display_name || 'the customer'}{' '}
+                          {formatCents(invoice.amount_due_cents, invoice.currency)} for {invoice.invoice_number}.
+                          This invoice was written off — that record is kept, and it will show as paid rather than
+                          reopened. Any credit balance is applied first. Dunning does not restart; if the card
+                          declines, the invoice stays written off.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => collectMutation.mutate()}>Charge customer</AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+                )
+              )}
             </div>
           </div>
         </div>

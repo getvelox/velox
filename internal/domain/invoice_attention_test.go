@@ -987,3 +987,88 @@ func TestCommitExposure_ExpiredGrantReportsNothing(t *testing.T) {
 		t.Fatalf("expired grant claimed spendable credit: %q", got.Message)
 	}
 }
+
+// TestRecoveryInFlight_NarrowByDesign pins the bad-debt-recovery banner and,
+// more importantly, its SILENCE.
+//
+// The banner exists so a second operator cannot charge a card that is already
+// being charged. But it must fire ONLY while a recovery is in flight — a
+// written-off invoice sitting at `failed` is every dunning-exhausted write-off
+// in the system, and lighting those up would put a permanent banner on the
+// most common terminal state there is.
+func TestRecoveryInFlight_NarrowByDesign(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  InvoiceStatus
+		payment InvoicePaymentStatus
+		want    bool
+	}{
+		{"written off + recovery in flight", InvoiceUncollectible, PaymentProcessing, true},
+		{"written off + failed (every dunning exhaustion)", InvoiceUncollectible, PaymentFailed, false},
+		{"written off + pending", InvoiceUncollectible, PaymentPending, false},
+		{"written off + parked", InvoiceUncollectible, PaymentUnknown, false},
+		{"voided + processing", InvoiceVoided, PaymentProcessing, false},
+		{"paid + processing", InvoicePaid, PaymentProcessing, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := draft()
+			inv.Status = tc.status
+			inv.PaymentStatus = tc.payment
+			got := ClassifyInvoiceAttention(inv, AttentionContext{})
+			fired := got != nil && got.Code == "payment.recovery_processing"
+			if fired != tc.want {
+				t.Fatalf("recovery banner fired=%v, want %v (attention=%+v)", fired, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestRecoveryBlocksCharge is the single source both the collect handler and
+// the dashboard read. It has three refusals and one permissive case, and the
+// permissive case is what makes the other three meaningful — a predicate that
+// blocked everything would satisfy every refusal assertion on its own.
+func TestRecoveryBlocksCharge(t *testing.T) {
+	writtenOff := func() Invoice {
+		return Invoice{Status: InvoiceUncollectible, BillingReason: BillingReasonSubscriptionCycle}
+	}
+	cases := []struct {
+		name       string
+		inv        Invoice
+		unrelieved int64
+		wantCode   string
+	}{
+		{"recoverable", writtenOff(), 0, ""},
+		{"tax already reversed", func() Invoice { i := writtenOff(); i.TaxTransactionID = "tax_tx_1"; return i }(), 0, "tax_reversed_unrecoverable"},
+		{"threshold re-billed", func() Invoice { i := writtenOff(); i.BillingReason = BillingReasonThreshold; return i }(), 0, "recovery_superseded"},
+		{"relief never applied", writtenOff(), 2500, "relief_not_reissued"},
+
+		// Not a recovery at all: an ordinary finalized invoice must never carry
+		// a recovery block, even when it happens to look like one of the above.
+		// Without this, the predicate could refuse ordinary collection.
+		{"finalized with committed tax is NOT blocked", Invoice{Status: InvoiceFinalized, TaxTransactionID: "tax_tx_1"}, 0, ""},
+		{"finalized threshold is NOT blocked", Invoice{Status: InvoiceFinalized, BillingReason: BillingReasonThreshold}, 9999, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := RecoveryBlocksCharge(tc.inv, tc.unrelieved)
+			if tc.wantCode == "" {
+				if b.Blocked {
+					t.Fatalf("blocked with %q, want allowed", b.Code)
+				}
+				return
+			}
+			if !b.Blocked {
+				t.Fatalf("allowed, want blocked with %q", tc.wantCode)
+			}
+			if b.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", b.Code, tc.wantCode)
+			}
+			// Every refusal must name a way forward — a dead-end refusal is how
+			// an operator ends up stuck with an invoice and no next step.
+			if len(b.Message) < 40 {
+				t.Errorf("message too thin to explain a money refusal: %q", b.Message)
+			}
+		})
+	}
+}

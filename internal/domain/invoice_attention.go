@@ -495,6 +495,19 @@ func classifyAttentionCause(inv Invoice, atc AttentionContext) *Attention {
 	if inv.PaymentAnomalyKind != "" {
 		return classifyPaymentAnomaly(inv)
 	}
+	// A BAD-DEBT RECOVERY charge in flight pierces the early-return, for the
+	// same reason the anomaly does: the state lives only on a row the return
+	// hides. An operator charged a written-off invoice, the provider has not
+	// answered yet, and without this the page shows nothing at all — so a
+	// second operator sees a written-off invoice with no sign that money is
+	// moving, and charges it again.
+	//
+	// Deliberately NARROW: `processing` only. A written-off invoice sitting at
+	// `failed` must stay silent — that is every dunning-exhausted write-off in
+	// the system, and the silence there is a decision, not an oversight.
+	if inv.Status == InvoiceUncollectible && inv.PaymentStatus == PaymentProcessing {
+		return classifyRecoveryInFlight(inv)
+	}
 	if inv.Status == InvoicePaid || inv.Status == InvoiceVoided || inv.Status == InvoiceUncollectible {
 		return nil
 	}
@@ -531,6 +544,31 @@ func classifyAttentionCause(inv Invoice, atc AttentionContext) *Attention {
 		return classifyAwaitingPayment(inv)
 	}
 	return nil
+}
+
+// classifyRecoveryInFlight surfaces a bad-debt recovery charge that an operator
+// started on a written-off invoice and the provider has not yet answered.
+//
+// Info, not Warning: nothing is wrong. The whole point of the banner is that
+// the invoice STILL READS as written off everywhere else — status, badge,
+// public page — so without it a second operator sees no sign that money is in
+// motion and charges the card again.
+//
+// Reuses AttentionReasonPaymentProcessing rather than minting a reason: the
+// fact is the same one that reason already names (a charge is in flight at the
+// provider), and the closed reason enum is a public contract. The Code carries
+// the recovery-specific granularity, which is what it is for.
+func classifyRecoveryInFlight(inv Invoice) *Attention {
+	since := attentionSince(inv)
+	return &Attention{
+		Severity: AttentionSeverityInfo,
+		Reason:   AttentionReasonPaymentProcessing,
+		Code:     "payment.recovery_processing",
+		Message: "This invoice was written off, and a recovery charge is now in flight at the payment provider. " +
+			"It stays written off until the payment settles — don't charge it again while this is pending.",
+		DocURL: docBaseURL + "payment-processing",
+		Since:  &since,
+	}
 }
 
 // attentionSeverityRank orders severity for max(). Kept next to the fold that

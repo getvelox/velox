@@ -1098,13 +1098,47 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if inv.Status != domain.InvoiceFinalized {
-		respond.Validation(w, r, "can only collect payment on finalized invoices")
+	// `uncollectible` is admitted for BAD-DEBT RECOVERY: the customer came back
+	// and the operator is running their card. The invoice is NOT reopened — it
+	// stays written off until money arrives, then settles uncollectible -> paid,
+	// keeping uncollectible_at in its history.
+	//
+	// Operator-only by construction: the claim this path takes
+	// (ClaimChargeForManualCollect) admits uncollectible, while the dunning and
+	// auto-charge claims still require finalized. No machine re-charges a debt
+	// the business wrote off.
+	if inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible {
+		respond.Validation(w, r, "can only collect payment on finalized or written-off invoices")
 		return
 	}
 	if inv.PaymentStatus == domain.PaymentSucceeded {
 		respond.Validation(w, r, "invoice is already paid")
 		return
+	}
+	// The recovery refusals. Each is ALSO enforced in the claim CAS (a service
+	// read is a TOCTOU against the sweeps that create these states) — these
+	// exist to answer WHY, because a bare claim miss is indistinguishable from
+	// "someone else is charging it right now".
+	if inv.Status == domain.InvoiceUncollectible {
+		var unrelieved int64
+		if h.svc.creditNotes != nil {
+			var cerr error
+			unrelieved, cerr = h.svc.creditNotes.UnreliefedClawbackCents(r.Context(), tenantID, inv.ID)
+			if cerr != nil {
+				// Fail loud: we cannot prove the amount is right, and this is a
+				// card charge we are CHOOSING to make.
+				slog.ErrorContext(r.Context(), "recovery blocked: could not read unrelieved clawback relief", "invoice_id", inv.ID, "error", cerr)
+				respond.InternalError(w, r)
+				return
+			}
+		}
+		// ONE source, shared with the read path that lets the dashboard disable
+		// its button with the same reason instead of letting an operator
+		// confirm a charge that answers 409.
+		if b := domain.RecoveryBlocksCharge(inv, unrelieved); b.Blocked {
+			respond.Error(w, r, http.StatusConflict, "invalid_state", b.Code, b.Message)
+			return
+		}
 	}
 	if inv.PaymentStatus == domain.PaymentUnknown {
 		// A possibly-succeeded payment is the reconciler's to resolve —
@@ -1149,19 +1183,23 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := h.paymentSetups.GetPaymentSetup(r.Context(), tenantID, inv.CustomerID)
-	if err != nil || ps.SetupStatus != domain.PaymentSetupReady || ps.StripeCustomerID == "" {
-		// Provably pre-Stripe — free the lease so sweep/dunning aren't
-		// locked out for the window.
-		_ = h.svc.ReleaseChargeClaim(r.Context(), tenantID, id)
-		respond.Validation(w, r, "customer has no payment method set up")
-		return
-	}
-
-	// Post-credit truth (ADR-088, mirrors the sweep): drain the balance,
-	// then charge the RELOADED remainder — never the handler snapshot. An
-	// apply failure releases the lease and reports; charging pre-credit
-	// would consummate exactly the overcharge the sweep exists to avoid.
+	// Post-credit truth (ADR-088): drain the balance, then charge the RELOADED
+	// remainder — never the handler snapshot. Charging pre-credit would
+	// consummate exactly the overcharge the sweep exists to avoid.
+	//
+	// This runs BEFORE the payment-method check, which is the order the engine
+	// sweep has always used (billing/engine.go applies credit, then settles a
+	// fully-covered invoice with MarkPaid and no payment method involved). This
+	// handler's comment claimed to "mirror the sweep" while doing the opposite:
+	// it demanded a card first, so an invoice a customer's balance covered
+	// ENTIRELY was refused for want of a card it never needed — and the
+	// zero-due branch below, whose whole premise is "settle without a card
+	// charge", was unreachable without one.
+	//
+	// Bad-debt recovery is where that bites hardest: goodwill credit issued
+	// during dunning is exactly how a written-off invoice gets covered, and the
+	// customer who was written off is the least likely to have a working card
+	// on file.
 	inv, err = h.svc.ApplyCreditBalance(r.Context(), tenantID, id)
 	if err != nil {
 		_ = h.svc.ReleaseChargeClaim(r.Context(), tenantID, id)
@@ -1169,13 +1207,25 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if inv.AmountDueCents <= 0 {
-		// Credits covered it — settle without a card charge.
+		// Credits covered it — settle without a card charge, and without ever
+		// asking whether there was a card.
 		settled, serr := h.svc.SettleZeroDue(r.Context(), tenantID, id)
 		if serr != nil {
 			respond.FromError(w, r, serr, "invoice")
 			return
 		}
 		respond.JSON(w, r, http.StatusOK, settled)
+		return
+	}
+
+	ps, err := h.paymentSetups.GetPaymentSetup(r.Context(), tenantID, inv.CustomerID)
+	if err != nil || ps.SetupStatus != domain.PaymentSetupReady || ps.StripeCustomerID == "" {
+		// Provably pre-Stripe — free the lease so sweep/dunning aren't
+		// locked out for the window. Any credit already applied STAYS applied:
+		// it was legitimately owed to this invoice, and amount_due is now
+		// correct for whatever settles it later.
+		_ = h.svc.ReleaseChargeClaim(r.Context(), tenantID, id)
+		respond.Validation(w, r, "customer has no payment method set up")
 		return
 	}
 
@@ -1825,10 +1875,20 @@ func describeEmailEvent(emailType, outboxStatus, deliveryState string) (string, 
 	case "pending":
 		return desc + " (queued)", "processing"
 	case "skipped":
-		// Deliberately not sent — the invoice settled while the row sat
-		// queued (0155). Pre-ADR-098 this fell through to the default
-		// "succeeded" rendering, showing a never-sent email as sent.
-		return desc + " (not sent — invoice settled first)", "info"
+		// Deliberately not sent — the invoice reached a TERMINAL state while
+		// the row sat queued (0155). Pre-ADR-098 this fell through to the
+		// default "succeeded" rendering, showing a never-sent email as sent.
+		//
+		// Says "closed", not "settled": the dispatcher skips on ANY terminal
+		// state (dispatcher.go reads InvoiceTerminalState, which answers paid /
+		// voided / uncollectible / gone). "Settled first" was true only for the
+		// paid case and asserted a payment on invoices that were written off or
+		// annulled — found on a written-off invoice whose row read "not sent —
+		// invoice settled first" beside a "Marked uncollectible" row two lines
+		// above it. The real state IS recorded (outbox last_error carries
+		// "reached <state> before delivery") but is not plumbed to the
+		// timeline, so this says only what it can know.
+		return desc + " (not sent — the invoice was already closed)", "info"
 	}
 	return desc, "succeeded"
 }
@@ -1846,7 +1906,7 @@ func emailClause(noun string, em EmailEventRow) string {
 	case "pending":
 		return noun + " queued"
 	case "skipped":
-		return noun + " skipped — invoice settled first"
+		return noun + " skipped — the invoice was already closed"
 	}
 	switch em.DeliveryState {
 	case "delivered":

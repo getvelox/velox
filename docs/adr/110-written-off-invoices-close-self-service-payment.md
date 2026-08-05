@@ -44,13 +44,16 @@ payment-update page ignoring status entirely, and that fix then stopped at
 
 ### The decisive argument is internal, not parity
 
-Velox **cannot charge a written-off invoice**. `chargeInvoice`
-(`internal/payment/stripe.go:502`) refuses anything but `finalized`, and the
-status machine's allowed-source set has no reopen edge — `finalized←draft;
-voided←draft/finalized/uncollectible; uncollectible←finalized`. A customer Pay
-button on such an invoice would call a gate that rejects it. Removing it
-removed a button pointing at a closed door; the parity check below confirms
-that is also where the industry sits, but the code settles it either way.
+At the time of this decision Velox **could not charge a written-off invoice at
+all**: `chargeInvoice` refused anything but `finalized`, and the status machine
+had no edge back. A customer Pay button would have called a gate that rejects
+it — so removing it removed a button pointing at a closed door.
+
+*(Superseded in part by the 2026-08-05 amendment below: an OPERATOR can now
+charge a written-off invoice. The customer-facing closure this section argues
+for is unchanged, and the amendment explains why operator-only is the whole
+point — but the flat "cannot charge" is no longer true and is left here only as
+the state this decision was made in.)*
 
 ## Industry evidence (verified 2026-08-05)
 
@@ -112,36 +115,77 @@ has formally written off invites the state to be reversed by a route that
 cannot currently reverse it. The honest surface is the one that matches what
 the system can actually do.
 
-## Accepted limitation, deferred with a trigger
+## Amendment 2026-08-05 — the limitation is closed, by charging in place
 
-**Velox's write-off is a card dead end where Stripe's is not.** Stripe keeps
-`POST /pay` legal from `uncollectible`, so an operator can still run the card.
-Velox cannot: there is no `uncollectible → finalized` edge, and the only
-settlement route is `RecordOfflinePayment` — the customer pays out of band and
-an operator records it.
+The limitation this ADR recorded — *"Velox's write-off is a card dead end where
+Stripe's is not"* — **is closed.** Its trigger fired the same day it was
+written, so the section it replaced is deleted rather than appended to: leaving
+a "deferred with a trigger" block standing next to the thing that closed it is
+the kind of doc rot this repo pays for.
 
-This matters more than its rarity suggests, because the state is
-**machine-set**: `internal/dunning/service.go` marks it automatically when
-retries exhaust under `final_action='mark_uncollectible'`. It arrives by
-timer, at scale, and the customer who returns weeks later with a working card
-is the highest-intent payer there is. "Contact support" is the
-highest-friction path that exists for money coming *in*.
+**The remedy this ADR prescribed was wrong.** It named an operator-side
+*reopen* (`uncollectible → finalized`). What shipped instead charges the
+invoice **in place**, and the reopen edge is now explicitly rejected:
 
-**Not built now** — zero customers, no named pressure, and it is a backend
-capability question rather than the UI question this ADR settles.
+- **A reopen would erase the write-off, not reverse it.** `grep -rn
+  uncollectible internal/analytics/` returns zero hits — AR and open-invoice
+  counts are recomputed from CURRENT status with no time dimension. After a
+  flip, no query in the system could tell an accountant the invoice had ever
+  been written off.
+- **It would re-enter automation.** `finalized` is the state every sweep and
+  claim predicate admits, so a reopen silently re-arms dunning enrolment and
+  the auto-charge sweeps on a debt the business had given up on.
+- **It is not Stripe's shape either.** Stripe has no `uncollectible → open`
+  edge; its only non-void exit is straight to `paid`. Charging in place is the
+  closer parallel, not the further one.
 
-**Trigger to close it:** the first real request to pay a written-off invoice
-by card. The fix is then an **operator-side reopen**
-(`uncollectible → finalized`), Velox's analogue of Stripe's `POST /pay` — not
-a customer-facing Pay button, which would still front a refusing gate.
-Secondary trigger: `mark_uncollectible` becoming a common dunning final
-action, which converts a rare state into a routine one.
+So the invoice stays `uncollectible` until money actually arrives, then settles
+`uncollectible → paid` — a transition `markPaidReportingTransition` already
+allowed — ending with `uncollectible_at` AND `paid_at` both set, which is
+Stripe's `status_transitions` shape.
 
-**Cheap check that would upgrade this ADR's confidence:** in a Stripe sandbox,
-create → finalize → `mark_uncollectible` → open `hosted_invoice_url` and look.
-~5 minutes, and the only thing that converts the one unverified cell. It would
-not change the decision (2–1 at worst); it would change how confidently the
-Stripe row can be written.
+**The customer-facing closure this ADR decided is untouched.** Recovery is
+operator-initiated only: `ClaimChargeForManualCollect` admits `uncollectible`
+while the dunning and auto-charge claims still require `finalized`. An operator
+may charge a written-off invoice; no machine may. The public pages are
+unchanged, so §"Decision" above still holds in full.
+
+### Three refusals, enforced in the claim CAS
+
+A service-side pre-read would be a TOCTOU against the very sweeps that create
+these states, so each gate is SQL in the claim; the handler repeats them only
+to answer *why* with a typed 409 rather than a bare claim miss.
+
+| Refusal | Code | Why |
+|---|---|---|
+| tax already reversed | `tax_reversed_unrecoverable` | `MarkUncollectible` always attempts an upstream tax reversal — irreversible at the provider, and not re-committable here (23h calculation TTL; tax computation is draft-only). Charging would collect tax the tenant has already reported as not collected. |
+| threshold usage re-billed | `recovery_superseded` | Writing off a threshold invoice does not stop the next cycle close re-billing that usage window; collecting this one double-bills it. |
+| unapplied clawback relief | `relief_not_reissued` | An `issue_pending` credit note that was voided before issuing never reduced `amount_due`, so the figure is stale-HIGH and charging over-collects. |
+
+The tax gate keys on the **structural** fact (`tax_transaction_id != ''`), not
+the best-effort `tax_reversed_at` stamp, which is written post-commit and can
+lag its own sweep.
+
+**Parity note, verified:** Stripe *also* decreases reported tax on
+`mark_uncollectible`. The difference is that Stripe owns its tax ledger and can
+re-report on recovery; Velox reversed an *external* Stripe Tax transaction it
+cannot restore. So the refusal is forced by architecture rather than by a Velox
+defect — and **tax re-commit on recovery remains deferred**, trigger: the first
+tax-registered tenant to hit `tax_reversed_unrecoverable`.
+
+### Still deferred
+
+- **Any `uncollectible → finalized` edge.** Trigger: a DP needs written-off
+  invoices back in *automated* collection — which needs a bad-debt journal
+  entry first, not a status flip.
+- **Restarting dunning on recovery.** A failed recovery deliberately starts no
+  campaign (both dunning-start sites are guarded). Trigger: recovery becomes a
+  collections motion rather than a one-off.
+- **`RecordOfflinePayment`'s own tax and threshold exposure.** The same two
+  hazards pre-exist on the offline route and are NOT gated there, deliberately:
+  the money already arrived, and refusing to record it would only make the
+  books wrong too. Governing rule — *refuse to CREATE a bad money event; never
+  refuse to RECORD one that already happened.* Tracked as its own defect.
 
 ## Consequences
 

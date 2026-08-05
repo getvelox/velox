@@ -20,7 +20,7 @@ func TestDescribeEmailEvent_DeliveryStateLayering(t *testing.T) {
 		{"dispatched, complained", "dispatched", "complained", "Invoice emailed to customer — recipient marked it as spam", "failed"},
 		{"pending", "pending", "unknown", "Invoice emailed to customer (queued)", "processing"},
 		{"failed", "failed", "unknown", "Invoice emailed to customer (delivery failed)", "failed"},
-		{"skipped no longer lies", "skipped", "unknown", "Invoice emailed to customer (not sent — invoice settled first)", "info"},
+		{"skipped no longer lies", "skipped", "unknown", "Invoice emailed to customer (not sent — the invoice was already closed)", "info"},
 	}
 	for _, c := range cases {
 		desc, status := describeEmailEvent("invoice", c.status, c.state)

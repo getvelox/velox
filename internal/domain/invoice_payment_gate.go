@@ -17,13 +17,13 @@ const (
 // PaymentBlock is the answer to "does this invoice's payment state block this
 // action, and what should the operator be told?"
 type PaymentBlock struct {
-	Blocked bool
+	Blocked bool `json:"blocked"`
 	// Code is machine-readable, for API consumers and the dashboard.
-	Code string
+	Code string `json:"code,omitempty"`
 	// Message is operator-facing and must always answer BOTH halves: why this
 	// is refused, and what to do instead. A refusal that names no alternative
 	// is how an operator ends up stuck with an invoice and no next step.
-	Message string
+	Message string `json:"message,omitempty"`
 }
 
 // PaymentBlocksAction is the SINGLE SOURCE for whether an invoice's payment
@@ -125,7 +125,7 @@ func PaymentBlocksAction(inv Invoice, action InvoiceAction) PaymentBlock {
 		return PaymentBlock{
 			Blocked: true,
 			Code:    "payment_unidentifiable",
-			Message: parkedMessage(action),
+			Message: parkedMessage(action, inv.Status == InvoiceUncollectible),
 		}
 	}
 
@@ -139,12 +139,24 @@ func PaymentBlocksAction(inv Invoice, action InvoiceAction) PaymentBlock {
 // parkedMessage always ends by naming mark-uncollectible, because it is the one
 // action that works on a parked invoice and an operator who is not told that
 // has no way out.
-func parkedMessage(action InvoiceAction) string {
+// alreadyWrittenOff swaps the tail advice. Every arm below steers the operator
+// to "mark the invoice uncollectible" as the exit — which is impossible advice
+// on an invoice that already IS uncollectible, and that is a reachable state:
+// writing off a parked invoice is the carve-out immediately above, and since
+// 2026-08-05 such a row stays visible to the ADR-108 search and can be the
+// subject of a bad-debt recovery attempt.
+func parkedMessage(action InvoiceAction, alreadyWrittenOff bool) string {
 	// Bounded since ADR-108: the search sweep can adopt a found PaymentIntent,
 	// so "will not resolve on its own" is conditional now — but every refusal
 	// below still holds while the invoice IS parked, and the write-off remains
 	// the only operator exit.
 	const why = "this invoice's charge attempt could not be identified with the payment provider, so we cannot tell whether the customer was charged, and unless the attempt can be found by Velox's provider search it will not resolve on its own"
+	if alreadyWrittenOff {
+		// It is already written off, so there is no status left to advise. What
+		// is still true is the reason: nobody knows whether that card was
+		// charged, and only the provider can answer it.
+		return why + " — it is already written off, so nothing further will be attempted automatically. Resolve the attempt in Stripe; if money was taken it will settle here when the provider reports it"
+	}
 	switch action {
 	case ActionVoid:
 		return why + " — voiding it could annul an invoice that was in fact paid. Check the attempt in Stripe; if nothing was charged, mark the invoice uncollectible instead"
@@ -190,4 +202,52 @@ func inFlightMessage(action InvoiceAction) string {
 	default:
 		return why + " — wait for it to report an outcome"
 	}
+}
+
+// RecoveryBlocksCharge is the SINGLE SOURCE for whether a WRITTEN-OFF invoice
+// can be charged — bad-debt recovery, when the customer comes back.
+//
+// It exists for the same reason PaymentBlocksAction does, and was extracted the
+// moment the rule needed a second reader. The three refusals below started life
+// as inline `if`s in the collect handler; the dashboard then needed them too,
+// to disable its "Charge customer" button with a reason instead of letting an
+// operator confirm a charge that answers 409. Two hand-written copies of a
+// money rule is exactly the drift this file's older sibling was written to end.
+//
+// These are ALSO enforced in ClaimChargeForManualCollect's SQL, and that is not
+// redundancy: a Go-side read is a TOCTOU against the very sweeps that create
+// these states (the tax-reversal sweep especially). The CAS is what makes the
+// refusal true; this is what makes it EXPLICABLE — to a handler answering with
+// a typed code, and to a UI deciding whether to offer the action at all.
+//
+// unreliefedClawbackCents is passed in rather than read here because it is a
+// cross-domain sum (credit notes) and this package holds no stores. Callers
+// that cannot compute it pass 0 — which is the permissive direction, so the CAS
+// stays the backstop rather than this being the only guard.
+func RecoveryBlocksCharge(inv Invoice, unreliefedClawbackCents int64) PaymentBlock {
+	if inv.Status != InvoiceUncollectible {
+		return PaymentBlock{} // not a recovery — ordinary rules apply
+	}
+	if inv.TaxTransactionID != "" {
+		return PaymentBlock{
+			Blocked: true,
+			Code:    "tax_reversed_unrecoverable",
+			Message: "This invoice's tax was reversed with the tax provider when it was written off, and it cannot be re-reported automatically. Charging now would collect tax that has already been reported as not collected. Record the payment as an offline payment instead, and correct the tax with your provider.",
+		}
+	}
+	if inv.BillingReason == BillingReasonThreshold {
+		return PaymentBlock{
+			Blocked: true,
+			Code:    "recovery_superseded",
+			Message: "This invoice was billed on a usage threshold, and writing it off did not stop that usage being re-billed on a later invoice. Charging it now would bill the same usage twice — collect the newer invoice instead.",
+		}
+	}
+	if unreliefedClawbackCents > 0 {
+		return PaymentBlock{
+			Blocked: true,
+			Code:    "relief_not_reissued",
+			Message: "This invoice is owed a credit that was never applied, so the amount shown is higher than what the customer owes. Re-issue the credit before charging, or the customer will be over-collected.",
+		}
+	}
+	return PaymentBlock{}
 }
