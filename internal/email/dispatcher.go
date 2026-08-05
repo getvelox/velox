@@ -56,7 +56,7 @@ type EmailDeliverer interface {
 	SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error
 	SendPaymentFailed(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, reason, publicToken string) error
 	SendCreditNote(ctx context.Context, tenantID, to string, cc []string, customerName, creditNoteNumber, invoiceNumber string, amountCents int64, currency string, pdfBytes []byte) error
-	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string) error
+	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error
 	SendPaymentSetupLink(ctx context.Context, tenantID, to, customerName, operatorNote, setupURL string) error
 	SendPasswordReset(ctx context.Context, tenantID, to, displayName, resetURL string) error
 	SendMemberInvite(ctx context.Context, tenantID, to, inviterEmail, tenantName, acceptURL string) error
@@ -173,6 +173,26 @@ func escalationAnnounces(emailType, terminalState string) bool {
 	return emailType == TypeDunningEscalation && terminalState == "uncollectible"
 }
 
+// setupLinkServesRecovery reports the second case a terminal invoice must not
+// mute: a payment-method setup link on a WRITTEN-OFF invoice.
+//
+// The blanket gate reads `uncollectible` as "settled, so stop asking" — true
+// for a payment demand, false for this one. Attaching a card is account-scoped
+// capture, not payment of the invoice (ADR-110 drew exactly this line when it
+// removed the customer's Pay button and kept the add-a-card button beside it),
+// and it is the ON-RAMP to bad-debt recovery: the operator cannot charge a
+// written-off invoice until a card exists, and this email is how one gets
+// there.
+//
+// Found by walking FLOW D6 2026-08-05, AFTER the endpoint was widened to admit
+// uncollectible: the request answered 200, wrote its row, and the dispatcher
+// then dropped it as obsolete — a silent no-op behind a success response,
+// which is worse than the 409 it replaced. paid/voided still mute it: there
+// no recovery is possible and the ask really is dead.
+func setupLinkServesRecovery(emailType, terminalState string) bool {
+	return emailType == TypePaymentSetupRequest && terminalState == "uncollectible"
+}
+
 var actionRequiredTypes = map[string]bool{
 	TypePaymentSetupRequest: true,
 	TypePaymentFailed:       true,
@@ -206,7 +226,7 @@ func (d *Dispatcher) handle(ctx context.Context, row OutboxRow) error {
 			slog.Warn("email staleness check failed — sending anyway (fail-open)",
 				"outbox_id", row.ID, "email_type", row.EmailType,
 				"invoice_number", msg.InvoiceNumber, "error", cerr)
-		} else if state != "" && !escalationAnnounces(row.EmailType, state) {
+		} else if state != "" && !escalationAnnounces(row.EmailType, state) && !setupLinkServesRecovery(row.EmailType, state) {
 			return fmt.Errorf("%w: invoice %s reached %s before delivery", ErrEmailObsolete, msg.InvoiceNumber, state)
 		}
 	}
@@ -241,7 +261,7 @@ func (d *Dispatcher) handle(ctx context.Context, row OutboxRow) error {
 			msg.Reason, msg.PublicToken)
 	case TypePaymentSetupRequest:
 		return d.sender.SendPaymentSetupRequest(ctx, row.TenantID, msg.To, msg.CustomerName, msg.InvoiceNumber,
-			msg.AmountCents, msg.Currency, msg.UpdateURL)
+			msg.AmountCents, msg.Currency, msg.UpdateURL, msg.InvoiceWrittenOff)
 	case TypePaymentSetupLink:
 		return d.sender.SendPaymentSetupLink(ctx, row.TenantID, msg.To, msg.CustomerName,
 			msg.OperatorNote, msg.SetupURL)

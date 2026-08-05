@@ -764,12 +764,26 @@ func (h *Handler) resendSetupLink(w http.ResponseWriter, r *http.Request) {
 		respond.FromError(w, r, err, "invoice")
 		return
 	}
-	// Only meaningful while collection is still pending: a finalized invoice
-	// that hasn't been paid. Draft/voided/paid invoices have no setup link to
-	// resend.
-	if inv.Status != domain.InvoiceFinalized || inv.PaymentStatus == domain.PaymentSucceeded {
+	// Finalized-unpaid, or WRITTEN OFF and unpaid. Draft/voided/paid invoices
+	// have no setup link to resend.
+	//
+	// `uncollectible` is admitted because attaching a card is account-scoped
+	// payment-method capture, not payment of this invoice — the same
+	// distinction ADR-110 drew when it removed the customer's Pay button but
+	// deliberately KEPT the "add a payment method" button beside it. Without
+	// it, bad-debt recovery had no on-ramp: the operator's charge answers 422
+	// "customer has no payment method set up", terminal invoices expose no
+	// `attention` so the banner offering this action never renders, and this
+	// endpoint 409'd on status — a closed loop around the exact scenario
+	// recovery exists for, a customer returning with a NEW card (walked
+	// 2026-08-05, FLOW D6).
+	//
+	// The copy MUST differ: see notifyRecoveryScoped below.
+	collectible := (inv.Status == domain.InvoiceFinalized || inv.Status == domain.InvoiceUncollectible) &&
+		inv.PaymentStatus != domain.PaymentSucceeded
+	if !collectible {
 		respond.Error(w, r, http.StatusConflict, "invalid_state", "invoice_not_collectible",
-			"setup link can only be resent for a finalized, unpaid invoice")
+			"setup link can only be resent for an unpaid invoice that is finalized or written off")
 		return
 	}
 	// The setup-link email tells the CUSTOMER "add a payment method and we'll

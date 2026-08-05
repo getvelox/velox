@@ -31,7 +31,7 @@ func (r *recordingDeliverer) SendPaymentFailed(_ context.Context, _, _ string, _
 	r.sent = append(r.sent, TypePaymentFailed)
 	return nil
 }
-func (r *recordingDeliverer) SendPaymentSetupRequest(_ context.Context, _, _, _, _ string, _ int64, _, _ string) error {
+func (r *recordingDeliverer) SendPaymentSetupRequest(_ context.Context, _, _, _, _ string, _ int64, _, _ string, _ bool) error {
 	r.sent = append(r.sent, TypePaymentSetupRequest)
 	return nil
 }
@@ -100,8 +100,18 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		// mark_uncollectible marks the invoice uncollectible in the same
 		// breath as it enqueues this email, so a blanket settled-gate
 		// skipped it every time and the customer was never told (FLOW I6
-		// walk, VLX-000016). Other action-required types stay muted —
-		// asking for a card on a written-off invoice is still noise.
+		// walk, VLX-000016).
+		//
+		// The SETUP LINK is the second exemption, added 2026-08-05. This
+		// test used to assert it stayed muted, on the reasoning that
+		// "asking for a card on a written-off invoice is still noise" —
+		// TRUE when written, because ADR-110 records that Velox then
+		// "could not charge a written-off invoice at all". The amendment
+		// that shipped operator-driven recovery retired that premise: a
+		// card attached now is exactly what unblocks the charge, and the
+		// operator cannot proceed without one. payment_failed and
+		// dunning_warning stay muted below — those really are stale on a
+		// written-off invoice — which is what keeps the exemption narrow.
 		sender := &recordingDeliverer{}
 		d := NewDispatcher(nil, sender, DispatcherConfig{})
 		d.SetSettledChecker(&recordingChecker{state: "uncollectible"})
@@ -111,7 +121,17 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		if len(sender.sent) != 1 {
 			t.Fatal("the escalation announcing the write-off was skipped — the customer is never told")
 		}
-		for _, typ := range []string{TypePaymentSetupRequest, TypePaymentFailed, TypeDunningWarning} {
+		// The setup link now delivers: it is the recovery on-ramp.
+		s1 := &recordingDeliverer{}
+		d1 := NewDispatcher(nil, s1, DispatcherConfig{})
+		d1.SetSettledChecker(&recordingChecker{state: "uncollectible"})
+		if err := d1.handle(ctx, rowOf(TypePaymentSetupRequest)); err != nil {
+			t.Fatalf("setup link must deliver on uncollectible — the operator cannot charge a written-off invoice until a card exists: %v", err)
+		}
+		if len(s1.sent) != 1 {
+			t.Fatal("the setup link that unblocks recovery was skipped")
+		}
+		for _, typ := range []string{TypePaymentFailed, TypeDunningWarning} {
 			s2 := &recordingDeliverer{}
 			d2 := NewDispatcher(nil, s2, DispatcherConfig{})
 			d2.SetSettledChecker(&recordingChecker{state: "uncollectible"})

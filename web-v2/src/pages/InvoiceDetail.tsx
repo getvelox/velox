@@ -886,6 +886,34 @@ export default function InvoiceDetailPage() {
                 </div>
                 )
               )}
+
+              {/* No card on file. Without this branch the Charge button simply
+                  did not render — silent absence, with no explanation and no
+                  way forward, on the one scenario bad-debt recovery exists
+                  for: the customer went quiet, you wrote the invoice off, and
+                  they come back with a NEW card. The attention banner that
+                  normally offers this action returns null for terminal
+                  invoices, so it has to live here. (Walked 2026-08-05, FLOW
+                  D6.) */}
+              {!paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0 && !hasPaymentMethod && (
+                <div className="mt-3 border-l-2 border-border pl-3">
+                  <p className="text-xs text-muted-foreground">
+                    <strong className="text-foreground">No payment method on file.</strong>{' '}
+                    Email {customer?.display_name || 'the customer'} a secure link to add a card, then charge
+                    this invoice from here. Adding a card does not collect it — a written-off invoice is
+                    never charged automatically.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2"
+                    disabled={acting || resendSetupLinkMutation.isPending}
+                    onClick={() => resendSetupLinkMutation.mutate()}
+                  >
+                    {resendSetupLinkMutation.isPending ? 'Sending…' : 'Email a payment-method link'}
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         </div>
