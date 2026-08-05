@@ -1980,12 +1980,86 @@ func (s *PostgresStore) ClaimChargeForDunningRetry(ctx context.Context, tenantID
 // the dunning claim: 'unknown' stays excluded (a possibly-succeeded
 // payment is the reconciler's, never blind re-charged).
 func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantID, id string) (bool, error) {
-	return s.claimChargeLease(ctx, tenantID, id)
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer postgres.Rollback(tx)
+
+	// Diverges from claimChargeLease (its sibling, which dunning retries ride)
+	// by admitting `uncollectible` — bad-debt RECOVERY. That divergence is the
+	// safety boundary and it is deliberate: an operator may charge a written-off
+	// invoice when the customer comes back; no MACHINE may. Dunning must never
+	// re-charge a debt the business gave up on, so ClaimChargeForDunningRetry
+	// keeps status='finalized'.
+	//
+	// The invoice is NOT reopened. It stays uncollectible until money actually
+	// arrives, then settles uncollectible -> paid — a transition
+	// markPaidReportingTransition already allows — leaving uncollectible_at AND
+	// paid_at both set. Flipping the status back would ERASE the write-off:
+	// analytics recomputes AR from CURRENT status with no time dimension, so
+	// afterwards nothing could tell an accountant the invoice was ever written
+	// off.
+	//
+	// The three recovery gates live HERE, in the CAS, not only in the handler's
+	// pre-checks. A service-side read is a TOCTOU against the very sweeps that
+	// create these states (the tax-reversal sweep in particular): read says
+	// "safe", sweep reverses, charge proceeds, tenant under-remits.
+	//
+	//   tax_transaction_id — MarkUncollectible ALWAYS attempts an upstream tax
+	//     reversal, which is irreversible at the provider (a reversal is a new
+	//     opposite-sign transaction) and cannot be re-committed here: the
+	//     original tax_calculation_id has a 23h TTL and tax computation is
+	//     draft-only. Charging now would collect tax the tenant has already
+	//     told the authority it did not collect. Gated on the STRUCTURAL fact
+	//     (a committed transaction exists) rather than the best-effort
+	//     tax_reversed_at stamp, which is written post-commit and may lag.
+	//     Stripe reduces reported tax on mark_uncollectible too — the
+	//     difference is that Stripe owns its tax ledger and can re-report;
+	//     Velox reversed an external transaction it cannot restore.
+	//
+	//   billing_reason='threshold' — writing off a threshold invoice does not
+	//     stop the next cycle close from re-billing that usage window. The
+	//     usage is already on a newer invoice, so collecting this one
+	//     double-bills it.
+	//
+	// The third gate (orphaned clawback relief leaving amount_due stale-high)
+	// is a cross-domain sum and cannot be expressed here; it is a handler
+	// pre-check. Stated so the next reader does not assume this CAS is the
+	// complete guard set.
+	res, err := tx.ExecContext(ctx, `
+		UPDATE invoices
+		SET auto_charge_claimed_until = now() + interval '5 minutes'
+		WHERE id = $1
+		  AND payment_status IN ('pending', 'failed')
+		  AND status IN ('finalized', 'uncollectible')
+		  AND amount_due_cents > 0
+		  AND (auto_charge_claimed_until IS NULL OR auto_charge_claimed_until < now())
+		  AND (
+		        status = 'finalized'
+		     OR (COALESCE(tax_transaction_id, '') = ''
+		         AND COALESCE(billing_reason, '') <> 'threshold')
+		      )
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
-// claimChargeLease is the shared CAS both non-sweep charge claims ride:
+// claimChargeLease is the shared CAS the DUNNING retry claim rides:
 // finalized, pending/failed, owing, lease free. No updated_at write —
 // Stripe idempotency keys derive from it (see ClaimAutoCharge).
+//
+// Deliberately still status='finalized' only. See
+// ClaimChargeForManualCollect for why operator-initiated recovery diverges.
 func (s *PostgresStore) claimChargeLease(ctx context.Context, tenantID, id string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {

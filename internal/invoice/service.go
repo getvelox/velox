@@ -671,7 +671,11 @@ func (s *Service) SettleZeroDue(ctx context.Context, tenantID, id string) (domai
 	if err != nil {
 		return domain.Invoice{}, err
 	}
-	if inv.Status != domain.InvoiceFinalized || inv.AmountDueCents > 0 || inv.PaymentStatus != domain.PaymentPending {
+	// Written-off invoices settle here too: a recovery whose credit balance
+	// covers the whole amount never reaches Stripe, and without this the
+	// operator gets a 200 with an invoice still marked uncollectible.
+	if (inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible) ||
+		inv.AmountDueCents > 0 || inv.PaymentStatus != domain.PaymentPending {
 		return inv, nil // nothing to settle — not an error, the caller keeps the invoice as-is
 	}
 	return s.store.MarkPaid(ctx, tenantID, id, "", s.clock.Now(ctx))
