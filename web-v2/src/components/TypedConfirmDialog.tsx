@@ -22,6 +22,14 @@ export interface TypedConfirmDialogProps {
   confirmLabel: string
   onConfirm: () => void
   loading?: boolean
+  /**
+   * Extra controls rendered between the description and the type-to-confirm
+   * input — for a SECOND decision the same action needs (e.g. writing an
+   * invoice off also asks whether to stop the subscription billing). Keep it
+   * to choices; anything that needs its own confirmation belongs in its own
+   * dialog.
+   */
+  children?: ReactNode
 }
 
 /**
@@ -39,6 +47,7 @@ export function TypedConfirmDialog({
   confirmLabel,
   onConfirm,
   loading = false,
+  children,
 }: TypedConfirmDialogProps) {
   const [typed, setTyped] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -64,6 +73,8 @@ export function TypedConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
         </AlertDialogHeader>
+
+        {children}
 
         <div className="space-y-2">
           <Label htmlFor="typed-confirm-input" className="text-sm">
