@@ -1687,8 +1687,8 @@ Verifies the 2026-05-26 audit sweep wired every state-changing flow into `audit_
 
 ## FLOW P5: Health checks
 
-- [ ] `/health` → 200 `{"status":"ok"}`. `/health/ready` → 200 with database, scheduler ok.
-- [ ] Stop Postgres → `/health/ready` → 503 `degraded` with `database: error:…`. `/health` still 200.
+- [x] `/health` → 200 `{"status":"ok"}`. `/health/ready` → 200 with database, scheduler ok. *(`/health` returns exactly `{"status":"ok"}`; `/health/ready` returns `status: ok` with `{api: ok, database: ok, scheduler: "ok: last run 33s ago"}` — the scheduler check reports its age rather than a bare boolean.)*
+- [x] Stop Postgres → `/health/ready` → 503 `degraded` with `database: error:…`. `/health` still 200. *(stopped the Postgres container briefly — **never** `down -v`. `/health/ready` went **503** with `status: degraded` and `database: error: failed to connect to \`user=velox_app database=velox\` … connection refused`, while `/health` stayed **200 {"status":"ok"}` — the liveness/readiness split behaving as intended. Two things fall out of the error text: the runtime pool really is connecting as the least-privilege `velox_app`, not `velox`, and the scheduler check stayed `ok` throughout, so `degraded` was attributed to the failing dependency rather than smearing across every check. Restarting the container recovered readiness to `ok` in ~4s with no restart of the app.)*
 - [ ] Kill scheduler goroutine or wait past 2× interval → readiness shows scheduler degraded.
 
 ## FLOW P6: Tax deferral metrics
@@ -1782,9 +1782,11 @@ Setup: ≥26 customers so at least one lands on page 2 (FLOW S1 tenant + a quick
 
 ## FLOW U8: Request-ID in error toasts
 
-- [ ] Force any API error → toast shows `Request ID: <id>` (clickable to copy). The id is server-minted with a `req_` prefix (Velox no longer uses chi's `<host>/<base32>-<counter>` shape, and never honours an inbound `X-Request-Id` — see FLOW P2).
-- [ ] Even when response envelope fails to parse → Request-Id from `Velox-Request-Id` header still appears.
-- [ ] `grep "<request-id>" server.log` (the id copied from the toast) matches.
+- [x] Force any API error → toast shows `Request ID: <id>` (clickable to copy). The id is server-minted with a `req_` prefix (Velox no longer uses chi's `<host>/<base32>-<counter>` shape, and never honours an inbound `X-Request-Id` — see FLOW P2). *(walked through the UI, not by calling the API: clicking **Archive** on a customer holding a trialing subscription produced a toast reading the 409 reason followed by `Request ID: req_d9pdihjmajdh8855ug10` and a **Copy ID** control.)*
+- [x] Even when response envelope fails to parse → Request-Id from `Velox-Request-Id` header still appears. **This was broken and is now fixed.** *(the header was written only by `respond.JSON`, so any response that never reached a respond helper carried no id in the header **or** the body. Measured with a control: a normal 200 and a JSON 404 both carried `Velox-Request-Id`, while an unrouted `/v1/nope/nope` returned `text/plain` "404 page not found" with the header **absent** — i.e. the one case where a caller must fall back to the header was exactly the case missing it. The id is now stamped in `mw.RequestID` where it is minted, before the handler runs, so it survives whoever writes the status; `respond.JSON` re-setting the same value is a no-op. Re-verified on the rebuilt server: plain-text 404 → `req_d9pdkr3majdibkfhr230`, 405 → present, JSON error → still present.*
+
+  *TRAP that nearly produced a false "not fixed" verdict: an older `velox-bin` was still holding :8080, so the first re-test measured the pre-fix binary. Confirm the listener's pid (`lsof -nP -iTCP:8080 -sTCP:LISTEN`) after restarting, not just that `/health` answers.)*
+- [x] `grep "<request-id>" server.log` (the id copied from the toast) matches. *(the exact id from the toast appears once in the server log, on the request that produced it: `"method":"PATCH","path":"/v1/customers/{id}","status":409,"request_id":"req_d9pdihjmajdh8855ug10"` — so the id an operator reports resolves to a specific call, method and outcome.)*
 
 ## FLOW U10: Public pages
 
@@ -1854,9 +1856,9 @@ Setup: Mailpit up, a customer with a paid invoice.
 
 ## FLOW X4: Security headers + metrics auth
 
-- [ ] `curl -I /v1/customers` carries: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: strict-origin-when-cross-origin`.
-- [ ] Staging/prod: `Strict-Transport-Security` present.
-- [ ] `METRICS_TOKEN=secret123` set → `/metrics` 401 unauth, 200 with Bearer. Unset → `/metrics` accessible (dev).
+- [x] `curl -I /v1/customers` carries: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: strict-origin-when-cross-origin`. *(all four present on the live server, verbatim.)*
+- [x] Staging/prod: `Strict-Transport-Security` present. *(walked with a control rather than alone: a second instance booted with `APP_ENV=staging` returns `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and the same binary in local mode returns no HSTS header at all — so the header is environment-gated, not unconditional. Staging boot also proved its own guard: it refuses to start unless `APP_DATABASE_URL` names a least-privilege role distinct from the documented default, so a throwaway role had to be granted `velox_app` for the test and was dropped afterwards.)*
+- [x] `METRICS_TOKEN=secret123` set → `/metrics` 401 unauth, 200 with Bearer. Unset → `/metrics` accessible (dev). *(with the token set: no header → **401**, wrong bearer → **401**, correct bearer → **200**. The wrong-bearer case is the one worth keeping — without it the check passes on any implementation that merely looks for the header's presence. Unset on the dev server → 200.)*
 
 ## FLOW X5: PII encryption at rest
 
@@ -1880,12 +1882,12 @@ Setup: Mailpit up, a customer with a paid invoice.
 
 ## FLOW X9: Config validation
 
-- [ ] No `VELOX_ENCRYPTION_KEY` in production → fatal.
-- [ ] Key not 64 hex / not valid hex → fatal.
-- [ ] `APP_ENV=production` no `REDIS_URL` → warn "rate limiting will fail open".
-- [ ] `APP_ENV=foo` → warn listing expected values. `PORT=not-a-port` → warn.
-- [ ] `DB_MAX_IDLE_CONNS > DB_MAX_OPEN_CONNS` → warn.
-- [ ] All valid → zero WARN-level config logs.
+- [x] No `VELOX_ENCRYPTION_KEY` in production → fatal. *(`APP_ENV=production` with the key unset: WARN "customer PII will be stored in plaintext", then ERROR `VELOX_ENCRYPTION_KEY is required in production — refusing to start with plaintext PII storage`, and the process exits without binding.)*
+- [x] Key not 64 hex / not valid hex → fatal. *(both shapes rejected with the length named: `zzzz` → "must be exactly 64 hex characters (32 bytes), got 4"; valid-hex-but-short `abcdef` → "got 6". Each pairs a WARN with a fatal ERROR, so the reason is visible even where the process would otherwise die quietly.)*
+- [x] `APP_ENV=production` no `REDIS_URL` → warn "rate limiting will fail open". *(WARN `REDIS_URL is not set — rate limiting will fail open (not enforced)`, worded as the consequence rather than the missing variable.)*
+- [x] `APP_ENV=foo` → warn listing expected values. `PORT=not-a-port` → warn. *(`APP_ENV="foo" is not a recognized environment (expected: local, staging, production)` and `PORT="not-a-port" is not a valid port number`. Worth knowing: **`development` is not a recognized value either** — the accepted set is exactly local / staging / production, so the obvious-looking `APP_ENV=development` warns.)*
+- [x] `DB_MAX_IDLE_CONNS > DB_MAX_OPEN_CONNS` → warn. *(`DB_MAX_IDLE_CONNS (50) exceeds DB_MAX_OPEN_CONNS (10) — idle conns will be capped` — states what actually happens rather than just flagging the pair.)*
+- [x] All valid → zero WARN-level config logs. *(booted the same binary on the working local env — `APP_ENV=local`, 64-char key, `REDIS_URL` set — and grepped its startup output: **zero** `config validation` lines. Control matters here: every case above emitted at least one, so the absence is the check passing, not the grep missing.)*
 
 ## FLOW X10: OpenTelemetry tracing
 

@@ -66,7 +66,17 @@ const requestIDPrefix = "req_"
 // where a request id is born.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), chimw.RequestIDKey, requestIDPrefix+xid.New().String())
+		id := requestIDPrefix + xid.New().String()
+		ctx := context.WithValue(r.Context(), chimw.RequestIDKey, id)
+		// Stamp the published header here, not only in respond.JSON. Responses
+		// that never reach a respond helper — chi's default "404 page not
+		// found" for an unrouted path, net/http's "400 Bad Request" for a
+		// malformed request line — used to carry no id in the header OR the
+		// body, so the one case where a caller most needs the header fallback
+		// (an unparseable envelope) was exactly the case that lacked it.
+		// Set before next.ServeHTTP so it is in place whoever writes the
+		// status; respond.JSON re-Sets the same value, which is a no-op.
+		w.Header().Set("Velox-Request-Id", id)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
