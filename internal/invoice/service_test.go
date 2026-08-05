@@ -1202,6 +1202,50 @@ func (f *fakeCreditNoteTotaler) UnreliefedClawbackCents(_ context.Context, _, _ 
 // applied customer credit reduces amount_due WITHOUT reversing tax, so the old
 // amount_paid+amount_due proxy under-reversed tax on void. With the credit-note
 // totaler wired (reporting NO credit note), void must reverse the FULL tax even
+// though amount_due is short.
+//
+// Untouched by ADR-111 — that decision removed the write-off's tax leg and left
+// VOID's alone. It was deleted by mistake alongside the uncollectible tests and
+// restored when golangci-lint flagged its now-unused fake; the fake was the only
+// evidence left that the test had gone.
+func TestVoid_CreditApplied_TaxNotUnderReversed(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store, nil, newMemNumberer())
+	rev := &fakeTaxReverser{}
+	svc.SetTaxReverser(rev)
+	svc.SetCreditNoteTotaler(&fakeCreditNoteTotaler{credited: 0}) // no credit note exists
+	ctx := context.Background()
+
+	inv, _ := svc.Create(ctx, "t1", CreateInput{
+		CustomerID: "c", SubscriptionID: "s",
+		BillingPeriodStart: time.Now(), BillingPeriodEnd: time.Now().AddDate(0, 1, 0),
+	})
+	if _, err := svc.Finalize(ctx, "t1", inv.ID); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	// $110 taxed invoice, $30 paid down by APPLIED CUSTOMER CREDIT (not a credit
+	// note): amount_due 8000, amount_paid 0, no credit note. The credit didn't
+	// reverse any tax, so the whole $110's tax must be reversed on void.
+	stale := store.invoices[inv.ID]
+	stale.TaxTransactionID = "tx_committed"
+	stale.TotalAmountCents = 11000
+	stale.AmountDueCents = 8000
+	stale.AmountPaidCents = 0
+	store.invoices[inv.ID] = stale
+
+	if _, err := svc.Void(ctx, "t1", inv.ID); err != nil {
+		t.Fatalf("Void: %v", err)
+	}
+	if len(rev.calls) != 1 {
+		t.Fatalf("ReverseTax calls: got %d want 1", len(rev.calls))
+	}
+	// remaining = total - credited(0) = 11000 = total → FULL reversal. The old
+	// proxy would have done ModePartial(8000), under-reversing $30 of tax.
+	if rev.calls[0].Mode != tax.ReversalModeFull {
+		t.Errorf("Mode: got %q want full (applied credit must NOT shrink the tax reversal)", rev.calls[0].Mode)
+	}
+}
+
 // TestMarkUncollectible_DoesNotReverseTax is the ADR-111 decision, inverted
 // from the test it replaces.
 //
@@ -1259,16 +1303,10 @@ func TestMarkUncollectible_DoesNotReverseTax(t *testing.T) {
 	}
 }
 
-// TestUncollectibleThenVoid_ReversesTaxWithOneStableReference is the product-audit
-// G1 regression: Void permits an `uncollectible` source (annulling a bad debt is
-// a legitimate operator action), and pre-fix MarkUncollectible + Void reversed the
-// tax under DIFFERENT references (inv_uncoll_<id> vs inv_void_<id>) that don't
-// dedup at Stripe → the same tax transaction was reversed twice → the tenant
-// UNDER-remitted output tax. The fix uses one invoice-stable reference so both
-// transitions share it (same Reference + idempotency key velox_tax_rev_<ref>),
-// TestUncollectibleThenVoid_ReversesExactlyOnce keeps the DECISION of the test
-// it replaces — a written-off invoice that is later voided must never
-// double-reverse its tax — and updates the mechanism.
+// TestUncollectibleThenVoid_ReversesExactlyOnce keeps the DECISION of the
+// product-audit G1 regression it replaces — a written-off invoice that is later
+// voided must never double-reverse its tax (which would UNDER-remit output tax)
+// — and updates the mechanism.
 //
 // Before ADR-111 that took two reversal calls sharing an invoice-stable
 // reference, relying on Stripe to dedup them. Now the write-off has no tax leg
