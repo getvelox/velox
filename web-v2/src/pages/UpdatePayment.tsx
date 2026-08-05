@@ -3,11 +3,54 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { formatCents } from '@/lib/api'
+import { isTerminalInvoiceStatus, invoiceAmountLabel } from '@/lib/invoiceTerminal'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 
 import { CreditCard, AlertTriangle, ExternalLink, ShieldCheck, Clock, Loader2, Info } from 'lucide-react'
+
+/**
+ * The invoice states where asking for payment would be a lie, and what to say
+ * instead. Presence in this map is the terminal test — both the banner and the
+ * money label read it, so they can never disagree about a status again.
+ *
+ * `uncollectible` was MISSING until 2026-08-05, and that was a real defect
+ * rather than an omission of taste: the sibling public page — HostedInvoice,
+ * same customer, reached from the same dunning emails — already rendered "This
+ * invoice is closed" and relabelled the figure to "Invoice amount" for
+ * voided AND uncollectible alike. So a written-off invoice showed the amber
+ * "Payment method needed · Amount Due" demand here while the other public page
+ * told the same customer collection was closed. Found live on TC Walk Co
+ * VLX-000152 (and VLX-000136 had been sitting in that state with a live token).
+ *
+ * That page's own comment records this rule being missed once before: #651
+ * relabelled one figure and left its twin saying "Amount Due" — "Same rule,
+ * both places." This is the third place.
+ *
+ * The write-off copy is deliberately NOT the void copy. Voiding annuls the
+ * debt, so "no payment is needed" is true. A write-off does not: the invoice
+ * stays on the books for audit and MarkPaid is still legal from it. What IS
+ * true is that self-service payment for it has closed.
+ *
+ * Every arm keeps the "add a payment method" button, which is why this page
+ * diverges from HostedInvoice dropping its Pay button: paying THIS invoice is
+ * closed, but saving a card still serves the next one.
+ */
+const TERMINAL_INVOICE_COPY: Record<string, { title: string; body: string }> = {
+  paid: {
+    title: 'This invoice is already paid',
+    body: 'Nothing is due. You can still add a payment method so future invoices are collected automatically.',
+  },
+  voided: {
+    title: 'This invoice was canceled',
+    body: 'No payment is needed. You can still add a payment method so future invoices are collected automatically.',
+  },
+  uncollectible: {
+    title: 'This invoice is closed',
+    body: 'Online payment for this invoice is no longer available — please contact support to settle it. You can still add a payment method so future invoices are collected automatically.',
+  },
+}
 
 interface TokenData {
   customer_name: string
@@ -154,20 +197,16 @@ export default function UpdatePaymentPage() {
                 {/* Alert banner — settled/annulled invoices state the
                     truth instead of asking for payment; adding a card is
                     still offered because it serves the NEXT invoice. */}
-                {data.invoice_status === 'paid' || data.invoice_status === 'voided' ? (
+                {isTerminalInvoiceStatus(data.invoice_status) ? (
                   <div className="bg-muted px-6 py-4 border-b border-border">
                     <div className="flex items-start gap-3">
                       <Info size={18} className="text-muted-foreground mt-0.5 shrink-0" />
                       <div>
                         <p className="text-sm font-medium text-foreground">
-                          {data.invoice_status === 'paid'
-                            ? 'This invoice is already paid'
-                            : 'This invoice was canceled'}
+                          {TERMINAL_INVOICE_COPY[data.invoice_status ?? ''].title}
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">
-                          {data.invoice_status === 'paid'
-                            ? 'Nothing is due. You can still add a payment method so future invoices are collected automatically.'
-                            : 'No payment is needed. You can still add a payment method so future invoices are collected automatically.'}
+                          {TERMINAL_INVOICE_COPY[data.invoice_status ?? ''].body}
                         </p>
                       </div>
                     </div>
@@ -205,9 +244,7 @@ export default function UpdatePaymentPage() {
                         customer for a settled invoice. */}
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">
-                        {data.invoice_status === 'paid' || data.invoice_status === 'voided'
-                          ? 'Invoice amount'
-                          : 'Amount Due'}
+                        {invoiceAmountLabel(data.invoice_status)}
                       </span>
                       <span className="text-lg font-semibold text-foreground">{formatCents(data.amount_due_cents, data.currency)}</span>
                     </div>

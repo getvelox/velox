@@ -11,6 +11,12 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A written-off invoice's payment link no longer demands payment (2026-08-05).** When an invoice is written off as bad debt, the customer-facing "update your payment method" page kept showing an amber **"Payment method needed"** warning with **"Amount Due $30.00"** — while the *other* public page, which the same customer reaches from the same dunning email, already said the invoice was closed and had relabelled the figure. Two pages, one invoice, opposite answers. A fix in July had taught this page to stop demanding payment for invoices that were paid or cancelled, and stopped one state short of written-off. It now says the invoice is closed and points to support, and the amount is labelled "Invoice amount" rather than presented as owed. The wording is deliberately different from a cancelled invoice's: cancelling annuls the debt, writing one off does not — it stays on the books, and a customer who chooses to pay still can. All three keep the "add a payment method" button, because saving a card still serves the *next* invoice.
+
+  This is the third time this same rule has been missed in the same way — always by handling "cancelled" and forgetting "written off". Both public pages now decide it in one shared place, guarded by tests that fail if either the state or its negative controls drift.
+
 ### Changed
 
 - **A resolved dunning run now says whether the invoice was voided or written off (2026-08-04).** One value, `manually_resolved`, was written for both outcomes by three different paths — the operator's "Void invoice" action, the mark-uncollectible action, and the engine's own terminal check — so the field that exists to answer "why did we stop collecting this?" could not distinguish annulling an invoice from writing it off as bad debt. Two different things for revenue. The resolution now names the outcome in every case, and `invoice_not_collectible` — which already described a write-off exactly, and was sitting unused beside it — is what the write-off paths record. Existing rows were mapped from their invoice's actual status, never guessed: six became "voided", one became "written off", and one whose invoice never transitioned at all kept the old value, because neither successor is true of it and inventing one would be worse than leaving it vague. The old value is refused going forward, with an error naming both replacements rather than a generic rejection.

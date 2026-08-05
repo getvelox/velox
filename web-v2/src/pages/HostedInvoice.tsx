@@ -3,6 +3,7 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { formatCents, formatRate, formatDate, formatTaxRate } from '@/lib/api'
+import { isTerminalInvoiceStatus, invoiceAmountLabel } from '@/lib/invoiceTerminal'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -444,9 +445,7 @@ export default function HostedInvoicePage() {
                     invoice still led with money owed in the largest type on
                     the page. Same rule, both places. */}
                 <p className="text-xs text-muted-foreground uppercase tracking-wider">
-                  {invoice.status === 'voided' || invoice.status === 'uncollectible'
-                    ? 'Invoice amount'
-                    : 'Amount Due'}
+                  {invoiceAmountLabel(invoice.status)}
                 </p>
                 <p className="text-2xl font-semibold text-foreground tabular-nums">
                   {formatCents(invoice.amount_due_cents, invoice.currency)}
@@ -598,9 +597,7 @@ export default function HostedInvoicePage() {
                     the payment-update page, 2026-07-28). */}
                 <div className="flex justify-between pt-2 border-t font-semibold">
                   <dt className="text-foreground">
-                    {invoice.status === 'voided' || invoice.status === 'uncollectible'
-                      ? 'Invoice amount'
-                      : 'Amount due'}
+                    {isTerminalInvoiceStatus(invoice.status) ? 'Invoice amount' : 'Amount due'}
                   </dt>
                   <dd className="text-foreground tabular-nums">
                     {formatCents(invoice.amount_due_cents, invoice.currency)}
