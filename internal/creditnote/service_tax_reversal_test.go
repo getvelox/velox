@@ -505,9 +505,12 @@ func TestRetryPendingCreditNoteTaxReversal_ZeroTaxOrphanDoesNotRewriteItself(t *
 		t.Errorf("SetTaxReversalPending writes: got %d, want 0 — the marker was already false, "+
 			"so this write only refreshes updated_at and keeps the row inside its own 24h window", got)
 	}
-	// The reversal itself is still attempted; only the redundant write is gone.
-	if len(rev.calls) != 1 {
-		t.Errorf("reverse calls: got %d, want 1", len(rev.calls))
+	// And no provider call either: a zero-tax transaction has nothing to
+	// reverse, so re-driving it is a round-trip that can never change the
+	// row. Leaving this in place meant ~288 pointless calls per credit note
+	// before the 24h window aged it out.
+	if len(rev.calls) != 0 {
+		t.Errorf("reverse calls: got %d, want 0 — a zero-tax invoice has nothing to reverse", len(rev.calls))
 	}
 	if got, _ := store.Get(context.Background(), "t1", cn.ID); got.TaxReversalPending {
 		t.Error("marker should remain false")

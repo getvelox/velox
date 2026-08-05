@@ -595,11 +595,19 @@ func (s *Service) RetryPendingCreditNoteTaxReversal(ctx context.Context, batch i
 			errsOut = append(errsOut, fmt.Errorf("get invoice for pending tax reversal %s: %w", cn.ID, err))
 			continue
 		}
-		if inv.TaxTransactionID == "" {
-			// No upstream transaction to reverse (provider changed / legacy) —
-			// nothing to recover; clear the marker so it leaves the scan.
-			if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, false); err != nil {
-				errsOut = append(errsOut, fmt.Errorf("clear stale tax_reversal_pending for %s: %w", cn.ID, err))
+		// Nothing to reverse, in either of its two shapes: no upstream
+		// transaction at all (provider changed / legacy), or a transaction
+		// that carried ZERO tax — reversing it is a no-op that returns no
+		// transaction id, so tax_transaction_id stays empty and the row
+		// re-qualifies through the scan's structural arm on the very next
+		// tick. Without the zero-tax half this re-drove a pointless Stripe
+		// call every tick until the 24h window aged it out (~288 calls per
+		// affected credit note) and reported advanced=1 the whole time.
+		if inv.TaxTransactionID == "" || inv.TaxAmountCents == 0 {
+			if cn.TaxReversalPending {
+				if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, false); err != nil {
+					errsOut = append(errsOut, fmt.Errorf("clear stale tax_reversal_pending for %s: %w", cn.ID, err))
+				}
 			}
 			continue
 		}
