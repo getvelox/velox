@@ -1908,9 +1908,11 @@ docker run -d --name jaeger -p 16686:16686 -p 4318:4318 jaegertracing/jaeger:2
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 go run ./cmd/velox
 ```
 
-- [ ] Hit several endpoints. Jaeger UI at :16686, service `velox`.
-- [ ] HTTP spans (method+path), `billing.RunCycle` with `batch_size`, `billing.BillSubscription` with `subscription_id`/`tenant_id`.
-- [ ] HTTP → billing parent-child relationship visible.
+- [x] Hit several endpoints. Jaeger UI at :16686, service `velox`. *(**tracing was completely broken and is now fixed — see the CHANGELOG.** Setting `OTEL_EXPORTER_OTLP_ENDPOINT`, the documented way to switch tracing on, made the server **fail to boot**: `init tracing: conflicting Schema URL: …/1.41.0 and …/1.27.0` was the only line it ever logged before exiting. `resource.Merge` refuses to merge resources with different schema URLs, and `resource.Default()` reports the SDK's schema (1.41.0, from otel v1.44.0) while the import pinned `semconv/v1.27.0`. So the feature was dead on arrival for anyone who tried to enable it. Fixed by merging a **schemaless** resource, which cannot drift again when the SDK bumps — re-pinning semconv would only reset the clock.*
+
+  *After the fix: the server logs `tracing enabled endpoint=http://localhost:4318 service=velox`, and Jaeger (run as a throwaway `jaegertracing/all-in-one` container) lists **velox** among its services with 8 operations and 14 traces on the search page.)*
+- [x] HTTP spans (method+path), `billing.RunCycle` with `batch_size`, `billing.BillSubscription` with `subscription_id`/`tenant_id`. *(HTTP spans are named `METHOD /route-pattern` — `GET /v1/customers/:id`, **not** the interpolated id, so span cardinality stays bounded — and carry `http.request.method`, `url.path`, `url.scheme`, `http.response.status_code`. `billing.RunCycle` appears on each scheduler tick with **`batch_size: 50`**. `billing.BillSubscription` did **not** appear, because no subscription came due during the window; the sibling `billing.BillOnCreateTx` carries the same `subscription_id` + `tenant_id` attribute pair and is shown in the box below, so the attribute shape is evidenced even though that specific span name was not exercised.)*
+- [x] HTTP → billing parent-child relationship visible. *(walked on a real trace: creating a start-now subscription produced a two-span trace with `POST /v1/subscriptions` (`http.response.status_code: 201`) as the **root** and **`billing.BillOnCreateTx` as its child**, carrying `subscription_id: vlx_sub_d9pfqc3…` and `tenant_id: vlx_ten_d9orb3…`. Note `billing.RunCycle` is a **root** span with no HTTP parent — correctly, since the scheduler drives it rather than a request — so it is not the pair to look for here.)*
 
 ## FLOW X11: Large batch usage ingestion
 
