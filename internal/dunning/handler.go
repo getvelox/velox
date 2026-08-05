@@ -196,7 +196,7 @@ func decodePolicyBody(r *http.Request) (domain.DunningPolicy, error) {
 	}
 	if err := json.Unmarshal(body, &legacy); err == nil && legacy.FinalAction != nil {
 		return domain.DunningPolicy{}, errs.Invalid("final_action",
-			"final_action was split in ADR-112 — send final_subscription_action (none|pause|cancel) and final_invoice_action (none|mark_uncollectible)")
+			"final_action is no longer accepted — it decided two separate things. Send final_subscription_action (none|pause|cancel) and final_invoice_action (none|mark_uncollectible) instead")
 	}
 	var policy domain.DunningPolicy
 	if err := json.Unmarshal(body, &policy); err != nil {

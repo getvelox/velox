@@ -47,7 +47,7 @@ export default defineConfig({
     // IPv6-only socket on macOS, which a browser hitting 127.0.0.1 can't
     // reach). Access the dashboard at http://localhost:5173.
     host: true,
-    port: 5173,
+    port: Number(process.env.VELOX_DEV_PORT ?? 5173),
     proxy: {
       // Bounded + error-handled so a stalled/reset upstream surfaces as a 502
       // instead of leaving the browser request "pending" forever. timeout/
@@ -55,7 +55,7 @@ export default defineConfig({
       // backend's own response wins when it's merely slow; the proxy only fires
       // on a genuinely dead/wedged upstream.
       '/v1': {
-        target: 'http://localhost:8080',
+        target: process.env.VELOX_API_TARGET ?? 'http://localhost:8080',
         changeOrigin: true,
         agent: backendKeepAlive,
         timeout: 35_000,
