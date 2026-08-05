@@ -196,3 +196,63 @@ func TestRecoveryClaim_CollisionExactlyOne(t *testing.T) {
 		t.Fatalf("%d concurrent recovery claims won, want exactly 1 — more than one means more than one card charge", won)
 	}
 }
+
+// TestRecovery_SettlesToPaidAndKeepsTheWriteOff is the feature's central
+// promise, and until now nothing asserted it.
+//
+// The entire design rests on "the invoice is charged in place, not reopened —
+// the write-off is preserved as history". If uncollectible_at were lost on
+// settle, the recovery would be an ERASURE, which is exactly the outcome the
+// reopen shape was rejected for. A claim test and a markPaid test each passing
+// separately does not prove this; only the pair together does.
+func TestRecovery_SettlesToPaidAndKeepsTheWriteOff(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Recovery Settle")
+	store := invoice.NewPostgresStore(db)
+
+	inv := seedWrittenOff(t, db, ctx, tenantID, "INV-REC-SETTLE", "")
+
+	before, err := store.Get(ctx, tenantID, inv.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if before.UncollectibleAt == nil {
+		t.Fatal("precondition: the fixture is not actually written off")
+	}
+	writtenOffAt := *before.UncollectibleAt
+
+	// The operator claims it (the recovery path), then the charge settles.
+	if ok, err := store.ClaimChargeForManualCollect(ctx, tenantID, inv.ID); err != nil || !ok {
+		t.Fatalf("recovery claim failed: ok=%v err=%v", ok, err)
+	}
+	paidAt := time.Now().UTC()
+	if _, err := store.MarkPaid(ctx, tenantID, inv.ID, "pi_recovered", paidAt); err != nil {
+		t.Fatalf("mark paid: %v", err)
+	}
+
+	got, err := store.Get(ctx, tenantID, inv.ID)
+	if err != nil {
+		t.Fatalf("get after settle: %v", err)
+	}
+
+	if got.Status != domain.InvoicePaid {
+		t.Errorf("status = %q, want paid — a settled recovery must leave the invoice paid", got.Status)
+	}
+	if got.PaymentStatus != domain.PaymentSucceeded {
+		t.Errorf("payment_status = %q, want succeeded", got.PaymentStatus)
+	}
+	// THE ASSERTION THIS TEST EXISTS FOR.
+	if got.UncollectibleAt == nil {
+		t.Fatal("uncollectible_at was CLEARED by the recovery — the write-off has been erased, which is precisely what charging in place exists to avoid")
+	}
+	if !got.UncollectibleAt.Equal(writtenOffAt) {
+		t.Errorf("uncollectible_at moved: %v -> %v; the write-off's own date must not be rewritten by a later recovery", writtenOffAt, *got.UncollectibleAt)
+	}
+	if got.PaidAt == nil {
+		t.Error("paid_at must be set — both stamps carry, which is Stripe's status_transitions shape")
+	}
+	if got.StripePaymentIntentID != "pi_recovered" {
+		t.Errorf("stripe_payment_intent_id = %q, want the recovery's PI", got.StripePaymentIntentID)
+	}
+}

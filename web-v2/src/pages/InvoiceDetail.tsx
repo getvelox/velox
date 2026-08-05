@@ -811,6 +811,19 @@ export default function InvoiceDetailPage() {
                   paymentIsUnresolved is imported, never re-typed — four call
                   sites drifting apart is the bug that seam exists to stop. */}
               {!paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0 && hasPaymentMethod && (
+                invoice.recovery_block?.blocked ? (
+                  /* The server published WHY this one cannot be charged (tax
+                     already reversed / usage re-billed / unapplied credit).
+                     Show the reason instead of an enabled button that answers
+                     409 after the operator has confirmed an amount — a control
+                     that promises what the server refuses is a defect, not a
+                     rough edge. Same source the endpoint refuses from, so the
+                     two can never disagree. */
+                  <p className="text-xs text-muted-foreground mt-3 border-l-2 border-border pl-3">
+                    <strong className="text-foreground">Can't charge this invoice.</strong>{' '}
+                    {invoice.recovery_block.message}
+                  </p>
+                ) : (
                 <div className="mt-3">
                   <AlertDialog>
                     <AlertDialogTrigger render={<Button size="sm" disabled={acting} />}>
@@ -834,6 +847,7 @@ export default function InvoiceDetailPage() {
                     </AlertDialogContent>
                   </AlertDialog>
                 </div>
+                )
               )}
             </div>
           </div>

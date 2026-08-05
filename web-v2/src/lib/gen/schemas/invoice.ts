@@ -14,6 +14,7 @@ import type { InvoicePaymentStatus } from './invoicePaymentStatus';
 import type { InvoiceStatus } from './invoiceStatus';
 import type { InvoiceTaxStatus } from './invoiceTaxStatus';
 import type { ItemChangeType } from './itemChangeType';
+import type { RecoveryBlock } from './recoveryBlock';
 
 /**
  * A Velox invoice. Returned from create, finalize, void, list, get,
@@ -73,6 +74,7 @@ export interface Invoice {
    */
   tax_error_code?: string;
   attention?: Attention;
+  recovery_block?: RecoveryBlock;
   total_amount_cents: number;
   amount_due_cents: number;
   amount_paid_cents: number;

@@ -545,3 +545,53 @@ func TestCollectAtFinalize_CreditBalance(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyCreditBalance_ReachableOnRecovery is the test that would have caught
+// the worst defect in the bad-debt-recovery work, and it is written through the
+// SERVICE deliberately.
+//
+// The recovery PR widened the credit STORE (ApplyToInvoiceAtomic gained an
+// uncollectible arm, with a comment stating the intent) and the settle, but not
+// ApplyCreditBalance — the service method that is the only caller on the
+// collect path. So the store arm was unreachable, the operator's card was
+// charged the GROSS while the balance sat unconsumed, and the confirm dialog
+// shipped in the same PR promised "Any credit balance is applied first".
+//
+// A store-level test would have passed the whole time. Only the service path
+// proves reachability, which is why the control below is not optional: without
+// the finalized arm, a predicate that applied credit to everything would also
+// satisfy the treatment.
+func TestApplyCreditBalance_ReachableOnRecovery(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		status domain.InvoiceStatus
+		want   bool
+	}{
+		{"finalized (control)", domain.InvoiceFinalized, true},
+		{"uncollectible — bad-debt recovery", domain.InvoiceUncollectible, true},
+		{"voided must NOT drain the balance", domain.InvoiceVoided, false},
+		{"paid must NOT drain the balance", domain.InvoicePaid, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemStore()
+			inv, err := store.Create(context.Background(), "t1", domain.Invoice{
+				AmountDueCents: 5000, CustomerID: "cus_1", Status: tc.status,
+			})
+			if err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			applier := &fakeInvCreditApplier{store: store, applyCents: 2000}
+			svc := NewService(store, nil, nil)
+			svc.SetCreditApplier(applier)
+
+			if _, err := svc.ApplyCreditBalance(context.Background(), "t1", inv.ID); err != nil {
+				t.Fatalf("ApplyCreditBalance: %v", err)
+			}
+			got := applier.calls > 0
+			if got != tc.want {
+				t.Fatalf("credit applied = %v, want %v — on a recovery this is the difference between charging the remainder and charging the gross", got, tc.want)
+			}
+		})
+	}
+}
