@@ -1072,3 +1072,79 @@ func TestRecoveryBlocksCharge(t *testing.T) {
 		})
 	}
 }
+
+// TestRecoveryWarnsOnOfflinePayment pins the OFFLINE twin, and the pairing with
+// RecoveryBlocksCharge is the point: the same two conditions BLOCK a card
+// charge and only WARN on an offline payment. Refuse to create a bad money
+// event; never refuse to record one that already happened.
+func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
+	writtenOff := func() Invoice {
+		return Invoice{Status: InvoiceUncollectible, BillingReason: BillingReasonSubscriptionCycle}
+	}
+	taxReversed := func() Invoice {
+		i := writtenOff()
+		i.TaxProvider, i.TaxAmountCents = "stripe_tax", 725
+		i.TaxReversedAt = &time.Time{}
+		return i
+	}
+
+	t.Run("tax reversed warns", func(t *testing.T) {
+		w := RecoveryWarnsOnOfflinePayment(taxReversed())
+		if w == nil || w.Code != "tax_reversed_unrecoverable" {
+			t.Fatalf("got %+v, want a tax_reversed_unrecoverable warning", w)
+		}
+	})
+
+	t.Run("threshold warns", func(t *testing.T) {
+		i := writtenOff()
+		i.BillingReason = BillingReasonThreshold
+		w := RecoveryWarnsOnOfflinePayment(i)
+		if w == nil || w.Code != "recovery_superseded" {
+			t.Fatalf("got %+v, want a recovery_superseded warning", w)
+		}
+	})
+
+	t.Run("ordinary written-off invoice says nothing", func(t *testing.T) {
+		if w := RecoveryWarnsOnOfflinePayment(writtenOff()); w != nil {
+			t.Fatalf("warned on a clean recovery: %+v — a warning on every offline payment is a warning nobody reads", w)
+		}
+	})
+
+	t.Run("a FINALIZED invoice never warns", func(t *testing.T) {
+		i := taxReversed()
+		i.Status = InvoiceFinalized
+		if w := RecoveryWarnsOnOfflinePayment(i); w != nil {
+			t.Fatalf("warned on an ordinary invoice: %+v", w)
+		}
+	})
+
+	t.Run("tax-free written-off invoice says nothing", func(t *testing.T) {
+		// Only a REVERSED provider transaction is unreconciled. An invoice with
+		// no tax, or a manual-provider one, has no provider ledger to disagree
+		// with — warning there would train the operator to ignore this.
+		i := writtenOff()
+		i.TaxProvider, i.TaxAmountCents = "stripe_tax", 0
+		if w := RecoveryWarnsOnOfflinePayment(i); w != nil {
+			t.Fatalf("warned with zero tax: %+v", w)
+		}
+		i.TaxProvider, i.TaxAmountCents = "manual", 725
+		if w := RecoveryWarnsOnOfflinePayment(i); w != nil {
+			t.Fatalf("warned on a manual-provider invoice: %+v — the tenant files that tax themselves", w)
+		}
+	})
+
+	t.Run("the SAME conditions block a card charge", func(t *testing.T) {
+		// The pairing is the rule. If these ever diverge, one of the two paths
+		// is treating the same money fact differently for no stated reason.
+		i := taxReversed()
+		i.TaxTransactionID = "tax_tx_1" // block keys on the committed id
+		if b := RecoveryBlocksCharge(i, 0); !b.Blocked || b.Code != "tax_reversed_unrecoverable" {
+			t.Errorf("card path does not block what the offline path warns about: %+v", b)
+		}
+		th := writtenOff()
+		th.BillingReason = BillingReasonThreshold
+		if b := RecoveryBlocksCharge(th, 0); !b.Blocked || b.Code != "recovery_superseded" {
+			t.Errorf("card path does not block the threshold case: %+v", b)
+		}
+	})
+}

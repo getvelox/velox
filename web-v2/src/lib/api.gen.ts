@@ -3589,6 +3589,18 @@ export interface components {
             tax_error_code?: string;
             attention?: components["schemas"]["Attention"];
             recovery_block?: components["schemas"]["RecoveryBlock"];
+            /**
+             * @description What an operator must know BEFORE recording an OFFLINE payment on a
+             *     written-off invoice — a consequence that will go unreconciled, NOT
+             *     a refusal. Absent when there is nothing to say.
+             *
+             *     The same two conditions that BLOCK a card charge (`recovery_block`)
+             *     only WARN here, deliberately: a card charge is Velox choosing to
+             *     move money, while an offline payment means the money already
+             *     arrived and refusing to record it would only make the books wrong
+             *     too. `blocked` is always false on this field.
+             */
+            recovery_warning?: components["schemas"]["RecoveryBlock"];
             /** Format: int64 */
             total_amount_cents: number;
             /** Format: int64 */

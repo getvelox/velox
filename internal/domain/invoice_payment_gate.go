@@ -251,3 +251,47 @@ func RecoveryBlocksCharge(inv Invoice, unreliefedClawbackCents int64) PaymentBlo
 	}
 	return PaymentBlock{}
 }
+
+// RecoveryWarnsOnOfflinePayment is the OFFLINE twin of RecoveryBlocksCharge,
+// and the difference between them is the whole rule for this area:
+//
+//	refuse to CREATE a bad money event; never refuse to RECORD one that
+//	already happened.
+//
+// A card charge is Velox choosing to move money, so those conditions BLOCK. An
+// offline payment means the wire already landed — refusing to record it would
+// only make the books wrong too, on top of a payment that exists either way.
+//
+// But "do not refuse" is not "say nothing". Both conditions below mean the
+// recorded payment does not reconcile with what the tenant has told the tax
+// authority, or with what was already billed elsewhere — and nothing
+// downstream will ever notice, because MarkPaid flips status to 'paid', which
+// drops the invoice out of the tax-reversal sweep's own predicate
+// (status IN ('voided','uncollectible')). The discrepancy becomes permanently
+// invisible at the instant it is created. So the operator has to be told
+// BEFORE they act, on the invoice, not in a log line an engineer reads later.
+//
+// Returns nil when there is nothing to say — the overwhelming majority.
+func RecoveryWarnsOnOfflinePayment(inv Invoice) *PaymentBlock {
+	if inv.Status != InvoiceUncollectible {
+		return nil
+	}
+	// Tax was reversed at write-off and cannot be re-reported automatically.
+	// Keyed on the reversal having HAPPENED (stamp set, or a stripe_tax invoice
+	// carrying tax whose committed transaction is gone), not on the invoice
+	// merely having tax.
+	if inv.TaxProvider == "stripe_tax" && inv.TaxAmountCents > 0 &&
+		(inv.TaxReversedAt != nil || inv.TaxTransactionID == "") {
+		return &PaymentBlock{
+			Code:    "tax_reversed_unrecoverable",
+			Message: "This invoice's tax was reversed with the tax provider when it was written off. Recording this payment does not re-report it, so the tax collected here will not appear in your provider's records — correct it with your provider.",
+		}
+	}
+	if inv.BillingReason == BillingReasonThreshold {
+		return &PaymentBlock{
+			Code:    "recovery_superseded",
+			Message: "This invoice was billed on a usage threshold, and writing it off did not stop that usage being re-billed on a later invoice. Check that this payment is not settling usage the customer has already been billed for.",
+		}
+	}
+	return nil
+}

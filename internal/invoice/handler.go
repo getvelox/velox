@@ -2507,7 +2507,16 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 	// the invoice was collected via dunning retry. The frontend
 	// renders "after N retry attempts" as a sub-line, replacing
 	// the now-suppressed dunning 'resolved' row.
-	if inv.PaidAt != nil && maxAttemptCount > 0 {
+	//
+	// NOT on a bad-debt recovery. A written-off invoice's retries all FAILED —
+	// that is why it was written off, and its run resolved
+	// invoice_not_collectible. Crediting "paid after N retry attempts" to a
+	// recovery would hand the operator's manual collection to the campaign that
+	// gave up on it, and it is the count of failures being shown as the cause
+	// of success. The write-off stamp is the discriminator: it is set only on
+	// invoices whose collection was abandoned, and it survives the recovery
+	// (which is exactly why it can be used here).
+	if inv.PaidAt != nil && inv.UncollectibleAt == nil && maxAttemptCount > 0 {
 		for i := range events {
 			if events[i].Source == "lifecycle" && events[i].EventType == "invoice.paid" {
 				events[i].AttemptCount = maxAttemptCount

@@ -13,6 +13,14 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Added
 
+- **Recording an offline payment on a written-off invoice now warns when it won't reconcile (2026-08-05).** Two situations make a recovered bad debt disagree with the books, and until now both were silent on the offline path: the invoice's tax was already reported to the tax authority as *not* collected and cannot be re-reported automatically, or the invoice was billed on a usage threshold whose usage has since been re-billed on a newer invoice. Neither blocks the recording — the money has already arrived, and refusing to write it down would only make the books wrong as well as the payment unrecorded. But the operator is now told before they commit, on the dialog itself, because nothing downstream will ever raise it: recording the payment marks the invoice paid, which removes it from the very sweep that tracks unreversed tax. The same two conditions **do** block a card charge, which is Velox choosing to move money rather than recording money that already moved.
+
+### Fixed
+
+- **Three reporting gaps around recovered bad debt (2026-08-05).** When a written-off invoice is later paid, three surfaces told a slightly wrong story. The CSV export carried no record of the write-off at all, so a recovered invoice was indistinguishable from one that had never been written off — an accountant could not locate a single bad-debt recovery in the file. The invoice timeline credited the *failed* dunning campaign for the operator's manual recovery, showing "paid after N retry attempts" where all N of those attempts had failed and were the reason the invoice was written off in the first place. And on a prepaid-commit invoice being recovered, the credit-exposure notice offered a **Void invoice** button that the server refuses while a payment is in flight — a control that could only fail.
+
+### Added
+
 - **A written-off invoice can now be charged when the customer comes back (2026-08-05).** When automatic retries give up, Velox writes the invoice off as bad debt — usually on a timer, without anyone deciding it. Until now that was a dead end for card payments: if the customer returned weeks later with a working card, the only way to take their money was for them to pay by wire and for someone to type it in by hand. An operator can now charge the card directly from the invoice. **The invoice is not reopened** — it stays written off until the payment actually settles, then shows as paid, so the write-off remains visible in its history rather than being quietly erased. If the card declines, it simply stays written off, and no new collection campaign starts.
 
   This stays an **operator** action. The customer-facing pages still say collection is closed, and the automatic retry machinery still refuses written-off invoices — nothing re-charges a debt the business gave up on without a person deciding to.

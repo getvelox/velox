@@ -1147,6 +1147,17 @@ type Invoice struct {
 	// applied, so `amount_due_cents` is higher than what is owed.
 	RecoveryBlock RecoveryBlock `json:"recovery_block,omitempty"`
 
+	// RecoveryWarning What an operator must know BEFORE recording an OFFLINE payment on a
+	// written-off invoice — a consequence that will go unreconciled, NOT
+	// a refusal. Absent when there is nothing to say.
+	//
+	// The same two conditions that BLOCK a card charge (`recovery_block`)
+	// only WARN here, deliberately: a card charge is Velox choosing to
+	// move money, while an offline payment means the money already
+	// arrived and refusing to record it would only make the books wrong
+	// too. `blocked` is always false on this field.
+	RecoveryWarning RecoveryBlock `json:"recovery_warning,omitempty"`
+
 	// SourceChangeType Classifies per-item proration artifacts so the dedup index can
 	// distinguish a plan-change and a quantity-change that happen to
 	// share the same `(subscription, item, timestamp)`.
