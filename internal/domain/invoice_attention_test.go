@@ -987,3 +987,39 @@ func TestCommitExposure_ExpiredGrantReportsNothing(t *testing.T) {
 		t.Fatalf("expired grant claimed spendable credit: %q", got.Message)
 	}
 }
+
+// TestRecoveryInFlight_NarrowByDesign pins the bad-debt-recovery banner and,
+// more importantly, its SILENCE.
+//
+// The banner exists so a second operator cannot charge a card that is already
+// being charged. But it must fire ONLY while a recovery is in flight — a
+// written-off invoice sitting at `failed` is every dunning-exhausted write-off
+// in the system, and lighting those up would put a permanent banner on the
+// most common terminal state there is.
+func TestRecoveryInFlight_NarrowByDesign(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  InvoiceStatus
+		payment InvoicePaymentStatus
+		want    bool
+	}{
+		{"written off + recovery in flight", InvoiceUncollectible, PaymentProcessing, true},
+		{"written off + failed (every dunning exhaustion)", InvoiceUncollectible, PaymentFailed, false},
+		{"written off + pending", InvoiceUncollectible, PaymentPending, false},
+		{"written off + parked", InvoiceUncollectible, PaymentUnknown, false},
+		{"voided + processing", InvoiceVoided, PaymentProcessing, false},
+		{"paid + processing", InvoicePaid, PaymentProcessing, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := draft()
+			inv.Status = tc.status
+			inv.PaymentStatus = tc.payment
+			got := ClassifyInvoiceAttention(inv, AttentionContext{})
+			fired := got != nil && got.Code == "payment.recovery_processing"
+			if fired != tc.want {
+				t.Fatalf("recovery banner fired=%v, want %v (attention=%+v)", fired, tc.want, got)
+			}
+		})
+	}
+}

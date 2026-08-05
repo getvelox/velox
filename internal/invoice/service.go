@@ -56,6 +56,11 @@ type TaxReverser interface {
 // *creditnote.Service.CreditedCents.
 type CreditNoteTotaler interface {
 	CreditedCents(ctx context.Context, tenantID, invoiceID string) (int64, error)
+	// UnreliefedClawbackCents sums clawback relief this invoice was owed but
+	// never received (issue_pending drafts that were voided before issuing).
+	// Non-zero means amount_due is stale-HIGH — bad-debt recovery refuses,
+	// because charging would over-collect by exactly that much.
+	UnreliefedClawbackCents(ctx context.Context, tenantID, invoiceID string) (int64, error)
 }
 
 // TaxRetrier is the narrow view into tax recompute + persistence the

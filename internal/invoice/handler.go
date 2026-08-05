@@ -1098,13 +1098,53 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if inv.Status != domain.InvoiceFinalized {
-		respond.Validation(w, r, "can only collect payment on finalized invoices")
+	// `uncollectible` is admitted for BAD-DEBT RECOVERY: the customer came back
+	// and the operator is running their card. The invoice is NOT reopened — it
+	// stays written off until money arrives, then settles uncollectible -> paid,
+	// keeping uncollectible_at in its history.
+	//
+	// Operator-only by construction: the claim this path takes
+	// (ClaimChargeForManualCollect) admits uncollectible, while the dunning and
+	// auto-charge claims still require finalized. No machine re-charges a debt
+	// the business wrote off.
+	if inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible {
+		respond.Validation(w, r, "can only collect payment on finalized or written-off invoices")
 		return
 	}
 	if inv.PaymentStatus == domain.PaymentSucceeded {
 		respond.Validation(w, r, "invoice is already paid")
 		return
+	}
+	// The recovery refusals. Each is ALSO enforced in the claim CAS (a service
+	// read is a TOCTOU against the sweeps that create these states) — these
+	// exist to answer WHY, because a bare claim miss is indistinguishable from
+	// "someone else is charging it right now".
+	if inv.Status == domain.InvoiceUncollectible {
+		if inv.TaxTransactionID != "" {
+			respond.Error(w, r, http.StatusConflict, "invalid_state", "tax_reversed_unrecoverable",
+				"This invoice's tax was reversed with the tax provider when it was written off, and it cannot be re-reported automatically. Charging now would collect tax that has already been reported as not collected. Record the payment as an offline payment instead, and correct the tax with your provider.")
+			return
+		}
+		if inv.BillingReason == domain.BillingReasonThreshold {
+			respond.Error(w, r, http.StatusConflict, "invalid_state", "recovery_superseded",
+				"This invoice was billed on a usage threshold, and writing it off did not stop that usage being re-billed on a later invoice. Charging it now would bill the same usage twice — collect the newer invoice instead.")
+			return
+		}
+		if h.svc.creditNotes != nil {
+			unrelieved, cerr := h.svc.creditNotes.UnreliefedClawbackCents(r.Context(), tenantID, inv.ID)
+			if cerr != nil {
+				// Fail loud: we cannot prove the amount is right, and this is a
+				// card charge we are choosing to make.
+				slog.ErrorContext(r.Context(), "recovery blocked: could not read unrelieved clawback relief", "invoice_id", inv.ID, "error", cerr)
+				respond.InternalError(w, r)
+				return
+			}
+			if unrelieved > 0 {
+				respond.Error(w, r, http.StatusConflict, "invalid_state", "relief_not_reissued",
+					"This invoice is owed a credit that was never applied, so the amount shown is higher than what the customer owes. Re-issue the credit before charging, or the customer will be over-collected.")
+				return
+			}
+		}
 	}
 	if inv.PaymentStatus == domain.PaymentUnknown {
 		// A possibly-succeeded payment is the reconciler's to resolve —
