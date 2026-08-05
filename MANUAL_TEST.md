@@ -1005,7 +1005,7 @@ Velox accepts `immediate=true` plan-swaps that change the billing interval as lo
 ## FLOW R3: Idempotent re-apply, no uninstall (ADR-085)
 
 - [x] Instantiate same recipe twice → second call is a **no-op**: `201` with the SAME `id` and `created_objects` as the first call (not a fresh instance, never a 409). Object counts (`meters`/`rating_rule_versions`/`plans`) are unchanged by the second call — no duplicate plan. *(walked 2026-07-26: re-POST openai_style → same id `vlx_rec_8a81…`, 35 rules, 201; UI disables re-install.)*
-- [ ] Different tenant, same recipe → 201 (fresh instance, its own new objects).
+- [x] Different tenant, same recipe → 201 (fresh instance, its own new objects). *(instantiated `anthropic_style` on X3 Tenant B while TC Walk Co already held an instance of the same recipe: **201**, a distinct instance id, `tenant_id` its own, and a **new** meter id plus 95 fresh rating-rule versions — so the second tenant gets its own objects rather than adopting or colliding with the first tenant's.)*
 - [x] Same tenant, other MODE → 201 with a **fresh** instance and fresh mode-scoped objects, not a no-op against the first mode's badge; each mode's card shows only its own "Installed" state. *(CI-locked `TestService_Instantiate_LivemodePartitioned`, real-Postgres, green 2026-07-26 — regression for the livemode-blind badge fixed in m0157.)*
 - [x] No uninstall exists: there is no `DELETE` route under `/v1/recipes/instances` (removed along with `Force` and the `seed_sample_data` scaffolding) — the badge (`recipe_instances` row) is a permanent record and is never deleted by recipe machinery. To retire the generated plan, archive it via `PATCH /v1/plans/{id}` (existing plan-domain verb) — the badge still names it afterward, truthfully, as what this recipe created.
 
@@ -1792,7 +1792,7 @@ Setup: ≥26 customers so at least one lands on page 2 (FLOW S1 tenant + a quick
 
 ## FLOW U10: Public pages
 
-- [ ] `/invoice/:token` (FLOW I10), `/update-payment` (FLOW D4), `/payment-method-added`, `/login` all load without auth. (The old `/checkout/success`/`/checkout/setup`/`/checkout/status` routes were removed in the unified-PM-paths cleanup.)
+- [x] `/invoice/:token` (FLOW I10), `/update-payment` (FLOW D4), `/payment-method-added`, `/login` all load without auth. (The old `/checkout/success`/`/checkout/setup`/`/checkout/status` routes were removed in the unified-PM-paths cleanup.) *(all four loaded with cookies cleared, and — the part that matters — each rendered its **own** content rather than redirecting to sign-in: the hosted invoice showed "VLX-000148" with the test-mode banner, `/update-payment` rendered its form and correctly reported "No payment update token provided", `/payment-method-added` showed its confirmation, `/login` the sign-in form. Checked `location.pathname` after load on each, so a silent redirect would have been visible.)*
 
 ---
 
