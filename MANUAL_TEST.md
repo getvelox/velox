@@ -1363,6 +1363,8 @@ invoice is charged in place and never reopened.
 - [ ] A written-off invoice for a customer with a credit balance charges the card only the remainder shown in the dialog.
 - [ ] The public payment link for that invoice still shows "This invoice is closed" with no Pay button — recovery is operator-only.
 
+- [x] Recording an OFFLINE payment on a written-off invoice whose tax was reversed **warns but does not refuse**. *(walked 2026-08-05 on TC Walk Co VLX-000136, screenshot `offline-warning-dialog.png`: the Record offline payment dialog shows an amber "**Check before recording.** This invoice's tax was reversed with the tax provider when it was written off. Recording this payment does not re-report it, so the tax collected here will not appear in your provider's records — correct it with your provider." The Record Payment button stays ENABLED — that is the point. The card path BLOCKS the same condition (409 `tax_reversed_unrecoverable`); the offline path only warns, because the money already arrived and refusing to record it would make the books wrong on top of a payment that exists either way. Verified the payload carries `recovery_warning` while `recovery_block` is null on the same invoice — the two paths key on different facts (a committed transaction id vs the reversal having happened) and are pinned together by `TestRecoveryWarnsOnOfflinePayment/the_SAME_conditions_block_a_card_charge`.)*
+
 ## FLOW D5: Dunning policy admin (CRUD + assignment + terminal actions)
 
 Policy configuration surface — distinct from the dunning state machine under catchup (FLOW TC5).

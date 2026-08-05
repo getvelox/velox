@@ -1474,6 +1474,22 @@ export default function InvoiceDetailPage() {
                 as paid. Use this for payments received outside Velox's
                 Stripe-attached charge flow.
               </p>
+              {/* The unreconciled consequence, stated BEFORE the operator
+                  commits. Deliberately not a block — the money already
+                  arrived, and refusing to record it would only make the books
+                  wrong too. But nothing downstream will ever flag this:
+                  recording the payment flips the invoice to paid, which drops
+                  it out of the tax-reversal sweep's own predicate, so the
+                  discrepancy becomes invisible at the moment it is created.
+                  Server-computed, from the same source that BLOCKS the card
+                  path. */}
+              {invoice.recovery_warning?.message && (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-500/20 dark:bg-amber-500/10">
+                  <p className="text-xs text-amber-800 dark:text-amber-400">
+                    <strong>Check before recording.</strong> {invoice.recovery_warning.message}
+                  </p>
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label htmlFor="record-payment-note">Reference (optional)</Label>
                 <Input

@@ -260,7 +260,11 @@ type Invoice struct {
 	// rather than letting an operator confirm a charge that answers 409. The
 	// refusals are server-truth (enforced in the claim CAS); this is the same
 	// truth, published, so the UI never promises what the server will refuse.
-	RecoveryBlock       *PaymentBlock `json:"recovery_block,omitempty"`
+	RecoveryBlock *PaymentBlock `json:"recovery_block,omitempty"`
+	// RecoveryWarning is what an operator must know before recording an
+	// OFFLINE payment on a written-off invoice — a consequence that will go
+	// unreconciled, not a refusal. Nil when there is nothing to say.
+	RecoveryWarning     *PaymentBlock `json:"recovery_warning,omitempty"`
 	TotalAmountCents    int64         `json:"total_amount_cents"`
 	AmountDueCents      int64         `json:"amount_due_cents"`
 	AmountPaidCents     int64         `json:"amount_paid_cents"`
