@@ -1875,10 +1875,20 @@ func describeEmailEvent(emailType, outboxStatus, deliveryState string) (string, 
 	case "pending":
 		return desc + " (queued)", "processing"
 	case "skipped":
-		// Deliberately not sent — the invoice settled while the row sat
-		// queued (0155). Pre-ADR-098 this fell through to the default
-		// "succeeded" rendering, showing a never-sent email as sent.
-		return desc + " (not sent — invoice settled first)", "info"
+		// Deliberately not sent — the invoice reached a TERMINAL state while
+		// the row sat queued (0155). Pre-ADR-098 this fell through to the
+		// default "succeeded" rendering, showing a never-sent email as sent.
+		//
+		// Says "closed", not "settled": the dispatcher skips on ANY terminal
+		// state (dispatcher.go reads InvoiceTerminalState, which answers paid /
+		// voided / uncollectible / gone). "Settled first" was true only for the
+		// paid case and asserted a payment on invoices that were written off or
+		// annulled — found on a written-off invoice whose row read "not sent —
+		// invoice settled first" beside a "Marked uncollectible" row two lines
+		// above it. The real state IS recorded (outbox last_error carries
+		// "reached <state> before delivery") but is not plumbed to the
+		// timeline, so this says only what it can know.
+		return desc + " (not sent — the invoice was already closed)", "info"
 	}
 	return desc, "succeeded"
 }
@@ -1896,7 +1906,7 @@ func emailClause(noun string, em EmailEventRow) string {
 	case "pending":
 		return noun + " queued"
 	case "skipped":
-		return noun + " skipped — invoice settled first"
+		return noun + " skipped — the invoice was already closed"
 	}
 	switch em.DeliveryState {
 	case "delivered":

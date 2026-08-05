@@ -261,12 +261,12 @@ type Invoice struct {
 	// refusals are server-truth (enforced in the claim CAS); this is the same
 	// truth, published, so the UI never promises what the server will refuse.
 	RecoveryBlock       *PaymentBlock `json:"recovery_block,omitempty"`
-	TotalAmountCents    int64      `json:"total_amount_cents"`
-	AmountDueCents      int64      `json:"amount_due_cents"`
-	AmountPaidCents     int64      `json:"amount_paid_cents"`
-	CreditsAppliedCents int64      `json:"credits_applied_cents"`
-	BillingPeriodStart  time.Time  `json:"billing_period_start"`
-	BillingPeriodEnd    time.Time  `json:"billing_period_end"`
+	TotalAmountCents    int64         `json:"total_amount_cents"`
+	AmountDueCents      int64         `json:"amount_due_cents"`
+	AmountPaidCents     int64         `json:"amount_paid_cents"`
+	CreditsAppliedCents int64         `json:"credits_applied_cents"`
+	BillingPeriodStart  time.Time     `json:"billing_period_start"`
+	BillingPeriodEnd    time.Time     `json:"billing_period_end"`
 	// BillingTimezone is the IANA timezone the period boundaries above are
 	// civil-midnight in — copied from the subscription's snapshot (ADR-077) at
 	// invoice creation and immutable thereafter. BillingPeriodDisplay is computed
