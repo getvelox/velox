@@ -1,7 +1,7 @@
 # ADR-109: Snapshot the bill-to and supplier blocks onto issued documents
 
 **Date:** 2026-08-05
-**Status:** Proposed
+**Status:** Proposed (amended 2026-08-05 — writer site-set corrected after enumeration)
 
 ## Context
 
@@ -167,10 +167,76 @@ its own right.
   the snapshot silently produces a NULL-snapshot invoice that looks
   correct until the profile changes.
 
+## Amendment 2026-08-05 — the writer site-set above is wrong
+
+The enumeration ran, and the decision survives it. The *site-set* does
+not. Three corrections, each load-bearing enough to have shipped a
+silently-broken snapshot:
+
+**1. There is no Go-level finalize chokepoint.** "Stamp it in the
+finalize writer" assumes one. **Six** writers produce a
+`status='finalized'` invoice and **five never pass through
+`invoice.Service.Finalize` at all** — they are *born finalized*:
+cycle close (`billing/engine.go:3147`), day-1/trial-end/activation
+(`engine.go:3673`), final-on-immediate-cancel (`engine.go:4377`),
+usage thresholds (`threshold_scan.go:722`), and proration/plan-swap
+(`subscription/handler.go:2360`). Only operator finalize and
+engine-draft finalize go through the service.
+
+The real chokepoint is one layer down: **`invoice/postgres.go:1773`
+`createWithLineItemsInTx`**, which all five born-finalized writers
+funnel through — and which already mints the public token at :1764 for
+exactly this "every born-finalized invoice needs it" reason. Stamp
+there, plus the two draft→finalized UPDATEs (`FinalizeWithDates:736`,
+`updateStatusInTx:670`). Three SQL sites instead of chasing thirteen
+Go callers.
+
+**2. `subscription/handler.go` has no customer-profile dependency
+wired.** The proration writer lives in a package that cannot read a
+billing profile today, so the snapshot cannot simply be assembled at
+each call site — another argument for the store layer.
+
+**3. Four ways it would fail OPEN** — i.e. look correct and quietly
+re-read live data, the exact failure this ADR exists to stop:
+
+- *`invCols` COALESCE.* The file's prevailing style
+  (`postgres.go:185-203`) is `COALESCE(col,'')`. Written that way NULL
+  collapses to `''` and the "snapshot absent → fall back to live"
+  branch can **never** fire. The new columns must read as true NULL.
+- *livemode RLS asymmetry.* `customer_billing_profiles` carries a
+  livemode-scoped isolation policy (`0020_test_mode.up.sql:118-142`)
+  while `tenant_settings` is mode-neutral
+  (`0006_close_rls_bypass.up.sql`). A snapshot assembled under the
+  wrong mode reads empty rather than erroring.
+- *partial reader coverage.* Switching only `BuildPDFContext` leaves
+  `hostedinvoice/handler.go:293-311` and
+  `web-v2/src/pages/InvoiceDetail.tsx:854-916` on live rows, so the PDF
+  freezes while the hosted HTML the customer actually opens keeps
+  mutating.
+- *twin-INSERT drift.* `postgres.go:309 CreateAudited` is a second
+  hand-maintained INSERT with its own column list, already missing the
+  public-token mint. Draft-only today, so it looks safe — until
+  something is born final through it.
+
+**Already shipped and worth fixing in the same PR:** `invoice/pdf.go`
+prints the buyer's VAT **twice from two eras** — live `billTo.TaxID`
+at :488 and frozen `inv.TaxID` at :604. Whatever the snapshot decides,
+those two must agree.
+
+**Open questions for the implementer**, both scope rather than
+approach: does `bill_to_email` belong in the snapshot (printed at
+`pdf.go:495-499`, shown at `hostedinvoice/handler.go:296`, but omitted
+from this ADR's field list), and do `supplier_email` /
+`supplier_phone` (printed on every invoice at `pdf.go:381-386`,
+likewise omitted).
+
+Migration number claimed by the enumeration:
+**0171_invoice_issued_document_snapshot**.
+
 ## Status note
 
-Proposed, not built. Found mid-walk during FLOW CU1; the fix is a
-migration plus a change to the finalize writer and eight render sites,
-which is its own PR and (per the money-path playbook) its own
-site-set enumeration and adversarial panel. The walk continued rather
-than absorbing that work inline.
+Proposed, not built. Found mid-walk during FLOW CU1. The site-set has
+now been enumerated and adversarially reviewed (see the amendment
+above), so the remaining work is the build itself: one migration, three
+SQL-layer stamp sites, the reader fallback, and the render sites —
+including the hosted HTML, not just the PDF.
