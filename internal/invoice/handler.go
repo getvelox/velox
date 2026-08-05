@@ -1183,19 +1183,23 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := h.paymentSetups.GetPaymentSetup(r.Context(), tenantID, inv.CustomerID)
-	if err != nil || ps.SetupStatus != domain.PaymentSetupReady || ps.StripeCustomerID == "" {
-		// Provably pre-Stripe — free the lease so sweep/dunning aren't
-		// locked out for the window.
-		_ = h.svc.ReleaseChargeClaim(r.Context(), tenantID, id)
-		respond.Validation(w, r, "customer has no payment method set up")
-		return
-	}
-
-	// Post-credit truth (ADR-088, mirrors the sweep): drain the balance,
-	// then charge the RELOADED remainder — never the handler snapshot. An
-	// apply failure releases the lease and reports; charging pre-credit
-	// would consummate exactly the overcharge the sweep exists to avoid.
+	// Post-credit truth (ADR-088): drain the balance, then charge the RELOADED
+	// remainder — never the handler snapshot. Charging pre-credit would
+	// consummate exactly the overcharge the sweep exists to avoid.
+	//
+	// This runs BEFORE the payment-method check, which is the order the engine
+	// sweep has always used (billing/engine.go applies credit, then settles a
+	// fully-covered invoice with MarkPaid and no payment method involved). This
+	// handler's comment claimed to "mirror the sweep" while doing the opposite:
+	// it demanded a card first, so an invoice a customer's balance covered
+	// ENTIRELY was refused for want of a card it never needed — and the
+	// zero-due branch below, whose whole premise is "settle without a card
+	// charge", was unreachable without one.
+	//
+	// Bad-debt recovery is where that bites hardest: goodwill credit issued
+	// during dunning is exactly how a written-off invoice gets covered, and the
+	// customer who was written off is the least likely to have a working card
+	// on file.
 	inv, err = h.svc.ApplyCreditBalance(r.Context(), tenantID, id)
 	if err != nil {
 		_ = h.svc.ReleaseChargeClaim(r.Context(), tenantID, id)
@@ -1203,13 +1207,25 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if inv.AmountDueCents <= 0 {
-		// Credits covered it — settle without a card charge.
+		// Credits covered it — settle without a card charge, and without ever
+		// asking whether there was a card.
 		settled, serr := h.svc.SettleZeroDue(r.Context(), tenantID, id)
 		if serr != nil {
 			respond.FromError(w, r, serr, "invoice")
 			return
 		}
 		respond.JSON(w, r, http.StatusOK, settled)
+		return
+	}
+
+	ps, err := h.paymentSetups.GetPaymentSetup(r.Context(), tenantID, inv.CustomerID)
+	if err != nil || ps.SetupStatus != domain.PaymentSetupReady || ps.StripeCustomerID == "" {
+		// Provably pre-Stripe — free the lease so sweep/dunning aren't
+		// locked out for the window. Any credit already applied STAYS applied:
+		// it was legitimately owed to this invoice, and amount_due is now
+		// correct for whatever settles it later.
+		_ = h.svc.ReleaseChargeClaim(r.Context(), tenantID, id)
+		respond.Validation(w, r, "customer has no payment method set up")
 		return
 	}
 
