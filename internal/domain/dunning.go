@@ -198,7 +198,7 @@ const (
 	// downstream side-effects as the automated path — Stripe-parity
 	// "Mark uncollectible" surfaced on the dunning resolve flow.
 	ResolutionInvoiceNotCollectible DunningResolution = "invoice_not_collectible"
-	// ResolutionActionFailed marks a run whose terminal final_action
+	// ResolutionActionFailed marks a run whose terminal action
 	// (pause / cancel / mark-uncollectible) FAILED at exhaustion — a
 	// Stripe blip, a conflicting state, a DB error. The run is left
 	// state=active (NOT escalated) with next_action_at set so the due-run
@@ -272,7 +272,7 @@ type InvoiceDunningRun struct {
 }
 
 // CustomerDunningOverride was removed in ADR-036. The partial-field
-// override (override max + grace + final_action but inherit
+// override (override max + grace + terminal action but inherit
 // retry_schedule) had no industry precedent (Stripe / Lago / Orb /
 // Recurly all use named templates with full assignment, verified
 // 2026-05-16). Per-customer differentiation now flows through

@@ -191,7 +191,7 @@ func TestProcessRun_PaidInvoice_ResolvesWithoutRetrying(t *testing.T) {
 
 // TestProcessRun_MaxRetriesPaid_DoesNotCancelSubscription is the load-bearing
 // case: a run AT max retries whose invoice was settled out-of-band must NOT reach
-// exhaustRun — which (final_action=cancel_subscription) would CANCEL a paying
+// exhaustRun — which (final_subscription_action=cancel) would CANCEL a paying
 // customer's subscription on a fully-paid invoice. The paid-pre-check must run
 // BEFORE the max-retries→exhaustRun branch.
 func TestProcessRun_MaxRetriesPaid_DoesNotCancelSubscription(t *testing.T) {

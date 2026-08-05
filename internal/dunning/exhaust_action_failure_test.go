@@ -31,7 +31,7 @@ func exhaustedRun(t *testing.T, store *memStore, svc *Service) domain.InvoiceDun
 }
 
 // TestExhaustRun_ActionFailure_StaysRequeryable locks the fix: when the
-// terminal final_action mover (here mark_uncollectible) FAILS, the run is
+// terminal action mover (here mark_uncollectible) FAILS, the run is
 // left state=active with next_action_at set (NOT a clean escalated), so the
 // due-run picker re-attempts it instead of recording "done" beside an
 // invoice that never got closed.

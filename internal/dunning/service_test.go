@@ -474,7 +474,7 @@ func TestProcessDueRunsForClock_LoopsUntilExhausted(t *testing.T) {
 		t.Errorf("processed: got %d, want 3 (all retries in one Advance)", processed)
 	}
 
-	// Run ends in terminal state. final_action defaults to manual_review
+	// Run ends in terminal state. The fixture policy is (none, none)
 	// in this fixture → state=escalated, resolution=retries_exhausted.
 	var only domain.InvoiceDunningRun
 	for _, r := range store.runs {
@@ -829,7 +829,7 @@ func TestUpsertPolicy_RejectsUnparseableSchedule(t *testing.T) {
 // TestUpsertPolicyTx_ValidationParity locks the recipe-path (tx) upsert to the
 // SAME save-time invariants as the API path. Pre-fix UpsertPolicyTx forwarded
 // straight to the store — its comment claimed "the recipe template layer
-// already validated," but recipe/parse.go validates only final_action, so a
+// already validated," but recipe/parse.go validates only the terminal actions, so a
 // mismatched recipe (max_retries exceeding intervals_hours) persisted fine and
 // stalled its campaign at retry-time ("retry_schedule index out of bounds" in a
 // background tick) instead of failing loudly at instantiate-time.

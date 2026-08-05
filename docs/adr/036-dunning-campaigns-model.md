@@ -1,7 +1,17 @@
 # ADR-036: Dunning campaigns model (multi-policy-per-tenant)
 
 **Date:** 2026-05-16
-**Status:** Accepted (amended 2026-05-16 — terminal-action set + pause-semantics fix; amended 2026-07-05 — initial-default-at-first-create + no-policy = deliberate skip; see Amendment sections below)
+**Status:** Accepted (amended 2026-05-16 — terminal-action set + pause-semantics fix; amended 2026-07-05 — initial-default-at-first-create + no-policy = deliberate skip; **the terminal-action half is SUPERSEDED by [ADR-112](112-dunning-exhaustion-settles-two-questions.md), 2026-08-05**; see Amendment sections below)
+
+> ⚠️ **The 2026-05-16 amendment below describes a `final_action` column that no
+> longer exists.** [ADR-112](112-dunning-exhaustion-settles-two-questions.md)
+> split it into `final_subscription_action` (`none`/`pause`/`cancel`) and
+> `final_invoice_action` (`none`/`mark_uncollectible`), because three of the
+> four values below describe the SUBSCRIPTION and one describes the INVOICE —
+> so choosing one meant giving up the others, and "cancel and write off" was
+> inexpressible. The per-action *semantics* in that table are still accurate;
+> only their mutual exclusivity is gone. Everything else in this ADR — the
+> campaigns model, per-customer assignment, the retry schedule — stands.
 
 ## Context
 
@@ -210,7 +220,10 @@ Sources:
 
 Velox supports all four actions; semantics aligned with Stripe.
 
-| Velox enum (post-amendment) | Behavior |
+*(Superseded by ADR-112 — these are no longer four alternatives on one column
+but two independent choices. The behaviours described are unchanged.)*
+
+| Velox enum (2026-05-16 amendment; column split by ADR-112) | Behavior |
 |---|---|
 | `manual_review` | Run lands state=escalated. No sub/invoice mutation. Operator handles via dashboard. Maps to Stripe "Keep active." |
 | `pause` | **Calls `subscription.Service.PauseCollection(behavior=keep_as_draft)`** — not the pre-amendment hard `PauseAtomic`. Cycle keeps drafting invoices; charging + dunning paused until operator resumes. Matches Stripe's `pause_collection.behavior=keep_as_draft`. The hard-pause path silently skipped invoice generation for the affected periods (per ADR-035 analysis) — non-Stripe and destructive. |

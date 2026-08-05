@@ -1,8 +1,10 @@
 # ADR-110: A written-off invoice closes the customer's self-service payment route
 
 **Status:** Accepted (2026-08-05)
-**Relates to:** [ADR-036](036-dunning-campaigns-model.md) (dunning campaigns —
-`mark_uncollectible` is a terminal final action), [ADR-107](107-unknown-is-terminal-until-a-human.md)
+**Relates to:** [ADR-036](036-dunning-campaigns-model.md) (dunning campaigns),
+[ADR-112](112-dunning-exhaustion-settles-two-questions.md) (`mark_uncollectible`
+is the terminal INVOICE action, set independently of the subscription's),
+[ADR-107](107-unknown-is-terminal-until-a-human.md)
 (the other "terminal until a human" state)
 **Shipped by:** PR #734
 
