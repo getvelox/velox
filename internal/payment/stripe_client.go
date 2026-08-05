@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/stripe/stripe-go/v82"
 
@@ -328,7 +329,25 @@ func (c *LiveStripeClient) GetPaymentIntent(ctx context.Context, paymentIntentID
 		ClientSecret:        pi.ClientSecret,
 		Purpose:             pi.Metadata["velox_purpose"],
 		AmountReceivedCents: pi.AmountReceived,
+		AnchorAt:            anchorFromPIMetadata(pi.Metadata),
 	}, nil
+}
+
+// anchorFromPIMetadata reads the contracted simulated instant off a retrieved
+// PI, mirroring anchorFromEventPayload's read of the same key on the webhook
+// path. Absence and unparseable values both yield the zero time and are simply
+// ignored by the caller: a malformed anchor must degrade to the pin binding,
+// never block a settlement.
+func anchorFromPIMetadata(meta map[string]string) time.Time {
+	raw := meta["velox_anchor_at"]
+	if raw == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // SearchPaymentIntentsByInvoiceID implements the ADR-108 lookup: find the

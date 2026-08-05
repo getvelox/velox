@@ -218,6 +218,19 @@ type PaymentIntentResult struct {
 	// the webhook-drop backstop path (the settle skips the truth-check
 	// when capturedCents == 0).
 	AmountReceivedCents int64
+	// AnchorAt is the charge's CONTRACTED simulated instant, read back from
+	// the PI's velox_anchor_at metadata. It exists for the same reason the
+	// webhook path reads that key: SettleSucceeded's invoice-pin binding
+	// resolves the clock's CURRENT frozen_time, so a settle that lands after
+	// an advance stamps paid_at on the advance target rather than the instant
+	// the charge actually fired.
+	//
+	// The reconciler is the THIRD settle path and was the only one without
+	// it — which is backwards, because it runs precisely when the webhook
+	// that carries the anchor was dropped. Same charge, same clock, and
+	// paid_at differed by however far the clock had moved, purely on whether
+	// the webhook landed. Zero for wall-clock charges, which carry no anchor.
+	AnchorAt time.Time
 }
 
 // InvoiceUpdater updates invoice payment status.

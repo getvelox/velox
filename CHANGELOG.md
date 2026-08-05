@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A recovered payment now records when the charge actually happened, not when we noticed (2026-08-05).** On a simulated timeline, a card charge records the instant it was *contracted* — the dunning retry's due moment, the cycle's close — rather than the moment the confirmation arrives, so a recovery run on simulated March 7th doesn't read "paid April 1st". Two of the three paths that settle a payment carried that instant: the immediate one takes it from the charge, and the webhook reads it back off the payment record. The third — the reconciler, which exists to finish the job when the webhook never arrives — had no way to get it, so it fell back to asking the clock what time it was *now*. If the clock had been moved forward in between, the payment was stamped with the new time. The same charge, on the same clock, was dated differently depending on nothing but whether a webhook happened to be delivered — and the wrong answer showed up only on the recovery path, the one nobody watches. The reconciler now reads the contracted instant back from the payment record exactly as the webhook does. Charges on the real calendar are unaffected: they contract nothing, and none is invented for them.
+
 ### Changed
 
 - **A dunning policy now decides the subscription's fate and the invoice's fate separately (2026-08-05, ADR-112).** *(Breaking — pre-1.0.)* "What happens when we give up chasing this payment" was one setting with four choices: leave it alone, pause collection, cancel the subscription, or write the invoice off. Three of those describe the subscription and one describes the invoice, and they were never really alternatives — so picking any of them meant giving up the others.
