@@ -1045,9 +1045,20 @@ func (s *Service) Finalize(ctx context.Context, tenantID, id string) (domain.Inv
 }
 
 // reverseInvoiceTax reverses the upstream tax transaction for an invoice being
-// voided or marked uncollectible. Industry standard (EU VAT Directive Art. 90,
-// Stripe Tax: "When an invoice is voided or marked uncollectible, you must
-// reverse the corresponding tax transaction"). Best-effort: a transient failure
+// VOIDED, or for a credit note — events that change what was supplied. NOT for
+// a write-off, which changes only who paid (ADR-111).
+//
+// This comment previously cited two authorities for reversing on write-off and
+// BOTH WERE FALSE. It attributed to Stripe: "When an invoice is voided or
+// marked uncollectible, you must reverse the corresponding tax transaction" —
+// a string that does not exist in Stripe's documentation, which describes its
+// own reporting behaviour and imposes nothing on an integrator. And it cited
+// EU VAT Directive Art. 90, which says the OPPOSITE: reduction on non-payment
+// happens "under conditions which shall be determined by the Member States",
+// with Art. 90(2) allowing derogation entirely. Two invented citations holding
+// up a money decision.
+//
+// Best-effort: a transient failure
 // logs but does NOT block the status transition — the invoice is the operator's
 // primary record and must stay flippable even if upstream is unreachable.
 //
@@ -1337,13 +1348,27 @@ func (s *Service) MarkUncollectible(ctx context.Context, tenantID, id string) (d
 	// vary (EU permits reclaim under specific conditions; US sales tax varies by
 	// state). We follow Stripe's default behaviour and let tenants whose
 	// jurisdiction requires the tax to stay re-commit manually. The reversal
-	// reference is invoice-stable (inv_taxrev_<id>) so it is idempotent PER
-	// INVOICE: a retry converges, AND a later Void of this now-uncollectible
-	// invoice reuses the same reference and dedups at Stripe instead of
-	// reversing the same tax transaction twice (which would under-remit tax).
-	// Best-effort post-commit: a failure here is logged ERROR and recovered by
-	// RetryPendingTaxReversal, so the caller deliberately ignores the return.
-	_ = s.reverseInvoiceTax(ctx, tenantID, inv, "inv_taxrev_"+inv.ID)
+	// NO TAX LEG (ADR-111). A write-off changes who PAID, not what was SOLD:
+	// the service was delivered, the invoice was correct, and the tax was
+	// correctly reported on accrual. The entry is Dr bad debt / Cr AR.
+	//
+	// Reversing here shipped a machine-driven under-remit with no human in it:
+	// an ambiguous charge parks an invoice (ADR-107), write-off is its only
+	// legal exit and the attention banner advises it, the reversal fires, then
+	// the ADR-108 provider search finds the charge succeeded and
+	// markPaidReportingTransition settles uncollectible -> paid — leaving a
+	// PAID invoice whose tax is un-reported and nothing to re-report it. The
+	// in-flight guard above catches only the payment already moving at
+	// write-off time, not the one that arrives later.
+	//
+	// Recovering tax remitted on an uncollected debt is BAD-DEBT RELIEF: a
+	// separate claim conditioned on facts Velox does not hold (UK: 6 months
+	// overdue AND written off to a separate bad-debt account; CA/NY/TX: charged
+	// off for federal income tax purposes). Claiming it at write-off time is
+	// premature by construction. It is the tenant's claim to make.
+	//
+	// Void and credit note still reverse — see reverseInvoiceTax. That
+	// asymmetry is the decision: they change what was supplied; this does not.
 
 	if s.audit != nil {
 		_ = s.audit.Log(ctx, tenantID, domain.AuditActionUpdate, "invoice", updated.ID, updated.InvoiceNumber, map[string]any{

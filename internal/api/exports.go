@@ -390,6 +390,16 @@ func (h *exportsHandler) exportInvoices(w http.ResponseWriter, r *http.Request) 
 		// row is byte-identical to one that was never written off. Bad-debt
 		// recovery is a distinct accounting event; the export was the only
 		// durable place an accountant could locate one, and it could not.
+		// tax_provider + tax_transaction_id are the RELIEF HATCH (ADR-111).
+		// Velox no longer reverses tax on write-off, so claiming bad-debt
+		// relief is the tenant's own conditioned claim (UK: 6 months + written
+		// off to a separate bad-debt account; CA/NY/TX: charged off for
+		// federal income tax purposes). Every other input those tests need is
+		// already here — status, tax_amount_cents, uncollectible_at, due_at,
+		// paid_at, amount_paid_cents. What was missing is whether Velox had
+		// ALREADY reversed at the provider, which is the one fact deciding
+		// whether the tenant's own claim would be a double claim.
+		"tax_provider", "tax_transaction_id", "tax_reversed_at",
 		"issued_at", "due_at", "paid_at", "voided_at", "uncollectible_at",
 		"created_at",
 	}); err != nil {
@@ -410,6 +420,9 @@ func (h *exportsHandler) exportInvoices(w http.ResponseWriter, r *http.Request) 
 			strconv.FormatInt(inv.CreditsAppliedCents, 10),
 			inv.BillingPeriodStart.UTC().Format(time.RFC3339),
 			inv.BillingPeriodEnd.UTC().Format(time.RFC3339),
+			csvSafe(inv.TaxProvider),
+			csvSafe(inv.TaxTransactionID),
+			timePtrCSV(inv.TaxReversedAt),
 			timePtrCSV(inv.IssuedAt),
 			timePtrCSV(inv.DueAt),
 			timePtrCSV(inv.PaidAt),

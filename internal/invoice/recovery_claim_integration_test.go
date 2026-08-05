@@ -113,12 +113,20 @@ func TestRecoveryClaim_GatesLiveInTheCAS(t *testing.T) {
 		why       string
 	}{
 		{
-			name: "tax already reversed", mutate: ", tax_transaction_id='tax_tx_123'", wantClaim: false,
-			why: "MarkUncollectible reversed this invoice's tax upstream and it cannot be re-committed (23h calc TTL, draft-only computation). Charging collects tax the tenant told the authority it did not collect.",
+			name: "tax already reversed", mutate: ", tax_reversed_at=now()", wantClaim: false,
+			why: "this invoice's tax was reversed upstream and cannot be re-committed (23h calc TTL, draft-only computation), so charging collects tax the tenant told the authority it did not collect. Keys on the reversal STAMP, not on tax_transaction_id — that column is set on every taxed invoice and never cleared, so keying on it refused every taxed invoice forever (ADR-111).",
 		},
 		{
 			name: "threshold usage re-billed", mutate: ", billing_reason='threshold'", wantClaim: false,
 			why: "writing off a threshold invoice does not stop the next cycle close re-billing that usage window — collecting this one double-bills it",
+		},
+		{
+			// The row the OLD key refused and the new one allows: tax was
+			// committed at finalize (as on every taxed invoice) but never
+			// reversed. Post-ADR-111 that is the NORMAL shape of a written-off
+			// taxed invoice, and it must be recoverable.
+			name: "tax committed but never reversed", mutate: ", tax_transaction_id='tax_tx_123'", wantClaim: true,
+			why: "a committed tax transaction is not a reversal; refusing on it made recovery impossible for every tax-registered tenant",
 		},
 		{
 			name: "recoverable", mutate: ", billing_reason='subscription_cycle'", wantClaim: true,

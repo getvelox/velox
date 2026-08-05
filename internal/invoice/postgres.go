@@ -2006,17 +2006,17 @@ func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantI
 	// create these states (the tax-reversal sweep in particular): read says
 	// "safe", sweep reverses, charge proceeds, tenant under-remits.
 	//
-	//   tax_transaction_id — MarkUncollectible ALWAYS attempts an upstream tax
-	//     reversal, which is irreversible at the provider (a reversal is a new
-	//     opposite-sign transaction) and cannot be re-committed here: the
-	//     original tax_calculation_id has a 23h TTL and tax computation is
-	//     draft-only. Charging now would collect tax the tenant has already
-	//     told the authority it did not collect. Gated on the STRUCTURAL fact
-	//     (a committed transaction exists) rather than the best-effort
-	//     tax_reversed_at stamp, which is written post-commit and may lag.
-	//     Stripe reduces reported tax on mark_uncollectible too — the
-	//     difference is that Stripe owns its tax ledger and can re-report;
-	//     Velox reversed an external transaction it cannot restore.
+	//   tax_reversed_at — the reversal HAVING HAPPENED. Charging then collects
+	//     tax the tenant has already told the authority it did not collect,
+	//     and Velox cannot re-report it (the tax_calculation_id has a ~23h TTL
+	//     and computation is draft-only).
+	//
+	//     Under ADR-111 a write-off no longer reverses, so this fires only on
+	//     invoices reversed BEFORE that change, or by a future
+	//     operator-initiated relief claim. It previously keyed on
+	//     tax_transaction_id — which is set on every taxed invoice and NEVER
+	//     cleared, so it refused every taxed invoice forever and made recovery
+	//     structurally unavailable to tax-registered tenants.
 	//
 	//   billing_reason='threshold' — writing off a threshold invoice does not
 	//     stop the next cycle close from re-billing that usage window. The
@@ -2037,7 +2037,7 @@ func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantI
 		  AND (auto_charge_claimed_until IS NULL OR auto_charge_claimed_until < now())
 		  AND (
 		        status = 'finalized'
-		     OR (COALESCE(tax_transaction_id, '') = ''
+		     OR (tax_reversed_at IS NULL
 		         AND COALESCE(billing_reason, '') <> 'threshold')
 		      )
 	`, id)
@@ -2802,7 +2802,11 @@ func (s *PostgresStore) ListPendingTaxReversal(ctx context.Context, batch int, l
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+invCols+` FROM invoices i
 		WHERE i.livemode = $1
-		  AND i.status IN ('voided', 'uncollectible')
+		  -- VOIDED ONLY (ADR-111). A write-off has no tax leg, so an
+		  -- uncollectible invoice has nothing pending. No hole:
+		  -- uncollectible -> voided is a permitted transition and the void
+		  -- bumps updated_at, so a failed void-path reversal is still swept.
+		  AND i.status = 'voided'
 		  AND i.tax_provider = 'stripe_tax'
 		  AND COALESCE(i.tax_transaction_id, '') <> ''
 		  AND i.tax_reversed_at IS NULL

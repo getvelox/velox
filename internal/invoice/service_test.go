@@ -1202,79 +1202,60 @@ func (f *fakeCreditNoteTotaler) UnreliefedClawbackCents(_ context.Context, _, _ 
 // applied customer credit reduces amount_due WITHOUT reversing tax, so the old
 // amount_paid+amount_due proxy under-reversed tax on void. With the credit-note
 // totaler wired (reporting NO credit note), void must reverse the FULL tax even
-// though amount_due is below total because credit was applied.
-func TestVoid_CreditApplied_TaxNotUnderReversed(t *testing.T) {
+// TestMarkUncollectible_DoesNotReverseTax is the ADR-111 decision, inverted
+// from the test it replaces.
+//
+// A write-off changes who PAID, not what was SOLD, so it has no tax leg. The
+// old test asserted the opposite and passed for months — the behaviour it
+// pinned shipped a machine-driven under-remit: park an invoice, write it off
+// (its only legal exit), the reversal fires, then the ADR-108 search finds the
+// charge succeeded and settles it PAID with its tax un-reported.
+//
+// The negative control below is the load-bearing half: VOID must still
+// reverse. Without it, a fix that simply disabled reverseInvoiceTax entirely
+// would pass — and that would strand real tax on annulled sales.
+func TestMarkUncollectible_DoesNotReverseTax(t *testing.T) {
 	store := newMemStore()
 	svc := NewService(store, nil, newMemNumberer())
 	rev := &fakeTaxReverser{}
 	svc.SetTaxReverser(rev)
-	svc.SetCreditNoteTotaler(&fakeCreditNoteTotaler{credited: 0}) // no credit note exists
 	ctx := context.Background()
 
-	inv, _ := svc.Create(ctx, "t1", CreateInput{
-		CustomerID: "c", SubscriptionID: "s",
-		BillingPeriodStart: time.Now(), BillingPeriodEnd: time.Now().AddDate(0, 1, 0),
-	})
-	if _, err := svc.Finalize(ctx, "t1", inv.ID); err != nil {
-		t.Fatalf("finalize: %v", err)
+	seed := func() string {
+		inv, _ := svc.Create(ctx, "t1", CreateInput{
+			CustomerID: "c", SubscriptionID: "s",
+			BillingPeriodStart: time.Now(), BillingPeriodEnd: time.Now().AddDate(0, 1, 0),
+		})
+		if _, err := svc.Finalize(ctx, "t1", inv.ID); err != nil {
+			t.Fatalf("finalize: %v", err)
+		}
+		stale := store.invoices[inv.ID]
+		stale.TaxTransactionID = "tx_committed_at_finalize"
+		store.invoices[inv.ID] = stale
+		return inv.ID
 	}
-	// $110 taxed invoice, $30 paid down by APPLIED CUSTOMER CREDIT (not a credit
-	// note): amount_due 8000, amount_paid 0, no credit note. The credit didn't
-	// reverse any tax, so the whole $110's tax must be reversed on void.
-	stale := store.invoices[inv.ID]
-	stale.TaxTransactionID = "tx_committed"
-	stale.TotalAmountCents = 11000
-	stale.AmountDueCents = 8000
-	stale.AmountPaidCents = 0
-	store.invoices[inv.ID] = stale
 
-	if _, err := svc.Void(ctx, "t1", inv.ID); err != nil {
+	writtenOff := seed()
+	if _, err := svc.MarkUncollectible(ctx, "t1", writtenOff); err != nil {
+		t.Fatalf("MarkUncollectible: %v", err)
+	}
+	if len(rev.calls) != 0 {
+		t.Fatalf("a write-off reversed tax (%d calls) — it has no tax leg; the sale still happened and the tax was correctly reported (ADR-111)", len(rev.calls))
+	}
+
+	// Negative control: void DOES reverse — the supply is annulled.
+	voided := seed()
+	if _, err := svc.Void(ctx, "t1", voided); err != nil {
 		t.Fatalf("Void: %v", err)
 	}
 	if len(rev.calls) != 1 {
-		t.Fatalf("ReverseTax calls: got %d want 1", len(rev.calls))
+		t.Fatalf("VOID reversal calls: got %d want 1 — voiding annuls the supply and must still reverse", len(rev.calls))
 	}
-	// remaining = total - credited(0) = 11000 = total → FULL reversal. The old
-	// proxy would have done ModePartial(8000), under-reversing $30 of tax.
+	if rev.calls[0].OriginalTransactionID != "tx_committed_at_finalize" {
+		t.Errorf("OriginalTransactionID: got %q", rev.calls[0].OriginalTransactionID)
+	}
 	if rev.calls[0].Mode != tax.ReversalModeFull {
-		t.Errorf("Mode: got %q want full (applied credit must NOT shrink the tax reversal)", rev.calls[0].Mode)
-	}
-}
-
-func TestMarkUncollectible_ReversesUpstreamTaxTransaction(t *testing.T) {
-	store := newMemStore()
-	svc := NewService(store, nil, newMemNumberer())
-	rev := &fakeTaxReverser{}
-	svc.SetTaxReverser(rev)
-	ctx := context.Background()
-
-	inv, _ := svc.Create(ctx, "t1", CreateInput{
-		CustomerID: "c", SubscriptionID: "s",
-		BillingPeriodStart: time.Now(), BillingPeriodEnd: time.Now().AddDate(0, 1, 0),
-	})
-	if _, err := svc.Finalize(ctx, "t1", inv.ID); err != nil {
-		t.Fatalf("finalize: %v", err)
-	}
-	stale := store.invoices[inv.ID]
-	stale.TaxTransactionID = "tx_committed_at_finalize"
-	store.invoices[inv.ID] = stale
-
-	if _, err := svc.MarkUncollectible(ctx, "t1", inv.ID); err != nil {
-		t.Fatalf("MarkUncollectible: %v", err)
-	}
-	if len(rev.calls) != 1 {
-		t.Fatalf("ReverseTax calls: got %d want 1", len(rev.calls))
-	}
-	call := rev.calls[0]
-	if call.OriginalTransactionID != "tx_committed_at_finalize" {
-		t.Errorf("OriginalTransactionID: got %q", call.OriginalTransactionID)
-	}
-	if call.Mode != tax.ReversalModeFull {
-		t.Errorf("Mode: got %q want full", call.Mode)
-	}
-	expectedRef := "inv_taxrev_" + inv.ID
-	if call.Reference != expectedRef {
-		t.Errorf("Reference: got %q want %q (invoice-stable reversal ref — shared with Void so a later void dedups instead of double-reversing)", call.Reference, expectedRef)
+		t.Errorf("Mode: got %q want full", rev.calls[0].Mode)
 	}
 }
 
@@ -1285,8 +1266,18 @@ func TestMarkUncollectible_ReversesUpstreamTaxTransaction(t *testing.T) {
 // dedup at Stripe → the same tax transaction was reversed twice → the tenant
 // UNDER-remitted output tax. The fix uses one invoice-stable reference so both
 // transitions share it (same Reference + idempotency key velox_tax_rev_<ref>),
-// collapsing to exactly one reversal.
-func TestUncollectibleThenVoid_ReversesTaxWithOneStableReference(t *testing.T) {
+// TestUncollectibleThenVoid_ReversesExactlyOnce keeps the DECISION of the test
+// it replaces — a written-off invoice that is later voided must never
+// double-reverse its tax — and updates the mechanism.
+//
+// Before ADR-111 that took two reversal calls sharing an invoice-stable
+// reference, relying on Stripe to dedup them. Now the write-off has no tax leg
+// at all, so exactly one call is made and the guarantee is STRUCTURAL rather
+// than provider-dependent: there is no second call to dedup.
+//
+// The stable reference is still asserted, because it is what makes a RETRY of
+// the void-path reversal converge (RetryPendingTaxReversal re-drives it).
+func TestUncollectibleThenVoid_ReversesExactlyOnce(t *testing.T) {
 	store := newMemStore()
 	svc := NewService(store, nil, newMemNumberer())
 	rev := &fakeTaxReverser{}
@@ -1310,21 +1301,21 @@ func TestUncollectibleThenVoid_ReversesTaxWithOneStableReference(t *testing.T) {
 	if _, err := svc.MarkUncollectible(ctx, "t1", inv.ID); err != nil {
 		t.Fatalf("MarkUncollectible: %v", err)
 	}
+	if len(rev.calls) != 0 {
+		t.Fatalf("the write-off reversed tax (%d calls) — ADR-111: no tax leg", len(rev.calls))
+	}
+
 	if _, err := svc.Void(ctx, "t1", inv.ID); err != nil {
 		t.Fatalf("Void of an uncollectible invoice should be allowed: %v", err)
 	}
-
-	if len(rev.calls) != 2 {
-		t.Fatalf("expected 2 ReverseTax calls (uncollectible + void), got %d", len(rev.calls))
+	if len(rev.calls) != 1 {
+		t.Fatalf("expected exactly 1 ReverseTax call (the void), got %d — more than one under-remits by reversing the same tax twice", len(rev.calls))
 	}
-	wantRef := "inv_taxrev_" + inv.ID
-	if rev.calls[0].Reference != wantRef || rev.calls[1].Reference != wantRef {
-		t.Fatalf("both reversals must share the invoice-stable reference %q so Stripe dedups to ONE reversal; got %q and %q",
-			wantRef, rev.calls[0].Reference, rev.calls[1].Reference)
+	if want := "inv_taxrev_" + inv.ID; rev.calls[0].Reference != want {
+		t.Errorf("reversal reference must be invoice-stable so a RETRY converges: got %q want %q", rev.calls[0].Reference, want)
 	}
-	if rev.calls[0].OriginalTransactionID != rev.calls[1].OriginalTransactionID {
-		t.Errorf("both reversals must target the same tax transaction; got %q and %q",
-			rev.calls[0].OriginalTransactionID, rev.calls[1].OriginalTransactionID)
+	if rev.calls[0].OriginalTransactionID != "tx_committed" {
+		t.Errorf("OriginalTransactionID: got %q want tx_committed", rev.calls[0].OriginalTransactionID)
 	}
 }
 

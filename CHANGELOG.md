@@ -11,6 +11,16 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Writing an invoice off no longer reverses its tax (2026-08-05, ADR-111).** Writing off a bad debt changes who paid, not what was sold — the service was delivered, the invoice was right, and the tax was correctly reported. Reclaiming that tax is a separate thing your business claims from the tax authority, on conditions Velox doesn't know: the UK requires the debt to be six months overdue and written off in your accounts; California, New York and Texas require it charged off for federal income tax purposes first. Velox was making that claim on your behalf the instant someone clicked a button.
+
+  It also caused a real problem. An invoice whose charge outcome can't be identified is parked, and writing it off is the only way to close it — the product says so. Doing that reversed the tax; then the background search would find the charge had in fact succeeded and settle the invoice as **paid, with its tax un-reported and nothing to put it back**. No warning, no human involved. Not reversing removes that path entirely rather than guarding it.
+
+  Voiding an invoice and issuing a credit note still reverse the tax, because those genuinely change what was sold. To help you make your own relief claims, the invoice export now carries the tax provider, transaction reference and reversal date.
+
+  Two comments in the code justified the old behaviour by citing Stripe and the EU VAT Directive. **Neither citation was real** — the Stripe sentence doesn't exist in their documentation, and the EU directive says the opposite of what was claimed. Both are removed.
+
 ### Added
 
 - **Recording an offline payment on a written-off invoice now warns when it won't reconcile (2026-08-05).** Two situations make a recovered bad debt disagree with the books, and until now both were silent on the offline path: the invoice's tax was already reported to the tax authority as *not* collected and cannot be re-reported automatically, or the invoice was billed on a usage threshold whose usage has since been re-billed on a newer invoice. Neither blocks the recording — the money has already arrived, and refusing to write it down would only make the books wrong as well as the payment unrecorded. But the operator is now told before they commit, on the dialog itself, because nothing downstream will ever raise it: recording the payment marks the invoice paid, which removes it from the very sweep that tracks unreversed tax. The same two conditions **do** block a card charge, which is Velox choosing to move money rather than recording money that already moved.

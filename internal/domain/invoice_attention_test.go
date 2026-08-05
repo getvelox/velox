@@ -1039,14 +1039,14 @@ func TestRecoveryBlocksCharge(t *testing.T) {
 		wantCode   string
 	}{
 		{"recoverable", writtenOff(), 0, ""},
-		{"tax already reversed", func() Invoice { i := writtenOff(); i.TaxTransactionID = "tax_tx_1"; return i }(), 0, "tax_reversed_unrecoverable"},
+		{"tax already reversed", func() Invoice { i := writtenOff(); i.TaxReversedAt = &time.Time{}; return i }(), 0, "tax_reversed_unrecoverable"},
 		{"threshold re-billed", func() Invoice { i := writtenOff(); i.BillingReason = BillingReasonThreshold; return i }(), 0, "recovery_superseded"},
 		{"relief never applied", writtenOff(), 2500, "relief_not_reissued"},
 
 		// Not a recovery at all: an ordinary finalized invoice must never carry
 		// a recovery block, even when it happens to look like one of the above.
 		// Without this, the predicate could refuse ordinary collection.
-		{"finalized with committed tax is NOT blocked", Invoice{Status: InvoiceFinalized, TaxTransactionID: "tax_tx_1"}, 0, ""},
+		{"finalized with reversed tax is NOT blocked", Invoice{Status: InvoiceFinalized, TaxReversedAt: &time.Time{}}, 0, ""},
 		{"finalized threshold is NOT blocked", Invoice{Status: InvoiceFinalized, BillingReason: BillingReasonThreshold}, 9999, ""},
 	}
 	for _, tc := range cases {
@@ -1136,8 +1136,7 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 	t.Run("the SAME conditions block a card charge", func(t *testing.T) {
 		// The pairing is the rule. If these ever diverge, one of the two paths
 		// is treating the same money fact differently for no stated reason.
-		i := taxReversed()
-		i.TaxTransactionID = "tax_tx_1" // block keys on the committed id
+		i := taxReversed() // both paths now key on the reversal stamp
 		if b := RecoveryBlocksCharge(i, 0); !b.Blocked || b.Code != "tax_reversed_unrecoverable" {
 			t.Errorf("card path does not block what the offline path warns about: %+v", b)
 		}
