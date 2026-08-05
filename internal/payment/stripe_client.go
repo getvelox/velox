@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -350,6 +351,38 @@ func anchorFromPIMetadata(meta map[string]string) time.Time {
 	return t
 }
 
+// classifySearchError decides whether a failed PI search is a PERMANENT
+// capability refusal (the caller latches its sweep off for this account+mode)
+// or an ordinary transient failure (the caller stamps the row and retries
+// after the cool-off). Getting this wrong in the permanent direction is the
+// expensive mistake: the latch lives in memory and never re-probes, so the
+// sweep stays off until the process restarts.
+//
+// invalid_request on a fixed-shape query is "search is not offered here"
+// (Stripe documents Search as unavailable to businesses in India; permission
+// and tier refusals take the same shape). Retrying that never helps.
+//
+// EXCEPT a 401. Stripe answers a bad or revoked secret key with the SAME
+// `invalid_request_error` type ("Invalid API Key provided"), so the type alone
+// cannot separate a capability refusal from a credential fault — and a
+// credential fault heals the moment the operator fixes the key. Treating it as
+// a refusal meant one botched key rotation disabled parked-invoice
+// self-resolution for the whole process, with a single CRITICAL log line as
+// the only signal.
+//
+// Verified against the live API 2026-08-05: bad key → 401, genuine
+// request-shape refusal → 400. Discriminating on the HTTP status uses the
+// semantic that already carries the distinction (Unauthorized vs Bad Request)
+// rather than matching on message text.
+func classifySearchError(err error) error {
+	var se *stripe.Error
+	if errors.As(err, &se) && se.Type == stripe.ErrorTypeInvalidRequest &&
+		se.HTTPStatusCode != http.StatusUnauthorized {
+		return fmt.Errorf("%w: %s", ErrSearchNotOffered, errs.Scrub(se.Msg))
+	}
+	return classifyStripeError(err)
+}
+
 // SearchPaymentIntentsByInvoiceID implements the ADR-108 lookup: find the
 // PaymentIntents this invoice's attempts created, by the velox_invoice_id
 // metadata every engine PI carries since inception (stripe.go chargeInvoice).
@@ -382,16 +415,7 @@ func (c *LiveStripeClient) SearchPaymentIntentsByInvoiceID(ctx context.Context, 
 	var out []PaymentIntentResult
 	for pi, err := range sc.V1PaymentIntents.Search(ctx, params) {
 		if err != nil {
-			// invalid_request on a fixed-shape query is "search is not offered
-			// here" (Stripe documents Search as unavailable to businesses in
-			// India; permission/tier refusals take the same shape). A request-
-			// shape error will not heal by retrying, so the caller disables its
-			// sweep for this account+mode instead of burning the budget forever.
-			var se *stripe.Error
-			if errors.As(err, &se) && se.Type == stripe.ErrorTypeInvalidRequest {
-				return nil, fmt.Errorf("%w: %s", ErrSearchNotOffered, errs.Scrub(se.Msg))
-			}
-			return nil, classifyStripeError(err)
+			return nil, classifySearchError(err)
 		}
 		out = append(out, PaymentIntentResult{
 			ID:                  pi.ID,
