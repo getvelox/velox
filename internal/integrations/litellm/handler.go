@@ -203,6 +203,10 @@ func (h *Handler) persist(ctx context.Context, tenantID string, ing ExternalInge
 		Dimensions:     ing.Dimensions,
 		IdempotencyKey: ing.IdempotencyKey,
 		Timestamp:      ing.Timestamp,
+		// ADR-079 D4: the provider's own per-half cost, already filtered by
+		// observedCostMicros to the halves D4 allows. nil leaves rate-table
+		// inference in charge, which is every pre-existing ingest path.
+		ObservedCostMicros: ing.ObservedCostMicros,
 	}
 
 	if _, err := h.ingester.Ingest(ctx, tenantID, input); err != nil {

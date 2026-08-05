@@ -19,9 +19,8 @@ DE
 Tax ID: DE123456789        <- also editable after finalization
 ```
 
-Nothing is snapshotted and no rendered PDF is persisted. Every render
-site rebuilds the document from whatever the customer and tenant rows
-say at request time:
+Nothing is snapshotted. Every render site rebuilds the document from
+whatever the customer and tenant rows say at request time:
 
 | Site | What it re-derives live |
 | --- | --- |
@@ -34,8 +33,18 @@ say at request time:
 | `internal/invoice/pdf_context.go:57` | supplier block, from tenant settings |
 | `internal/api/adapters.go:606` | display name on outbound email |
 
-`grep -rn "RenderPDF(" internal` returns only call sites; there is no
-table, column, or object store holding a rendered document.
+`grep -rn "RenderPDF(" internal` returns only call sites — no table or
+column holds a *canonical* rendered document.
+
+**Correction (2026-08-05):** an earlier draft of this ADR said "no
+rendered PDF is persisted". That is wrong. `internal/email/outbox_sender.go:91`
+carries `PDF []byte` and `SendInvoice` (:166-178) writes the rendered bytes
+into `email_outbox.payload` JSONB, with no purge job — so every
+operator-sent invoice PDF is already retained indefinitely. It does not
+change the decision (that copy is a send artifact, not a canonical
+document, and nothing renders *from* it), but it does mean a
+pre-snapshot record of what a customer actually received already exists
+and is worth consulting during any dispute.
 
 Consequences, in order of severity:
 
@@ -44,9 +53,15 @@ Consequences, in order of severity:
    was that day; the hosted link re-renders from the profile as it is
    today. Same invoice number, two different legal documents.
 2. **The buyer VAT number on a finalized invoice is mutable.** It is a
-   plain profile field, and `tax_status` drives the reverse-charge
-   legend, so an edit can retroactively change both the buyer
-   registration and the tax legend printed on an already-issued invoice.
+   plain profile field read live at render time.
+   *Refined 2026-08-05:* the legend's **presence** is already safe —
+   `tax_reverse_charge` and `tax_exempt_reason` are frozen on the
+   invoice row (`internal/invoice/pdf.go:746`). What is still live is
+   the legend's **wording**: `reverseChargeLegend` (`pdf.go:95-103`)
+   branches through `isIndianContext` (`pdf.go:125-137`) on the live
+   buyer country and supplier tax-id type, so an address edit can flip
+   an issued invoice between the CGST §9(3)/9(4) wording and the EU
+   Art. 196 wording.
 3. **Supplier-side drift is the same class.** Rename the company or edit
    its address in settings and every historical invoice re-renders under
    the new letterhead.
@@ -105,9 +120,17 @@ customer.
 
 Render sites prefer the snapshot and fall back to the live profile only
 when it is NULL, so historical rows keep rendering exactly as they do
-today. `internal/invoice/pdf_context.go` is the natural place for the
-resolve-with-fallback helper, since both the invoice and credit-note
-paths already route through it.
+today. `internal/invoice/pdf_context.go` is the natural home for the
+resolve-with-fallback helper.
+
+**Correction (2026-08-05):** an earlier draft claimed the invoice and
+credit-note paths "already route through" it. They do not.
+`internal/creditnote/handler.go:291` (`assemblePDFContext`) is a
+hand-rolled duplicate with its own `BillToInfo`/`CompanyInfo` types
+(`internal/creditnote/pdf.go:21,40`) and never calls
+`invoice.BuildPDFContext`. Sharing the helper therefore costs either a
+new cross-domain edge (`internal/arch/boundaries_test.go` gate) or
+duplicated resolve logic — a real decision, not a free reuse.
 
 Draft invoices keep reading live — a draft is not an issued document,
 and an operator fixing an address before finalizing must see the fix.
@@ -230,8 +253,45 @@ from this ADR's field list), and do `supplier_email` /
 `supplier_phone` (printed on every invoice at `pdf.go:381-386`,
 likewise omitted).
 
+**4. Four more sites the corrected plan still missed**, found by an
+adversarial pass over it:
+
+- **A third `INSERT INTO invoices`** lives outside `internal/invoice`
+  entirely — `cmd/velox-migrate-safety/seed.go:224`, writing
+  `'finalized'` as a SQL literal. The "only four SQL statements, all in
+  internal/invoice" claim above is therefore wrong as stated; it is true
+  only of the production paths.
+- **`invoices.tax_id` has three writers, not one.**
+  `internal/invoice/postgres.go:1650 UpdateTaxAtomic` writes it too, and
+  at :1567 it opens **its own** transaction — so the "the snapshot
+  shares the invoice's fate because every stamp site is in-tx" argument
+  does not hold on the manual-finalize path.
+- **`RETURNING` runs before the stamp.**
+  `createWithLineItemsInTx:1774` scans the row from `RETURNING invCols`
+  on the INSERT. A follow-up UPDATE means the `domain.Invoice` handed
+  back to callers carries `bill_to_snapshot_at = NULL` even though the
+  row is stamped — so anything that renders from the returned value,
+  rather than re-reading, silently takes the fallback path. Fold the
+  stamp into the INSERT or re-scan.
+- **Coordinator-tx blast radius.** Nine distinct transactions
+  (`subscription/postgres.go:118/:339/:786/:889`,
+  `subscription/handler.go:1510/:1592/:1709`) will now fail **closed**
+  if the stamp errors — a snapshot problem could abort a subscription
+  create or cancel. That trade needs stating in the risks section, not
+  discovering in production.
+
+**And one interaction worth pausing on:** `RetryCustomerDataErrors`
+(`internal/invoice/service.go:1813`) fires **on billing-profile save**
+and can auto-finalize invoices (`service.go:1645`). So the very action
+that changes a bill-to is itself a finalize trigger — post-fix, saving a
+corrected address would stamp the *new* profile onto invoices that had
+been waiting on that correction. That is arguably the desired outcome,
+but it must be a decision rather than an accident.
+
 Migration number claimed by the enumeration:
-**0171_invoice_issued_document_snapshot**.
+**0171_invoice_issued_document_snapshot** (0170 is the highest on
+origin/main; 0166 is taken by an unmerged branch and must not be
+reused).
 
 ## Status note
 

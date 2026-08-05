@@ -175,10 +175,13 @@ func ingestOneTx(ctx context.Context, tx *sql.Tx, tenantID string, event domain.
 			quantity, properties, idempotency_key, timestamp, origin,
 			provider_cost_micros, provider_cost_source)
 		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9,
-			CASE WHEN (SELECT COUNT(*) FROM rate) = 1
-				THEN ROUND((SELECT cost_per_token FROM rate) * $5 * 1000000)::BIGINT
+			CASE
+				WHEN $10::BIGINT IS NOT NULL THEN $10::BIGINT
+				WHEN (SELECT COUNT(*) FROM rate) = 1
+					THEN ROUND((SELECT cost_per_token FROM rate) * $5 * 1000000)::BIGINT
 			END,
 			CASE
+				WHEN $10::BIGINT IS NOT NULL THEN 'observed'
 				WHEN $6::jsonb->>'provider' IS NULL
 				  OR $6::jsonb->>'token_type' IS NULL
 				  OR ($6::jsonb->>'model' IS NULL AND $6::jsonb->>'model_raw' IS NULL)
@@ -193,6 +196,10 @@ func ingestOneTx(ctx context.Context, tx *sql.Tx, tenantID string, event domain.
 		event.Quantity,
 		props, postgres.NullableString(event.IdempotencyKey),
 		event.Timestamp, origin,
+		// $10 — the provider's own per-half cost when the caller supplied
+		// one (ADR-079 D4). NULL keeps the rate-table path exactly as it
+		// was; non-NULL short-circuits both CASEs above.
+		event.ProviderCostMicros,
 	).Scan(&event.ID, &event.TenantID, &event.CustomerID, &event.MeterID,
 		&event.Quantity, propertiesScanner{&event.Dimensions},
 		&event.IdempotencyKey, &event.Timestamp, &event.Origin,
