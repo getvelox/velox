@@ -310,7 +310,7 @@ func parseRecipe(data []byte) (domain.Recipe, error) {
 		// apply (pause, none) to a recipe whose author wrote
 		// `final_action: cancel_subscription` — a policy they did not choose.
 		if dp.LegacyFinalAction != "" {
-			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_action was split in ADR-112 — use final_subscription_action (none|pause|cancel) and final_invoice_action (none|mark_uncollectible)", raw.Key)
+			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_action is no longer accepted — it decided two separate things. Use final_subscription_action (none|pause|cancel) and final_invoice_action (none|mark_uncollectible)", raw.Key)
 		}
 		if !domain.DunningSubscriptionAction(dp.FinalSubscriptionAction).Valid() {
 			return domain.Recipe{}, fmt.Errorf("recipe %q: dunning.policy.final_subscription_action %q must be one of none, pause, cancel", raw.Key, dp.FinalSubscriptionAction)
