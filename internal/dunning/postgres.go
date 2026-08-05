@@ -23,22 +23,24 @@ func NewPostgresStore(db *postgres.DB) *PostgresStore {
 
 // scanPolicy is the shared row decoder for the policy SELECTs below.
 // Returned columns are fixed: id, tenant_id, name, enabled, is_default,
-// retry_schedule (jsonb), max_retry_attempts, final_action,
-// grace_period_days, created_at, updated_at — in that order.
+// retry_schedule (jsonb), max_retry_attempts, final_subscription_action,
+// final_invoice_action, grace_period_days, created_at, updated_at — in
+// that order.
 func scanPolicy(row interface {
 	Scan(dest ...any) error
 }) (domain.DunningPolicy, error) {
 	var p domain.DunningPolicy
 	var scheduleJSON []byte
 	if err := row.Scan(&p.ID, &p.TenantID, &p.Name, &p.Enabled, &p.IsDefault, &scheduleJSON,
-		&p.MaxRetryAttempts, &p.FinalAction, &p.GracePeriodDays, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.MaxRetryAttempts, &p.FinalSubscriptionAction, &p.FinalInvoiceAction,
+		&p.GracePeriodDays, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return domain.DunningPolicy{}, err
 	}
 	_ = json.Unmarshal(scheduleJSON, &p.RetrySchedule)
 	return p, nil
 }
 
-const policyColumns = `id, tenant_id, name, enabled, is_default, retry_schedule, max_retry_attempts, final_action, grace_period_days, created_at, updated_at`
+const policyColumns = `id, tenant_id, name, enabled, is_default, retry_schedule, max_retry_attempts, final_subscription_action, final_invoice_action, grace_period_days, created_at, updated_at`
 
 // GetPolicyByID looks up a single policy by its id within the tenant.
 func (s *PostgresStore) GetPolicyByID(ctx context.Context, tenantID, id string) (domain.DunningPolicy, error) {
@@ -237,12 +239,12 @@ func (s *PostgresStore) upsertPolicyTx(ctx context.Context, tx *sql.Tx, tenantID
 		newID := postgres.NewID("vlx_dpol")
 		row := tx.QueryRowContext(ctx, `
 			INSERT INTO dunning_policies (id, tenant_id, name, enabled, is_default,
-				retry_schedule, max_retry_attempts, final_action, grace_period_days,
-				created_at, updated_at)
-			VALUES ($1,$2,$3,$4,NOT EXISTS(SELECT 1 FROM dunning_policies WHERE is_default),$5,$6,$7,$8,$9,$9)
+				retry_schedule, max_retry_attempts, final_subscription_action,
+				final_invoice_action, grace_period_days, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,NOT EXISTS(SELECT 1 FROM dunning_policies WHERE is_default),$5,$6,$7,$8,$9,$10,$10)
 			RETURNING `+policyColumns,
 			newID, tenantID, p.Name, p.Enabled, scheduleJSON, p.MaxRetryAttempts,
-			p.FinalAction, p.GracePeriodDays, now,
+			p.FinalSubscriptionAction, p.FinalInvoiceAction, p.GracePeriodDays, now,
 		)
 		return scanPolicy(row)
 	}
@@ -251,12 +253,13 @@ func (s *PostgresStore) upsertPolicyTx(ctx context.Context, tx *sql.Tx, tenantID
 	row := tx.QueryRowContext(ctx, `
 		UPDATE dunning_policies
 		SET name = $2, enabled = $3, retry_schedule = $4,
-			max_retry_attempts = $5, final_action = $6, grace_period_days = $7,
-			updated_at = $8
+			max_retry_attempts = $5, final_subscription_action = $6,
+			final_invoice_action = $7, grace_period_days = $8,
+			updated_at = $9
 		WHERE id = $1
 		RETURNING `+policyColumns,
 		p.ID, p.Name, p.Enabled, scheduleJSON, p.MaxRetryAttempts,
-		p.FinalAction, p.GracePeriodDays, now,
+		p.FinalSubscriptionAction, p.FinalInvoiceAction, p.GracePeriodDays, now,
 	)
 	return scanPolicy(row)
 }

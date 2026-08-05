@@ -13,7 +13,7 @@ import (
 // mark_uncollectible terminal so exhaustRun invokes a real mover.
 func markUncollectiblePolicy(store *memStore) {
 	p := store.policies[store.defaultID]
-	p.FinalAction = domain.DunningActionMarkUncollectible
+	p.FinalInvoiceAction = domain.InvActionMarkUncollectible
 	store.policies[store.defaultID] = p
 }
 

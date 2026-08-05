@@ -133,6 +133,8 @@ export * from './recipeCreatedObjects';
 export * from './recipeCreates';
 export * from './recipeDetail';
 export * from './recipeDunningPolicy';
+export * from './recipeDunningPolicyFinalInvoiceAction';
+export * from './recipeDunningPolicyFinalSubscriptionAction';
 export * from './recipeInstance';
 export * from './recipeInstanceOverrides';
 export * from './recipeListItem';

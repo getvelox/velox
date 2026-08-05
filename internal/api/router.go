@@ -406,6 +406,7 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// subscription.Service + invoice store, both defined above).
 	dunningSvc.SetSubscriptionPauser(&subscriptionPauserAdapter{svc: subSvc}, invoiceStore)
 	dunningSvc.SetSubscriptionCanceler(&subscriptionCancelerAdapter{svc: subSvc})
+	dunningSvc.SetSubscriptionStateReader(&subscriptionStateAdapter{svc: subSvc})
 	dunningSvc.SetEventDispatcher(eventDispatcher)
 	// Customer→dunning_policy_id resolver so dunning service can pick
 	// the effective policy at StartDunning time (ADR-036).

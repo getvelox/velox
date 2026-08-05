@@ -55,19 +55,13 @@ type SubscriptionPauser interface {
 }
 
 // SubscriptionCanceler cancels a subscription when dunning exhausts
-// retries with final_action='cancel_subscription' — Stripe's default
-// terminal action; supported by 3 of 4 reference platforms (Stripe,
-// Lago, Recurly) per the ADR-036 amendment research.
+// retries with final_subscription_action='cancel'.
 type SubscriptionCanceler interface {
 	Cancel(ctx context.Context, tenantID, id string) error
 }
 
-// InvoiceUncollectibleMarker marks an invoice uncollectible when
-// dunning exhausts retries with final_action='mark_uncollectible'.
-// Stripe-standard terminal: "we won't try again; close out the
-// receivable." Replaces the pre-amendment write_off_later semantics
-// (the implementation was identical — invoice mutation, no sub
-// state-change — but the name was non-standard).
+// InvoiceUncollectibleMarker writes the unpaid invoice off when dunning
+// exhausts retries with final_invoice_action='mark_uncollectible'.
 type InvoiceUncollectibleMarker interface {
 	MarkUncollectible(ctx context.Context, tenantID, invoiceID string) error
 }
@@ -75,6 +69,35 @@ type InvoiceUncollectibleMarker interface {
 // InvoiceGetter gets invoice details for finding the subscription.
 type InvoiceGetter interface {
 	Get(ctx context.Context, tenantID, id string) (domain.Invoice, error)
+}
+
+// SubscriptionTerminalState reports whether a subscription can still be
+// acted on. Only Terminated is needed: `canceled` and `archived` are the
+// two states in which BOTH movers refuse.
+type SubscriptionTerminalState struct {
+	Terminated bool
+}
+
+// SubscriptionStateReader answers "is there anything left to do to this
+// subscription" before exhaustRun fires a terminal action.
+//
+// It exists because ADR-112 made exhaustion fire TWO actions that can fail
+// independently, and a failed exhaustion is re-attempted 24h later. Both
+// subscription movers refuse when the sub is already terminal —
+// cancelSpec() allows only draft/trialing/active, and SetPauseCollection
+// rejects canceled/archived outright — so without a skip-if-done read, a
+// re-attempt after a partial failure would fail forever on the half that
+// already succeeded and never reach the half that did not. Same reason the
+// invoice half checks status==uncollectible first: MarkUncollectible
+// returns "invoice is already uncollectible" rather than a no-op.
+//
+// Deliberately a state READ rather than error-string matching on the
+// movers (no heuristic proxies) and rather than a new applied-actions
+// column on dunning_runs (one source of truth — if an operator canceled
+// the sub by hand mid-run, skipping is the correct behaviour, and only the
+// entity knows that).
+type SubscriptionStateReader interface {
+	GetTerminalState(ctx context.Context, tenantID, id string) (SubscriptionTerminalState, error)
 }
 
 // CustomerEmailFetcher resolves customer contact info for email notifications.
@@ -98,7 +121,9 @@ type EmailNotifier interface {
 	// tone exists: the exhausting attempt sends the escalation email
 	// instead of a warning (see the warning-enqueue gate in processRun).
 	SendDunningWarning(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, attemptNumber, maxAttempts int, nextRetryDate, failureReason, publicToken string) error
-	SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, action, publicToken string) error
+	// outcome is what exhaustion actually did to THIS invoice, not what
+	// the policy asked for — the copy is composed from it (ADR-112).
+	SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error
 }
 
 // CustomerPolicyReader returns a customer's assigned dunning_policy_id
@@ -114,6 +139,7 @@ type Service struct {
 	retrier          PaymentRetrier
 	subPauser        SubscriptionPauser
 	subCanceler      SubscriptionCanceler
+	subState         SubscriptionStateReader
 	invoiceUncollect InvoiceUncollectibleMarker
 	invoiceGet       InvoiceGetter
 	events           domain.EventDispatcher
@@ -186,21 +212,28 @@ func (s *Service) GetEffectivePolicyForCustomer(ctx context.Context, tenantID, c
 }
 
 // SetSubscriptionPauser configures the pause-collection terminal action
-// (ADR-036 amendment — semantics now Stripe-aligned: keep_as_draft,
-// not hard pause).
+// (Stripe-aligned keep_as_draft, not hard pause).
 func (s *Service) SetSubscriptionPauser(pauser SubscriptionPauser, invoices InvoiceGetter) {
 	s.subPauser = pauser
 	s.invoiceGet = invoices
 }
 
-// SetSubscriptionCanceler configures the cancel-subscription terminal
-// action (ADR-036 amendment).
+// SetSubscriptionCanceler configures the cancel terminal action.
 func (s *Service) SetSubscriptionCanceler(c SubscriptionCanceler) {
 	s.subCanceler = c
 }
 
-// SetInvoiceUncollectibleMarker configures the mark-uncollectible
-// terminal action (ADR-036 amendment).
+// SetSubscriptionStateReader wires the skip-if-done read that makes a
+// re-attempted exhaustion converge — see SubscriptionStateReader. Leaving
+// it nil is safe but degraded: the subscription action is then attempted
+// unconditionally, so a re-attempt whose subscription half already
+// succeeded logs a failure and re-queues instead of moving on to the
+// invoice half.
+func (s *Service) SetSubscriptionStateReader(r SubscriptionStateReader) {
+	s.subState = r
+}
+
+// SetInvoiceUncollectibleMarker configures the write-off terminal action.
 func (s *Service) SetInvoiceUncollectibleMarker(m InvoiceUncollectibleMarker) {
 	s.invoiceUncollect = m
 }
@@ -827,116 +860,95 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		}
 	}
 
-	// actionFailed records whether the terminal final_action mover errored.
-	// The run's terminal state is assigned AFTER the switch so a swallowed
-	// mover failure leaves the run requeryable (state=active) instead of a
-	// clean "escalated" beside an invoice/sub that never got closed —
-	// escalated runs are permanently excluded from both due-run pickers, so
-	// they'd never be re-attempted.
+	// Exhaustion fires TWO independent actions (ADR-112): one on the
+	// subscription, one on the unpaid invoice. Either can fail on its own,
+	// and a failed exhaustion is re-attempted 24h later — so each is skipped
+	// when its target state already holds. Without that, a re-attempt would
+	// die forever on the half that already succeeded (both subscription
+	// movers refuse a terminal sub; MarkUncollectible returns "invoice is
+	// already uncollectible") and never reach the half that did not.
+	//
+	// The run's terminal state is assigned AFTER both, so a swallowed mover
+	// failure leaves the run requeryable (state=active) instead of a clean
+	// "escalated" beside an invoice/sub that never got closed — escalated
+	// runs are permanently excluded from both due-run pickers, so they'd
+	// never be re-attempted.
 	actionFailed := false
 
-	// emailAction is what the escalation email renders. It starts as the
-	// policy's final action and is cleared to "" (neutral copy) when the
-	// action did not apply to THIS invoice — a one-off invoice has no
-	// subscription to cancel or pause, and an unwired mover can't act.
-	// The debtor must never read "your subscription has been canceled"
-	// when nothing was canceled.
-	emailAction := string(policy.FinalAction)
+	// applied is what the escalation email renders. It records whether each
+	// REQUESTED END STATE HOLDS — not whether this call performed the
+	// mutation. The email describes the subscription's and invoice's state,
+	// and "your subscription has been canceled" is true whoever canceled it;
+	// keying on authorship instead would drop the sentence on exactly the
+	// re-attempt paths this split introduced. It stays false when the action
+	// could not apply to THIS invoice at all — a one-off has no subscription
+	// to cancel, an unwired mover cannot act — so the debtor never reads
+	// "your subscription has been canceled" when nothing was.
+	var outcome appliedActions
 
-	switch policy.FinalAction {
-	case domain.DunningActionManualReview:
-		// State stays at escalated; resolution stays retries_exhausted.
-		// Operator handles via the dashboard. Stripe "Keep active"
-		// equivalent.
+	// The two halves need the invoice differently, so a missing reader
+	// degrades them differently:
+	//
+	//   - the SUBSCRIPTION action needs inv.SubscriptionID and cannot run
+	//     without it at all;
+	//   - the INVOICE action needs only the id already on the run. inv.Status
+	//     is a convergence aid (skip an already-written-off invoice rather
+	//     than re-erroring on it), not a prerequisite.
+	//
+	// A read that FAILS is different from a reader that is absent: absent is
+	// a known-degraded construction, failure means the state is unknown, and
+	// acting blind there could email a lie. So a failure blocks both halves
+	// and re-queues; absence blocks only the subscription half.
+	var inv domain.Invoice
+	invRead := false
+	needsInvoice := policy.FinalSubscriptionAction != domain.SubActionNone ||
+		policy.FinalInvoiceAction != domain.InvActionNone
+	if needsInvoice && s.invoiceGet != nil {
+		loaded, err := s.invoiceGet.Get(ctx, tenantID, run.InvoiceID)
+		if err != nil {
+			actionFailed = true
+			slog.Warn("failed to load invoice for dunning terminal action",
+				"invoice_id", run.InvoiceID, "error", err)
+		} else {
+			inv, invRead = loaded, true
+		}
+	}
 
-	case domain.DunningActionPause:
-		// Pause COLLECTION (keep_as_draft) — cycle keeps drafting,
-		// no charging / dunning until the operator resumes. Matches
-		// Stripe's pause_collection.behavior=keep_as_draft. The pre-
-		// ADR-036-amendment implementation called hard PauseAtomic,
-		// which silently skipped invoice generation for the affected
-		// periods — non-Stripe and destructive.
-		if s.subPauser != nil && s.invoiceGet != nil {
-			inv, err := s.invoiceGet.Get(ctx, tenantID, run.InvoiceID)
+	// SUBSCRIPTION first: it is the half that stops future money movement,
+	// and it matches Stripe's causality (there the subscription setting is
+	// what marks the invoice uncollectible).
+	if !actionFailed && policy.FinalSubscriptionAction != domain.SubActionNone {
+		if !invRead {
+			slog.Warn("dunning subscription action skipped — no invoice reader wired, so no subscription to act on",
+				"run_id", run.ID, "invoice_id", run.InvoiceID)
+		} else {
+			subApplied, subFailed := s.applySubscriptionAction(
+				ctx, tenantID, policy.FinalSubscriptionAction, inv.SubscriptionID)
+			actionFailed = actionFailed || subFailed
 			switch {
-			case err != nil:
-				// Can't tell whether a subscription exists — a failed
-				// action, so the run stays requeryable and re-attempts
-				// instead of escalating (and emailing "paused") on a
-				// DB blip.
-				actionFailed = true
-				slog.Warn("failed to load invoice for dunning pause action",
-					"invoice_id", run.InvoiceID, "error", err)
-			case inv.SubscriptionID == "":
-				// One-off invoice — nothing to pause; neutral email copy.
-				emailAction = ""
-			default:
-				if err := s.subPauser.PauseCollection(ctx, tenantID, inv.SubscriptionID); err != nil {
-					actionFailed = true
-					slog.Warn("failed to pause collection after dunning exhausted",
-						"invoice_id", run.InvoiceID, "subscription_id", inv.SubscriptionID, "error", err)
-				} else {
-					slog.Info("collection paused by dunning",
-						"invoice_id", run.InvoiceID, "subscription_id", inv.SubscriptionID)
-				}
+			case !subApplied:
+			case policy.FinalSubscriptionAction == domain.SubActionPause:
+				outcome.SubscriptionPaused = true
+			case policy.FinalSubscriptionAction == domain.SubActionCancel:
+				outcome.SubscriptionCanceled = true
 			}
-		} else {
-			emailAction = "" // no pauser wired — nothing was paused
 		}
+	}
 
-	case domain.DunningActionCancelSubscription:
-		// Cancel the subscription. Stripe-default terminal action;
-		// supported by 3 of 4 reference platforms (Stripe, Lago,
-		// Recurly) per the ADR-036 amendment research.
-		if s.subCanceler != nil && s.invoiceGet != nil {
-			inv, err := s.invoiceGet.Get(ctx, tenantID, run.InvoiceID)
-			switch {
-			case err != nil:
-				// Can't tell whether a subscription exists — a failed
-				// action, so the run stays requeryable and re-attempts
-				// instead of escalating (and emailing "canceled") on a
-				// DB blip.
-				actionFailed = true
-				slog.Warn("failed to load invoice for dunning cancel action",
-					"invoice_id", run.InvoiceID, "error", err)
-			case inv.SubscriptionID == "":
-				// One-off invoice — nothing to cancel; neutral email copy.
-				emailAction = ""
-			default:
-				if err := s.subCanceler.Cancel(ctx, tenantID, inv.SubscriptionID); err != nil {
-					actionFailed = true
-					slog.Warn("failed to cancel subscription after dunning exhausted",
-						"invoice_id", run.InvoiceID, "subscription_id", inv.SubscriptionID, "error", err)
-				} else {
-					slog.Info("subscription canceled by dunning",
-						"invoice_id", run.InvoiceID, "subscription_id", inv.SubscriptionID)
-				}
-			}
-		} else {
-			emailAction = "" // no canceler wired — nothing was canceled
-		}
-
-	case domain.DunningActionMarkUncollectible:
-		// Mark the unpaid invoice as uncollectible. Stripe-standard
-		// for "we won't try again; close out the receivable." The
-		// subscription itself stays active — operator may
-		// independently cancel via the dashboard.
-		if s.invoiceUncollect != nil {
-			if err := s.invoiceUncollect.MarkUncollectible(ctx, tenantID, run.InvoiceID); err != nil {
-				actionFailed = true
-				slog.Warn("failed to mark invoice uncollectible after dunning exhausted",
-					"invoice_id", run.InvoiceID, "error", err)
-			} else {
-				slog.Info("invoice marked uncollectible by dunning",
-					"invoice_id", run.InvoiceID)
-			}
-		} else {
-			emailAction = "" // no mover wired — the invoice was NOT closed
-		}
-
-	default:
-		slog.Warn("unknown dunning final_action — leaving run escalated without state-change action",
-			"final_action", policy.FinalAction, "run_id", run.ID)
+	// INVOICE second, and ONLY if the subscription half is settled. Writing
+	// the invoice off while the subscription action is still outstanding
+	// would strand it: the late-paid re-check at the top of this function
+	// resolves any run whose invoice is already uncollectible, so the
+	// re-attempt would return there and never retry the subscription.
+	//
+	// `inv` is the zero value when unread, whose Status is not
+	// `uncollectible`, so the skip-if-done check simply does not fire and the
+	// write-off is attempted — the pre-ADR-112 behaviour.
+	if !actionFailed {
+		invApplied, invFailed := s.applyInvoiceAction(
+			ctx, tenantID, run.InvoiceID, policy.FinalInvoiceAction, inv)
+		actionFailed = actionFailed || invFailed
+		outcome.InvoiceWrittenOff = invApplied
 	}
 
 	if actionFailed {
@@ -960,8 +972,10 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 				"run_id", run.ID, "invoice_id", run.InvoiceID)
 			return nil
 		}
-		slog.Warn("dunning final_action failed; run kept active for re-attempt",
-			"run_id", run.ID, "invoice_id", run.InvoiceID, "final_action", policy.FinalAction)
+		slog.Warn("dunning terminal action failed; run kept active for re-attempt",
+			"run_id", run.ID, "invoice_id", run.InvoiceID,
+			"final_subscription_action", policy.FinalSubscriptionAction,
+			"final_invoice_action", policy.FinalInvoiceAction)
 		return nil
 	}
 
@@ -989,33 +1003,161 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		EventType:    domain.DunningEventEscalated,
 		State:        run.State,
 		AttemptCount: run.AttemptCount,
-		Reason:       string(policy.FinalAction),
-		CreatedAt:    now,
+		// What actually happened to this invoice, not what the policy asked
+		// for — the timeline renders this row, and a one-off invoice under a
+		// cancel policy would otherwise read "cancel" beside a subscription
+		// that never existed.
+		Reason:    outcome.Reason(),
+		CreatedAt: now,
 	})
 
 	slog.Info("dunning exhausted",
 		"run_id", run.ID,
 		"invoice_id", run.InvoiceID,
-		"final_action", policy.FinalAction,
+		"final_subscription_action", policy.FinalSubscriptionAction,
+		"final_invoice_action", policy.FinalInvoiceAction,
+		"applied", outcome.Reason(),
 	)
 
 	// Synchronous enqueue — see comment on enqueueDunningWarning. Renders
-	// emailAction (the action that actually applied to this invoice), not
-	// policy.FinalAction — see the note above the switch.
+	// what actually applied to this invoice, not what the policy asked for.
 	if s.emailNotifier != nil && s.customerEmail != nil {
-		s.enqueueDunningEscalation(ctx, tenantID, run, emailAction)
+		s.enqueueDunningEscalation(ctx, tenantID, run, outcome)
 	}
 
 	s.fireEvent(ctx, tenantID, domain.EventDunningEscalated, map[string]any{
-		"run_id":       run.ID,
-		"invoice_id":   run.InvoiceID,
-		"customer_id":  run.CustomerID,
-		"final_action": string(policy.FinalAction),
-		"resolution":   string(run.Resolution),
-		"attempts":     run.AttemptCount,
+		"run_id":      run.ID,
+		"invoice_id":  run.InvoiceID,
+		"customer_id": run.CustomerID,
+		// The policy's two configured actions, and separately what actually
+		// landed. Subscribers reconciling their own records need the second:
+		// a one-off invoice under a cancel policy escalates with nothing
+		// canceled, and an aggregate "final_action" could not say so.
+		"final_subscription_action": string(policy.FinalSubscriptionAction),
+		"final_invoice_action":      string(policy.FinalInvoiceAction),
+		"applied":                   outcome.Reason(),
+		"resolution":                string(run.Resolution),
+		"attempts":                  run.AttemptCount,
 	})
 
 	return nil
+}
+
+// appliedActions is what a terminal exhaustion actually did to ONE
+// invoice. It lives in domain because the email package renders it —
+// the escalation copy is a function of the OUTCOME, not of the policy.
+type appliedActions = domain.DunningEscalationOutcome
+
+// applySubscriptionAction moves the subscription to the policy's terminal
+// state, reporting whether that state now holds and whether the attempt
+// errored. See SubscriptionStateReader for why the skip-if-done read
+// exists rather than tolerating the movers' already-terminal errors.
+func (s *Service) applySubscriptionAction(ctx context.Context, tenantID string, action domain.DunningSubscriptionAction, subID string) (applied, failed bool) {
+	if action == domain.SubActionNone {
+		return false, false
+	}
+	if subID == "" {
+		// One-off invoice — no subscription exists to act on. Not a
+		// failure; there is simply nothing to do, and the escalation email
+		// must not claim otherwise.
+		return false, false
+	}
+
+	if s.subState != nil {
+		st, err := s.subState.GetTerminalState(ctx, tenantID, subID)
+		if err != nil {
+			slog.Warn("failed to read subscription state for dunning terminal action",
+				"subscription_id", subID, "error", err)
+			return false, true
+		}
+		if st.Terminated {
+			// Already canceled or archived — by this run's earlier attempt,
+			// by another flow, or by an operator. A `cancel` request is
+			// satisfied by that (whoever did it, the end state holds). A
+			// `pause` request is NOT: a terminated subscription has no
+			// collection left to pause, so nothing applied and the email
+			// stays silent about it.
+			return action == domain.SubActionCancel, false
+		}
+	}
+
+	switch action {
+	case domain.SubActionPause:
+		if s.subPauser == nil {
+			// Wiring gap (the producer always wires it). Logged rather than
+			// failed: failing would re-queue every run in such a deployment
+			// forever, and the email correctly claims nothing.
+			slog.Warn("dunning pause action skipped — no subscription pauser wired",
+				"subscription_id", subID)
+			return false, false
+		}
+		if err := s.subPauser.PauseCollection(ctx, tenantID, subID); err != nil {
+			slog.Warn("failed to pause collection after dunning exhausted",
+				"subscription_id", subID, "error", err)
+			return false, true
+		}
+		slog.Info("collection paused by dunning", "subscription_id", subID)
+		return true, false
+
+	case domain.SubActionCancel:
+		if s.subCanceler == nil {
+			slog.Warn("dunning cancel action skipped — no subscription canceler wired",
+				"subscription_id", subID)
+			return false, false
+		}
+		if err := s.subCanceler.Cancel(ctx, tenantID, subID); err != nil {
+			slog.Warn("failed to cancel subscription after dunning exhausted",
+				"subscription_id", subID, "error", err)
+			return false, true
+		}
+		slog.Info("subscription canceled by dunning", "subscription_id", subID)
+		return true, false
+
+	default:
+		// Unreachable while the CHECK constraint holds. Loud rather than
+		// silently no-op: a value the code does not understand must not
+		// read as "the operator asked for nothing".
+		slog.Error("unknown dunning final_subscription_action — no action taken",
+			"action", action, "subscription_id", subID)
+		return false, false
+	}
+}
+
+// applyInvoiceAction writes the unpaid invoice off when the policy asks,
+// reporting whether it is now written off and whether the attempt errored.
+func (s *Service) applyInvoiceAction(ctx context.Context, tenantID, invoiceID string, action domain.DunningInvoiceAction, inv domain.Invoice) (applied, failed bool) {
+	switch action {
+	case domain.InvActionNone:
+		return false, false
+
+	case domain.InvActionMarkUncollectible:
+		if inv.Status == domain.InvoiceUncollectible {
+			// Already written off. MarkUncollectible returns "invoice is
+			// already uncollectible" rather than a no-op, and treating that
+			// as a failure would re-queue the run forever. (exhaustRun's
+			// late-paid re-check normally resolves such a run before
+			// reaching here; this covers an operator write-off landing
+			// between the two reads.)
+			return true, false
+		}
+		if s.invoiceUncollect == nil {
+			slog.Warn("dunning write-off skipped — no invoice uncollectible marker wired",
+				"invoice_id", invoiceID)
+			return false, false
+		}
+		if err := s.invoiceUncollect.MarkUncollectible(ctx, tenantID, invoiceID); err != nil {
+			slog.Warn("failed to mark invoice uncollectible after dunning exhausted",
+				"invoice_id", invoiceID, "error", err)
+			return false, true
+		}
+		slog.Info("invoice marked uncollectible by dunning", "invoice_id", invoiceID)
+		return true, false
+
+	default:
+		slog.Error("unknown dunning final_invoice_action — no action taken",
+			"action", action, "invoice_id", invoiceID)
+		return false, false
+	}
 }
 
 // ResolveRun marks a dunning run as resolved (e.g., after manual payment).
@@ -1234,22 +1376,27 @@ func normalizeAndValidatePolicy(policy domain.DunningPolicy) (domain.DunningPoli
 	if policy.GracePeriodDays > 30 {
 		return domain.DunningPolicy{}, errs.Invalid("grace_period_days", "cannot exceed 30")
 	}
-	switch policy.FinalAction {
-	case domain.DunningActionManualReview, domain.DunningActionPause,
-		domain.DunningActionMarkUncollectible, domain.DunningActionCancelSubscription:
-		// valid
-	case "":
-		// Default = pause (Stripe-aligned pause_collection.behavior=
-		// keep_as_draft semantics after ADR-036 amendment). Without
-		// this, the engine would keep generating finalized invoices
-		// for delinquent customers every cycle — stacking failures +
-		// dunning emails. pause + keep_as_draft is the operator-
-		// protective choice. Operators who want a different terminal
-		// action set it explicitly.
-		policy.FinalAction = domain.DunningActionPause
-	default:
-		return domain.DunningPolicy{}, errs.Invalid("final_action",
-			"must be one of: manual_review, pause, mark_uncollectible, cancel_subscription")
+	// Default = pause (Stripe-aligned pause_collection.behavior=
+	// keep_as_draft). Without it the engine keeps generating finalized
+	// invoices for a delinquent customer every cycle, stacking failures and
+	// dunning emails.
+	if policy.FinalSubscriptionAction == "" {
+		policy.FinalSubscriptionAction = domain.SubActionPause
+	}
+	// Default = leave the invoice open. Deliberately NOT a write-off, even
+	// though Recurly defaults its equivalent on: writing off asserts bad
+	// debt, and a machine should not make that assertion on a fresh
+	// tenant's behalf unasked (ADR-112, same reasoning as ADR-111).
+	if policy.FinalInvoiceAction == "" {
+		policy.FinalInvoiceAction = domain.InvActionNone
+	}
+	if !policy.FinalSubscriptionAction.Valid() {
+		return domain.DunningPolicy{}, errs.Invalid("final_subscription_action",
+			"must be one of: none, pause, cancel")
+	}
+	if !policy.FinalInvoiceAction.Valid() {
+		return domain.DunningPolicy{}, errs.Invalid("final_invoice_action",
+			"must be one of: none, mark_uncollectible")
 	}
 	if err := domain.MaxLen("name", policy.Name, 255); err != nil {
 		return domain.DunningPolicy{}, err
@@ -1340,7 +1487,7 @@ func (s *Service) enqueueDunningWarning(ctx context.Context, tenantID string, ru
 // cancel_subscription policy exhausting on a one-off invoice with no
 // subscription. Callers must not pass policy.FinalAction blindly: the
 // email asserts an outcome, so it renders outcomes, not intentions.
-func (s *Service) enqueueDunningEscalation(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, action string) {
+func (s *Service) enqueueDunningEscalation(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, outcome domain.DunningEscalationOutcome) {
 	email, name, cc, err := s.customerEmail.GetCustomerEmail(ctx, tenantID, run.CustomerID)
 	if err != nil || email == "" {
 		slog.Warn("skip dunning escalation email — cannot resolve customer email",
@@ -1355,7 +1502,7 @@ func (s *Service) enqueueDunningEscalation(ctx context.Context, tenantID string,
 			publicToken = inv.PublicToken
 		}
 	}
-	if err := s.emailNotifier.SendDunningEscalation(ctx, tenantID, email, cc, name, invoiceNumber, action, publicToken); err != nil {
+	if err := s.emailNotifier.SendDunningEscalation(ctx, tenantID, email, cc, name, invoiceNumber, outcome, publicToken); err != nil {
 		slog.Error("failed to enqueue dunning escalation email",
 			"run_id", run.ID, "email", email, "error", err)
 	}

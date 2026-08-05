@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+
+	"github.com/sagarsuperuser/velox/internal/domain"
 )
 
 // Email type tags written into email_outbox.email_type. Kept stable because
@@ -64,14 +66,19 @@ type outboxMessage struct {
 	AttemptNumber    int    `json:"attempt_number,omitempty"`
 	MaxAttempts      int    `json:"max_attempts,omitempty"`
 	NextRetryDate    string `json:"next_retry_date,omitempty"`
-	Action           string `json:"action,omitempty"`
 	Reason           string `json:"reason,omitempty"`
 	// FailureReason carries the latest decline-or-error message for
 	// dunning_warning + payment_failed templates. Surfaced inline so
 	// the customer can act (insufficient_funds → top up; lost_card →
-	// swap card). Distinct from Reason which is used by dunning_
-	// escalation to carry the final-action verb.
+	// swap card).
 	FailureReason string `json:"failure_reason,omitempty"`
+	// EscalationOutcome is what dunning's exhaustion actually did to this
+	// invoice (ADR-112) — it replaced the single `action` verb, which could
+	// not describe a policy that both cancels and writes off. Rows enqueued
+	// by the previous binary decode to the zero value, which renders the
+	// NEUTRAL sentence: degraded but not false, since neutral copy asserts
+	// no state change rather than the wrong one.
+	EscalationOutcome domain.DunningEscalationOutcome `json:"escalation_outcome,omitempty"`
 	// SetupURL + OperatorNote carry the operator-initiated
 	// "add a payment method" email payload (TypePaymentSetupLink).
 	// SetupURL is the Stripe Checkout setup-session URL; OperatorNote
@@ -206,14 +213,14 @@ func (s *OutboxSender) SendDunningWarning(ctx context.Context, tenantID, to stri
 }
 
 // SendDunningEscalation enqueues a dunning-escalation email. Satisfies dunning.EmailNotifier.
-func (s *OutboxSender) SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, action, publicToken string) error {
+func (s *OutboxSender) SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error {
 	return s.enqueue(ctx, tenantID, TypeDunningEscalation, outboxMessage{
-		To:            to,
-		Cc:            cc,
-		CustomerName:  customerName,
-		InvoiceNumber: invoiceNumber,
-		Action:        action,
-		PublicToken:   publicToken,
+		To:                to,
+		Cc:                cc,
+		CustomerName:      customerName,
+		InvoiceNumber:     invoiceNumber,
+		EscalationOutcome: outcome,
+		PublicToken:       publicToken,
 	})
 }
 

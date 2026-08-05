@@ -106,7 +106,7 @@ func TestListFailedWithoutDunningRun_CandidateSet(t *testing.T) {
 	dstore := dunning.NewPostgresStore(db)
 	pol, err := dstore.UpsertPolicy(ctx, tenantID, domain.DunningPolicy{
 		Name: "backfill-pol", Enabled: true, RetrySchedule: []string{"72h", "120h"},
-		MaxRetryAttempts: 3, FinalAction: domain.DunningActionManualReview, GracePeriodDays: 1,
+		MaxRetryAttempts: 3, FinalSubscriptionAction: domain.SubActionNone, FinalInvoiceAction: domain.InvActionNone, GracePeriodDays: 1,
 	})
 	if err != nil {
 		t.Fatalf("create dunning policy: %v", err)

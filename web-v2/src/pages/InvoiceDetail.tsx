@@ -30,6 +30,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Separator } from '@/components/ui/separator'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -446,12 +447,47 @@ export default function InvoiceDetailPage() {
   const [showMarkUncollectibleConfirm, setShowMarkUncollectibleConfirm] = useState(false)
   const [showRecordPaymentDialog, setShowRecordPaymentDialog] = useState(false)
   const [recordPaymentNote, setRecordPaymentNote] = useState('')
+  // Writing an invoice off and stopping the subscription are two decisions,
+  // not one (ADR-112 — the same split the dunning policy now makes). The
+  // dialog offers both; this is the second, defaulted OFF because a write-off
+  // must not silently change what a live subscription bills.
+  const [pauseSubOnWriteOff, setPauseSubOnWriteOff] = useState(false)
+  // Only offerable when there IS a subscription still collecting: a one-off
+  // invoice has none, a canceled/archived sub refuses the pause outright
+  // (SetPauseCollection rejects terminal rows), and an already-paused one has
+  // nothing to pause.
+  const canPauseSubOnWriteOff = Boolean(
+    subscription &&
+    subscription.status !== 'canceled' &&
+    subscription.status !== 'archived' &&
+    !subscription.pause_collection
+  )
   const markUncollectibleMutation = useMutation({
-    mutationFn: () => api.markInvoiceUncollectible(id!),
+    mutationFn: async () => {
+      const written = await api.markInvoiceUncollectible(id!)
+      if (pauseSubOnWriteOff && canPauseSubOnWriteOff && invoice?.subscription_id) {
+        // Sequential, not parallel: the write-off is the decision being
+        // confirmed, and pausing a subscription whose write-off failed would
+        // stop billing for nothing. Its failure is reported separately below
+        // rather than folded into one message — the write-off HAS happened by
+        // then, and a single "failed" toast would misstate that.
+        try {
+          await api.pauseSubscriptionCollection(invoice.subscription_id, { behavior: 'keep_as_draft' })
+        } catch (err) {
+          showApiError(err, `Invoice ${invoice?.invoice_number} was written off, but pausing collection on the subscription failed — it is still billing. Pause it from the subscription page.`)
+        }
+      }
+      return written
+    },
     onSuccess: () => {
       invalidateAll()
       setShowMarkUncollectibleConfirm(false)
-      toast.success(`Invoice ${invoice?.invoice_number} marked uncollectible`)
+      setPauseSubOnWriteOff(false)
+      toast.success(
+        pauseSubOnWriteOff && canPauseSubOnWriteOff
+          ? `Invoice ${invoice?.invoice_number} marked uncollectible; collection paused on the subscription`
+          : `Invoice ${invoice?.invoice_number} marked uncollectible`
+      )
     },
     onError: (err) => showApiError(err, 'Failed to mark uncollectible'),
   })
@@ -1435,12 +1471,37 @@ export default function InvoiceDetailPage() {
         open={showMarkUncollectibleConfirm}
         onOpenChange={setShowMarkUncollectibleConfirm}
         title="Mark Invoice Uncollectible"
-        description="Records this invoice as bad debt. The invoice stays on the books for audit, but dunning automation halts and no further collection is attempted. Subscription stays active — cancel it separately if you also want to stop future billing. If the payment provider later confirms the charge did go through, the invoice still settles as paid on its own."
+        description="Records this invoice as bad debt. The invoice stays on the books for audit, but dunning automation halts and no further collection is attempted. If the payment provider later confirms the charge did go through, the invoice still settles as paid on its own."
         confirmWord="WRITE OFF"
         confirmLabel="Mark Uncollectible"
         onConfirm={() => markUncollectibleMutation.mutate()}
         loading={markUncollectibleMutation.isPending}
-      />
+      >
+        {canPauseSubOnWriteOff ? (
+          <div className="rounded-md border p-3 space-y-2">
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id="pause-sub-on-writeoff"
+                checked={pauseSubOnWriteOff}
+                onCheckedChange={(val) => setPauseSubOnWriteOff(val === true)}
+                disabled={markUncollectibleMutation.isPending}
+              />
+              <Label htmlFor="pause-sub-on-writeoff" className="text-sm font-normal leading-snug">
+                Also pause collection on this subscription
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {pauseSubOnWriteOff
+                ? 'The subscription keeps drafting invoices for each cycle, but nothing is charged until you resume it.'
+                : 'The subscription keeps billing and charging as normal. Writing off this invoice does not stop the next one.'}
+            </p>
+          </div>
+        ) : subscription ? (
+          <p className="text-xs text-muted-foreground">
+            Collection on this subscription is already stopped, so writing off this invoice changes nothing about future billing.
+          </p>
+        ) : null}
+      </TypedConfirmDialog>
 
       {/* Rotate public-token Confirm — defensive affordance for when the
           public URL has been shared where it shouldn't be (wider email

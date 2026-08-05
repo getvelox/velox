@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { finalActionSummary } from '@/lib/dunningActions'
 import {
   Select,
   SelectContent,
@@ -48,12 +49,33 @@ import {
 // `items` prop that lets <SelectValue> render the selected label
 // (Base UI shows the raw value otherwise). Labels reflect the actual
 // semantics (pause = collection-only, not hard pause).
-const FINAL_ACTION_OPTIONS = [
+const SUBSCRIPTION_ACTION_OPTIONS = [
   { value: 'pause', label: 'Pause collection (keep drafting invoices)' },
-  { value: 'cancel_subscription', label: 'Cancel subscription' },
-  { value: 'mark_uncollectible', label: 'Mark invoice uncollectible' },
-  { value: 'manual_review', label: 'Leave open — manual review' },
+  { value: 'cancel', label: 'Cancel the subscription' },
+  { value: 'none', label: 'Leave it active' },
 ]
+
+const INVOICE_ACTION_OPTIONS = [
+  { value: 'none', label: 'Leave it open and due' },
+  { value: 'mark_uncollectible', label: 'Write it off as bad debt' },
+]
+
+// Plain-language consequence for every combination. The old single-select
+// left the debt's fate entirely unstated: an operator picking "Cancel
+// subscription" had no way to learn the unpaid invoice then sits open with
+// no closer anywhere in the system. Finance/ops read this, so it names
+// money and next steps, not enum values.
+function outcomeSentence(sub: string, inv: string): string {
+  const subPart =
+    sub === 'cancel' ? 'The subscription is canceled.'
+    : sub === 'pause' ? 'Automatic charging stops; the cycle keeps drafting invoices until you resume.'
+    : 'The subscription keeps billing as normal.'
+  const invPart =
+    inv === 'mark_uncollectible'
+      ? 'The unpaid invoice is written off as bad debt — it leaves your receivables, stays on the books for audit, and can still be settled by bank transfer or by charging it from the invoice page.'
+      : 'The unpaid invoice stays open and due. Nothing closes it automatically — you collect it or write it off yourself.'
+  return `${subPart} ${invPart}`
+}
 
 export default function DunningPoliciesPage() {
   usePageTitle('Dunning policies')
@@ -148,7 +170,7 @@ export default function DunningPoliciesPage() {
                       <span>Max retries: <span className="text-foreground">{p.max_retry_attempts}</span></span>
                       <span>Grace: <span className="text-foreground">{p.grace_period_days}d</span></span>
                       <span>Schedule: <span className="text-foreground">{p.retry_schedule.join(' · ') || '—'}</span></span>
-                      <span>Final: <span className="text-foreground">{p.final_action}</span></span>
+                      <span>On exhaustion: <span className="text-foreground">{finalActionSummary(p)}</span></span>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -218,7 +240,8 @@ function PolicyDialog({ mode, initial, onClose, onSaved }: {
     max_retry_attempts: String(initial?.max_retry_attempts ?? 3),
     grace_period_days: String(initial?.grace_period_days ?? 3),
     retry_schedule: (initial?.retry_schedule ?? ['72h', '120h']).join(', '),
-    final_action: initial?.final_action || 'pause',
+    final_subscription_action: initial?.final_subscription_action || 'pause',
+    final_invoice_action: initial?.final_invoice_action || 'none',
   })
   const [saving, setSaving] = useState(false)
 
@@ -237,7 +260,8 @@ function PolicyDialog({ mode, initial, onClose, onSaved }: {
         max_retry_attempts: parseInt(form.max_retry_attempts, 10) || 0,
         grace_period_days: parseInt(form.grace_period_days, 10) || 0,
         retry_schedule: parseSchedule(form.retry_schedule),
-        final_action: form.final_action,
+        final_subscription_action: form.final_subscription_action,
+        final_invoice_action: form.final_invoice_action,
       }
       if (mode === 'create') {
         await api.createDunningPolicy(payload)
@@ -295,19 +319,38 @@ function PolicyDialog({ mode, initial, onClose, onSaved }: {
               )}
             </p>
           </div>
-          <div className="space-y-2">
-            <Label>Final action</Label>
-            <Select items={FINAL_ACTION_OPTIONS} value={form.final_action} onValueChange={(val) => setForm(f => ({ ...f, final_action: val ?? 'pause' }))}>
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {FINAL_ACTION_OPTIONS.map(o => (
-                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <fieldset className="space-y-3 rounded-md border p-3">
+            <legend className="px-1 text-sm font-medium">When all retries fail</legend>
+            <div className="space-y-2">
+              <Label>Do this to the subscription</Label>
+              <Select items={SUBSCRIPTION_ACTION_OPTIONS} value={form.final_subscription_action} onValueChange={(val) => setForm(f => ({ ...f, final_subscription_action: val ?? 'pause' }))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SUBSCRIPTION_ACTION_OPTIONS.map(o => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Do this to the unpaid invoice</Label>
+              <Select items={INVOICE_ACTION_OPTIONS} value={form.final_invoice_action} onValueChange={(val) => setForm(f => ({ ...f, final_invoice_action: val ?? 'none' }))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {INVOICE_ACTION_OPTIONS.map(o => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {outcomeSentence(form.final_subscription_action, form.final_invoice_action)}
+            </p>
+          </fieldset>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" disabled={saving}>

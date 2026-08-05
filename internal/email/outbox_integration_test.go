@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/email"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
@@ -442,11 +443,11 @@ func (f *fakeDeliverer) SendDunningWarning(_ context.Context, tenantID, to strin
 	f.lastPublicToken = publicToken
 	return nil
 }
-func (f *fakeDeliverer) SendDunningEscalation(_ context.Context, tenantID, to string, cc []string, name, inv, action, publicToken string) error {
+func (f *fakeDeliverer) SendDunningEscalation(_ context.Context, tenantID, to string, cc []string, name, inv string, outcome domain.DunningEscalationOutcome, publicToken string) error {
 	f.calls++
 	f.lastCc = cc
 	f.lastType, f.lastTenant, f.lastTo, f.lastName, f.lastInvoice = email.TypeDunningEscalation, tenantID, to, name, inv
-	f.lastAction = action
+	f.lastAction = outcome.Reason()
 	f.lastPublicToken = publicToken
 	return nil
 }
@@ -510,12 +511,16 @@ func callDeliverer(ctx context.Context, d email.EmailDeliverer, row email.Outbox
 		AttemptNumber    int      `json:"attempt_number"`
 		MaxAttempts      int      `json:"max_attempts"`
 		NextRetryDate    string   `json:"next_retry_date"`
-		Action           string   `json:"action"`
 		Reason           string   `json:"reason"`
-		FailureReason    string   `json:"failure_reason"`
-		UpdateURL        string   `json:"update_url"`
-		PublicToken      string   `json:"public_token"`
-		PDF              []byte   `json:"pdf"`
+		// Mirrors outboxMessage.EscalationOutcome. This struct is a
+		// hand-maintained twin of the production payload, so a field added
+		// there and not here decodes to zero and the assertion silently
+		// passes against nothing.
+		EscalationOutcome domain.DunningEscalationOutcome `json:"escalation_outcome"`
+		FailureReason     string                          `json:"failure_reason"`
+		UpdateURL         string                          `json:"update_url"`
+		PublicToken       string                          `json:"public_token"`
+		PDF               []byte                          `json:"pdf"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return err
@@ -528,7 +533,7 @@ func callDeliverer(ctx context.Context, d email.EmailDeliverer, row email.Outbox
 	case email.TypeDunningWarning:
 		return d.SendDunningWarning(ctx, row.TenantID, m.To, m.Cc, m.CustomerName, m.InvoiceNumber, m.AttemptNumber, m.MaxAttempts, m.NextRetryDate, m.FailureReason, m.PublicToken)
 	case email.TypeDunningEscalation:
-		return d.SendDunningEscalation(ctx, row.TenantID, m.To, m.Cc, m.CustomerName, m.InvoiceNumber, m.Action, m.PublicToken)
+		return d.SendDunningEscalation(ctx, row.TenantID, m.To, m.Cc, m.CustomerName, m.InvoiceNumber, m.EscalationOutcome, m.PublicToken)
 	case email.TypePaymentFailed:
 		return d.SendPaymentFailed(ctx, row.TenantID, m.To, m.Cc, m.CustomerName, m.InvoiceNumber, m.Reason, m.PublicToken)
 	case email.TypePaymentSetupRequest:

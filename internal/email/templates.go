@@ -5,6 +5,8 @@ import (
 	"html"
 	"html/template"
 	"strings"
+
+	"github.com/sagarsuperuser/velox/internal/domain"
 )
 
 // Branding is the per-tenant visual identity a sender pulls from
@@ -216,21 +218,18 @@ func renderDunningWarningHTML(customerName, invoiceNumber string, attemptNumber,
 	return subject, b.String(), ctaURL, ctaLabel
 }
 
-func renderDunningEscalationHTML(customerName, invoiceNumber, action, hostedURL string) (subject, contentHTML, ctaURL, ctaLabel string) {
+func renderDunningEscalationHTML(customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, hostedURL string) (subject, contentHTML, ctaURL, ctaLabel string) {
 	subject = "Action required for invoice " + invoiceNumber
 	var b strings.Builder
 	b.WriteString(`<h1 style="margin:0 0 12px;font-size:20px;color:#111827;">We couldn't collect payment</h1>`)
 	b.WriteString(`<p style="margin:0 0 8px;color:#4b5563;">Hi ` + escape(customerName) + `,</p>`)
 	b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">All payment attempts for invoice <strong style="color:#111827;">` + escape(invoiceNumber) + `</strong> were unsuccessful.</p>`)
 
-	// The final action is an INTERNAL enum — rendering it raw showed the
-	// debtor "Action taken: mark_uncollectible" (P13). Map to customer
-	// copy via dunningEscalationCopy (shared with the plaintext part),
-	// and only promise "settle via the link" when the invoice is actually
-	// still payable there: a mark_uncollectible invoice has no Pay button
-	// (locked P6 scoping) — its email points at support instead of a
-	// dead end.
-	sentence, stillPayable := dunningEscalationCopy(action)
+	// Never render the internal enum — that leak (P13) showed the debtor
+	// "Action taken: mark_uncollectible". dunningEscalationCopy composes
+	// the customer sentence from the OUTCOME and is shared with the
+	// plaintext part.
+	sentence, stillPayable := dunningEscalationCopy(outcome)
 	b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">` + escape(sentence) + `</p>`)
 	if hostedURL != "" {
 		ctaURL = hostedURL
@@ -242,35 +241,52 @@ func renderDunningEscalationHTML(customerName, invoiceNumber, action, hostedURL 
 	return subject, b.String(), ctaURL, ctaLabel
 }
 
-// dunningEscalationCopy maps the INTERNAL final-action enum to the
-// customer-facing sentence used by BOTH multipart/alternative parts of
-// the escalation email. Single source on purpose — the P13 raw-enum leak
-// was fixed in the HTML part only, and the plaintext twin kept showing
-// text-only clients "Action taken: mark_uncollectible" for another two
-// months. stillPayable=false when the hosted invoice page has no Pay
-// button for this action (a mark_uncollectible invoice locks online
-// payment), so callers offer the link as "View invoice", never a dead
-// "Pay invoice".
-func dunningEscalationCopy(action string) (sentence string, stillPayable bool) {
-	switch action {
-	case "mark_uncollectible":
-		// The invoice is closed for online payment but the subscription
-		// stays active (dunning/service.go) — no "restore service" claim.
-		return "This invoice has been closed for online payment. Please contact support to arrange payment.", false
-	case "cancel_subscription":
-		return "Your subscription has been canceled. The outstanding balance remains due — you can settle it using the link below.", true
-	case "pause":
-		// Pause = collection pause only (keep_as_draft): service
-		// continues, automatic charging stops — so no "service is
-		// paused" / "resume service" claims.
-		return "Automatic payment collection on your account has been paused. The balance remains due — please pay the invoice below or update your payment method.", true
-	default:
-		// manual_review, "" (the policy's action didn't apply to this
-		// invoice — e.g. a one-off invoice with no subscription to
-		// cancel), and any future action: neutral — no state change is
-		// asserted.
-		return "The invoice remains due. Please settle it using the link below or reach out to support.", true
+// dunningEscalationCopy composes the customer-facing sentence used by BOTH
+// multipart/alternative parts of the escalation email. Single source on
+// purpose — the P13 raw-enum leak was fixed in the HTML part only, and the
+// plaintext twin kept showing text-only clients "Action taken:
+// mark_uncollectible" for another two months.
+//
+// It reads the OUTCOME, never the policy (ADR-112): exhaustion now settles
+// two independent things, and only the outcome knows which of them applied
+// to this invoice. A one-off invoice under a cancel policy cancels nothing,
+// so it must get the neutral sentence.
+//
+// stillPayable=false once the invoice is written off — a written-off
+// invoice has no Pay button on the hosted page (ADR-110), so callers offer
+// the link as "View invoice" and point at support rather than a dead end.
+// It is the invoice half that decides this; the subscription half never
+// changes whether THIS invoice can be paid online.
+func dunningEscalationCopy(o domain.DunningEscalationOutcome) (sentence string, stillPayable bool) {
+	// Subscription clause. Pause is collection-only (keep_as_draft):
+	// service continues and only automatic charging stops, so no "service
+	// is paused" / "resume service" claim is made.
+	var subClause string
+	switch {
+	case o.SubscriptionCanceled:
+		subClause = "Your subscription has been canceled."
+	case o.SubscriptionPaused:
+		subClause = "Automatic payment collection on your account has been paused."
 	}
+
+	if o.InvoiceWrittenOff {
+		// Closed for online payment, and the balance is NOT described as
+		// still collectible through the link — it isn't.
+		s := "This invoice has been closed for online payment. Please contact support to arrange payment."
+		if subClause != "" {
+			s = subClause + " " + s
+		}
+		return s, false
+	}
+
+	if subClause != "" {
+		return subClause + " The outstanding balance remains due — you can settle it using the link below.", true
+	}
+
+	// Nothing applied: a (none, none) policy, a one-off invoice whose
+	// policy only acts on subscriptions, or an unwired mover. Neutral — no
+	// state change is asserted.
+	return "The invoice remains due. Please settle it using the link below or reach out to support.", true
 }
 
 func renderPaymentFailedHTML(customerName, invoiceNumber, reason, hostedURL string) (subject, contentHTML, ctaURL, ctaLabel string) {

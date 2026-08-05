@@ -1,38 +1,121 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
-// DunningFinalAction is the terminal-state action when a dunning run
-// exhausts its retries. Aligned with the cross-platform set verified
-// 2026-05-16 (ADR-036 amendment): Stripe / Lago / Orb / Recurly all
-// converge on some subset of {manual_review, pause, mark_uncollectible,
-// cancel_subscription}. Velox supports all four.
+// Exhausting a dunning run settles TWO independent questions, and ADR-112
+// gives each its own column: what happens to the SUBSCRIPTION, and what
+// happens to the unpaid INVOICE.
 //
-// Semantics:
-//   - ManualReview       — run lands at state=escalated, no sub/invoice
-//     mutation; operator handles. Maps to Stripe
-//     "Keep active" and Lago default.
-//   - Pause              — calls subscription.SetPauseCollection
-//     (behavior=keep_as_draft). Cycle keeps drafting
-//     invoices; no charging / dunning until resumed.
-//     Matches Stripe's pause_collection (NOT the
-//     hard PauseAtomic — that was the pre-amendment
-//     implementation, replaced for Stripe-parity).
-//   - MarkUncollectible  — marks the unpaid invoice as uncollectible
-//     (industry-standard term for "we won't try
-//     again; close out the receivable"). Replaces
-//     the pre-amendment "write_off_later" naming.
-//   - CancelSubscription — cancels the subscription. Stripe-default
-//     terminal action; supported by 3 of 4
-//     reference platforms.
-type DunningFinalAction string
+// They were one enum until 2026-08-05, which made Stripe's own default
+// outcome — cancel the subscription AND write off the invoice —
+// inexpressible, and left the debt permanently open in the three of four
+// values that were not `mark_uncollectible`. Every peer separates them
+// (ADR-112 carries the verbatim quotes): Stripe derives the invoice
+// write-off from the subscription setting, Recurly pairs an invoice
+// auto-fail flag with an expire-subscription flag, Chargebee configures
+// "the action to be performed on the subscription ... and invoice".
+//
+// The old `manual_review` value is not missing — it IS
+// (SubActionNone, InvActionNone), matching Chargebee's "remain active"
+// + "not paid".
+
+// DunningSubscriptionAction is what exhaustion does to the subscription
+// behind the unpaid invoice. No-op when the invoice has no subscription
+// (a one-off), which the escalation copy must then not claim.
+type DunningSubscriptionAction string
 
 const (
-	DunningActionManualReview       DunningFinalAction = "manual_review"
-	DunningActionPause              DunningFinalAction = "pause"
-	DunningActionMarkUncollectible  DunningFinalAction = "mark_uncollectible"
-	DunningActionCancelSubscription DunningFinalAction = "cancel_subscription"
+	// SubActionNone leaves the subscription alone — the operator handles
+	// it. Stripe "leave past_due", Chargebee "remain active".
+	SubActionNone DunningSubscriptionAction = "none"
+	// SubActionPause calls subscription.PauseCollection
+	// (behavior=keep_as_draft): the cycle keeps drafting invoices, but
+	// nothing is charged and no dunning starts until an operator resumes.
+	// Matches Stripe's pause_collection — NOT the hard PauseAtomic, which
+	// silently skipped invoice generation and was replaced for parity.
+	SubActionPause DunningSubscriptionAction = "pause"
+	// SubActionCancel cancels the subscription outright.
+	SubActionCancel DunningSubscriptionAction = "cancel"
 )
+
+// DunningInvoiceAction is what exhaustion does to the unpaid invoice that
+// the run was chasing.
+type DunningInvoiceAction string
+
+const (
+	// InvActionNone leaves the invoice finalized and due. Honest, and the
+	// default: nobody has decided this is bad debt yet. It does mean the
+	// receivable stays open until a human closes or collects it, which the
+	// policy form says in as many words.
+	InvActionNone DunningInvoiceAction = "none"
+	// InvActionMarkUncollectible writes the invoice off as bad debt. The
+	// receivable closes; the invoice stays on the books for audit and stays
+	// settleable out of band (ADR-110).
+	//
+	// Auto-VOID and Chargebee's auto-"Reverse" (mark paid + adjustment
+	// credit note) are deliberately NOT offered — see ADR-112. Void asserts
+	// the sale never happened and reverses tax (ADR-111); a machine making
+	// that assertion about delivered usage is precisely the bad money event
+	// the governing rule refuses to CREATE.
+	InvActionMarkUncollectible DunningInvoiceAction = "mark_uncollectible"
+)
+
+// Valid reports whether the action is a known enum value. UpsertPolicy
+// refuses anything else rather than defaulting — an unrecognized action
+// silently becoming "none" would quietly stop closing receivables the
+// operator asked to close.
+func (a DunningSubscriptionAction) Valid() bool {
+	return a == SubActionNone || a == SubActionPause || a == SubActionCancel
+}
+
+// Valid reports whether the action is a known enum value. See the note on
+// DunningSubscriptionAction.Valid.
+func (a DunningInvoiceAction) Valid() bool {
+	return a == InvActionNone || a == InvActionMarkUncollectible
+}
+
+// DunningEscalationOutcome is what a terminal exhaustion actually did to
+// ONE invoice — which is not the same as what its policy asked for. Each
+// field means "the requested end state holds", so it stays true across a
+// re-attempt that skipped a half already in place, and false when the
+// action could not apply here at all (a one-off invoice has no
+// subscription to cancel; an unwired mover cannot act).
+//
+// The escalation email, the escalated timeline row, and the outbound
+// webhook all render THIS rather than the policy. A debtor must never
+// read "your subscription has been canceled" when nothing was.
+type DunningEscalationOutcome struct {
+	SubscriptionPaused   bool
+	SubscriptionCanceled bool
+	InvoiceWrittenOff    bool
+}
+
+// Reason is the stable machine token stamped on the escalated event and
+// the outbound webhook. It describes OUTCOMES rather than echoing the
+// policy: "" means the run escalated with nothing changed, which is the
+// honest reading of a (none, none) policy and of a one-off invoice under
+// a cancel policy alike.
+func (o DunningEscalationOutcome) Reason() string {
+	var parts []string
+	if o.SubscriptionPaused {
+		parts = append(parts, "subscription_paused")
+	}
+	if o.SubscriptionCanceled {
+		parts = append(parts, "subscription_canceled")
+	}
+	if o.InvoiceWrittenOff {
+		parts = append(parts, "invoice_marked_uncollectible")
+	}
+	return strings.Join(parts, "+")
+}
+
+// Any reports whether exhaustion changed anything at all.
+func (o DunningEscalationOutcome) Any() bool {
+	return o.SubscriptionPaused || o.SubscriptionCanceled || o.InvoiceWrittenOff
+}
 
 type DunningRunState string
 
@@ -131,17 +214,20 @@ const (
 // the Lago / Recurly named-campaigns shape verified during the 2026-
 // 05-16 industry research.
 type DunningPolicy struct {
-	ID               string             `json:"id"`
-	TenantID         string             `json:"tenant_id,omitempty"`
-	Name             string             `json:"name"`
-	Enabled          bool               `json:"enabled"`
-	IsDefault        bool               `json:"is_default"`
-	RetrySchedule    []string           `json:"retry_schedule"`
-	MaxRetryAttempts int                `json:"max_retry_attempts"`
-	FinalAction      DunningFinalAction `json:"final_action"`
-	GracePeriodDays  int                `json:"grace_period_days"`
-	CreatedAt        time.Time          `json:"created_at"`
-	UpdatedAt        time.Time          `json:"updated_at"`
+	ID               string   `json:"id"`
+	TenantID         string   `json:"tenant_id,omitempty"`
+	Name             string   `json:"name"`
+	Enabled          bool     `json:"enabled"`
+	IsDefault        bool     `json:"is_default"`
+	RetrySchedule    []string `json:"retry_schedule"`
+	MaxRetryAttempts int      `json:"max_retry_attempts"`
+	// The two terminal decisions (ADR-112). Both are always present; the
+	// (none, none) pair is the old `manual_review`.
+	FinalSubscriptionAction DunningSubscriptionAction `json:"final_subscription_action"`
+	FinalInvoiceAction      DunningInvoiceAction      `json:"final_invoice_action"`
+	GracePeriodDays         int                       `json:"grace_period_days"`
+	CreatedAt               time.Time                 `json:"created_at"`
+	UpdatedAt               time.Time                 `json:"updated_at"`
 }
 
 type InvoiceDunningRun struct {

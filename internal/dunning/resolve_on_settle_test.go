@@ -197,7 +197,7 @@ func TestProcessRun_PaidInvoice_ResolvesWithoutRetrying(t *testing.T) {
 func TestProcessRun_MaxRetriesPaid_DoesNotCancelSubscription(t *testing.T) {
 	store := newMemStore()
 	p := store.policies[store.defaultID]
-	p.FinalAction = domain.DunningActionCancelSubscription // would cancel if exhaustRun reached
+	p.FinalSubscriptionAction = domain.SubActionCancel // would cancel if exhaustRun reached
 	store.policies[store.defaultID] = p
 
 	canceler := &recordingSubCanceler{}
@@ -338,7 +338,7 @@ func (r *settlingDeclineRetrier) RetryPayment(_ context.Context, _, _, _ string)
 func TestExhaustRun_LatePaidRecheck_DoesNotCancel(t *testing.T) {
 	store := newMemStore()
 	p := store.policies[store.defaultID]
-	p.FinalAction = domain.DunningActionCancelSubscription
+	p.FinalSubscriptionAction = domain.SubActionCancel
 	store.policies[store.defaultID] = p
 
 	paid := false
@@ -383,7 +383,7 @@ func TestExhaustRun_ResolvedDuringTerminalAction_NoEscalatedClobber(t *testing.T
 	store := newMemStore()
 	disp := &captureDispatcher{}
 	p := store.policies[store.defaultID]
-	p.FinalAction = domain.DunningActionCancelSubscription
+	p.FinalSubscriptionAction = domain.SubActionCancel
 	store.policies[store.defaultID] = p
 
 	svc := NewService(store, &noopRetrier{}, nil)

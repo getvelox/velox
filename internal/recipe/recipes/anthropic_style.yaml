@@ -1,5 +1,5 @@
 key: anthropic_style
-version: 4.0.0
+version: 5.0.0
 name: Anthropic (Claude) token pricing
 summary: |
   Ready-made pricing for reselling Claude (Anthropic) API access. Bills each
@@ -1073,7 +1073,8 @@ dunning:
     name: AI default retry
     max_retries: 4
     intervals_hours: [24, 72, 168, 336]
-    final_action: pause
+    final_subscription_action: pause
+    final_invoice_action: none
 
 webhook:
   events:

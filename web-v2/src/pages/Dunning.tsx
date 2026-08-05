@@ -63,8 +63,10 @@ import { Loader2 } from 'lucide-react'
 // map whose whole purpose is preventing exactly that.
 //
 // `write_off` was also here and is not a resolution at all — no writer can
-// produce it and the CHECK constraint forbids it. It looks like a confusion
-// with dunning_policies.final_action, which does have `write_off_later`.
+// produce it and the CHECK constraint forbids it. It looked like a confusion
+// with the dunning policy's terminal action, whose write-off value is spelled
+// `mark_uncollectible` and now lives in dunning_policies.final_invoice_action
+// (ADR-112).
 const RESOLUTION_LABELS: Record<string, string> = {
   payment_recovered: 'Payment recovered',
   invoice_voided: 'Voided',

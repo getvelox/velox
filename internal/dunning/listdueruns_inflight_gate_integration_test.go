@@ -58,7 +58,7 @@ func TestListDueRuns_InFlightGate(t *testing.T) {
 	dstore := dunning.NewPostgresStore(db)
 	policy, err := dstore.UpsertPolicy(ctx, tenantID, domain.DunningPolicy{
 		Name: "default", Enabled: true, RetrySchedule: []string{"72h"}, MaxRetryAttempts: 3,
-		FinalAction: domain.DunningFinalAction("mark_uncollectible"), GracePeriodDays: 3,
+		FinalSubscriptionAction: domain.SubActionNone, FinalInvoiceAction: domain.InvActionMarkUncollectible, GracePeriodDays: 3,
 	})
 	if err != nil {
 		t.Fatalf("upsert policy: %v", err)
@@ -197,8 +197,8 @@ func TestListDueRunsForClock_InFlightGate(t *testing.T) {
 		VALUES ($1, $2, 'inflight', $3, 'ready', false)`, clockID, tenantID, frozen)
 	mustExec(`INSERT INTO customers (id, tenant_id, external_id, display_name, email, test_clock_id, created_at, updated_at)
 		VALUES ('cus_inflight_clk', $1, 'inflight_clk', 'InFlight', '', $2, $3, $3)`, tenantID, clockID, frozen)
-	mustExec(`INSERT INTO dunning_policies (id, tenant_id, name, enabled, is_default, retry_schedule, max_retry_attempts, final_action, grace_period_days, livemode)
-		VALUES ('dpol_inflight', $1, 'P', true, true, '["72h"]', 3, 'pause', 3, false)`, tenantID)
+	mustExec(`INSERT INTO dunning_policies (id, tenant_id, name, enabled, is_default, retry_schedule, max_retry_attempts, final_subscription_action, final_invoice_action, grace_period_days, livemode)
+		VALUES ('dpol_inflight', $1, 'P', true, true, '["72h"]', 3, 'pause', 'none', 3, false)`, tenantID)
 
 	// payStatus/piID/invStatus reproduce the shapes; the invoices are simulated
 	// so they belong to the catchup scan rather than the wall sweep.

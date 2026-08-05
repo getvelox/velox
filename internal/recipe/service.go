@@ -671,17 +671,17 @@ func dunningFromRecipe(p domain.RecipeDunningPolicy) domain.DunningPolicy {
 	for _, h := range p.IntervalsHours {
 		schedule = append(schedule, strconv.Itoa(h)+"h")
 	}
-	final := domain.DunningFinalAction(p.FinalAction)
-	if final == "" {
-		final = domain.DunningActionManualReview
-	}
+	// Both are required and validated at parse time, so no defaulting here
+	// — a recipe silently falling back to a terminal action its author did
+	// not write is exactly what parse.go now refuses.
 	return domain.DunningPolicy{
-		Name:             p.Name,
-		Enabled:          true,
-		RetrySchedule:    schedule,
-		MaxRetryAttempts: p.MaxRetries,
-		FinalAction:      final,
-		GracePeriodDays:  3,
+		Name:                    p.Name,
+		Enabled:                 true,
+		RetrySchedule:           schedule,
+		MaxRetryAttempts:        p.MaxRetries,
+		FinalSubscriptionAction: domain.DunningSubscriptionAction(p.FinalSubscriptionAction),
+		FinalInvoiceAction:      domain.DunningInvoiceAction(p.FinalInvoiceAction),
+		GracePeriodDays:         3,
 	}
 }
 

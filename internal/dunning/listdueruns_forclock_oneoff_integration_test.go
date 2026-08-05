@@ -58,8 +58,8 @@ func TestListDueRunsForClock_IncludesOneOffInvoiceRuns(t *testing.T) {
 		VALUES ('cus_dun_wall', $1, 'dun_wall', 'Wall', '', $2, $2)`, tenantID, frozen)
 	mustExec(`INSERT INTO subscriptions (id, tenant_id, code, display_name, customer_id, status, livemode, test_clock_id)
 		VALUES ('sub_dun_pin', $1, 'dun-pin', 'dun-pin', 'cus_dun_pin', 'active', false, $2)`, tenantID, clockID)
-	mustExec(`INSERT INTO dunning_policies (id, tenant_id, name, enabled, is_default, retry_schedule, max_retry_attempts, final_action, grace_period_days, livemode)
-		VALUES ('dpol_oneoff', $1, 'P', true, true, '["72h"]', 3, 'pause', 3, false)`, tenantID)
+	mustExec(`INSERT INTO dunning_policies (id, tenant_id, name, enabled, is_default, retry_schedule, max_retry_attempts, final_subscription_action, final_invoice_action, grace_period_days, livemode)
+		VALUES ('dpol_oneoff', $1, 'P', true, true, '["72h"]', 3, 'pause', 'none', 3, false)`, tenantID)
 	seedInvRun := func(invID, custID, subID, runID string, due time.Time) {
 		sub := any(nil)
 		if subID != "" {
