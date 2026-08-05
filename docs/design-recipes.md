@@ -331,7 +331,9 @@ dunning:
     name: AI default retry
     max_retries: 4
     intervals_hours: [24, 72, 168, 336]
-    final_action: void
+    # What exhausting all retries does — two independent decisions (ADR-112).
+    final_subscription_action: pause   # none | pause | cancel
+    final_invoice_action: none         # none | mark_uncollectible
 
 webhook:
   events:

@@ -44,7 +44,7 @@ type PaymentRetrier interface {
 }
 
 // SubscriptionPauser pauses collection on a subscription when dunning
-// exhausts retries with final_action='pause' (ADR-036 amendment —
+// exhausts retries with final_subscription_action='pause' (ADR-112 —
 // semantics changed to match Stripe's `pause_collection.behavior=
 // keep_as_draft`: cycle continues, drafts pile up, no charging /
 // dunning until resumed). Pre-amendment this called PauseAtomic
@@ -831,7 +831,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		now = s.clock.Now(ctx)
 	}
 
-	// Late paid re-check — the terminal final_action (cancel_subscription in
+	// Late paid re-check — the terminal action (cancel in
 	// particular) is IRREVERSIBLE, and the tick-start paid-pre-check goes stale
 	// across the retry's Stripe round-trip: an invoice that settled out-of-band
 	// mid-tick would otherwise cancel a paying customer's subscription here. Re-
@@ -968,7 +968,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run); err != nil {
 			return err
 		} else if !applied {
-			slog.Info("dunning final_action failed but run resolved concurrently — leaving it resolved",
+			slog.Info("dunning terminal action failed but run resolved concurrently — leaving it resolved",
 				"run_id", run.ID, "invoice_id", run.InvoiceID)
 			return nil
 		}
@@ -1196,7 +1196,7 @@ func (s *Service) ResolveRun(ctx context.Context, tenantID, runID string, resolu
 	if resolution == domain.ResolutionInvoiceNotCollectible && s.invoiceUncollect != nil {
 		if err := s.invoiceUncollect.MarkUncollectible(ctx, tenantID, run.InvoiceID); err != nil {
 			// Already-uncollectible is benign (race with automated
-			// final_action). Surface other errors so the operator
+			// terminal invoice action). Surface other errors so the operator
 			// knows the dunning run was resolved but the invoice
 			// didn't transition.
 			if !errors.Is(err, errs.ErrInvalidState) {
@@ -1344,7 +1344,7 @@ func (s *Service) UpsertPolicy(ctx context.Context, tenantID string, policy doma
 
 // UpsertPolicyTx is the tx-aware upsert used by the recipe-instantiate path.
 // It runs the SAME normalize+validate as UpsertPolicy — the recipe schema layer
-// validates only final_action (recipe/parse.go), NOT the schedule-length
+// validates only the terminal actions (recipe/parse.go), NOT the schedule-length
 // invariant, so skipping validation here let a mismatched recipe (max_retries
 // exceeding its intervals_hours count) persist and stall that campaign at
 // retry-time in a background tick ("retry_schedule index out of bounds")

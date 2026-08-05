@@ -60,7 +60,8 @@ Mechanism:
 - The dunning retrier (`RetryPayment`) already returns a *real failed
   attempt* on "no payment method" (not `ErrTransientSkip`), so the campaign
   ticks through grace + retries and **exhausts to the policy
-  `final_action`** — the card-less delinquent reaches a terminal.
+  terminal actions** (ADR-112 split these into `final_subscription_action`
+  and `final_invoice_action`) — the card-less delinquent reaches a terminal.
 - Adding a card mid-campaign lets the existing auto-charge sweep collect it
   and the run resolves `payment_recovered`.
 - A tenant with dunning **disabled** keeps the invoice un-dunned: the

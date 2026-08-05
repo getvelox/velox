@@ -119,6 +119,44 @@ messages + CHANGELOG.md, not here.
 | [080](080-paid-commit-cn-relief.md) | 2026-07-06 | Accepted | Paid-commit CN relief — telescoping price-ratio refund cap, single-tx create-and-issue |
 | [081](081-minimal-team-invites.md) | 2026-07-06 | Accepted | Minimal team invites — tokenized accept, session-revoking removal, NO RBAC (role recorded, not enforced) |
 | [082](082-email-recipient-semantics.md) | 2026-07-06 | Accepted | Email recipients — encrypted additional_emails, CC coverage matrix (credentials never CC), CN send endpoint |
+| [083](083-recipe-adoption-conformance-gate.md) | 2026-07-08 | Superseded | Recipe adoption conformance gate — refuse to adopt a divergent plan/meter, never silently |
+| [085](085-recipe-idempotent-apply.md) | 2026-07-11 | Accepted | A recipe is an idempotent, additive provisioning event — one verb, no uninstall |
+| [086](086-simulated-data-lifecycle.md) | 2026-07-09 | Accepted | Simulated-data lifecycle — durable `is_simulated` sweep-gates + clock-delete teardown |
+| [087](087-collect-after-finalize-pipeline.md) | 2026-07-11 | Accepted | One post-finalize collection pipeline; collection gates stay per-site |
+| [088](088-credit-balance-applies-to-all-invoices.md) | 2026-07-11 | Accepted | Customer credit balance applies to every invoice at finalize, card charged the remainder |
+| [089](089-retire-audit-fail-closed-response-swap.md) | 2026-07-13 | Accepted | Retire the audit fail-closed response swap (and the `audit_fail_closed` setting) |
+| [090](090-audit-in-tx-emission.md) | 2026-07-13 | Accepted | In-transaction audit emission (LogInTx) and the declared-coverage model |
+| [091](091-org-timezone-change-seam-absorb.md) | 2026-07-14 | Accepted | An org-timezone change never overbills a subscription — absorb/prorate the re-anchor "seam" |
+| [092](092-split-billing-timezone-from-display.md) | 2026-07-14 | Proposed | Split the org billing timezone from the org display timezone (DEFERRED design) |
+| [093](093-csrf-origin-verification.md) | 2026-07-16 | Accepted | CSRF defense for the cookie dashboard — origin verification, not tokens |
+| [094](094-login-brute-force-throttle.md) | 2026-07-17 | Accepted | Login brute-force protection — Postgres-authoritative, non-weaponizable, extensible |
+| [095](095-login-security-roadmap-and-mfa.md) | 2026-07-17 | Accepted | Login-security roadmap & MFA design — minimal-complete for a self-hostable B2B money dashboard |
+| [096](096-unpriced-meter-plan-attach-guard.md) | 2026-07-18 | Accepted | Unpriced meter on a plan — guard at authoring, loud at finalize |
+| [097](097-mid-period-scheduled-cancel-fires-as-immediate-cancel.md) | 2026-07-18 | Accepted | A due mid-period `cancel_at` fires as an immediate cancel at that instant |
+| [098](098-postmark-delivery-webhook-ingestion.md) | 2026-07-19 | Accepted | Postmark delivery/bounce/complaint webhook ingestion |
+| [099](099-simulated-time-disclosure-policy.md) | 2026-07-21 | Accepted | Simulated-time disclosure — once per scope, one word, banner teaches / chip flags |
+| [100](100-currency-coherence-guard-ring.md) | 2026-07-26 | Accepted | Currency coherence is enforced at every write — a guard ring, not engine reconciliation |
+| [101](101-billing-intervals.md) | 2026-07-27 | Accepted | Billing intervals — write-time item lifetimes replace read-time log interpretation |
+| [102](102-invoice-charge-attempts.md) | 2026-07-28 | Accepted | Charge attempts as first-class facts |
+| [103](103-single-payment-source.md) | 2026-07-28 | Accepted | One owner for payment rows on the invoice timeline |
+| [104](104-one-activity-lane-entity-calendar.md) | 2026-07-29 | Accepted | One activity lane — the entity's calendar |
+| [105](105-charge-idempotency-key-seed.md) | 2026-07-30 | Accepted | The charge idempotency key is seeded by an attempt counter, not `updated_at` |
+| [106](106-charge-intent-ledger.md) | 2026-07-31 | Superseded | Record the charge attempt before calling Stripe |
+| [107](107-unknown-is-terminal-until-a-human.md) | 2026-07-31 | Accepted | An unnameable charge attempt parks the invoice; it is never settled failed |
+| [108](108-parked-invoices-search-and-adopt.md) | 2026-08-02 | Accepted | Parked invoices are resolved by provider search — adopt what you can name, never settle absence |
+| [110](110-written-off-invoices-close-self-service-payment.md) | 2026-08-05 | Accepted | A written-off invoice closes the customer's self-service payment route |
+| [111](111-a-write-off-has-no-tax-leg.md) | 2026-08-05 | Accepted | A write-off has no tax leg |
+| [112](112-dunning-exhaustion-settles-two-questions.md) | 2026-08-05 | Accepted | Dunning exhaustion settles two questions, not one |
+
+> ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
+> across every ref). It is a skipped number, not a lost decision.
+>
+> ⚠️ **This index sat frozen at 082 for a month** while ADRs 083–112 shipped —
+> 28 decisions, including the whole written-off-invoice arc (110/111/112),
+> were undiscoverable here. Backfilled 2026-08-05; dates for the 20 whose
+> `**Status:**` line carried no date come from each file's first commit.
+> Nothing enforces this table, so it rots silently: add the row in the same PR
+> as the ADR.
 
 > ℹ️ **ADR-058 was renumbered from a duplicate ADR-050** (2026-06-21). Two
 > concurrent sessions had each taken `050` — the same hazard the migration-numbering

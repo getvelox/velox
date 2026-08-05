@@ -18,7 +18,7 @@ const (
 	// InvoiceUncollectible marks an invoice as no-further-collection-
 	// attempted while preserving it in financial reporting (Stripe-
 	// standard semantics; distinct from Voided which annuls the
-	// invoice). Set by dunning's mark_uncollectible final_action and
+	// invoice). Set by dunning's mark_uncollectible terminal invoice action and
 	// by operator action. ADR-036 amendment.
 	InvoiceUncollectible InvoiceStatus = "uncollectible"
 )
