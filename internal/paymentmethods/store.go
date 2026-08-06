@@ -315,6 +315,14 @@ func (s *PostgresStore) DetachAndRebalance(ctx context.Context, tenantID, custom
 	var newDefault *PaymentMethod
 	if wasDefault {
 		// Promote the newest remaining active card. The just-detached row is
+		// detached_at IS NULL appears in BOTH the subquery and the OUTER
+		// WHERE, and the outer copy is load-bearing: under READ COMMITTED a
+		// concurrent Detach of the chosen id commits between snapshot and
+		// row lock, and EvalPlanQual re-evaluates only the OUTER predicate —
+		// without it the promote lands is_default=true on a detached card
+		// (the charge-a-removed-card hazard; found by the ADR-113 doctor
+		// mining pass, and exactly what the doctor's
+		// payment_methods_detached_but_still_default check flags).
 		// excluded (detached_at IS NOT NULL). The prior default is already
 		// cleared, so no other is_default row conflicts with the partial
 		// unique index — a single targeted set is safe. ErrNoRows = no
@@ -322,7 +330,7 @@ func (s *PostgresStore) DetachAndRebalance(ctx context.Context, tenantID, custom
 		var nd PaymentMethod
 		err := scanPM(tx.QueryRowContext(ctx, `
 			UPDATE payment_methods SET is_default = true, updated_at = now()
-			WHERE tenant_id = $1 AND customer_id = $2 AND id = (
+			WHERE tenant_id = $1 AND customer_id = $2 AND detached_at IS NULL AND id = (
 			    SELECT id FROM payment_methods
 			    WHERE tenant_id = $1 AND customer_id = $2 AND detached_at IS NULL
 			    ORDER BY created_at DESC, id DESC
