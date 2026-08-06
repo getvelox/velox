@@ -37,17 +37,6 @@ import {
 } from '@/components/ui/dialog'
 import { TypedConfirmDialog } from '@/components/TypedConfirmDialog'
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog'
-import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import {
@@ -835,73 +824,24 @@ export default function InvoiceDetailPage() {
                 ) : 'cancel it separately'} if you also want to stop future billing.
               </p>
               <p className="text-xs text-muted-foreground mt-2">
-                If the customer pays after all, charge their card below or use <strong>Record Payment</strong> above
-                for money received offline. To reclassify as cancelled (rather than written-off), use <strong>Void</strong>.
+                If the customer pays after all, use <strong>Record Payment</strong> above for money received
+                offline. To collect by card, issue a fresh <strong>recovery invoice</strong> for the amount —
+                it runs on normal rails (hosted payment page, auto-charge once a card is on file) and this
+                invoice stays honestly written off; bad-debt recovery books as new income. A written-off
+                invoice is never charged directly (ADR-113). To reclassify as cancelled rather than
+                written-off, use <strong>Void</strong>.
               </p>
-              {/* Bad-debt recovery. The invoice is NOT reopened — it stays
-                  written off until the payment settles, then shows as paid,
-                  keeping the write-off in its history. Gated on the same
-                  conditions the server enforces; the three money refusals (tax
-                  already reversed / threshold usage re-billed / unapplied
-                  credit) are server-side and answer with a specific 409, since
-                  the client cannot see any of them.
-                  paymentIsUnresolved is imported, never re-typed — four call
-                  sites drifting apart is the bug that seam exists to stop. */}
-              {!paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0 && hasPaymentMethod && (
-                invoice.recovery_block?.blocked ? (
-                  /* The server published WHY this one cannot be charged (tax
-                     already reversed / usage re-billed / unapplied credit).
-                     Show the reason instead of an enabled button that answers
-                     409 after the operator has confirmed an amount — a control
-                     that promises what the server refuses is a defect, not a
-                     rough edge. Same source the endpoint refuses from, so the
-                     two can never disagree. */
-                  <p className="text-xs text-muted-foreground mt-3 border-l-2 border-border pl-3">
-                    <strong className="text-foreground">Can't charge this invoice.</strong>{' '}
-                    {invoice.recovery_block.message}
-                  </p>
-                ) : (
-                <div className="mt-3">
-                  <AlertDialog>
-                    <AlertDialogTrigger render={<Button size="sm" disabled={acting} />}>
-                      {collectMutation.isPending ? 'Charging…' : 'Charge customer'}
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Charge customer</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          Charge {customer?.display_name || 'the customer'}{' '}
-                          {formatCents(invoice.amount_due_cents, invoice.currency)} for {invoice.invoice_number}.
-                          This invoice was written off — that record is kept, and it will show as paid rather than
-                          reopened. Any credit balance is applied first. Dunning does not restart; if the card
-                          declines, the invoice stays written off.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => collectMutation.mutate()}>Charge customer</AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                </div>
-                )
-              )}
-
-              {/* No card on file. Without this branch the Charge button simply
-                  did not render — silent absence, with no explanation and no
-                  way forward, on the one scenario bad-debt recovery exists
-                  for: the customer went quiet, you wrote the invoice off, and
-                  they come back with a NEW card. The attention banner that
-                  normally offers this action returns null for terminal
-                  invoices, so it has to live here. (Walked 2026-08-05, FLOW
-                  D6.) */}
-              {!paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0 && !hasPaymentMethod && (
+              {/* No card on file: offer the secure add-a-card link. The card is
+                  account-scoped — it serves the recovery invoice and future
+                  billing; nothing charges THIS invoice (ADR-113). The attention
+                  banner that normally offers this action returns null for
+                  terminal invoices, so it has to live here. */}
+              {invoice.amount_due_cents > 0 && !hasPaymentMethod && (
                 <div className="mt-3 border-l-2 border-border pl-3">
                   <p className="text-xs text-muted-foreground">
                     <strong className="text-foreground">No payment method on file.</strong>{' '}
-                    Email {customer?.display_name || 'the customer'} a secure link to add a card, then charge
-                    this invoice from here. Adding a card does not collect it — a written-off invoice is
-                    never charged automatically.
+                    Email {customer?.display_name || 'the customer'} a secure link to add a card, then
+                    collect through a recovery invoice. Adding a card never charges this invoice.
                   </p>
                   <Button
                     size="sm"

@@ -119,6 +119,14 @@ the system can actually do.
 
 ## Amendment 2026-08-05 — the limitation is closed, by charging in place
 
+> ⚠️ **SUPERSEDED by [ADR-113](113-nothing-charges-a-written-off-invoice.md)
+> (2026-08-06).** Charge-in-place recovery shipped on 2026-08-05 and was
+> removed the next day on industry evidence: 1 of 6 verified platforms
+> (Stripe alone) charges the written-off object. The section below is kept as
+> the state this was decided in. The core decision of THIS ADR — public pages
+> closed, add-a-card kept — stands, and the "three refusals" table below
+> describes gates that no longer exist.
+
 The limitation this ADR recorded — *"Velox's write-off is a card dead end where
 Stripe's is not"* — **is closed.** Its trigger fired the same day it was
 written, so the section it replaced is deleted rather than appended to: leaving

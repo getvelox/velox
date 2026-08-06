@@ -204,60 +204,17 @@ func inFlightMessage(action InvoiceAction) string {
 	}
 }
 
-// RecoveryBlocksCharge is the SINGLE SOURCE for whether a WRITTEN-OFF invoice
-// can be charged — bad-debt recovery, when the customer comes back.
-//
-// It exists for the same reason PaymentBlocksAction does, and was extracted the
-// moment the rule needed a second reader. The three refusals below started life
-// as inline `if`s in the collect handler; the dashboard then needed them too,
-// to disable its "Charge customer" button with a reason instead of letting an
-// operator confirm a charge that answers 409. Two hand-written copies of a
-// money rule is exactly the drift this file's older sibling was written to end.
-//
-// These are ALSO enforced in ClaimChargeForManualCollect's SQL, and that is not
-// redundancy: a Go-side read is a TOCTOU against the very sweeps that create
-// these states (the tax-reversal sweep especially). The CAS is what makes the
-// refusal true; this is what makes it EXPLICABLE — to a handler answering with
-// a typed code, and to a UI deciding whether to offer the action at all.
-//
-// unreliefedClawbackCents is passed in rather than read here because it is a
-// cross-domain sum (credit notes) and this package holds no stores. Callers
-// that cannot compute it pass 0 — which is the permissive direction, so the CAS
-// stays the backstop rather than this being the only guard.
-func RecoveryBlocksCharge(inv Invoice, unreliefedClawbackCents int64) PaymentBlock {
-	if inv.Status != InvoiceUncollectible {
-		return PaymentBlock{} // not a recovery — ordinary rules apply
-	}
-	// Keys on tax_reversed_at — the reversal HAVING HAPPENED — not on
-	// tax_transaction_id, which is set on every taxed invoice and never
-	// cleared. Under ADR-111 a write-off no longer reverses, so this fires
-	// only on invoices reversed BEFORE that change, or reversed by a future
-	// operator-initiated bad-debt-relief claim. Keyed on the transaction id it
-	// would refuse every taxed invoice forever and make recovery structurally
-	// unavailable to tax-registered tenants — the defect this replaces.
-	if inv.TaxReversedAt != nil {
-		return PaymentBlock{
-			Blocked: true,
-			Code:    "tax_reversed_unrecoverable",
-			Message: "This invoice's tax was reversed with the tax provider when it was written off, and it cannot be re-reported automatically. Charging now would collect tax that has already been reported as not collected. Record the payment as an offline payment instead, and correct the tax with your provider.",
-		}
-	}
-	if inv.BillingReason == BillingReasonThreshold {
-		return PaymentBlock{
-			Blocked: true,
-			Code:    "recovery_superseded",
-			Message: "This invoice was billed on a usage threshold, and writing it off did not stop that usage being re-billed on a later invoice. Charging it now would bill the same usage twice — collect the newer invoice instead.",
-		}
-	}
-	if unreliefedClawbackCents > 0 {
-		return PaymentBlock{
-			Blocked: true,
-			Code:    "relief_not_reissued",
-			Message: "This invoice is owed a credit that was never applied, so the amount shown is higher than what the customer owes. Re-issue the credit before charging, or the customer will be over-collected.",
-		}
-	}
-	return PaymentBlock{}
-}
+// RecoveryBlocksCharge was removed by ADR-113 (2026-08-06). It was the
+// single source for whether a WRITTEN-OFF invoice could be CHARGED — three
+// refusals (tax reversed / threshold re-billed / relief unapplied) that
+// existed only because charge-in-place aimed money at an object carrying
+// stale state. Industry evidence killed the feature, not the gates: 1 of 6
+// verified platforms (Stripe alone) charges the written-off object; the
+// majority reverse the write-off artifact or have no such state, and
+// recovery runs on NORMAL rails. Velox's shape for that is a fresh recovery
+// invoice, which has none of the three hazards. RecoveryWarnsOnOfflinePayment
+// below SURVIVES: recording money that already arrived is never refused, but
+// the operator is told when it will not reconcile.
 
 // RecoveryWarnsOnOfflinePayment is the OFFLINE twin of RecoveryBlocksCharge,
 // and the difference between them is the whole rule for this area:

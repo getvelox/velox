@@ -14,7 +14,7 @@ import type { InvoicePaymentStatus } from './invoicePaymentStatus';
 import type { InvoiceStatus } from './invoiceStatus';
 import type { InvoiceTaxStatus } from './invoiceTaxStatus';
 import type { ItemChangeType } from './itemChangeType';
-import type { RecoveryBlock } from './recoveryBlock';
+import type { RecoveryWarning } from './recoveryWarning';
 
 /**
  * A Velox invoice. Returned from create, finalize, void, list, get,
@@ -74,18 +74,11 @@ export interface Invoice {
    */
   tax_error_code?: string;
   attention?: Attention;
-  recovery_block?: RecoveryBlock;
   /** What an operator must know BEFORE recording an OFFLINE payment on a
   written-off invoice — a consequence that will go unreconciled, NOT
   a refusal. Absent when there is nothing to say.
-
-  The same two conditions that BLOCK a card charge (`recovery_block`)
-  only WARN here, deliberately: a card charge is Velox choosing to
-  move money, while an offline payment means the money already
-  arrived and refusing to record it would only make the books wrong
-  too. `blocked` is always false on this field.
    */
-  recovery_warning?: RecoveryBlock;
+  recovery_warning?: RecoveryWarning;
   total_amount_cents: number;
   amount_due_cents: number;
   amount_paid_cents: number;
