@@ -63,19 +63,19 @@ type Customer struct {
 	EmailStatus        CustomerEmailStatus `json:"email_status,omitempty"`
 	EmailLastBouncedAt *time.Time          `json:"email_last_bounced_at,omitempty"`
 	EmailBounceReason  string              `json:"email_bounce_reason,omitempty"`
-	// CostDashboardToken is the credential for the public cost-dashboard
-	// iframe URL. Empty when the operator has never minted a token.
-	// Rotation is the only mutation and invalidates the previous URL.
-	// See internal/customer/cost_dashboard_token.go for the format
-	// (vlx_pcd_<64 hex> = 256 bits of entropy).
+	// There is deliberately NO CostDashboardToken field here (removed with
+	// migration 0172). The public cost-dashboard credential is stored only
+	// as a SHA-256 blind index, so there is no plaintext for a read to
+	// hydrate — and the raw token now exists in-process for exactly the
+	// length of one rotate response. Carrying it on this struct is what
+	// made the 2026-07-19 truth audit's finding possible (every
+	// authenticated customer GET/List re-disclosed the credential
+	// indefinitely, because the field then had a json tag); the field is
+	// gone rather than merely untagged so the mistake cannot recur by
+	// someone adding a tag back. Resolve a presented token with
+	// customer.Store.GetByCostDashboardToken, which hashes before it
+	// compares.
 	//
-	// NEVER serialized (json:"-"): the rotate endpoint's own response is
-	// the ONE place the plaintext leaves the system — the show-once
-	// contract the API docs promise. This field carried a json tag until
-	// the 2026-07-19 truth audit found every authenticated customer
-	// GET/List re-disclosing the credential indefinitely. Internal reads
-	// still hydrate it (the public cost-dashboard auth path needs it).
-	CostDashboardToken string `json:"-"`
 	// TestClockID pins this customer to a test clock (Stripe parity,
 	// ADR-027). Once set at create time, every Subscription / Invoice
 	// for this customer runs on that clock's simulated time. Empty

@@ -195,6 +195,12 @@ WHERE g.entry_type = 'grant' AND g.consumed_cents < g.amount_cents;`,
 		SQL:    `SELECT id, tenant_id, livemode, customer_id, stripe_payment_method_id, card_last4, is_default, detached_at, updated_at FROM payment_methods WHERE detached_at IS NOT NULL AND is_default = true`,
 	},
 	{
+		Name:   "cost_dashboard_token_plaintext_at_rest",
+		Domain: "customers",
+		Why:    "customers.cost_dashboard_token_hash must hold a SHA-256 blind index, never the credential itself; a vlx_pcd_-prefixed value means some writer stored the raw public-dashboard token and a DB read yields a replayable URL (migration 0172)",
+		SQL:    `SELECT id, tenant_id, livemode, external_id, cost_dashboard_token_hash, updated_at FROM customers WHERE cost_dashboard_token_hash IS NOT NULL AND (cost_dashboard_token_hash LIKE 'vlx_%' OR length(cost_dashboard_token_hash) <> 64)`,
+	},
+	{
 		Name:   "cn_deferred_draft_stale",
 		Domain: "credit-notes",
 		Why:    "an issue_pending draft waiting on an in-flight charge should resolve in minutes (ADR-059); one waiting days means the charge wedged and the relief is silently unissued",

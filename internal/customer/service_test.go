@@ -17,12 +17,14 @@ import (
 type memoryStore struct {
 	customers       map[string]domain.Customer
 	billingProfiles map[string]domain.CustomerBillingProfile
+	costDashHashes  map[string]string
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
 		customers:       make(map[string]domain.Customer),
 		billingProfiles: make(map[string]domain.CustomerBillingProfile),
+		costDashHashes:  make(map[string]string),
 	}
 }
 
@@ -176,24 +178,33 @@ func (m *memoryStore) ResetEmailStatus(_ context.Context, tenantID, customerID s
 	return nil
 }
 
+// costDashHashes mirrors customers.cost_dashboard_token_hash: the fake stores
+// the SAME blind index the real store does, keyed by customer id, and resolves
+// by hashing the presented token. Keeping the raw token here instead would let
+// a regression that writes or compares plaintext still pass against the fake —
+// the fake would simply agree with itself. (customer id -> sha256 hex)
 func (m *memoryStore) SetCostDashboardToken(_ context.Context, tenantID, customerID, token string) error {
 	c, ok := m.customers[customerID]
 	if !ok || c.TenantID != tenantID {
 		return errs.ErrNotFound
 	}
+	if m.costDashHashes == nil {
+		m.costDashHashes = map[string]string{}
+	}
+	hash := HashCostDashboardToken(token)
 	if token != "" {
 		// Mirror the partial UNIQUE index: another customer holding
 		// the same token is a collision, not a silent overwrite.
-		for id, other := range m.customers {
+		for id, other := range m.costDashHashes {
 			if id == customerID {
 				continue
 			}
-			if other.CostDashboardToken == token {
+			if other == hash {
 				return fmt.Errorf("set cost dashboard token: collision: %s", token)
 			}
 		}
 	}
-	c.CostDashboardToken = token
+	m.costDashHashes[customerID] = hash
 	m.customers[customerID] = c
 	return nil
 }
@@ -202,9 +213,10 @@ func (m *memoryStore) GetByCostDashboardToken(_ context.Context, token string) (
 	if token == "" {
 		return domain.Customer{}, errs.ErrNotFound
 	}
-	for _, c := range m.customers {
-		if c.CostDashboardToken == token {
-			return c, nil
+	hash := HashCostDashboardToken(token)
+	for id, h := range m.costDashHashes {
+		if h == hash {
+			return m.customers[id], nil
 		}
 	}
 	return domain.Customer{}, errs.ErrNotFound
