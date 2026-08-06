@@ -77,3 +77,55 @@ func TestCommitTax_ExpiryGuardTripsOnRealAge(t *testing.T) {
 		t.Fatalf("want an expiry message, got %v", err)
 	}
 }
+
+// TestCheckTaxCalculationUsable_DirectContract pins the standalone check —
+// the method invoice.Service.Finalize consults BEFORE the state transition.
+// Expired → InvalidState carrying the stable machine code; fresh → nil;
+// uncertainty (unwired store / nil provider) → nil, because only a PROVEN
+// expiry may block a finalize.
+func TestCheckTaxCalculationUsable_DirectContract(t *testing.T) {
+	t.Run("expired calc blocks with the stable code", func(t *testing.T) {
+		e := &Engine{
+			settings:     &taxSettings{provider: "stripe_tax"},
+			taxProviders: stubResolver(&stubProvider{}),
+			taxCalcStore: &fakeCalcStore{createdAt: time.Now().UTC().Add(-30 * time.Hour)},
+		}
+		err := e.CheckTaxCalculationUsable(context.Background(), "t1", "inv_1", "taxcalc_1")
+		if !errors.Is(err, errs.ErrInvalidState) {
+			t.Fatalf("want ErrInvalidState, got %v", err)
+		}
+		var de *errs.DomainError
+		if !errors.As(err, &de) || de.Code != "tax_calculation_expired" {
+			t.Fatalf("want stable code tax_calculation_expired, got %+v", err)
+		}
+		if !strings.Contains(err.Error(), "retry tax to refresh, then finalize") {
+			t.Fatalf("the message must carry the operator remedy, got %v", err)
+		}
+	})
+	t.Run("fresh calc passes", func(t *testing.T) {
+		e := &Engine{
+			settings:     &taxSettings{provider: "stripe_tax"},
+			taxProviders: stubResolver(&stubProvider{}),
+			taxCalcStore: &fakeCalcStore{createdAt: time.Now().UTC()},
+		}
+		if err := e.CheckTaxCalculationUsable(context.Background(), "t1", "inv_1", "taxcalc_1"); err != nil {
+			t.Fatalf("fresh calc must pass: %v", err)
+		}
+	})
+	t.Run("unwired store is uncertainty, not a block", func(t *testing.T) {
+		e := &Engine{settings: &taxSettings{provider: "stripe_tax"}, taxProviders: stubResolver(&stubProvider{})}
+		if err := e.CheckTaxCalculationUsable(context.Background(), "t1", "inv_1", "taxcalc_1"); err != nil {
+			t.Fatalf("no calc store wired must pass: %v", err)
+		}
+	})
+	t.Run("nil provider skips — an aged calc must not block a tenant whose commit would skip too", func(t *testing.T) {
+		e := &Engine{
+			settings:     &taxSettings{provider: "none"},
+			taxProviders: stubResolver(nil),
+			taxCalcStore: &fakeCalcStore{createdAt: time.Now().UTC().Add(-30 * time.Hour)},
+		}
+		if err := e.CheckTaxCalculationUsable(context.Background(), "t1", "inv_1", "taxcalc_1"); err != nil {
+			t.Fatalf("nil provider must pass even with an aged calc: %v", err)
+		}
+	})
+}

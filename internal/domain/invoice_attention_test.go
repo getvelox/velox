@@ -178,16 +178,24 @@ func TestClassifyInvoiceAttention_ProviderNotConfigured_StripeConnectedSwapsCopy
 	})
 }
 
+// Pending is warning ONLY while an automatic mover remains (a retryable code
+// below the retry cap). This test originally pinned customer_data_invalid —
+// a NON-retryable code the reconciler never scans — as warning, which showed
+// the "self-healing in progress" tier over an invoice only an operator can
+// move. The severity-tracks-mover rule (see
+// TestClassifyInvoiceAttention_PendingSeverityTracksAutomaticMover) corrected
+// it; this test keeps the half that was true: a retryable, non-exhausted
+// pending IS a warning, not a critical.
 func TestClassifyInvoiceAttention_TaxPendingIsWarning(t *testing.T) {
 	inv := draft()
 	inv.TaxStatus = InvoiceTaxPending
-	inv.TaxErrorCode = "customer_data_invalid"
+	inv.TaxErrorCode = "provider_outage" // retryable, retry count 0: the reconciler is on it
 	att := ClassifyInvoiceAttention(inv, AttentionContext{})
 	if att == nil || att.Severity != AttentionSeverityWarning {
-		t.Fatalf("pending should be warning, got %+v", att)
+		t.Fatalf("pending with a live automatic mover should be warning, got %+v", att)
 	}
-	if att.Reason != AttentionReasonTaxLocationRequired {
-		t.Errorf("reason = %s, want %s", att.Reason, AttentionReasonTaxLocationRequired)
+	if att.Reason != AttentionReasonTaxCalculationFailed {
+		t.Errorf("reason = %s, want %s", att.Reason, AttentionReasonTaxCalculationFailed)
 	}
 }
 
@@ -1162,4 +1170,43 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 			t.Errorf("card path does not block the threshold case: %+v", b)
 		}
 	})
+}
+
+// TestClassifyInvoiceAttention_PendingSeverityTracksAutomaticMover pins the
+// severity rule as a rule, not per-code taste: warning is the tier meaning
+// "self-healing in progress", so it is legal ONLY while an automatic mover
+// remains. A pending invoice with a retryable code below the cap keeps
+// warning; a non-retryable code (born with no mover — the reconciler never
+// scans it) and an exhausted retryable code (mover permanently gone) must
+// both read critical. Found by walking the provider_auth banner: the box
+// promised red, the classifier rendered amber.
+func TestClassifyInvoiceAttention_PendingSeverityTracksAutomaticMover(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name       string
+		errorCode  string
+		retryCount int
+		want       AttentionSeverity
+	}{
+		{"retryable below cap self-heals: warning", "provider_outage", 2, AttentionSeverityWarning},
+		{"non-retryable has no mover from birth: critical", "provider_auth", 0, AttentionSeverityCritical},
+		{"non-retryable customer data: critical", "customer_data_invalid", 0, AttentionSeverityCritical},
+		{"retryable but exhausted: critical", "provider_outage", MaxTaxRetryAttempts, AttentionSeverityCritical},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := draft()
+			inv.TaxStatus = InvoiceTaxPending
+			inv.TaxErrorCode = tc.errorCode
+			inv.TaxRetryCount = tc.retryCount
+			inv.TaxDeferredAt = &now
+			att := ClassifyInvoiceAttention(inv, AttentionContext{})
+			if att == nil {
+				t.Fatal("expected attention, got nil")
+			}
+			if att.Severity != tc.want {
+				t.Fatalf("severity = %s, want %s", att.Severity, tc.want)
+			}
+		})
+	}
 }
