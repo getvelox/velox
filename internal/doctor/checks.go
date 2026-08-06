@@ -194,4 +194,31 @@ WHERE g.entry_type = 'grant' AND g.consumed_cents < g.amount_cents;`,
 		Why:    "a detached card may never remain the default — that is the charge-a-removed-card hazard",
 		SQL:    `SELECT id, tenant_id, livemode, customer_id, stripe_payment_method_id, card_last4, is_default, detached_at, updated_at FROM payment_methods WHERE detached_at IS NOT NULL AND is_default = true`,
 	},
+	{
+		Name:   "cn_deferred_draft_stale",
+		Domain: "credit-notes",
+		Why:    "an issue_pending draft waiting on an in-flight charge should resolve in minutes (ADR-059); one waiting days means the charge wedged and the relief is silently unissued",
+		SQL: `SELECT id, tenant_id, credit_note_number, invoice_id, status, created_at
+		FROM credit_notes
+		WHERE issue_pending = true
+		  AND status = 'draft'
+		  AND created_at < now() - interval '7 days'`,
+	},
+	{
+		Name:   "invoice_tax_calculated_never_committed",
+		Domain: "invoices",
+		Why:    "a finalized stripe_tax invoice carrying tax with a calculation but no committed transaction never reported that tax — and the ~24h calculation TTL means it can no longer be committed automatically",
+		SQL: `SELECT id, tenant_id, invoice_number, status, tax_amount_cents, tax_calculation_id, issued_at
+		FROM invoices
+		WHERE stripe_invoice_id IS NULL
+		  AND id NOT LIKE 'vlx_inv_safe%'
+		  AND is_simulated = false
+		  AND tax_provider = 'stripe_tax'
+		  AND tax_status = 'ok'
+		  AND tax_amount_cents > 0
+		  AND COALESCE(tax_calculation_id, '') <> ''
+		  AND COALESCE(tax_transaction_id, '') = ''
+		  AND status IN ('finalized','paid','voided','uncollectible')
+		  AND updated_at < now() - interval '48 hours'`,
+	},
 }

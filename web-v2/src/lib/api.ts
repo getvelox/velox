@@ -1692,6 +1692,13 @@ export async function downloadPDF(invoiceId: string, invoiceNumber: string) {
   const res = await fetchWithTimeout(`${API_BASE}/invoices/${invoiceId}/pdf`, {
     credentials: 'include',
   })
+  // Without this the JSON error body saves as "<invoice_number>.pdf" — the
+  // operator gets a corrupt file named like a real invoice and no error.
+  // The credit-note twin below always had the guard; invoices were missed
+  // (2026-07-02 audit low, triaged and fixed 2026-08-06).
+  if (!res.ok) {
+    throw new Error(`Failed to download invoice PDF (${res.status})`)
+  }
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

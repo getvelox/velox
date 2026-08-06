@@ -11,6 +11,13 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unused password-reset links kept working after a password was reset (2026-08-06).** Reset links are single-use, but a person can hold several at once — anyone who knows an email address can request one, and people often click "forgot password" more than once. Redeeming one link only consumed that link: any other outstanding link for the same account stayed usable for the rest of its hour. Whoever held an earlier one — from a mailbox that has since been secured, or a link forwarded in a support thread — could set the password again, right after the rightful owner had just reset it, on the account that authorizes charges and refunds. Redeeming a link now voids every other outstanding link for that account in the same database transaction. Other people's reset links are untouched.
+
+- **A failed invoice PDF download saved the error as a .pdf file (2026-08-06).** Downloading or previewing an invoice PDF didn't check whether the request succeeded, so a server error was written to disk as `<invoice-number>.pdf` — a corrupt file named like a real invoice, with no error shown. Credit-note PDFs always had this check; invoices now do too.
+
+
 ### Added
 
 - **A 13-month billing soak now runs in CI (2026-08-06).** One subscription anchored on the worst day of the month — the 31st — is driven through thirteen real cycle closes across a year boundary and two Februaries, through the real server and billing engine, with the money-invariant sweep run after every single advance. It proves the whole pipeline end to end: the anchor clamps to Feb 28 and restores to the 31st (never ratcheting), every close produces exactly one invoice, and thirteen consecutive closes leave zero invariant violations behind. First run: clean.

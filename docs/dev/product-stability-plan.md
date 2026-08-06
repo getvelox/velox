@@ -142,12 +142,41 @@ could not.
 |---|---|---|
 | fast-uri HIGH + audit-fixable batch | fixed in #750 | merge on green |
 | Jan 31 → Feb 28 date-math clamp | **known trap, unfixed** | fix with B2 |
-| ~41 LOWs backlog (2026-07-02 audit) | recorded | one triage pass: promote money-adjacent, close-with-reason the rest |
+| ~41 LOWs backlog (2026-07-02 audit) | **TRIAGED 2026-08-06** | 104 items adjudicated (LOWs + every register/ADR deferral). 28 FIXED_ALREADY, 3 GONE_SURFACE, 69 ACCEPT-with-reason, **4 PROMOTED and shipped**. Backlog closed — see below. |
 | cost-dashboard public-token hashing | **HARD GATE pre-prod** (lies audit) | schedule before any prod deploy |
 | engine post-commit audit rows (6) | open, CI-gated | with the next engine arc |
 | react-router 8, orval-next | deferred WITH trigger | leave; revisit on trigger |
 | breached-pw + TLS (pre-deploy), MFA (pre-DP) | gates recorded (#507) | leave; they gate deploy, not today |
 | HA N=2 hazards | trigger = prod cutover | leave |
+
+### The 2026-08-06 triage result
+
+Every one of the ~41 remaining LOWs plus every deferral in the velox-ops
+register and in ADR-110…113 was adjudicated against current code — 104
+items. The distribution is the useful finding: **28 had already been fixed**
+by unrelated work and **3 lived in code that no longer exists**, i.e. a
+third of a five-week-old backlog decays on its own. 69 are ACCEPT-with-
+reason (cosmetic, or a deferral whose named trigger has not fired — no DP,
+no production, no traffic).
+
+Four promoted, all shipped in the triage PR:
+
+1. **Password-reset siblings survived a reset** (security, real): redeeming
+   one token left the user's other live tokens redeemable for the rest of
+   their hour, so a holder of an earlier token could re-flip the password of
+   the account that authorizes charges. Now voided in the same tx;
+   mutation-verified both ways (remove the void → siblings redeemable;
+   over-broaden it → the bystander control fails).
+2. **Invoice PDF download/preview lacked `res.ok`** — an error body saved as
+   `<invoice_number>.pdf`. The credit-note twin always had the guard.
+3. **Stale deferred-CN-draft alarm** (ADR-059) and
+4. **tax-calculated-never-committed sensor** — two register items whose
+   named vehicles had already passed them by twice. Both were one doctor
+   check each; the doctor was the vehicle they were waiting for.
+
+Two register items were struck as **stale premises**, not deferrals:
+ADR-110's "restart dunning on recovery" and "tax re-commit on recovery" —
+both describe a charge-in-place path ADR-113 deleted.
 
 ## Pillar D — Rot prevention *(exists — keep enforced)*
 

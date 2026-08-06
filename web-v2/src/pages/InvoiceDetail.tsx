@@ -758,6 +758,9 @@ export default function InvoiceDetailPage() {
                 onClick={async () => {
                   try {
                     const res = await fetch(`/v1/invoices/${invoice.id}/pdf`, { credentials: 'same-origin' })
+                    // Same guard as api.ts downloadPDF: without it the error
+                    // body renders in the preview frame as if it were the PDF.
+                    if (!res.ok) throw new Error(`preview failed (${res.status})`)
                     const blob = await res.blob()
                     const url = URL.createObjectURL(blob)
                     setPdfPreviewUrl(url)

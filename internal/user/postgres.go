@@ -244,6 +244,29 @@ func (s *PostgresStore) ConsumeResetToken(ctx context.Context, tokenHash string)
 		}
 		return "", err
 	}
+
+	// Void every OTHER outstanding token for this user, in the same tx.
+	// Single-use per token was never enough: reset is requestable by
+	// anyone who knows the email, so a user can hold several live tokens
+	// at once. Redeeming one left the siblings redeemable for the rest of
+	// their hour — meaning whoever obtained an earlier token (a since-
+	// recovered mailbox, a forwarded link) could re-flip the password of
+	// the account that authorizes charges and refunds, AFTER the rightful
+	// owner had just reset it. Voiding here rather than after SetPassword
+	// keeps the failure direction safe: if the hash write then fails, every
+	// token is dead and the user must request a fresh one — no window is
+	// left open by a partial failure. (OWASP: invalidate all outstanding
+	// reset tokens on password change.)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE password_reset_tokens
+		SET used_at = now()
+		WHERE user_id = $1
+		  AND token_hash <> $2
+		  AND used_at IS NULL
+	`, userID, tokenHash); err != nil {
+		return "", err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
