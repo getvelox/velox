@@ -239,7 +239,6 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (domain.Cu
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, external_id, display_name, COALESCE(email, ''), status,
 			email_status, email_last_bounced_at, COALESCE(email_bounce_reason,''),
-			COALESCE(cost_dashboard_token, ''),
 			COALESCE(test_clock_id, ''),
 			COALESCE(dunning_policy_id, ''),
 			COALESCE(stripe_customer_id, ''),
@@ -248,7 +247,6 @@ func (s *PostgresStore) Get(ctx context.Context, tenantID, id string) (domain.Cu
 		FROM customers WHERE id = $1
 	`, id).Scan(&c.ID, &c.TenantID, &c.ExternalID, &c.DisplayName, &c.Email, &c.Status,
 		(*string)(&c.EmailStatus), &c.EmailLastBouncedAt, &c.EmailBounceReason,
-		&c.CostDashboardToken,
 		&c.TestClockID,
 		&c.DunningPolicyID,
 		&c.StripeCustomerID,
@@ -335,7 +333,13 @@ func (s *PostgresStore) SetStripeCustomerIDAudited(ctx context.Context, tenantID
 // tokens are discarded immediately — there's no grace window, since
 // the public dashboard is read-only and rotating because of a leak
 // must take effect now. Per ADR-031 / cost-dashboard rollout: this
-// is the only writer for customers.cost_dashboard_token.
+// is the only writer for customers.cost_dashboard_token_hash.
+//
+// Only the SHA-256 is persisted (migration 0172). The raw token leaves
+// this process exactly once, in the rotate response — so this method
+// takes the raw token and drops it, rather than accepting a pre-hashed
+// value: leaving the hashing to callers is how one caller eventually
+// forgets and writes plaintext.
 func (s *PostgresStore) SetCostDashboardToken(ctx context.Context, tenantID, customerID, token string) error {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
@@ -344,11 +348,11 @@ func (s *PostgresStore) SetCostDashboardToken(ctx context.Context, tenantID, cus
 	defer postgres.Rollback(tx)
 
 	result, err := tx.ExecContext(ctx, `
-		UPDATE customers SET cost_dashboard_token = $1, updated_at = now()
+		UPDATE customers SET cost_dashboard_token_hash = $1, updated_at = now()
 		WHERE id = $2
-	`, token, customerID)
+	`, HashCostDashboardToken(token), customerID)
 	if err != nil {
-		return fmt.Errorf("set cost_dashboard_token: %w", err)
+		return fmt.Errorf("set cost_dashboard_token_hash: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
@@ -364,7 +368,11 @@ func (s *PostgresStore) SetCostDashboardToken(ctx context.Context, tenantID, cus
 // tenant_id is what subsequent calls scope to. Tokens are 64 random
 // hex chars (32 bytes entropy via NewCostDashboardToken) so guessing
 // is computationally infeasible; the partial UNIQUE index on
-// cost_dashboard_token IS NOT NULL prevents collisions at write.
+// cost_dashboard_token_hash IS NOT NULL prevents collisions at write.
+//
+// The presented token is hashed before the comparison — the column holds
+// only the blind index (migration 0172), so an equality match on the raw
+// token would silently never resolve.
 func (s *PostgresStore) GetByCostDashboardToken(ctx context.Context, token string) (domain.Customer, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
@@ -376,15 +384,13 @@ func (s *PostgresStore) GetByCostDashboardToken(ctx context.Context, token strin
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, external_id, display_name, COALESCE(email, ''), status,
 			email_status, email_last_bounced_at, COALESCE(email_bounce_reason,''),
-			COALESCE(cost_dashboard_token, ''),
 			COALESCE(test_clock_id, ''),
 			COALESCE(dunning_policy_id, ''),
 			livemode,
 			created_at, updated_at
-		FROM customers WHERE cost_dashboard_token = $1
-	`, token).Scan(&c.ID, &c.TenantID, &c.ExternalID, &c.DisplayName, &c.Email, &c.Status,
+		FROM customers WHERE cost_dashboard_token_hash = $1
+	`, HashCostDashboardToken(token)).Scan(&c.ID, &c.TenantID, &c.ExternalID, &c.DisplayName, &c.Email, &c.Status,
 		(*string)(&c.EmailStatus), &c.EmailLastBouncedAt, &c.EmailBounceReason,
-		&c.CostDashboardToken,
 		&c.TestClockID,
 		&c.DunningPolicyID,
 		&c.Livemode,
@@ -411,7 +417,6 @@ func (s *PostgresStore) GetByExternalID(ctx context.Context, tenantID, externalI
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, external_id, display_name, COALESCE(email, ''), status,
 			email_status, email_last_bounced_at, COALESCE(email_bounce_reason,''),
-			COALESCE(cost_dashboard_token, ''),
 			COALESCE(test_clock_id, ''),
 			COALESCE(dunning_policy_id, ''),
 			additional_emails,
@@ -419,7 +424,6 @@ func (s *PostgresStore) GetByExternalID(ctx context.Context, tenantID, externalI
 		FROM customers WHERE external_id = $1
 	`, externalID).Scan(&c.ID, &c.TenantID, &c.ExternalID, &c.DisplayName, &c.Email, &c.Status,
 		(*string)(&c.EmailStatus), &c.EmailLastBouncedAt, &c.EmailBounceReason,
-		&c.CostDashboardToken,
 		&c.TestClockID,
 		&c.DunningPolicyID,
 		&storedCC,
@@ -459,14 +463,12 @@ func (s *PostgresStore) GetByStripeCustomerID(ctx context.Context, tenantID, str
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, external_id, display_name, COALESCE(email, ''), status,
 			email_status, email_last_bounced_at, COALESCE(email_bounce_reason,''),
-			COALESCE(cost_dashboard_token, ''),
 			COALESCE(test_clock_id, ''),
 			COALESCE(dunning_policy_id, ''),
 			created_at, updated_at
 		FROM customers WHERE stripe_customer_id = $1
 	`, stripeCustomerID).Scan(&c.ID, &c.TenantID, &c.ExternalID, &c.DisplayName, &c.Email, &c.Status,
 		(*string)(&c.EmailStatus), &c.EmailLastBouncedAt, &c.EmailBounceReason,
-		&c.CostDashboardToken,
 		&c.TestClockID,
 		&c.DunningPolicyID,
 		&c.CreatedAt, &c.UpdatedAt)
