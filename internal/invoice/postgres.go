@@ -1986,9 +1986,10 @@ func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantI
 	}
 	defer postgres.Rollback(tx)
 
-	// finalized ONLY — same status universe as its siblings (ClaimAutoCharge,
-	// ClaimChargeForDunningRetry); it differs from them only in admitting
-	// payment_status='failed' so an operator can retry a declined charge.
+	// finalized ONLY — same status universe as its siblings. It differs from
+	// ClaimAutoCharge (pending-only, auto_charge_pending) in admitting
+	// payment_status='failed' so an operator can retry a declined charge;
+	// ClaimChargeForDunningRetry admits 'failed' too.
 	//
 	// This claim briefly (2026-08-05, ADR-110 amendment) also admitted
 	// `uncollectible` — operator-initiated bad-debt recovery, charge-in-place —
@@ -2028,7 +2029,9 @@ func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantI
 // Stripe idempotency keys derive from it (see ClaimAutoCharge).
 //
 // Deliberately still status='finalized' only. See
-// ClaimChargeForManualCollect for why operator-initiated recovery diverges.
+// ClaimChargeForManualCollect — predicate identical since ADR-113 removed
+// the recovery divergence; separate functions so a future divergence is a
+// deliberate edit, not a shared-lease accident.
 func (s *PostgresStore) claimChargeLease(ctx context.Context, tenantID, id string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {

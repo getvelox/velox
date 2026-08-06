@@ -499,15 +499,16 @@ func ChargeIdempotencyKey(invoiceID string, chargeAttemptSeq int64, purpose stri
 }
 
 func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.Invoice, stripeCustomerID, stripePaymentMethodID, purpose string) (domain.Invoice, error) {
-	// `uncollectible` is admitted for bad-debt RECOVERY: the customer came back
-	// and an operator is running their card. The invoice is not reopened — it
-	// settles uncollectible -> paid, keeping the write-off in its history.
-	// Reaching here on an uncollectible invoice requires
-	// ClaimChargeForManualCollect, whose CAS carries the recovery gates (tax
-	// already reversed / threshold usage re-billed); the dunning and sweep
-	// claims still refuse, so no MACHINE can re-charge a written-off debt.
-	if inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible {
-		return domain.Invoice{}, fmt.Errorf("can only charge finalized or written-off invoices, current status: %s", inv.Status)
+	// finalized ONLY (ADR-113: nothing initiates money against a written-off
+	// invoice). This belt gate is not redundant with the claims: every claim
+	// reads BEFORE the handler re-reads the invoice, so a MarkUncollectible
+	// landing between claim and charge (the status CAS does not consult the
+	// charge lease, and PaymentBlocksAction does not block on `failed`)
+	// arrives here carrying `uncollectible` — and until 2026-08-06 this line
+	// admitted it, which would have minted a PaymentIntent against a debt the
+	// books say is dead. Found by the ADR-113 removal sweep.
+	if inv.Status != domain.InvoiceFinalized {
+		return domain.Invoice{}, fmt.Errorf("can only charge a finalized invoice, current status: %s", inv.Status)
 	}
 	if inv.AmountDueCents <= 0 {
 		return domain.Invoice{}, fmt.Errorf("invoice has no amount due")
@@ -739,12 +740,14 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		// (Stripe outage, ambiguous timeout) defer to the webhook so
 		// the reconciler can resolve them without burning a retry on
 		// an ambiguous result.
-		// ...and never on a BAD-DEBT RECOVERY. A written-off invoice has already
-		// been through dunning: it ran, exhausted, and the policy's final action
-		// fired. Re-enrolling it would restart escalation emails — and under a
-		// cancel-subscription final action, cancel a subscription — triggered by
-		// an operator TRYING TO RECOVER the debt. A declined recovery simply
-		// leaves the invoice written off, which is the honest outcome.
+		// ...and never on a WRITTEN-OFF invoice. It has already been through
+		// dunning: it ran, exhausted, and the policy's final action fired.
+		// Re-enrolling it would restart escalation emails — and under a
+		// cancel-subscription final action, cancel a subscription — on a debt
+		// the business gave up on. Post-ADR-113 no charge path admits
+		// uncollectible, so this fires only for charges already in flight at
+		// the removal deploy; the guard stays because the failure it prevents
+		// is catastrophic and the cost is one status check.
 		//
 		// This is the second of TWO dunning-start sites; the other is
 		// SettleFailed (settlement.go). Guarding only one leaves the inline

@@ -1,6 +1,13 @@
 # ADR-111: A write-off has no tax leg
 
 **Status:** Accepted (2026-08-05)
+
+> ℹ️ **Reader note (2026-08-06):** this ADR's decision — a write-off has no tax
+> leg — stands in full. But its prose describes `RecoveryBlocksCharge`, the
+> recovery tax gate, and the operator card route as live; [ADR-113](113-nothing-charges-a-written-off-invoice.md)
+> deleted all three one day later. Sentences below about "the tax gate", "the
+> card route", or re-keying the gate are point-in-time records, not current
+> code.
 **Relates to:** [ADR-110](110-written-off-invoices-close-self-service-payment.md)
 (written-off invoices close self-service payment), [ADR-107](107-unknown-is-terminal-until-a-human.md)
 (parked invoices), ADR-108 (parked search-and-adopt)

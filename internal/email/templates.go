@@ -333,13 +333,12 @@ type paymentSetupLinkContext struct {
 	InvoiceNumber  string // optional — engine-fired no-PM-at-finalize path
 	AmountDueLabel string // formatted ($X.XX); empty when InvoiceNumber empty
 	// WrittenOff marks the invoice as already written off as bad debt. It
-	// changes ONE thing and it is the honesty of the whole email: no machine
-	// ever collects a written-off invoice (ADR-110 — the auto-charge and
-	// dunning claims both pin `finalized`; only an operator may charge one),
-	// so the ordinary "we'll collect it automatically" promise would be a
-	// commitment the engine cannot keep. Adding a card here is genuinely
-	// useful — it is what lets the operator complete the recovery — but the
-	// customer must be told a person will do it, not a machine.
+	// changes ONE thing and it is the honesty of the whole email: NOTHING
+	// collects a written-off invoice (ADR-113 — every charge claim pins
+	// `finalized`), so the ordinary "we'll collect it automatically" promise
+	// would be a commitment the engine cannot keep. Adding a card is still
+	// genuinely useful — it serves the fresh recovery invoice and future
+	// billing — but the customer must be told a person will follow up.
 	WrittenOff bool
 }
 

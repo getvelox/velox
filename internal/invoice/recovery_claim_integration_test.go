@@ -57,14 +57,9 @@ func seedWrittenOff(t *testing.T, db *postgres.DB, ctx context.Context, tenantID
 	return inv
 }
 
-// TestRecoveryClaim_OperatorMayMachineMayNot is THE safety boundary of this
-// feature, and the reason ClaimChargeForManualCollect stopped sharing
-// claimChargeLease.
-//
-// An operator may charge a written-off invoice — the customer came back. No
-// MACHINE may: dunning re-charging a debt the business formally gave up on is
-// the failure this whole design exists to avoid. Both directions in one test,
-// so collapsing the two claims back onto one shared lease fails here.
+// TestManualCollectClaim_RefusesWrittenOff pins ADR-113's refusal from both
+// sides: the written-off shape the removed feature used to admit must be
+// refused, and the finalized/failed operator-retry shape must still claim.
 func TestManualCollectClaim_RefusesWrittenOff(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 20*time.Second)

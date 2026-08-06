@@ -651,15 +651,11 @@ func (s *Service) ApplyCreditBalance(ctx context.Context, tenantID, id string) (
 	if err != nil {
 		return domain.Invoice{}, err
 	}
-	// Written-off invoices included: a bad-debt recovery must drain the balance
-	// FIRST so the card is charged the remainder, not the gross (ADR-088 order).
-	// Missing this made the uncollectible arm in credit.ApplyToInvoiceAtomic
-	// unreachable and made the recovery dialog's "Any credit balance is applied
-	// first" a written promise the code did not keep — and the population that
-	// gets written off is exactly the one carrying credit-note and clawback
-	// relief on the way down.
+	// finalized only (ADR-113 — the uncollectible admission served the
+	// deleted charge-in-place recovery; leaving it would carry a claim-to-
+	// charge race through the credit step instead of stopping it here).
 	if s.creditApplier == nil || inv.AmountDueCents <= 0 ||
-		(inv.Status != domain.InvoiceFinalized && inv.Status != domain.InvoiceUncollectible) {
+		inv.Status != domain.InvoiceFinalized {
 		return inv, nil
 	}
 	if _, err := s.creditApplier.ApplyToInvoiceAt(ctx, tenantID, inv.CustomerID, inv.ID, inv.AmountDueCents, s.clock.Now(ctx), inv.InvoiceNumber); err != nil {
@@ -826,11 +822,6 @@ func (s *Service) attachAttention(ctx context.Context, inv domain.Invoice) domai
 	}
 	inv.Attention = domain.ClassifyInvoiceAttention(inv, atc)
 
-	// Publish WHY a written-off invoice cannot be charged, so the dashboard can
-	// disable its button with the reason instead of letting an operator confirm
-	// a charge the server will refuse. Same source the collect handler uses —
-	// the UI and the refusal can never disagree.
-	//
 	// What an operator must know BEFORE recording a wire against a
 	// written-off invoice (tax already reported as uncollected / threshold
 	// usage re-billed / unapplied clawback relief). Not a refusal — the money

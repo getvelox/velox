@@ -181,7 +181,8 @@ func escalationAnnounces(emailType, terminalState string) bool {
 // capture, not payment of the invoice (ADR-110 drew exactly this line when it
 // removed the customer's Pay button and kept the add-a-card button beside it),
 // and it is the ON-RAMP to bad-debt recovery: the operator cannot charge a
-// written-off invoice until a card exists, and this email is how one gets
+// card serves recovery on normal rails (a fresh recovery invoice, ADR-113)
+// and future billing — this email is how one gets
 // there.
 //
 // Found by walking FLOW D6 2026-08-05, AFTER the endpoint was widened to admit

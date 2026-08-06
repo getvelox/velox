@@ -51,11 +51,11 @@ all**: `chargeInvoice` refused anything but `finalized`, and the status machine
 had no edge back. A customer Pay button would have called a gate that rejects
 it — so removing it removed a button pointing at a closed door.
 
-*(Superseded in part by the 2026-08-05 amendment below: an OPERATOR can now
-charge a written-off invoice. The customer-facing closure this section argues
-for is unchanged, and the amendment explains why operator-only is the whole
-point — but the flat "cannot charge" is no longer true and is left here only as
-the state this decision was made in.)*
+*(History: the 2026-08-05 amendment below briefly made an operator able to
+charge a written-off invoice; [ADR-113](113-nothing-charges-a-written-off-invoice.md)
+removed that the next day, so the flat "cannot charge" is TRUE again — now by
+decision rather than by limitation. The customer-facing closure this section
+argues for was never touched.)*
 
 ## Industry evidence (verified 2026-08-05)
 

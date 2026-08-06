@@ -991,8 +991,10 @@ func TestCommitExposure_ExpiredGrantReportsNothing(t *testing.T) {
 // TestRecoveryInFlight_NarrowByDesign pins the bad-debt-recovery banner and,
 // more importantly, its SILENCE.
 //
-// The banner exists so a second operator cannot charge a card that is already
-// being charged. But it must fire ONLY while a recovery is in flight — a
+// Post-ADR-113 no charge path admits uncollectible, so the state is reachable
+// only for rows whose charge was in flight when the removal deployed (and for
+// parked payments awaiting ADR-108 adoption). The banner stays for those, and
+// it must fire ONLY while a payment is genuinely in flight — a
 // written-off invoice sitting at `failed` is every dunning-exhausted write-off
 // in the system, and lighting those up would put a permanent banner on the
 // most common terminal state there is.

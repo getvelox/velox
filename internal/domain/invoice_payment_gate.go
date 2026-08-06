@@ -144,7 +144,7 @@ func PaymentBlocksAction(inv Invoice, action InvoiceAction) PaymentBlock {
 // on an invoice that already IS uncollectible, and that is a reachable state:
 // writing off a parked invoice is the carve-out immediately above, and since
 // 2026-08-05 such a row stays visible to the ADR-108 search and can be the
-// subject of a bad-debt recovery attempt.
+// subject of an ADR-108 adoption settle (recording, never a charge — ADR-113).
 func parkedMessage(action InvoiceAction, alreadyWrittenOff bool) string {
 	// Bounded since ADR-108: the search sweep can adopt a found PaymentIntent,
 	// so "will not resolve on its own" is conditional now — but every refusal

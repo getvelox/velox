@@ -50,7 +50,7 @@ export function pollIntervalForInvoice(invoice?: PollableInvoice): number | fals
   // uncollectible is terminal ONLY while nothing is charging it. A bad-debt
   // recovery leaves the invoice written off with a live PaymentIntent, and
   // treating that as terminal froze the page at the exact moment money was
-  // moving: the operator clicked Charge customer, one refetch drew the
+  // moving: a pre-ADR-113 recovery charge or a parked payment drew the
   // in-flight banner, and nothing updated again until a manual reload — no
   // settle, no paid row, no status flip. The banner that exists to stop a
   // second operator charging again could never clear on its own.

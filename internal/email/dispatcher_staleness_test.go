@@ -106,10 +106,10 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		// test used to assert it stayed muted, on the reasoning that
 		// "asking for a card on a written-off invoice is still noise" —
 		// TRUE when written, because ADR-110 records that Velox then
-		// "could not charge a written-off invoice at all". The amendment
-		// that shipped operator-driven recovery retired that premise: a
-		// card attached now is exactly what unblocks the charge, and the
-		// operator cannot proceed without one. payment_failed and
+		// "could not charge a written-off invoice at all". Under ADR-113
+		// that is true AGAIN — but the card still unblocks recovery, now
+		// via a fresh recovery invoice on normal rails, so the setup link
+		// keeps delivering. payment_failed and
 		// dunning_warning stay muted below — those really are stale on a
 		// written-off invoice — which is what keeps the exemption narrow.
 		sender := &recordingDeliverer{}
@@ -126,7 +126,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		d1 := NewDispatcher(nil, s1, DispatcherConfig{})
 		d1.SetSettledChecker(&recordingChecker{state: "uncollectible"})
 		if err := d1.handle(ctx, rowOf(TypePaymentSetupRequest)); err != nil {
-			t.Fatalf("setup link must deliver on uncollectible — the operator cannot charge a written-off invoice until a card exists: %v", err)
+			t.Fatalf("setup link must deliver on uncollectible — the card is the on-ramp to recovery on normal rails (ADR-113): %v", err)
 		}
 		if len(s1.sent) != 1 {
 			t.Fatal("the setup link that unblocks recovery was skipped")

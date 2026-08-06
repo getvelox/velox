@@ -699,7 +699,9 @@ func (s *PostgresStore) ApplyToInvoiceAtomic(ctx context.Context, tenantID, cust
 		// Payable — draft stays eligible: billOnePeriod applies credits to
 		// tax-pending drafts at build time.
 	default:
-		// Paid / voided: nothing to cover. The caller's
+		// Paid / voided / uncollectible: nothing to cover — uncollectible
+		// lands here since ADR-113 (no charge path admits it, so credit
+		// must not drain against it either). Also the caller's
 		// pre-read went stale (e.g. the customer settled via checkout while
 		// a dunning tick was in flight).
 		slog.DebugContext(ctx, "credit apply skipped: invoice no longer payable",

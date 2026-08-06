@@ -1112,11 +1112,6 @@ func (h *Handler) collectPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// `uncollectible` is admitted for BAD-DEBT RECOVERY: the customer came back
-	// and the operator is running their card. The invoice is NOT reopened — it
-	// stays written off until money arrives, then settles uncollectible -> paid,
-	// keeping uncollectible_at in its history.
-	//
 	// finalized only. A written-off invoice is deliberately NOT chargeable
 	// here (ADR-113): charge-the-written-off-object is a Stripe-only pattern,
 	// and its three refusal gates existed only because the charged object

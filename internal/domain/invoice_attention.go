@@ -564,8 +564,8 @@ func classifyRecoveryInFlight(inv Invoice) *Attention {
 		Severity: AttentionSeverityInfo,
 		Reason:   AttentionReasonPaymentProcessing,
 		Code:     "payment.recovery_processing",
-		Message: "This invoice was written off, and a recovery charge is now in flight at the payment provider. " +
-			"It stays written off until the payment settles — don't charge it again while this is pending.",
+		Message: "This invoice was written off, and a payment is still in flight at the payment provider. " +
+			"It stays written off until that payment reports an outcome.",
 		DocURL: docBaseURL + "payment-processing",
 		Since:  &since,
 	}
@@ -654,7 +654,7 @@ func withCommitExposure(att *Attention, inv Invoice, atc AttentionContext) *Atte
 	// refuses void in that state — the button would answer 409. Reachable
 	// since bad-debt recovery shipped: a written-off commit invoice being
 	// recovered sits at uncollectible+processing, where this banner folds onto
-	// the recovery banner and would otherwise say "don't charge it again"
+	// the recovery banner (pre-ADR-113 in-flight rows only)
 	// immediately above a Void button that cannot run.
 	var voidAction []AttentionActionItem
 	if drawable > 0 && !inv.PaymentStatus.IsInFlight() {
