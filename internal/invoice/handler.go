@@ -2378,14 +2378,14 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 				}
 				ts, recorded, sim := emailRowInstant(evt)
 				events = append(events, timelineEvent{
-					ID:           "email:" + evt.ID,
-					Timestamp:    ts.Format(time.RFC3339),
-					sortAt:       ts,
-					tieRank:      rankEmail,
-					Source:       "email",
-					EventType:    "email." + evt.EmailType,
-					Status:       status,
-					Description:  desc,
+					ID:          "email:" + evt.ID,
+					Timestamp:   ts.Format(time.RFC3339),
+					sortAt:      ts,
+					tieRank:     rankEmail,
+					Source:      "email",
+					EventType:   "email." + evt.EmailType,
+					Status:      status,
+					Description: desc,
 					// Cause subline (PR #640 pattern: uniform machine title,
 					// cause underneath). Without it, a finalize-time setup
 					// link and an operator's Resend rendered byte-identical —
