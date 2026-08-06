@@ -108,18 +108,27 @@ anniversary_month_end_test.go. Verified 2026-08-06 by enumerating every
 remaining `addIntervalIn` caller; the record was corrected rather than the
 fixed code re-fixed.
 
-### B3. Runbook truth-rate sample *(one session)*
+### B3. Runbook truth-rate sample *(DONE 2026-08-06 — result: 25/25 TRUE)*
 
-~25 boxes, random but money-weighted, re-run against current code. Output
-is a number. ≈100% ⇒ the ledger is trustworthy and full re-walks stay
-off the table; drift found ⇒ expand only where found.
+Deterministic hash-ordered sample (no cherry-picking), 17 money-path + 8
+general boxes, each verified adversarially against current code by an
+independent reader required to LOCATE the producing code (verdicts anchored
+to current file:line; moved citations and renamed identifiers explicitly
+not counted as drift — only behavioral mismatch). **Truth rate: 100%.**
+Consequence, per this section's own rule: the ledger is trustworthy and
+full re-walks are permanently off the table. Re-measure only if the same-PR
+revision rule is ever suspended.
 
-### B4. Staleness flagger *(small script)*
+### B4. Staleness flagger *(REFUTED 2026-08-06 — do not build)*
 
-Every annotation carries its walk date. Map flows → source areas, flag any
-flow whose code changed after its annotation date. Run before anything
-DP-facing; re-walk only flagged flows. Replaces calendar-based re-walking
-with change-based re-walking.
+Evidence-gated and it failed the gate. The zero-maintenance design (derive
+watched paths from file citations inside each flow's own annotations) covers
+**3 of 129 flows** — 97 flows cite no machine-parseable paths — and its one
+flag was an already-registered known item (X14). Useful coverage would
+require a hand-maintained flow→source map, a rot-prone surface bought for
+~2% signal. The actual staleness defense is the same-PR revision rule, which
+B3 just measured working at 100%. Do not rebuild without new evidence that
+the same-PR rule is failing.
 
 ### B5. Fresh-tenant smoke ritual *(no build — a rule)*
 
@@ -169,9 +178,8 @@ could not.
 | doctor sweep | every CI integration run + before/after any walk session |
 | pre-push gate + adversarial verify | every PR (verify: mandatory on money paths) |
 | fresh-tenant S1/S2 | before each DP-facing milestone |
-| staleness flagger | before each DP-facing milestone |
 | clock soak | CI-locked (every integration run) |
-| truth-rate sample | once now; repeat only if drift found |
+| truth-rate sample | DONE (100%); repeat only if the same-PR rule is suspended |
 | burn-down table review | monthly, or when any trigger fires |
 
 ## Order of execution from here
@@ -180,5 +188,6 @@ could not.
 2. **Fix the Feb-clamp trap, then build B1 (`velox doctor`)** — one arc,
    playbook rules apply (it touches money math).
 3. ~~B2 soak~~ — SHIPPED, CI-locked (and the clamp trap was already fixed by ADR-055; memory corrected).
-4. B3 sample + B4 flagger (one session together).
-5. C-table triage pass (LOWs + register sweep for fired triggers).
+4. ~~B3 sample~~ — DONE, 25/25 TRUE. ~~B4 flagger~~ — REFUTED, not built.
+5. C-table triage pass (LOWs + register sweep for fired triggers) — the one
+   remaining item.
