@@ -140,8 +140,8 @@ could not.
 
 | item | state | action |
 |---|---|---|
-| fast-uri HIGH + audit-fixable batch | fixed in #750 | merge on green |
-| Jan 31 → Feb 28 date-math clamp | **known trap, unfixed** | fix with B2 |
+| fast-uri HIGH + audit-fixable batch | **CLOSED** — #750 merged 2026-08-06 | none |
+| Jan 31 → Feb 28 date-math clamp | **CLOSED — the trap was already fixed when this row was written (2026-08-06 correction)** | none. ADR-055's `advanceAnchored` (internal/domain/subscription.go) ships the clamp-and-restore; `internal/domain/anniversary_month_end_test.go` pins day-29/30/31 anchors incl. the leap-year case; B2's soak (#754) then drove a day-31 anchor through **two non-leap Februaries and a year boundary** against the real server, doctor-clean after all 13 closes. The row was carried over from a stale note, not re-derived from code — the same born-false class this plan exists to catch, found in the plan itself. |
 | ~41 LOWs backlog (2026-07-02 audit) | **TRIAGED 2026-08-06** | 104 items adjudicated (LOWs + every register/ADR deferral). 28 FIXED_ALREADY, 3 GONE_SURFACE, 69 ACCEPT-with-reason, **4 PROMOTED and shipped**. Backlog closed — see below. |
 | cost-dashboard public-token hashing | **HARD GATE pre-prod** (lies audit) | schedule before any prod deploy |
 | engine post-commit audit rows (6) | open, CI-gated | with the next engine arc |
