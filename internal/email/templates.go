@@ -310,12 +310,13 @@ func renderPaymentFailedHTML(customerName, invoiceNumber, reason, hostedURL stri
 // retained for back-compat with the SendPaymentSetupRequest call
 // site. Delegates to the unified renderPaymentSetupLinkHTML so the
 // template stays single-source.
-func renderPaymentUpdateRequestHTML(customerName, invoiceNumber, amountDue, updateURL string) (subject, contentHTML, ctaURL, ctaLabel string) {
+func renderPaymentUpdateRequestHTML(customerName, invoiceNumber, amountDue, updateURL string, writtenOff bool) (subject, contentHTML, ctaURL, ctaLabel string) {
 	return renderPaymentSetupLinkHTML(paymentSetupLinkContext{
 		CustomerName:   customerName,
 		SetupURL:       updateURL,
 		InvoiceNumber:  invoiceNumber,
 		AmountDueLabel: amountDue,
+		WrittenOff:     writtenOff,
 	})
 }
 
@@ -331,6 +332,15 @@ type paymentSetupLinkContext struct {
 	SetupURL       string
 	InvoiceNumber  string // optional — engine-fired no-PM-at-finalize path
 	AmountDueLabel string // formatted ($X.XX); empty when InvoiceNumber empty
+	// WrittenOff marks the invoice as already written off as bad debt. It
+	// changes ONE thing and it is the honesty of the whole email: no machine
+	// ever collects a written-off invoice (ADR-110 — the auto-charge and
+	// dunning claims both pin `finalized`; only an operator may charge one),
+	// so the ordinary "we'll collect it automatically" promise would be a
+	// commitment the engine cannot keep. Adding a card here is genuinely
+	// useful — it is what lets the operator complete the recovery — but the
+	// customer must be told a person will do it, not a machine.
+	WrittenOff bool
 }
 
 // renderPaymentSetupLinkHTML is the single template used by every
@@ -370,7 +380,11 @@ func renderPaymentSetupLinkHTML(ctx paymentSetupLinkContext) (subject, contentHT
 		b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">` + escape(ctx.OperatorNote) + `</p>`)
 	case hasInvoice:
 		b.WriteString(`<p style="margin:0 0 8px;color:#4b5563;">Invoice <strong style="color:#111827;">` + escape(ctx.InvoiceNumber) + `</strong> (<strong style="color:#111827;">` + escape(ctx.AmountDueLabel) + `</strong>) is ready.</p>`)
-		b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">Add a payment method with the secure link below and we'll collect it automatically — your card details go directly to our payment processor and never touch our servers.</p>`)
+		if ctx.WrittenOff {
+			b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">Add a payment method with the secure link below and we'll be in touch to settle it — your card details go directly to our payment processor and never touch our servers.</p>`)
+		} else {
+			b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">Add a payment method with the secure link below and we'll collect it automatically — your card details go directly to our payment processor and never touch our servers.</p>`)
+		}
 	default:
 		b.WriteString(`<p style="margin:0 0 16px;color:#4b5563;">Please add a payment method on file so we can process your billing. Use the secure link below — your card details go directly to our payment processor and never touch our servers.</p>`)
 	}

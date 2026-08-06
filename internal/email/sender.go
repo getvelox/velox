@@ -574,14 +574,14 @@ func (s *Sender) SendPaymentSetupLink(ctx context.Context, tenantID, to, custome
 // charging an invoice). Sent at finalize when the customer has no PM
 // on file. Distinct from SendPaymentFailed which fires after a charge
 // has already been attempted and declined.
-func (s *Sender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string) error {
+func (s *Sender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error {
 	if updateURL == "" {
 		return fmt.Errorf("update_url required: refusing to send payment-setup-request email with no link")
 	}
 	brand := s.brandingFor(ctx, tenantID)
 	amount := formatAmount(amountDueCents, currency)
 
-	subject, contentHTML, ctaURL, ctaLabel := renderPaymentUpdateRequestHTML(customerName, invoiceNumber, amount, updateURL)
+	subject, contentHTML, ctaURL, ctaLabel := renderPaymentUpdateRequestHTML(customerName, invoiceNumber, amount, updateURL, writtenOff)
 	htmlBody, err := renderLayout(layoutInputs{
 		Subject: subject, CompanyName: brand.CompanyName, LogoURL: brand.LogoURL,
 		BrandColor: brand.BrandColor, SupportURL: brand.SupportURL,

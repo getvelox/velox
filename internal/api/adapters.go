@@ -699,7 +699,7 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 // doesn't bleed an interface name into the api/payment dep graph.
 // Satisfied by both *email.Sender and *email.OutboxSender.
 type paymentSetupEmailSender interface {
-	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string) error
+	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error
 }
 
 // customerSentEmailsAdapter bridges email.OutboxStore.ListByCustomer →
@@ -789,7 +789,7 @@ func (a *noPaymentMethodNotifierAdapter) NotifyNoPaymentMethod(ctx context.Conte
 		return "", fmt.Errorf("create payment update token: %w", err)
 	}
 	updateURL := fmt.Sprintf("%s?token=%s", a.paymentUpdateURL, rawToken)
-	if err := a.email.SendPaymentSetupRequest(ctx, tenantID, to, name, inv.InvoiceNumber, inv.AmountDueCents, inv.Currency, updateURL); err != nil {
+	if err := a.email.SendPaymentSetupRequest(ctx, tenantID, to, name, inv.InvoiceNumber, inv.AmountDueCents, inv.Currency, updateURL, inv.Status == domain.InvoiceUncollectible); err != nil {
 		return "", err
 	}
 	// Audit the engine-fired send so the operator can answer

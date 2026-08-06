@@ -94,8 +94,12 @@ type outboxMessage struct {
 	// PublicToken is the Stripe-equivalent hosted_invoice_url credential
 	// (T0-17). Carried on invoice-related email types so the dispatcher
 	// can build the hosted-invoice CTA URL for the rendered HTML body.
-	PublicToken string `json:"public_token,omitempty"`
-	PDF         []byte `json:"pdf,omitempty"`
+	// InvoiceWrittenOff drives the setup-link email's promise: a written-off
+	// invoice is never collected by a machine (ADR-110), so the copy says a
+	// person will follow up rather than "we'll collect it automatically".
+	InvoiceWrittenOff bool   `json:"invoice_written_off,omitempty"`
+	PublicToken       string `json:"public_token,omitempty"`
+	PDF               []byte `json:"pdf,omitempty"`
 }
 
 // OutboxSender satisfies the four domain email interfaces (invoice.EmailSender,
@@ -238,17 +242,18 @@ func (s *OutboxSender) SendPaymentFailed(ctx context.Context, tenantID, to strin
 
 // SendPaymentSetupRequest enqueues a payment-setup-request email
 // (customer must set up a PM on a finalized invoice).
-func (s *OutboxSender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string) error {
+func (s *OutboxSender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error {
 	if updateURL == "" {
 		return fmt.Errorf("update_url required: refusing to enqueue payment-setup-request email with no link")
 	}
 	return s.enqueue(ctx, tenantID, TypePaymentSetupRequest, outboxMessage{
-		To:            to,
-		CustomerName:  customerName,
-		InvoiceNumber: invoiceNumber,
-		AmountCents:   amountDueCents,
-		Currency:      currency,
-		UpdateURL:     updateURL,
+		To:                to,
+		CustomerName:      customerName,
+		InvoiceNumber:     invoiceNumber,
+		AmountCents:       amountDueCents,
+		Currency:          currency,
+		UpdateURL:         updateURL,
+		InvoiceWrittenOff: writtenOff,
 	})
 }
 
