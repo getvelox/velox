@@ -97,6 +97,17 @@ jobs:
           TEST_ADMIN_DATABASE_URL: postgres://velox:velox@localhost:5432/velox_test?sslmode=disable
           TEST_DATABASE_URL: postgres://velox_test_app:velox_test_app@localhost:5432/velox_test?sslmode=disable
 
+      # Money-invariant sweep over whatever the integration suite left behind
+      # (docs/dev/product-stability-plan.md B1). The doctor's own test already
+      # proves the catalog runs and catches seeded violations on a fresh DB;
+      # THIS step asks a different question — did any test's real writer
+      # sequence leave data no legal writer should produce? Owner DSN on
+      # purpose: an RLS-scoped role would make the sweep silently blind.
+      - name: Money-invariant sweep (velox-doctor)
+        run: go run ./cmd/velox-doctor
+        env:
+          DATABASE_URL: postgres://velox:velox@localhost:5432/velox_test?sslmode=disable
+
       - name: Upload Coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         with:
