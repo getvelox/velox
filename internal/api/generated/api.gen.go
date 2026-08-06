@@ -605,15 +605,15 @@ func (e RecipeRatingRuleMode) Valid() bool {
 	}
 }
 
-// Defines values for RecoveryBlockCode.
+// Defines values for RecoveryWarningCode.
 const (
-	RecoverySuperseded       RecoveryBlockCode = "recovery_superseded"
-	ReliefNotReissued        RecoveryBlockCode = "relief_not_reissued"
-	TaxReversedUnrecoverable RecoveryBlockCode = "tax_reversed_unrecoverable"
+	RecoverySuperseded       RecoveryWarningCode = "recovery_superseded"
+	ReliefNotReissued        RecoveryWarningCode = "relief_not_reissued"
+	TaxReversedUnrecoverable RecoveryWarningCode = "tax_reversed_unrecoverable"
 )
 
-// Valid indicates whether the value is a known member of the RecoveryBlockCode enum.
-func (e RecoveryBlockCode) Valid() bool {
+// Valid indicates whether the value is a known member of the RecoveryWarningCode enum.
+func (e RecoveryWarningCode) Valid() bool {
 	switch e {
 	case RecoverySuperseded:
 		return true
@@ -1159,43 +1159,10 @@ type Invoice struct {
 	// /v1/invoices/{id}/rotate-public-token`.
 	PublicToken string `json:"public_token,omitempty"`
 
-	// RecoveryBlock Why a WRITTEN-OFF invoice (`status = uncollectible`) cannot be charged.
-	//
-	// Velox lets an OPERATOR charge a written-off invoice when the customer
-	// comes back — bad-debt recovery via `POST /v1/invoices/{id}/collect`.
-	// The invoice is not reopened: it stays `uncollectible` until the payment
-	// settles, then becomes `paid`, so the write-off remains in its history.
-	// This is never a customer-facing capability; the public pages continue
-	// to show the invoice as closed (ADR-110).
-	//
-	// Present ONLY when such a charge would be refused, and absent both on
-	// recoverable written-off invoices and on every other status — so
-	// `recovery_block == null` does NOT mean "chargeable", it means "no
-	// recovery-specific refusal applies".
-	//
-	// The same three refusals are enforced in the charge claim's SQL; this
-	// field publishes them so a UI can disable the action with its reason
-	// rather than surfacing a 409 after the operator has confirmed an amount.
-	//
-	// `tax_reversed_unrecoverable` — the invoice's tax was reversed with the
-	// tax provider at write-off and cannot be re-reported automatically;
-	// charging would collect tax already reported as not collected.
-	// `recovery_superseded` — the invoice was billed on a usage threshold and
-	// that usage has since been re-billed; charging would bill it twice.
-	// `relief_not_reissued` — a credit the invoice was owed was never
-	// applied, so `amount_due_cents` is higher than what is owed.
-	RecoveryBlock RecoveryBlock `json:"recovery_block,omitempty"`
-
 	// RecoveryWarning What an operator must know BEFORE recording an OFFLINE payment on a
 	// written-off invoice — a consequence that will go unreconciled, NOT
 	// a refusal. Absent when there is nothing to say.
-	//
-	// The same two conditions that BLOCK a card charge (`recovery_block`)
-	// only WARN here, deliberately: a card charge is Velox choosing to
-	// move money, while an offline payment means the money already
-	// arrived and refusing to record it would only make the books wrong
-	// too. `blocked` is always false on this field.
-	RecoveryWarning RecoveryBlock `json:"recovery_warning,omitempty"`
+	RecoveryWarning RecoveryWarning `json:"recovery_warning,omitempty"`
 
 	// SourceChangeType Classifies per-item proration artifacts so the dedup index can
 	// distinguish a plan-change and a quantity-change that happen to
@@ -1709,41 +1676,36 @@ type RecipeWebhook struct {
 	UrlPlaceholder string   `json:"url_placeholder"`
 }
 
-// RecoveryBlock Why a WRITTEN-OFF invoice (`status = uncollectible`) cannot be charged.
+// RecoveryWarning What an operator must know BEFORE recording an OFFLINE payment on a
+// written-off invoice (`status = uncollectible`) — a consequence that
+// will go unreconciled, never a refusal. The money already arrived, and
+// refusing to record it would only make the books wrong too.
 //
-// Velox lets an OPERATOR charge a written-off invoice when the customer
-// comes back — bad-debt recovery via `POST /v1/invoices/{id}/collect`.
-// The invoice is not reopened: it stays `uncollectible` until the payment
-// settles, then becomes `paid`, so the write-off remains in its history.
-// This is never a customer-facing capability; the public pages continue
-// to show the invoice as closed (ADR-110).
-//
-// Present ONLY when such a charge would be refused, and absent both on
-// recoverable written-off invoices and on every other status — so
-// `recovery_block == null` does NOT mean "chargeable", it means "no
-// recovery-specific refusal applies".
-//
-// The same three refusals are enforced in the charge claim's SQL; this
-// field publishes them so a UI can disable the action with its reason
-// rather than surfacing a 409 after the operator has confirmed an amount.
+// A written-off invoice is settled by RECORDING writers only — an
+// offline payment, or the provider-search reconciler adopting a charge
+// that turns out to have succeeded (ADR-108). Nothing initiates a card
+// charge against one (ADR-113): recovery of a returned customer runs on
+// normal rails via a fresh recovery invoice.
 //
 // `tax_reversed_unrecoverable` — the invoice's tax was reversed with the
-// tax provider at write-off and cannot be re-reported automatically;
-// charging would collect tax already reported as not collected.
-// `recovery_superseded` — the invoice was billed on a usage threshold and
-// that usage has since been re-billed; charging would bill it twice.
+// tax provider and cannot be re-reported automatically; the recorded
+// payment collects tax already reported as not collected.
+// `recovery_superseded` — the invoice was billed on a usage threshold
+// and that usage has since been re-billed; the payment double-collects.
 // `relief_not_reissued` — a credit the invoice was owed was never
-// applied, so `amount_due_cents` is higher than what is owed.
-type RecoveryBlock struct {
-	Blocked bool              `json:"blocked"`
-	Code    RecoveryBlockCode `json:"code,omitempty"`
+// applied, so `amount_due_cents` is higher than what is owed and the
+// customer may have overpaid.
+type RecoveryWarning struct {
+	// Blocked Always false — this shape only ever warns.
+	Blocked bool                `json:"blocked"`
+	Code    RecoveryWarningCode `json:"code,omitempty"`
 
-	// Message Operator-facing sentence naming both why the charge is refused and what to do instead.
+	// Message Operator-facing sentence naming the consequence that will go unreconciled if the payment is recorded.
 	Message string `json:"message,omitempty"`
 }
 
-// RecoveryBlockCode defines model for RecoveryBlock.Code.
-type RecoveryBlockCode string
+// RecoveryWarningCode defines model for RecoveryWarning.Code.
+type RecoveryWarningCode string
 
 // Subscription defines model for Subscription.
 type Subscription struct {

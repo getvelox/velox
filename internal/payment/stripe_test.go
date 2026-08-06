@@ -18,6 +18,7 @@ import (
 
 type mockStripeClient struct {
 	lastParams   PaymentIntentParams
+	createCalls  int
 	shouldFail   bool
 	failErr      error // when set, overrides the default card_declined failure
 	piID         string
@@ -34,6 +35,7 @@ type mockStripeClient struct {
 }
 
 func (m *mockStripeClient) CreatePaymentIntent(_ context.Context, params PaymentIntentParams) (PaymentIntentResult, error) {
+	m.createCalls++
 	m.lastParams = params
 	if m.shouldFail {
 		if m.failErr != nil {

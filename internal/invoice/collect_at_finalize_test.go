@@ -546,22 +546,16 @@ func TestCollectAtFinalize_CreditBalance(t *testing.T) {
 	})
 }
 
-// TestApplyCreditBalance_ReachableOnRecovery is the test that would have caught
-// the worst defect in the bad-debt-recovery work, and it is written through the
-// SERVICE deliberately.
+// TestApplyCreditBalance_FinalizedOnly pins the ADR-113 status universe
+// through the SERVICE, the only caller on the collect path.
 //
-// The recovery PR widened the credit STORE (ApplyToInvoiceAtomic gained an
-// uncollectible arm, with a comment stating the intent) and the settle, but not
-// ApplyCreditBalance — the service method that is the only caller on the
-// collect path. So the store arm was unreachable, the operator's card was
-// charged the GROSS while the balance sat unconsumed, and the confirm dialog
-// shipped in the same PR promised "Any credit balance is applied first".
-//
-// A store-level test would have passed the whole time. Only the service path
-// proves reachability, which is why the control below is not optional: without
-// the finalized arm, a predicate that applied credit to everything would also
-// satisfy the treatment.
-func TestApplyCreditBalance_ReachableOnRecovery(t *testing.T) {
+// History matters here: this test's ancestor pinned the OPPOSITE for
+// uncollectible (the charge-in-place recovery era, where credit had to drain
+// before the card was charged the remainder). ADR-113 removed that feature,
+// so credit draining against a written-off invoice would now be a ledger
+// debit nothing consumes — the uncollectible row asserts refusal, and the
+// finalized control keeps a refuse-everything predicate from passing.
+func TestApplyCreditBalance_FinalizedOnly(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
@@ -569,7 +563,7 @@ func TestApplyCreditBalance_ReachableOnRecovery(t *testing.T) {
 		want   bool
 	}{
 		{"finalized (control)", domain.InvoiceFinalized, true},
-		{"uncollectible — bad-debt recovery", domain.InvoiceUncollectible, true},
+		{"uncollectible must NOT drain the balance (ADR-113)", domain.InvoiceUncollectible, false},
 		{"voided must NOT drain the balance", domain.InvoiceVoided, false},
 		{"paid must NOT drain the balance", domain.InvoicePaid, false},
 	} {
@@ -590,7 +584,7 @@ func TestApplyCreditBalance_ReachableOnRecovery(t *testing.T) {
 			}
 			got := applier.calls > 0
 			if got != tc.want {
-				t.Fatalf("credit applied = %v, want %v — on a recovery this is the difference between charging the remainder and charging the gross", got, tc.want)
+				t.Fatalf("credit applied = %v, want %v — draining credit against a non-chargeable invoice books a debit nothing consumes", got, tc.want)
 			}
 		})
 	}

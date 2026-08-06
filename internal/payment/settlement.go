@@ -404,12 +404,13 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 	// that would hold the invoice FOR UPDATE across StartDunning's ~600ms retry
 	// sleep + a cross-domain policy read on every failed charge (see the design
 	// panel — dunning-start is a schedule, not a money artifact).
-	// A failed BAD-DEBT RECOVERY must not open a fresh campaign. The invoice is
-	// already written off — dunning ran, exhausted, and the policy's final
-	// action fired. Re-enrolling it would restart escalation emails (and, under
-	// a cancel-subscription final action, cancel a subscription) on a debt the
-	// business already gave up on, triggered by an operator trying to RECOVER
-	// it. The invoice simply stays written off, which is the honest outcome.
+	// A charge that fails against a WRITTEN-OFF invoice must not open a fresh
+	// campaign. Dunning ran, exhausted, and the policy's final action fired;
+	// re-enrolling would restart escalation emails (and, under a cancel-
+	// subscription final action, cancel a subscription) on a debt the business
+	// gave up on. Post-ADR-113 nothing charges a written-off invoice, so this
+	// settles only charges already in flight at the removal deploy — the guard
+	// stays because the failure it prevents is catastrophic and cheap to stop.
 	//
 	// Guarded here rather than inside StartDunning because StartDunning is
 	// idempotent-by-invoice and has no status opinion; this caller is the one

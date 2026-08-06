@@ -8,10 +8,10 @@ usage metering, invoice generation, Stripe payments, dunning, and credits.
  * OpenAPI spec version: 2026-04-07
  */
 
-export type RecoveryBlockCode = typeof RecoveryBlockCode[keyof typeof RecoveryBlockCode];
+export type RecoveryWarningCode = typeof RecoveryWarningCode[keyof typeof RecoveryWarningCode];
 
 
-export const RecoveryBlockCode = {
+export const RecoveryWarningCode = {
   tax_reversed_unrecoverable: 'tax_reversed_unrecoverable',
   recovery_superseded: 'recovery_superseded',
   relief_not_reissued: 'relief_not_reissued',

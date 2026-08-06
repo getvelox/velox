@@ -698,15 +698,10 @@ func (s *PostgresStore) ApplyToInvoiceAtomic(ctx context.Context, tenantID, cust
 	case domain.InvoiceDraft, domain.InvoiceFinalized:
 		// Payable — draft stays eligible: billOnePeriod applies credits to
 		// tax-pending drafts at build time.
-	case domain.InvoiceUncollectible:
-		// Bad-debt RECOVERY (operator-initiated). A written-off invoice is
-		// payable again only through the operator collect path, whose claim CAS
-		// carries the recovery gates — no machine reaches here on one, because
-		// both sweep claims still require 'finalized'. Credit must apply first
-		// so the card is charged the remainder, not the gross (ADR-088 order),
-		// and so a fully-covered recovery settles without touching Stripe.
 	default:
-		// Paid / voided: nothing to cover. The caller's
+		// Paid / voided / uncollectible: nothing to cover — uncollectible
+		// lands here since ADR-113 (no charge path admits it, so credit
+		// must not drain against it either). Also the caller's
 		// pre-read went stale (e.g. the customer settled via checkout while
 		// a dunning tick was in flight).
 		slog.DebugContext(ctx, "credit apply skipped: invoice no longer payable",

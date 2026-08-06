@@ -1986,60 +1986,30 @@ func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantI
 	}
 	defer postgres.Rollback(tx)
 
-	// Diverges from claimChargeLease (its sibling, which dunning retries ride)
-	// by admitting `uncollectible` — bad-debt RECOVERY. That divergence is the
-	// safety boundary and it is deliberate: an operator may charge a written-off
-	// invoice when the customer comes back; no MACHINE may. Dunning must never
-	// re-charge a debt the business gave up on, so ClaimChargeForDunningRetry
-	// keeps status='finalized'.
+	// finalized ONLY — same status universe as its siblings. It differs from
+	// ClaimAutoCharge (pending-only, auto_charge_pending) in admitting
+	// payment_status='failed' so an operator can retry a declined charge;
+	// ClaimChargeForDunningRetry admits 'failed' too.
 	//
-	// The invoice is NOT reopened. It stays uncollectible until money actually
-	// arrives, then settles uncollectible -> paid — a transition
-	// markPaidReportingTransition already allows — leaving uncollectible_at AND
-	// paid_at both set. Flipping the status back would ERASE the write-off:
-	// analytics recomputes AR from CURRENT status with no time dimension, so
-	// afterwards nothing could tell an accountant the invoice was ever written
-	// off.
-	//
-	// The three recovery gates live HERE, in the CAS, not only in the handler's
-	// pre-checks. A service-side read is a TOCTOU against the very sweeps that
-	// create these states (the tax-reversal sweep in particular): read says
-	// "safe", sweep reverses, charge proceeds, tenant under-remits.
-	//
-	//   tax_reversed_at — the reversal HAVING HAPPENED. Charging then collects
-	//     tax the tenant has already told the authority it did not collect,
-	//     and Velox cannot re-report it (the tax_calculation_id has a ~23h TTL
-	//     and computation is draft-only).
-	//
-	//     Under ADR-111 a write-off no longer reverses, so this fires only on
-	//     invoices reversed BEFORE that change, or by a future
-	//     operator-initiated relief claim. It previously keyed on
-	//     tax_transaction_id — which is set on every taxed invoice and NEVER
-	//     cleared, so it refused every taxed invoice forever and made recovery
-	//     structurally unavailable to tax-registered tenants.
-	//
-	//   billing_reason='threshold' — writing off a threshold invoice does not
-	//     stop the next cycle close from re-billing that usage window. The
-	//     usage is already on a newer invoice, so collecting this one
-	//     double-bills it.
-	//
-	// The third gate (orphaned clawback relief leaving amount_due stale-high)
-	// is a cross-domain sum and cannot be expressed here; it is a handler
-	// pre-check. Stated so the next reader does not assume this CAS is the
-	// complete guard set.
+	// This claim briefly (2026-08-05, ADR-110 amendment) also admitted
+	// `uncollectible` — operator-initiated bad-debt recovery, charge-in-place —
+	// guarded by three bespoke CAS gates. ADR-113 removed it on industry
+	// evidence: charge-the-written-off-object is a Stripe-only pattern (1 of 6
+	// platforms verified); Chargebee/Zuora reverse the write-off artifact and
+	// collect on NORMAL rails, Recurly is irreversible, Lago/Orb have no such
+	// state. The gates existed only because the charged object carried stale
+	// state; a fresh recovery invoice (the documented practice) has none of
+	// those hazards. A written-off invoice is settleable by RECORDING writers
+	// only (offline payment, ADR-108 adoption) — nothing initiates money
+	// against it.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoices
 		SET auto_charge_claimed_until = now() + interval '5 minutes'
 		WHERE id = $1
 		  AND payment_status IN ('pending', 'failed')
-		  AND status IN ('finalized', 'uncollectible')
+		  AND status = 'finalized'
 		  AND amount_due_cents > 0
 		  AND (auto_charge_claimed_until IS NULL OR auto_charge_claimed_until < now())
-		  AND (
-		        status = 'finalized'
-		     OR (tax_reversed_at IS NULL
-		         AND COALESCE(billing_reason, '') <> 'threshold')
-		      )
 	`, id)
 	if err != nil {
 		return false, err
@@ -2059,7 +2029,9 @@ func (s *PostgresStore) ClaimChargeForManualCollect(ctx context.Context, tenantI
 // Stripe idempotency keys derive from it (see ClaimAutoCharge).
 //
 // Deliberately still status='finalized' only. See
-// ClaimChargeForManualCollect for why operator-initiated recovery diverges.
+// ClaimChargeForManualCollect — predicate identical since ADR-113 removed
+// the recovery divergence; separate functions so a future divergence is a
+// deliberate edit, not a shared-lease accident.
 func (s *PostgresStore) claimChargeLease(ctx context.Context, tenantID, id string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {

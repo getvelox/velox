@@ -184,18 +184,21 @@ func TestChargeLease_ReleasedOnDefinitiveOutcomes(t *testing.T) {
 	}
 }
 
-// TestChargeInvoice_FailedRecoveryDoesNotRestartDunning: a failed BAD-DEBT
-// RECOVERY charge must not open a fresh dunning campaign.
+// TestChargeInvoice_RefusesWrittenOff_BeforeStripe: the ADR-113 belt gate.
 //
-// The invoice is already written off — dunning ran, exhausted, and the policy's
-// final action fired. Re-enrolling it would restart escalation emails and, under
-// a cancel-subscription final action, cancel a subscription — all triggered by
-// an operator TRYING TO RECOVER the debt. The invoice simply stays written off.
+// Every claim refuses uncollectible, but the claims read BEFORE the handler
+// re-reads the invoice — a MarkUncollectible landing in that gap (the status
+// CAS does not consult the charge lease, and PaymentBlocksAction does not
+// block on `failed`) arrives at chargeInvoice carrying `uncollectible`. Until
+// 2026-08-06 this admitted it and would have minted a real PaymentIntent
+// against a written-off debt. The assertion on client.calls is the load-
+// bearing half: the refusal must happen BEFORE any Stripe call, and no
+// dunning may start either.
 //
-// Both arms in one test: the finalized invoice must still enroll, or the guard
-// would have silently disabled dunning for every ordinary failed charge.
-func TestChargeInvoice_FailedRecoveryDoesNotRestartDunning(t *testing.T) {
-	t.Run("written-off invoice does NOT start dunning", func(t *testing.T) {
+// Both arms in one test: the finalized invoice must still charge and, on
+// decline, still enroll — or the gate would have silently disabled charging.
+func TestChargeInvoice_RefusesWrittenOff_BeforeStripe(t *testing.T) {
+	t.Run("written-off invoice is refused before Stripe", func(t *testing.T) {
 		inv := finalizedPendingInvoice()
 		inv.Status = domain.InvoiceUncollectible
 
@@ -205,10 +208,15 @@ func TestChargeInvoice_FailedRecoveryDoesNotRestartDunning(t *testing.T) {
 		dunning := &recordingDunningStarter{}
 		s := NewStripe(client, invoices, newMockWebhookStore(), nil, dunning)
 
-		_, _ = s.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe_abc", "pm_test")
-
+		_, err := s.ChargeInvoice(context.Background(), "t1", inv, "cus_stripe_abc", "pm_test")
+		if err == nil {
+			t.Fatal("ChargeInvoice accepted a WRITTEN-OFF invoice — ADR-113: nothing initiates money against one")
+		}
+		if client.createCalls != 0 {
+			t.Errorf("the refusal must fire BEFORE Stripe: %d PaymentIntent create call(s) were made against a written-off invoice", client.createCalls)
+		}
 		if len(dunning.calls) != 0 {
-			t.Errorf("a failed recovery charge started dunning on a WRITTEN-OFF invoice: %+v — recovery must not restart collection the business already gave up on", dunning.calls)
+			t.Errorf("refusing the charge started dunning on a WRITTEN-OFF invoice: %+v", dunning.calls)
 		}
 	})
 

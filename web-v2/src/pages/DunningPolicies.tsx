@@ -72,7 +72,7 @@ function outcomeSentence(sub: string, inv: string): string {
     : 'The subscription keeps billing as normal.'
   const invPart =
     inv === 'mark_uncollectible'
-      ? 'The unpaid invoice is written off as bad debt — it leaves your receivables, stays on the books for audit, and can still be settled by bank transfer or by charging it from the invoice page.'
+      ? 'The unpaid invoice is written off as bad debt — it leaves your receivables and stays on the books for audit. If the customer pays later, record the offline payment or issue a recovery invoice; nothing charges the written-off invoice itself.'
       : 'The unpaid invoice stays open and due. Nothing closes it automatically — you collect it or write it off yourself.'
   return `${subPart} ${invPart}`
 }

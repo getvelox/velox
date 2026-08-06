@@ -991,8 +991,10 @@ func TestCommitExposure_ExpiredGrantReportsNothing(t *testing.T) {
 // TestRecoveryInFlight_NarrowByDesign pins the bad-debt-recovery banner and,
 // more importantly, its SILENCE.
 //
-// The banner exists so a second operator cannot charge a card that is already
-// being charged. But it must fire ONLY while a recovery is in flight — a
+// Post-ADR-113 no charge path admits uncollectible, so the state is reachable
+// only for rows whose charge was in flight when the removal deployed (and for
+// parked payments awaiting ADR-108 adoption). The banner stays for those, and
+// it must fire ONLY while a payment is genuinely in flight — a
 // written-off invoice sitting at `failed` is every dunning-exhausted write-off
 // in the system, and lighting those up would put a permanent banner on the
 // most common terminal state there is.
@@ -1024,59 +1026,10 @@ func TestRecoveryInFlight_NarrowByDesign(t *testing.T) {
 	}
 }
 
-// TestRecoveryBlocksCharge is the single source both the collect handler and
-// the dashboard read. It has three refusals and one permissive case, and the
-// permissive case is what makes the other three meaningful — a predicate that
-// blocked everything would satisfy every refusal assertion on its own.
-func TestRecoveryBlocksCharge(t *testing.T) {
-	writtenOff := func() Invoice {
-		return Invoice{Status: InvoiceUncollectible, BillingReason: BillingReasonSubscriptionCycle}
-	}
-	cases := []struct {
-		name       string
-		inv        Invoice
-		unrelieved int64
-		wantCode   string
-	}{
-		{"recoverable", writtenOff(), 0, ""},
-		{"tax already reversed", func() Invoice { i := writtenOff(); i.TaxReversedAt = &time.Time{}; return i }(), 0, "tax_reversed_unrecoverable"},
-		{"threshold re-billed", func() Invoice { i := writtenOff(); i.BillingReason = BillingReasonThreshold; return i }(), 0, "recovery_superseded"},
-		{"relief never applied", writtenOff(), 2500, "relief_not_reissued"},
-
-		// Not a recovery at all: an ordinary finalized invoice must never carry
-		// a recovery block, even when it happens to look like one of the above.
-		// Without this, the predicate could refuse ordinary collection.
-		{"finalized with reversed tax is NOT blocked", Invoice{Status: InvoiceFinalized, TaxReversedAt: &time.Time{}}, 0, ""},
-		{"finalized threshold is NOT blocked", Invoice{Status: InvoiceFinalized, BillingReason: BillingReasonThreshold}, 9999, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := RecoveryBlocksCharge(tc.inv, tc.unrelieved)
-			if tc.wantCode == "" {
-				if b.Blocked {
-					t.Fatalf("blocked with %q, want allowed", b.Code)
-				}
-				return
-			}
-			if !b.Blocked {
-				t.Fatalf("allowed, want blocked with %q", tc.wantCode)
-			}
-			if b.Code != tc.wantCode {
-				t.Errorf("code = %q, want %q", b.Code, tc.wantCode)
-			}
-			// Every refusal must name a way forward — a dead-end refusal is how
-			// an operator ends up stuck with an invoice and no next step.
-			if len(b.Message) < 40 {
-				t.Errorf("message too thin to explain a money refusal: %q", b.Message)
-			}
-		})
-	}
-}
-
-// TestRecoveryWarnsOnOfflinePayment pins the OFFLINE twin, and the pairing with
-// RecoveryBlocksCharge is the point: the same two conditions BLOCK a card
-// charge and only WARN on an offline payment. Refuse to create a bad money
-// event; never refuse to record one that already happened.
+// TestRecoveryWarnsOnOfflinePayment pins the offline-recording warning. Its
+// charge-blocking twin (RecoveryBlocksCharge) was removed by ADR-113; recording
+// money that already arrived is never refused, only warned about. Refuse to
+// create a bad money event; never refuse to record one that already happened.
 func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 	writtenOff := func() Invoice {
 		return Invoice{Status: InvoiceUncollectible, BillingReason: BillingReasonSubscriptionCycle}
@@ -1149,17 +1102,4 @@ func TestRecoveryWarnsOnOfflinePayment(t *testing.T) {
 		}
 	})
 
-	t.Run("the SAME conditions block a card charge", func(t *testing.T) {
-		// The pairing is the rule. If these ever diverge, one of the two paths
-		// is treating the same money fact differently for no stated reason.
-		i := taxReversed() // both paths now key on the reversal stamp
-		if b := RecoveryBlocksCharge(i, 0); !b.Blocked || b.Code != "tax_reversed_unrecoverable" {
-			t.Errorf("card path does not block what the offline path warns about: %+v", b)
-		}
-		th := writtenOff()
-		th.BillingReason = BillingReasonThreshold
-		if b := RecoveryBlocksCharge(th, 0); !b.Blocked || b.Code != "recovery_superseded" {
-			t.Errorf("card path does not block the threshold case: %+v", b)
-		}
-	})
 }

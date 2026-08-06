@@ -147,6 +147,7 @@ messages + CHANGELOG.md, not here.
 | [110](110-written-off-invoices-close-self-service-payment.md) | 2026-08-05 | Accepted | A written-off invoice closes the customer's self-service payment route |
 | [111](111-a-write-off-has-no-tax-leg.md) | 2026-08-05 | Accepted | A write-off has no tax leg |
 | [112](112-dunning-exhaustion-settles-two-questions.md) | 2026-08-05 | Accepted | Dunning exhaustion settles two questions, not one |
+| [113](113-nothing-charges-a-written-off-invoice.md) | 2026-08-06 | Accepted | Nothing charges a written-off invoice — recording writers only; recovery runs on normal rails |
 
 > ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
 > across every ref). It is a skipped number, not a lost decision.

@@ -252,15 +252,6 @@ type Invoice struct {
 	// (terminal-state or no failure mode active). See
 	// docs/adr/009-invoice-attention.md for the wire-shape contract.
 	Attention *Attention `json:"attention,omitempty"`
-	// RecoveryBlock explains why a WRITTEN-OFF invoice cannot be charged, when
-	// it cannot. Computed on read like Attention, never persisted, and nil for
-	// every invoice that is not uncollectible.
-	//
-	// It exists so the dashboard can disable "Charge customer" WITH ITS REASON
-	// rather than letting an operator confirm a charge that answers 409. The
-	// refusals are server-truth (enforced in the claim CAS); this is the same
-	// truth, published, so the UI never promises what the server will refuse.
-	RecoveryBlock *PaymentBlock `json:"recovery_block,omitempty"`
 	// RecoveryWarning is what an operator must know before recording an
 	// OFFLINE payment on a written-off invoice — a consequence that will go
 	// unreconciled, not a refusal. Nil when there is nothing to say.

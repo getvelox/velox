@@ -26,7 +26,7 @@ func TestSetupLinkServesRecovery_ExemptsOnlyWrittenOff(t *testing.T) {
 		why              string
 	}{
 		{TypePaymentSetupRequest, "uncollectible", true,
-			"a written-off invoice cannot be charged until a card exists — this email is how one gets there"},
+			"the card is the on-ramp to recovery on normal rails (fresh recovery invoice, ADR-113) and future billing"},
 		{TypePaymentSetupRequest, "paid", false,
 			"asking for a card after the invoice is paid is the exact trust-eroding mail the gate exists to stop"},
 		{TypePaymentSetupRequest, "voided", false,
@@ -47,8 +47,8 @@ func TestSetupLinkServesRecovery_ExemptsOnlyWrittenOff(t *testing.T) {
 
 // TestSetupLinkCopy_DoesNotPromiseAutoCollectOnWriteOff is the honesty half.
 //
-// No machine ever collects a written-off invoice — ADR-110 pins the
-// auto-charge and dunning claims to `finalized`, so only an operator can. The
+// NOTHING collects a written-off invoice — ADR-113 pins every charge claim
+// to `finalized`. The
 // stock copy promises "we'll collect it automatically", which would be a
 // commitment the engine cannot keep, sent to the customer, triggered by an
 // operator button.
