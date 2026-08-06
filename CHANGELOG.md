@@ -13,6 +13,8 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Added
 
+- **A 13-month billing soak now runs in CI (2026-08-06).** One subscription anchored on the worst day of the month — the 31st — is driven through thirteen real cycle closes across a year boundary and two Februaries, through the real server and billing engine, with the money-invariant sweep run after every single advance. It proves the whole pipeline end to end: the anchor clamps to Feb 28 and restores to the 31st (never ratcheting), every close produces exactly one invoice, and thirteen consecutive closes leave zero invariant violations behind. First run: clean.
+
 - **`velox-doctor` — a money-invariant sweep for any Velox database (2026-08-06).** Tests verify code; the doctor verifies data. It runs 24 exact invariant checks — invoice money conservation, paid/terminal timestamp coherence, credit-ledger bounds, credit-note splits, dunning run shapes, subscription cycle stamps, outbox and payment-method coherence — each mined from the domain's writers and kept only after an adversarial pass failed to find a legal state it would flag. Read-only, exits non-zero on violations, and must run as a role that sees every row (an RLS-scoped role would report a spotless bill of health over rows it cannot see — the doctor's own test caught exactly that). First run against the development database flagged 25 rows of genuine pre-fix residue plus one real contradiction: an invoice whose audit log records a successful write-off while the row still reads `finalized` with `uncollectible_at` stamped — a half-applied transition no current writer can produce.
 
 ### Fixed
