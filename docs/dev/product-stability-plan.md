@@ -93,13 +93,20 @@ exists, it becomes the ops health check. Every future bug class gets its
 invariant added here in the fixing PR — that is the mechanized half of
 "enforce invariant after a bug class."
 
-### B2. Long-horizon clock soak *(build second)*
+### B2. Long-horizon clock soak *(SHIPPED 2026-08-06 — CI-locked)*
 
-One scripted test clock driven ~14 months month-by-month across a year
-boundary and a February, running the doctor after every advance. This is
-the cheapest flush for the time-math class — including the blast radius of
-the **known Jan 31 → Feb 28 clamp trap**, which gets FIXED as part of
-building this (fix first, then the soak proves the class).
+`TestE2E_ClockSoak_MonthEndAnchorThroughYearBoundary` (internal/api): a
+day-31-anchored subscription driven through 13 REAL cycle closes across a
+year boundary and two Februaries via the actual server + catchup
+orchestrator, doctor sweep after every advance. Runs in every integration
+CI pass — stronger than the per-release cadence originally planned.
+
+The "known Jan 31 → Feb 28 clamp trap" this section was going to fix first
+turned out to be a STALE memory: ADR-055 (`advanceAnchored` + migration
+0120) had already shipped the clamp, with unit pins in
+anniversary_month_end_test.go. Verified 2026-08-06 by enumerating every
+remaining `addIntervalIn` caller; the record was corrected rather than the
+fixed code re-fixed.
 
 ### B3. Runbook truth-rate sample *(one session)*
 
@@ -163,7 +170,7 @@ could not.
 | pre-push gate + adversarial verify | every PR (verify: mandatory on money paths) |
 | fresh-tenant S1/S2 | before each DP-facing milestone |
 | staleness flagger | before each DP-facing milestone |
-| clock soak | after B2 lands: with each release tag |
+| clock soak | CI-locked (every integration run) |
 | truth-rate sample | once now; repeat only if drift found |
 | burn-down table review | monthly, or when any trigger fires |
 
@@ -172,6 +179,6 @@ could not.
 1. Merge #750 (dep batch) — in flight.
 2. **Fix the Feb-clamp trap, then build B1 (`velox doctor`)** — one arc,
    playbook rules apply (it touches money math).
-3. B2 soak using the doctor as its oracle.
+3. ~~B2 soak~~ — SHIPPED, CI-locked (and the clamp trap was already fixed by ADR-055; memory corrected).
 4. B3 sample + B4 flagger (one session together).
 5. C-table triage pass (LOWs + register sweep for fired triggers).
