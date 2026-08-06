@@ -265,11 +265,21 @@ API reference: [`api/openapi.yaml`](api/openapi.yaml) covers the core resource r
 
 | Type        | Prefix            | What it can do                                           |
 |-------------|-------------------|----------------------------------------------------------|
-| Platform    | `vlx_platform_`   | Tenant management only                                   |
+| Platform    | `vlx_platform_`   | Tenant management only — **not issuable in-product** (see below) |
 | Secret      | `vlx_secret_`     | Full tenant access (server-side)                         |
 | Publishable | `vlx_pub_`        | Authenticate-only — no tenant data access (browser-safe) |
 
 API keys are salted-SHA-256 hashed at rest; rotation supports an optional grace window (immediate by default, up to 7 days) so in-flight requests keep authenticating while the old key winds down. (The 72-hour overlap window is Stripe's webhook-signing-secret pattern, which Velox mirrors for outbound webhook secrets — not API keys.)
+
+**On platform keys.** A platform key unlocks `/v1/tenants` (create / list / get), and it can only be issued by an existing platform key — deliberately, so a single-tenant principal can't self-mint one and escalate to every tenant. There is no in-product way to create the *first* one: it would have to be provisioned out-of-band. In practice that means `/v1/tenants` is unreachable in a stock deployment, and **the supported way to add a tenant is the bootstrap CLI** — re-run it with a different owner email:
+
+```bash
+make bootstrap VELOX_BOOTSTRAP_EMAIL=tenant-b@local \
+  VELOX_BOOTSTRAP_PASSWORD='choose-a-password' \
+  VELOX_BOOTSTRAP_TENANT='Tenant B'
+```
+
+Whether to keep the `/v1/tenants` surface at all is an open question — it has no consumer today (not in the dashboard, the OpenAPI contract, or any SDK). It's left in place rather than cut because removing it churns the audit-route registry and its integration tests for no functional gain; revisit when the hosting model (self-host vs. managed multi-tenant) is decided.
 
 ---
 

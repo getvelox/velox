@@ -78,7 +78,17 @@ func (h *customerPortalHandler) listInvoices(w http.ResponseWriter, r *http.Requ
 }
 
 // overview returns a consolidated view of a customer: active subscriptions,
-// recent invoices, and current-period usage summary.
+// the 5 most-recent invoices, and outstanding balance. It does NOT return a
+// usage summary — the comment said so for a while and the response never
+// carried one.
+//
+// Known gap: there is no customer lookup here, so an unknown customer_id —
+// a typo, or an id belonging to another tenant — returns 200 with an empty
+// shell rather than 404. That is not a leak (every field comes from
+// tenant-scoped queries, and a nonexistent id behaves identically to a
+// cross-tenant one, so there is no existence oracle), but it does mean a
+// mistyped id reads as "this customer has nothing" instead of "no such
+// customer". Fixing it needs a customer store wired into this handler.
 func (h *customerPortalHandler) overview(w http.ResponseWriter, r *http.Request) {
 	tenantID := auth.TenantID(r.Context())
 	customerID := chi.URLParam(r, "customer_id")

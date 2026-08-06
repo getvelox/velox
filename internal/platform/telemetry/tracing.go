@@ -39,10 +39,22 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 		serviceName = "velox"
 	}
 
+	// Schemaless on purpose. resource.Merge REFUSES to merge two resources
+	// carrying different schema URLs, and resource.Default() reports whatever
+	// schema the SDK ships with — so pairing it with a pinned
+	// semconv/vX.Y.Z resource breaks the moment the SDK's schema moves ahead
+	// of the import. It had: the SDK sits at 1.44.0 (schema 1.41.0) while the
+	// import pinned 1.27.0, and Init returned
+	// "conflicting Schema URL: …/1.41.0 and …/1.27.0". That error is fatal at
+	// boot, so simply setting OTEL_EXPORTER_OTLP_ENDPOINT — the documented way
+	// to turn tracing on — stopped the server from starting at all.
+	//
+	// A schemaless resource merges with anything, so the attribute lands and
+	// Default()'s schema is preserved. This cannot drift again on an SDK bump;
+	// re-pinning semconv to match would only reset the clock.
 	res, err := resource.Merge(
 		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+		resource.NewSchemaless(
 			semconv.ServiceName(serviceName),
 		),
 	)

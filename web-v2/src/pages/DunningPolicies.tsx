@@ -179,11 +179,16 @@ export default function DunningPoliciesPage() {
                         <Star size={14} className="mr-1" /> Make default
                       </Button>
                     )}
-                    <Button variant="ghost" size="sm" onClick={() => setEditingPolicy(p)}>
+                    {/* Icon-only actions carry the policy name in their
+                        accessible name. Without it both read as bare
+                        "button" — and on a list of N policies that gives a
+                        screen-reader user no way to tell which row's
+                        DESTRUCTIVE action they are on. */}
+                    <Button variant="ghost" size="sm" aria-label={`Edit policy ${p.name}`} onClick={() => setEditingPolicy(p)}>
                       <Pencil size={14} />
                     </Button>
                     {!p.is_default && (
-                      <Button variant="ghost" size="sm" onClick={() => handleDelete(p)}>
+                      <Button variant="ghost" size="sm" aria-label={`Delete policy ${p.name}`} onClick={() => handleDelete(p)}>
                         <Trash2 size={14} className="text-destructive" />
                       </Button>
                     )}

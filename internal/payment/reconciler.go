@@ -456,7 +456,18 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 
 	switch res.Status {
 	case "succeeded":
-		return r.settle(ctx, inv, res.ID, res.AmountReceivedCents, false, "", terminalSucceeded, res.Status)
+		// Carry the charge's contracted instant into the settle, exactly as the
+		// inline and webhook paths do. Without it SettleSucceeded falls back to
+		// the invoice pin, which resolves the clock's CURRENT frozen_time — so a
+		// recovery running after an advance stamped paid_at on the advance
+		// target instead of the instant the charge fired. This path recovers
+		// dropped webhooks, so it must reproduce what the dropped webhook would
+		// have written, not a fresher answer.
+		settleCtx := ctx
+		if !res.AnchorAt.IsZero() {
+			settleCtx = withSettleAnchor(ctx, res.AnchorAt)
+		}
+		return r.settle(settleCtx, inv, res.ID, res.AmountReceivedCents, false, "", terminalSucceeded, res.Status)
 
 	case "canceled", "requires_payment_method":
 		// Replicate the webhook's customer-email suppression from the PI

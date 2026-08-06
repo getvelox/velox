@@ -85,3 +85,60 @@ func TestRequestID_IgnoresClientSuppliedHeader(t *testing.T) {
 		}
 	})
 }
+
+// TestRequestID_HeaderSetForNonRespondResponses pins the header fallback the
+// dashboard relies on when an error envelope will not parse.
+//
+// The id used to be written only by respond.JSON, so any response that never
+// reached a respond helper carried no id at all — not in the body, not in the
+// header. chi's default "404 page not found" for an unrouted path and
+// net/http's plain-text 400 are precisely those responses, which made the
+// unparseable-envelope case the one case with no id to fall back to.
+func TestRequestID_HeaderSetForNonRespondResponses(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		// Writes a status and a plain-text body without touching respond.*,
+		// standing in for chi's NotFoundHandler.
+		"plain-text 404": func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		},
+		// Writes nothing at all — the header must still be on the response.
+		"empty body": func(_ http.ResponseWriter, _ *http.Request) {},
+		// Hijack-free panic-adjacent case: status only.
+		"status only": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	}
+
+	for name, handler := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mw.RequestID(handler).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/nope", nil))
+
+			got := rec.Header().Get("Velox-Request-Id")
+			if got == "" {
+				t.Fatal("Velox-Request-Id header is absent; a caller with an unparseable body has no id to report")
+			}
+			if !strings.HasPrefix(got, "req_") {
+				t.Fatalf("Velox-Request-Id = %q, want the server-minted req_ prefix", got)
+			}
+		})
+	}
+}
+
+// TestRequestID_HeaderMatchesContextID guards against the header and the
+// audit-log id drifting apart: support correlates the value a caller reports
+// from the header against audit_log.request_id, which is stamped from ctx.
+func TestRequestID_HeaderMatchesContextID(t *testing.T) {
+	var fromCtx string
+	rec := httptest.NewRecorder()
+	mw.RequestID(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		fromCtx = chimw.GetReqID(r.Context())
+	})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/customers", nil))
+
+	if fromCtx == "" {
+		t.Fatal("no request id in context")
+	}
+	if got := rec.Header().Get("Velox-Request-Id"); got != fromCtx {
+		t.Fatalf("header %q != context id %q — a reported id would not find its audit row", got, fromCtx)
+	}
+}

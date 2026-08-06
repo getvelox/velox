@@ -92,6 +92,18 @@ type IngestInput struct {
 	Dimensions     map[string]any  `json:"dimensions,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
 	Timestamp      *time.Time      `json:"timestamp,omitempty"`
+	// ObservedCostMicros is the provider's OWN reported cost for this one
+	// event, in micro-dollars — the ADR-079 D4 fast-follow. When set it wins
+	// over rate-table inference and stamps provider_cost_source='observed';
+	// when nil the table path is unchanged.
+	//
+	// The caller must have already applied D4's rule, because this layer
+	// cannot re-derive it: only a PER-HALF figure may arrive here
+	// (input_cost onto the input event, output_cost onto the output event).
+	// A whole-call figure must never reach this field — it would be stamped
+	// onto each half and multi-count COGS, which is exactly why phase 1
+	// stamped nothing at all.
+	ObservedCostMicros *int64 `json:"observed_cost_micros,omitempty"`
 }
 
 func (s *Service) Ingest(ctx context.Context, tenantID string, input IngestInput) (domain.UsageEvent, error) {
@@ -330,6 +342,10 @@ func (s *Service) prepare(ctx context.Context, tenantID string, input IngestInpu
 		IdempotencyKey: input.IdempotencyKey,
 		Timestamp:      ts,
 		Origin:         origin,
+		// Carries the observed cost INTO the INSERT, where it either wins
+		// over the rate table or is replaced by the table's figure on
+		// RETURNING. Nil leaves the phase-1 behaviour untouched.
+		ProviderCostMicros: input.ObservedCostMicros,
 	}, nil
 }
 

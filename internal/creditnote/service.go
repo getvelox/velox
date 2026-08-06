@@ -595,11 +595,19 @@ func (s *Service) RetryPendingCreditNoteTaxReversal(ctx context.Context, batch i
 			errsOut = append(errsOut, fmt.Errorf("get invoice for pending tax reversal %s: %w", cn.ID, err))
 			continue
 		}
-		if inv.TaxTransactionID == "" {
-			// No upstream transaction to reverse (provider changed / legacy) —
-			// nothing to recover; clear the marker so it leaves the scan.
-			if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, false); err != nil {
-				errsOut = append(errsOut, fmt.Errorf("clear stale tax_reversal_pending for %s: %w", cn.ID, err))
+		// Nothing to reverse, in either of its two shapes: no upstream
+		// transaction at all (provider changed / legacy), or a transaction
+		// that carried ZERO tax — reversing it is a no-op that returns no
+		// transaction id, so tax_transaction_id stays empty and the row
+		// re-qualifies through the scan's structural arm on the very next
+		// tick. Without the zero-tax half this re-drove a pointless Stripe
+		// call every tick until the 24h window aged it out (~288 calls per
+		// affected credit note) and reported advanced=1 the whole time.
+		if inv.TaxTransactionID == "" || inv.TaxAmountCents == 0 {
+			if cn.TaxReversalPending {
+				if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, false); err != nil {
+					errsOut = append(errsOut, fmt.Errorf("clear stale tax_reversal_pending for %s: %w", cn.ID, err))
+				}
 			}
 			continue
 		}
@@ -620,9 +628,23 @@ func (s *Service) RetryPendingCreditNoteTaxReversal(ctx context.Context, batch i
 				continue
 			}
 		}
-		if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, false); err != nil {
-			errsOut = append(errsOut, fmt.Errorf("clear tax_reversal_pending for %s: %w", cn.ID, err))
-			continue
+		// Only write when the marker is actually set. This used to run
+		// unconditionally, and rows reached here via the SECOND arm of
+		// ListPendingCreditNoteTaxReversal's predicate — tax_transaction_id
+		// empty, marker already false — which made it a no-op UPDATE that
+		// still bumped updated_at. That defeated the 24h window the scan
+		// relies on to age a row out: a zero-tax reversal returns no
+		// transaction id, so tax_transaction_id stayed empty, the row
+		// requalified next tick, and the sweep refreshed its own
+		// eligibility. Observed live as advanced=1 on every tick forever
+		// with zero rows actually pending, re-filing a reversal at Stripe
+		// every 5 minutes (deduped there by the per-CN reference, so no
+		// money moved) and leaving the metric unable to ever read healthy.
+		if cn.TaxReversalPending {
+			if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, false); err != nil {
+				errsOut = append(errsOut, fmt.Errorf("clear tax_reversal_pending for %s: %w", cn.ID, err))
+				continue
+			}
 		}
 		reversed++
 	}

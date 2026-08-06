@@ -3,6 +3,7 @@ package litellm
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -263,6 +264,7 @@ func MapPayload(p StandardLoggingPayload) ([]ExternalIngest, error) {
 			IdempotencyKey:     p.ID + ":" + TokenTypeInput,
 			Timestamp:          ts,
 			Metadata:           buildEventMetadata(p, TokenTypeInput),
+			ObservedCostMicros: observedCostMicros(p, TokenTypeInput),
 		})
 	}
 	if cacheRead > 0 {
@@ -273,7 +275,10 @@ func MapPayload(p StandardLoggingPayload) ([]ExternalIngest, error) {
 			Dimensions:         dimsWithTokenType(dims, TokenTypeCacheRead),
 			IdempotencyKey:     p.ID + ":" + TokenTypeCacheRead,
 			Timestamp:          ts,
-			Metadata:           buildEventMetadata(p, TokenTypeCacheRead),
+			// Deliberately no observed cost: D4 sends cache_read to table
+			// inference. CostBreakdown.InputCost is the whole input side, so
+			// attaching it here would double-count against the input half.
+			Metadata: buildEventMetadata(p, TokenTypeCacheRead),
 		})
 	}
 	if p.Usage.CompletionTokens > 0 {
@@ -285,6 +290,7 @@ func MapPayload(p StandardLoggingPayload) ([]ExternalIngest, error) {
 			IdempotencyKey:     p.ID + ":" + TokenTypeOutput,
 			Timestamp:          ts,
 			Metadata:           buildEventMetadata(p, TokenTypeOutput),
+			ObservedCostMicros: observedCostMicros(p, TokenTypeOutput),
 		})
 	}
 
@@ -332,6 +338,10 @@ type ExternalIngest struct {
 	IdempotencyKey     string          `json:"idempotency_key,omitempty"`
 	Timestamp          *time.Time      `json:"timestamp,omitempty"`
 	Metadata           map[string]any  `json:"metadata,omitempty"`
+	// ObservedCostMicros is LiteLLM's OWN cost for this one half, in
+	// micro-dollars — the ADR-079 D4 fast-follow, set only where D4 permits
+	// (see observedCostMicros). nil means "fall to rate-table inference".
+	ObservedCostMicros *int64 `json:"observed_cost_micros,omitempty"`
 }
 
 // buildEventMetadata composes the per-event metadata blob: LiteLLM's
@@ -381,3 +391,48 @@ func unixSecondsToTime(secs float64) time.Time {
 // _ ensures the usage package import stays — the handler uses
 // usage.IngestInput (resolved form) downstream.
 var _ = usage.IngestInput{}
+
+// observedCostMicros returns LiteLLM's own cost for ONE token half, in
+// micro-dollars, or nil to fall back to rate-table inference.
+//
+// It encodes ADR-079 D4 verbatim, and every clause is load-bearing:
+//
+//   - Only per-half CostBreakdown is eligible — input_cost onto the input
+//     event, output_cost onto the output event. A single call fans out to up
+//     to three events, so stamping any whole-call figure on each half would
+//     multi-count COGS by up to 3×. That risk is the reason phase 1 stamped
+//     nothing at all.
+//   - ResponseCost is a whole-call figure and is therefore NEVER used here,
+//     however tempting it is as a fallback when CostBreakdown is absent.
+//   - cache_read gets nil: InputCost covers the whole input side, so
+//     attaching it to the cache-read half as well would double-count it
+//     against the uncached-input half.
+//   - Non-finite or negative values are rejected rather than clamped. A NaN
+//     would otherwise become a garbage int64 and silently corrupt margin;
+//     falling back to the rate table is the honest answer.
+//   - Zero is a real answer (a free/credited call), not "absent" — it is
+//     stamped as 0 with source 'observed' rather than dropped, so the margin
+//     card can tell "cost was zero" from "we don't know the cost".
+//
+// Dollars-float to micro-dollars uses ROUND HALF UP, matching the rate-table
+// path's ROUND() in internal/usage/postgres.go so the two sources agree at
+// the boundary.
+func observedCostMicros(p StandardLoggingPayload, half string) *int64 {
+	if p.CostBreakdown == nil {
+		return nil
+	}
+	var dollars float64
+	switch half {
+	case TokenTypeInput:
+		dollars = p.CostBreakdown.InputCost
+	case TokenTypeOutput:
+		dollars = p.CostBreakdown.OutputCost
+	default:
+		return nil
+	}
+	if math.IsNaN(dollars) || math.IsInf(dollars, 0) || dollars < 0 {
+		return nil
+	}
+	micros := int64(math.Floor(dollars*1e6 + 0.5))
+	return &micros
+}

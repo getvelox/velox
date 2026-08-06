@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { CopyButton } from '@/components/CopyButton'
 import { useSearchParams } from 'react-router-dom'
@@ -97,6 +97,14 @@ function EndpointsTab() {
   const [deleteTarget, setDeleteTarget] = useState<WebhookEndpoint | null>(null)
   const [editTarget, setEditTarget] = useState<WebhookEndpoint | null>(null)
   const [rotatingId, setRotatingId] = useState<string | null>(null)
+  // Re-entrancy guard for rotate. `disabled={!!rotatingId}` already stops a
+  // human double-click, but only from the NEXT render — the `if (rotatingId)`
+  // check inside the handler reads the closure's stale value, so two clicks
+  // dispatched in one tick both passed it and rotated the secret twice. A ref
+  // updates synchronously, so it holds inside that same tick. Rotating twice
+  // matters: each rotation demotes the prior secret into the parallel-validity
+  // window, so a double fire can retire a secret subscribers are still using.
+  const rotateInFlight = useRef(false)
   const queryClient = useQueryClient()
 
   const { data, isLoading: loading, error: loadError, refetch } = useQuery({
@@ -217,7 +225,8 @@ function EndpointsTab() {
                         <Button variant="outline" size="sm" className="h-7 text-xs"
                           disabled={!!rotatingId}
                           onClick={async () => {
-                            if (rotatingId) return
+                            if (rotateInFlight.current) return
+                            rotateInFlight.current = true
                             setRotatingId(ep.id)
                             try {
                               const res = await api.rotateWebhookSecret(ep.id)
@@ -227,6 +236,7 @@ function EndpointsTab() {
                             } catch (err) {
                               showApiError(err, 'Failed to rotate secret')
                             } finally {
+                              rotateInFlight.current = false
                               setRotatingId(null)
                             }
                           }}>

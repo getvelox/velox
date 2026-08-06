@@ -72,11 +72,19 @@ func (h *Handler) Routes() chi.Router {
 // the existing /v1/usage-events/batch response so partners using
 // both surfaces see one shape:
 //
-//	{ "accepted": N, "skipped": M, "errors": [{ "id": "...", "error": "..." }] }
+//	{ "accepted": N, "deduplicated": D, "skipped": M, "errors": [{ "id": "...", "error": "..." }] }
+//
+// accepted counts rows the store NEWLY recorded. Deduplicated counts rows
+// it already held — a success, since LiteLLM redelivering a batch is the
+// happy path, but not new usage. They were previously summed into
+// accepted, so a pure replay reported the same number as the original
+// delivery and an operator reconciling spend could not tell a retry from
+// fresh consumption. /v1/usage-events/batch already separated the two.
 type SpendResponse struct {
-	Accepted int             `json:"accepted"`
-	Skipped  int             `json:"skipped"`
-	Errors   []SpendRowError `json:"errors,omitempty"`
+	Accepted     int             `json:"accepted"`
+	Deduplicated int             `json:"deduplicated"`
+	Skipped      int             `json:"skipped"`
+	Errors       []SpendRowError `json:"errors,omitempty"`
 }
 
 // SpendRowError carries the per-payload reason a particular row was
@@ -143,14 +151,21 @@ func (h *Handler) spend(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, ing := range ingests {
-			if err := h.persist(r.Context(), tenantID, ing); err != nil {
+			switch err := h.persist(r.Context(), tenantID, ing); {
+			case err == nil:
+				resp.Accepted++
+			case errors.Is(err, errDuplicateRow):
+				// Already held by the store. Still a success — LiteLLM
+				// retrying a delivered batch is the happy path — but
+				// counting it as accepted told an operator reconciling
+				// spend that a replay had recorded fresh usage.
+				resp.Deduplicated++
+			default:
 				resp.Errors = append(resp.Errors, SpendRowError{
 					ID:    payload.ID,
 					Error: err.Error(),
 				})
-				continue
 			}
-			resp.Accepted++
 		}
 	}
 
@@ -158,6 +173,7 @@ func (h *Handler) spend(w http.ResponseWriter, r *http.Request) {
 		slog.WarnContext(r.Context(), "litellm spend: partial failure",
 			"tenant_id", tenantID,
 			"accepted", resp.Accepted,
+			"deduplicated", resp.Deduplicated,
 			"skipped", resp.Skipped,
 			"errors", len(resp.Errors),
 		)
@@ -187,6 +203,10 @@ func (h *Handler) persist(ctx context.Context, tenantID string, ing ExternalInge
 		Dimensions:     ing.Dimensions,
 		IdempotencyKey: ing.IdempotencyKey,
 		Timestamp:      ing.Timestamp,
+		// ADR-079 D4: the provider's own per-half cost, already filtered by
+		// observedCostMicros to the halves D4 allows. nil leaves rate-table
+		// inference in charge, which is every pre-existing ingest path.
+		ObservedCostMicros: ing.ObservedCostMicros,
 	}
 
 	if _, err := h.ingester.Ingest(ctx, tenantID, input); err != nil {
@@ -200,12 +220,18 @@ func (h *Handler) persist(ctx context.Context, tenantID string, ing ExternalInge
 		// a real persistence problem and bubbles to the partial-failure
 		// accounting.
 		if errors.Is(err, errs.ErrDuplicateKey) || errors.Is(err, errs.ErrAlreadyExists) {
-			return nil
+			return errDuplicateRow
 		}
 		return err
 	}
 	return nil
 }
+
+// errDuplicateRow marks a row the store already held. It is a successful
+// outcome, not a failure — it just must not be counted as newly recorded,
+// so a replayed batch reports what it actually changed. Never returned to
+// the caller.
+var errDuplicateRow = errors.New("litellm: row already ingested")
 
 // decodeBody normalizes the request body into a slice of payloads.
 // Accepts:

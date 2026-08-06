@@ -1639,6 +1639,13 @@ type recordingTaxCommitter struct {
 	err   error
 }
 
+// The fake's check always passes — expiry behavior is pinned by the
+// engine's own tests plus TestFinalize_ExpiredTaxCalculationBlocks, which
+// uses a fake that returns the expiry error.
+func (r *recordingTaxCommitter) CheckTaxCalculationUsable(context.Context, string, string, string) error {
+	return nil
+}
+
 func (r *recordingTaxCommitter) CommitTax(_ context.Context, _, invoiceID, _ string) error {
 	r.calls = append(r.calls, invoiceID)
 	return r.err
@@ -1849,4 +1856,100 @@ func TestRetryTax_AutoFinalize_RespectsPauseCollection(t *testing.T) {
 			t.Errorf("status = %s, want finalized — an unreadable pause state must not strand the draft", out.Status)
 		}
 	})
+}
+
+// expiredTaxCommitter is a TaxCommitter whose pre-check reports the calc as
+// expired — the shape the engine returns for a build-time calculation older
+// than the provider's 24h TTL.
+type expiredTaxCommitter struct {
+	commits int
+}
+
+func (f *expiredTaxCommitter) CheckTaxCalculationUsable(context.Context, string, string, string) error {
+	return errs.InvalidState("tax calculation expired (age 25h0m, max 23h0m) — retry tax to refresh, then finalize").
+		WithCode("tax_calculation_expired")
+}
+
+func (f *expiredTaxCommitter) CommitTax(context.Context, string, string, string) error {
+	f.commits++
+	return nil
+}
+
+// TestFinalize_ExpiredTaxCalculationBlocks pins the walk-found fix: an
+// engine-built draft whose build-time calculation has expired must be REFUSED
+// at finalize with the operator remedy — not finalized with the commit
+// failure swallowed into a log line. Pre-fix, finalize succeeded, the commit
+// warn'd, and the invoice ended up collected with tax printed on the PDF but
+// never reported to Stripe; the orphan reconciler could never recover it
+// because the same age rule blocks its re-commit.
+func TestFinalize_ExpiredTaxCalculationBlocks(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store, nil, nil)
+	committer := &expiredTaxCommitter{}
+	svc.SetTaxCommitter(committer)
+	ctx := context.Background()
+
+	// Engine-built shape: a cycle draft carrying a successful build-time
+	// calculation (the paused-collection sub's invoice is the common way one
+	// sits long enough to age).
+	store.invoices["draft1"] = domain.Invoice{
+		ID: "draft1", TenantID: "t1", Status: domain.InvoiceDraft,
+		BillingReason: domain.BillingReasonSubscriptionCycle,
+		TaxFacts: domain.TaxFacts{
+			TaxStatus: domain.InvoiceTaxOK, TaxProvider: "stripe_tax",
+			TaxCalculationID: "taxcalc_aged",
+		},
+	}
+
+	_, err := svc.Finalize(ctx, "t1", "draft1")
+	if !errors.Is(err, errs.ErrInvalidState) {
+		t.Fatalf("finalize of an expired-calc draft must refuse with ErrInvalidState, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "retry tax to refresh, then finalize") {
+		t.Fatalf("the refusal must carry the operator remedy, got %v", err)
+	}
+	// The load-bearing halves: the invoice did NOT transition, and the
+	// commit was never attempted against the expired calc.
+	if got := store.invoices["draft1"].Status; got != domain.InvoiceDraft {
+		t.Fatalf("invoice must stay draft after the refusal, got %s", got)
+	}
+	if committer.commits != 0 {
+		t.Fatalf("CommitTax must not run against an expired calc, ran %d times", committer.commits)
+	}
+}
+
+// TestFinalize_CommittedCalcSkipsExpiryCheck is the refinement the LIVE walk
+// forced: engine-built cycle invoices commit their tax at BUILD time, so the
+// common paused-collection draft carries calc + transaction together. An aged
+// calc with a committed transaction must NOT block finalize (nothing is left
+// to commit) and must NOT re-commit (expiry noise, pointless provider call).
+// The first version of the pre-check blocked this shape — sending the
+// operator to "retry tax", which would have minted a second calculation
+// beside the committed transaction: double-reported tax.
+func TestFinalize_CommittedCalcSkipsExpiryCheck(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store, nil, nil)
+	committer := &expiredTaxCommitter{} // Check would refuse — must never be consulted
+	svc.SetTaxCommitter(committer)
+
+	store.invoices["draft2"] = domain.Invoice{
+		ID: "draft2", TenantID: "t1", Status: domain.InvoiceDraft,
+		BillingReason: domain.BillingReasonSubscriptionCycle,
+		TaxFacts: domain.TaxFacts{
+			TaxStatus: domain.InvoiceTaxOK, TaxProvider: "stripe_tax",
+			TaxCalculationID: "taxcalc_aged",
+		},
+		TaxTransactionID: "tax_committed_at_build",
+	}
+
+	got, err := svc.Finalize(context.Background(), "t1", "draft2")
+	if err != nil {
+		t.Fatalf("an aged-but-committed calc must not block finalize: %v", err)
+	}
+	if got.Status != domain.InvoiceFinalized {
+		t.Fatalf("want finalized, got %s", got.Status)
+	}
+	if committer.commits != 0 {
+		t.Fatalf("no re-commit for an already-committed calc, ran %d times", committer.commits)
+	}
 }

@@ -750,14 +750,20 @@ func classifyTaxAttention(inv Invoice, atc AttentionContext, severity AttentionS
 		Since:    inv.TaxDeferredAt,
 		Code:     "tax." + errorCode,
 	}
-	// Exhaustion escalates. After MaxTaxRetryAttempts the reconciler
+	// Escalate whenever NO automatic mover remains. Exhaustion proves it
+	// for retryable codes: after MaxTaxRetryAttempts the reconciler
 	// permanently excludes the invoice (tax_retry.go predicate), so a
 	// "retrying automatically" banner would soothe forever over an
-	// invoice nothing will touch — the operator is the only mover, and
-	// the severity must say so.
+	// invoice nothing will touch. A NON-retryable code is in that state
+	// from birth — provider_auth (rotate the key) and
+	// customer_data_invalid (fix the address) never enter the retry scan
+	// at all — yet it used to sit at warning while an exhausted retryable
+	// code read critical: the tier that means "self-healing in progress"
+	// was shown precisely where nothing was in progress. The operator is
+	// the only mover in both shapes, and the severity must say so.
 	retryable := TaxErrorCodeRetryable(errorCode)
 	exhausted := retryable && inv.TaxRetryCount >= MaxTaxRetryAttempts
-	if exhausted {
+	if exhausted || !retryable {
 		att.Severity = AttentionSeverityCritical
 	}
 	// A real scheduled next attempt exists only while retries remain;

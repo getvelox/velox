@@ -357,8 +357,8 @@ export default function SettingsPage() {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   <div>
-                    <Label>Business name</Label>
-                    <Input type="text" placeholder="Acme Inc." maxLength={255}
+                    <Label htmlFor="settings-company-name">Business name</Label>
+                    <Input id="settings-company-name" type="text" placeholder="Acme Inc." maxLength={255}
                       {...register('company_name')}
                       className={cn('mt-1', formErrors.company_name && 'border-destructive')} />
                     {formErrors.company_name
@@ -366,8 +366,8 @@ export default function SettingsPage() {
                       : <p className="text-xs text-muted-foreground mt-1">Displayed on invoice headers</p>}
                   </div>
                   <div>
-                    <Label>Email</Label>
-                    <Input type="email" placeholder="billing@acme.com" maxLength={254}
+                    <Label htmlFor="settings-company-email">Email</Label>
+                    <Input id="settings-company-email" type="email" placeholder="billing@acme.com" maxLength={254}
                       {...register('company_email')}
                       className={cn('mt-1', formErrors.company_email && 'border-destructive')} />
                     {formErrors.company_email
@@ -375,15 +375,15 @@ export default function SettingsPage() {
                       : <p className="text-xs text-muted-foreground mt-1">Reply-to address on invoice emails</p>}
                   </div>
                   <div>
-                    <Label>Phone</Label>
-                    <Input type="tel" placeholder="+1 (555) 123-4567" maxLength={20}
+                    <Label htmlFor="settings-company-phone">Phone</Label>
+                    <Input id="settings-company-phone" type="tel" placeholder="+1 (555) 123-4567" maxLength={20}
                       {...register('company_phone')}
                       className={cn('mt-1', formErrors.company_phone && 'border-destructive')} />
                     {formErrors.company_phone && <p className="text-xs text-destructive mt-1">{formErrors.company_phone.message}</p>}
                   </div>
                   <div>
-                    <Label>Support URL</Label>
-                    <Input type="url" placeholder="https://acme.com/support" maxLength={500}
+                    <Label htmlFor="settings-support-url">Support URL</Label>
+                    <Input id="settings-support-url" type="url" placeholder="https://acme.com/support" maxLength={500}
                       {...register('support_url')}
                       className={cn('mt-1', formErrors.support_url && 'border-destructive')} />
                     {formErrors.support_url
@@ -391,8 +391,8 @@ export default function SettingsPage() {
                       : <p className="text-xs text-muted-foreground mt-1">Shown in invoice footers so customers can find help</p>}
                   </div>
                   <div className="md:col-span-2">
-                    <Label>Logo URL</Label>
-                    <Input type="url" placeholder="https://acme.com/logo.png" maxLength={500}
+                    <Label htmlFor="settings-logo-url">Logo URL</Label>
+                    <Input id="settings-logo-url" type="url" placeholder="https://acme.com/logo.png" maxLength={500}
                       {...register('logo_url')}
                       className={cn('mt-1', formErrors.logo_url && 'border-destructive')} />
                     {formErrors.logo_url
@@ -402,7 +402,7 @@ export default function SettingsPage() {
                         : <p className="text-xs text-muted-foreground mt-1">Public HTTPS URL — e.g. Cloudinary, S3 public object, or your CDN. Rendered at the top of invoice PDFs.</p>}
                   </div>
                   <div className="md:col-span-2">
-                    <Label>Brand color</Label>
+                    <Label htmlFor="settings-brand-color">Brand color</Label>
                     <div className="mt-1 flex items-center gap-2">
                       <input
                         type="color"
@@ -412,6 +412,7 @@ export default function SettingsPage() {
                         className="h-9 w-12 cursor-pointer rounded-md border border-border bg-background p-1"
                       />
                       <Input
+                        id="settings-brand-color"
                         type="text"
                         placeholder="#1f6feb"
                         maxLength={7}
@@ -457,26 +458,26 @@ export default function SettingsPage() {
                     {formErrors.company_country && <p className="text-xs text-destructive mt-1">{formErrors.company_country.message}</p>}
                   </div>
                   <div className="md:col-span-6">
-                    <Label>Address line 1</Label>
-                    <Input type="text" placeholder="123 Main Street" maxLength={200}
+                    <Label htmlFor="settings-company-address-line1">Address line 1</Label>
+                    <Input id="settings-company-address-line1" type="text" placeholder="123 Main Street" maxLength={200}
                       {...register('company_address_line1')}
                       className={cn('mt-1', formErrors.company_address_line1 && 'border-destructive')} />
                     {formErrors.company_address_line1 && <p className="text-xs text-destructive mt-1">{formErrors.company_address_line1.message}</p>}
                   </div>
                   <div className="md:col-span-6">
-                    <Label>Address line 2 <span className="text-muted-foreground font-normal">(optional)</span></Label>
-                    <Input type="text" placeholder="Suite, floor, etc." maxLength={200}
+                    <Label htmlFor="settings-company-address-line2">Address line 2 <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                    <Input id="settings-company-address-line2" type="text" placeholder="Suite, floor, etc." maxLength={200}
                       {...register('company_address_line2')}
                       className={cn('mt-1', formErrors.company_address_line2 && 'border-destructive')} />
                   </div>
                   <div className="md:col-span-2">
-                    <Label>City</Label>
-                    <Input type="text" placeholder="San Francisco" maxLength={100}
+                    <Label htmlFor="settings-company-city">City</Label>
+                    <Input id="settings-company-city" type="text" placeholder="San Francisco" maxLength={100}
                       {...register('company_city')}
                       className={cn('mt-1', formErrors.company_city && 'border-destructive')} />
                   </div>
                   <div className="md:col-span-2">
-                    <Label>{stateLabel}</Label>
+                    <Label htmlFor="settings-company-state">{stateLabel}</Label>
                     {stateOptions ? (
                       <Combobox
                         value={form.company_state}
@@ -487,14 +488,14 @@ export default function SettingsPage() {
                         className="mt-1"
                       />
                     ) : (
-                      <Input type="text" maxLength={100}
+                      <Input id="settings-company-state" type="text" maxLength={100}
                         {...register('company_state')}
                         className={cn('mt-1', formErrors.company_state && 'border-destructive')} />
                     )}
                   </div>
                   <div className="md:col-span-2">
-                    <Label>Postal code</Label>
-                    <Input type="text" placeholder={postalPlaceholder} maxLength={20}
+                    <Label htmlFor="settings-company-postal-code">Postal code</Label>
+                    <Input id="settings-company-postal-code" type="text" placeholder={postalPlaceholder} maxLength={20}
                       {...register('company_postal_code')}
                       className={cn('mt-1', formErrors.company_postal_code && 'border-destructive')} />
                   </div>
@@ -590,10 +591,10 @@ export default function SettingsPage() {
                     <p className="text-xs text-muted-foreground mt-1.5">Days after issue before payment is due</p>
                   </div>
                   <div>
-                    <Label>Credit low-balance alert</Label>
+                    <Label htmlFor="settings-credit-balance-low-threshold">Credit low-balance alert</Label>
                     <div className="relative mt-1 max-w-[200px]">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">{symbol}</span>
-                      <Input inputMode="decimal"
+                      <Input id="settings-credit-balance-low-threshold" inputMode="decimal"
                         {...register('credit_balance_low_threshold')}
                         className={cn('pl-7', formErrors.credit_balance_low_threshold && 'border-destructive')}
                         placeholder="Off" />
@@ -603,8 +604,8 @@ export default function SettingsPage() {
                       : <p className="text-xs text-muted-foreground mt-1.5">Sends a webhook when a customer's credit balance drops below this amount. Leave blank to turn off. Empty and depleted balances always send their own events.</p>}
                   </div>
                   <div className="md:col-span-2">
-                    <Label>Invoice footer</Label>
-                    <Textarea
+                    <Label htmlFor="settings-invoice-footer">Invoice footer</Label>
+                    <Textarea id="settings-invoice-footer"
                       {...register('invoice_footer')}
                       rows={3}
                       maxLength={1000}
@@ -634,8 +635,8 @@ export default function SettingsPage() {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   <div>
-                    <Label>Tax ID</Label>
-                    <Input type="text" placeholder="GB123456789 · 12-3456789 · 29ABCDE1234F1Z5" maxLength={50}
+                    <Label htmlFor="settings-tax-id">Tax ID</Label>
+                    <Input id="settings-tax-id" type="text" placeholder="GB123456789 · 12-3456789 · 29ABCDE1234F1Z5" maxLength={50}
                       {...register('tax_id')}
                       className={cn('mt-1 font-mono', formErrors.tax_id && 'border-destructive')} />
                     {formErrors.tax_id
@@ -711,8 +712,8 @@ export default function SettingsPage() {
                   <>
                     <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-5">
                       <div>
-                        <Label>Tax name</Label>
-                        <Input type="text" maxLength={50} placeholder="e.g. GST, VAT, Sales Tax"
+                        <Label htmlFor="settings-tax-name">Tax name</Label>
+                        <Input id="settings-tax-name" type="text" maxLength={50} placeholder="e.g. GST, VAT, Sales Tax"
                           {...register('tax_name')}
                           className={cn('mt-1', formErrors.tax_name && 'border-destructive')} />
                         {formErrors.tax_name ? (
@@ -796,8 +797,8 @@ export default function SettingsPage() {
                 {form.tax_provider === 'stripe_tax' && (
                   <>
                     <div className="mt-6">
-                      <Label>Default product tax code</Label>
-                      <Input type="text" placeholder="txcd_10103001" maxLength={13}
+                      <Label htmlFor="settings-default-product-tax-code">Default product tax code</Label>
+                      <Input id="settings-default-product-tax-code" type="text" placeholder="txcd_10103001" maxLength={13}
                         {...register('default_product_tax_code')}
                         className={cn('mt-1 font-mono', formErrors.default_product_tax_code && 'border-destructive')} />
                       {formErrors.default_product_tax_code ? (
@@ -1385,8 +1386,8 @@ function ApiKeysForm({ livemode, connected, onSuccess }: {
     <>
       <form onSubmit={onSubmit} className="space-y-3">
         <div>
-          <Label>Secret key</Label>
-          <Input
+          <Label htmlFor="settings-secret-key">Secret key</Label>
+          <Input id="settings-secret-key"
             type="password"
             autoComplete="off"
             placeholder={livemode ? 'sk_live_...' : 'sk_test_...'}
@@ -1409,8 +1410,8 @@ function ApiKeysForm({ livemode, connected, onSuccess }: {
           </p>
         </div>
         <div>
-          <Label>Publishable key</Label>
-          <Input
+          <Label htmlFor="settings-publishable-key">Publishable key</Label>
+          <Input id="settings-publishable-key"
             type="text"
             autoComplete="off"
             placeholder={livemode ? 'pk_live_...' : 'pk_test_...'}

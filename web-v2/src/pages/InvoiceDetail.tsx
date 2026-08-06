@@ -689,6 +689,20 @@ export default function InvoiceDetailPage() {
               <MoreHorizontal size={16} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
+              {/* Drafts with a tax calculation can refresh it here. The
+                  attention banner offers Retry tax only while tax is
+                  pending/failed — but finalize also refuses a draft whose
+                  SUCCESSFUL calculation aged past the provider's 24h window,
+                  with "retry tax to refresh, then finalize". That draft has
+                  no banner, so without this item the toast names a remedy
+                  the page nowhere offers. The server gates misuse: a fresh
+                  calculation answers with a clear 409. */}
+              {invoice.status === 'draft' && !!invoice.tax_calculation_id && !invoice.tax_transaction_id && (
+                <DropdownMenuItem onClick={() => retryTaxMutation.mutate()} disabled={acting || retryTaxMutation.isPending}>
+                  <RotateCw size={14} className="mr-2" />
+                  Retry tax
+                </DropdownMenuItem>
+              )}
               {((invoice.status === 'finalized' && invoice.payment_status !== 'succeeded' && !paymentIsUnresolved(invoice.payment_status) && invoice.amount_due_cents > 0) ||
                 invoice.status === 'uncollectible') && (
                 <DropdownMenuItem onClick={() => setShowRecordPaymentDialog(true)} disabled={acting}>

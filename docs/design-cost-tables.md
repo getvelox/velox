@@ -48,11 +48,15 @@ price-change ask). Migration must EXPLICITLY add: livemode column,
 set_livemode trigger (hard-coded per-table list, 0021 pattern),
 ENABLE + FORCE ROW LEVEL SECURITY + tenant policy.
 
-**D2. Stamp at ingest, single source.** Rate-table inference ONLY. New
+**D2. Stamp at ingest, single source.** Rate-table inference in phase 1;
+observed cost added 2026-08-05 (see D4). New
 nullable columns on usage_events: `provider_cost_micros BIGINT` (int64
 micro-dollars, ROUND HALF UP at stamp; SUMs stay exact),
-`provider_cost_source TEXT CHECK IN ('table','not_applicable')` (enum
-future-proofs the observed-cost fast-follow without a migration).
+`provider_cost_source TEXT CHECK IN ('table','observed','not_applicable')`
+— the shipped constraint (`0137_provider_cost_rates.up.sql:60-62`) already
+carries `'observed'`, so the fast-follow needed no migration, exactly as
+intended. (An earlier draft of this line omitted `'observed'` and was
+stale against the migration from the day it shipped.)
 Implementation: SQL scalar subquery inside the existing store.Ingest
 INSERT — resolve `(provider, model_raw→model fallback, token_type)` from
 the event's dims against provider_cost_rates; zero extra round trips, no
@@ -66,12 +70,16 @@ NULL. Non-retroactive forever: events ingested before a rate existed stay
 NULL; NO recompute/backfill tooling (universal verified snapshot
 semantics + house no-speculative-backfill).
 
-**D4. Observed cost = named fast-follow, NOT phase 1.** Rule pinned now:
+**D4. Observed cost — SHIPPED 2026-08-05** (was: named fast-follow, not phase 1). Rule pinned now:
 per-half CostBreakdown only (input_cost→input event, output_cost→output
 event); cache_read halves and ResponseCost-only payloads fall to table
 inference; whole-call ResponseCost is NEVER stamped on a per-half event
-(3× COGS). Requires explicit plumbing (typed field ExternalIngest →
-IngestInput → domain → INSERT) — none exists. Float guard: reject
+(3× COGS). Plumbing now exists: typed `ObservedCostMicros *int64` on
+`litellm.ExternalIngest` → `usage.IngestInput` → `domain.UsageEvent` →
+the `ingestOneTx` INSERT, where a non-NULL value wins over the rate
+table and stamps `provider_cost_source='observed'`. The per-half rule is
+enforced in `litellm.observedCostMicros`, which is the only place that
+reads `CostBreakdown`. Float guard: reject
 negative/NaN, document dollars-float→micros rounding.
 
 **D5. No import in phase 1** (trigger: first operator with >10 models).

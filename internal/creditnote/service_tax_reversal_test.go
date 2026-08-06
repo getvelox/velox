@@ -451,3 +451,114 @@ func (f *fakeCreditGranter) RetireCommitSliceForReliefTx(_ context.Context, _ *s
 func (f *fakeCreditGranter) GrantForCreditNoteTx(ctx context.Context, _ *sql.Tx, _, creditNoteID string, in CreditGrantInput) error {
 	return f.GrantForCreditNote(ctx, "", creditNoteID, in)
 }
+
+// TestRetryPendingCreditNoteTaxReversal_ZeroTaxOrphanDoesNotRewriteItself pins
+// the convergence property of the sweep.
+//
+// The scan's second arm selects issued credit notes whose tax_transaction_id is
+// empty, bounded by `updated_at > now() - 24h` so a row that cannot be resolved
+// eventually ages out to manual reconcile. A zero-tax reversal succeeds but
+// returns NO transaction id, so the row's tax_transaction_id stays empty and it
+// requalifies on the next tick. That was survivable — until the sweep wrote
+// SetTaxReversalPending(false) unconditionally, including when the marker was
+// already false. The real store bumps updated_at on that UPDATE, refreshing the
+// row's own eligibility window, so the sweep re-filed a reversal at Stripe every
+// tick forever. Observed live: advanced=1 on every scheduler tick with zero rows
+// genuinely pending.
+//
+// The memStore cannot model updated_at, so the assertion is the write itself:
+// no marker write when there is no marker to clear.
+func TestRetryPendingCreditNoteTaxReversal_ZeroTaxOrphanDoesNotRewriteItself(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	invoices := &memInvoiceReader{
+		invoices: map[string]domain.Invoice{
+			"inv_zero_tax": {
+				ID: "inv_zero_tax", TenantID: "t1", CustomerID: "cus_1",
+				Status: domain.InvoicePaid, PaymentStatus: domain.PaymentSucceeded,
+				Currency: "USD", SubtotalCents: 10000,
+				TaxFacts:         domain.TaxFacts{TaxAmountCents: 0},
+				TotalAmountCents: 10000, AmountPaidCents: 10000,
+				TaxTransactionID: "tx_upstream_zero_tax",
+			},
+		},
+	}
+	// A zero-tax reversal: succeeds, returns no transaction id to store.
+	rev := &fakeTaxReverser{returnID: ""}
+	svc := NewService(store, invoices, &fakeRefunder{}, &fakeCreditGranter{})
+	svc.SetTaxReverser(rev)
+
+	cn, err := store.Create(context.Background(), "t1", domain.CreditNote{
+		InvoiceID: "inv_zero_tax", CustomerID: "cus_1", Status: domain.CreditNoteIssued,
+		TotalCents: 1000, TaxReversalPending: false, TaxTransactionID: "",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	before := store.setPendingCalls
+	if _, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(context.Background(), 10); len(sweepErrs) != 0 {
+		t.Fatalf("sweep errors: %v", sweepErrs)
+	}
+
+	if got := store.setPendingCalls - before; got != 0 {
+		t.Errorf("SetTaxReversalPending writes: got %d, want 0 — the marker was already false, "+
+			"so this write only refreshes updated_at and keeps the row inside its own 24h window", got)
+	}
+	// And no provider call either: a zero-tax transaction has nothing to
+	// reverse, so re-driving it is a round-trip that can never change the
+	// row. Leaving this in place meant ~288 pointless calls per credit note
+	// before the 24h window aged it out.
+	if len(rev.calls) != 0 {
+		t.Errorf("reverse calls: got %d, want 0 — a zero-tax invoice has nothing to reverse", len(rev.calls))
+	}
+	if got, _ := store.Get(context.Background(), "t1", cn.ID); got.TaxReversalPending {
+		t.Error("marker should remain false")
+	}
+}
+
+// TestRetryPendingCreditNoteTaxReversal_ClearsMarkerWhenActuallySet is the
+// other half: when the marker IS set, the sweep must still clear it, or a
+// genuinely pending row would never leave the fast-path arm of the scan.
+func TestRetryPendingCreditNoteTaxReversal_ClearsMarkerWhenActuallySet(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	invoices := &memInvoiceReader{
+		invoices: map[string]domain.Invoice{
+			"inv_tax": {
+				ID: "inv_tax", TenantID: "t1", CustomerID: "cus_1",
+				Status: domain.InvoicePaid, PaymentStatus: domain.PaymentSucceeded,
+				Currency: "USD", SubtotalCents: 10000,
+				TaxFacts:         domain.TaxFacts{TaxAmountCents: 1000},
+				TotalAmountCents: 11000, AmountPaidCents: 11000,
+				TaxTransactionID: "tx_upstream",
+			},
+		},
+	}
+	rev := &fakeTaxReverser{returnID: "tx_reversal_ok"}
+	svc := NewService(store, invoices, &fakeRefunder{}, &fakeCreditGranter{})
+	svc.SetTaxReverser(rev)
+
+	cn, err := store.Create(context.Background(), "t1", domain.CreditNote{
+		InvoiceID: "inv_tax", CustomerID: "cus_1", Status: domain.CreditNoteIssued,
+		TotalCents: 5500, TaxReversalPending: true, TaxTransactionID: "",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	before := store.setPendingCalls
+	if _, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(context.Background(), 10); len(sweepErrs) != 0 {
+		t.Fatalf("sweep errors: %v", sweepErrs)
+	}
+	if got := store.setPendingCalls - before; got != 1 {
+		t.Errorf("SetTaxReversalPending writes: got %d, want 1 — a set marker must be cleared", got)
+	}
+	got, _ := store.Get(context.Background(), "t1", cn.ID)
+	if got.TaxReversalPending {
+		t.Error("marker not cleared")
+	}
+	if got.TaxTransactionID != "tx_reversal_ok" {
+		t.Errorf("reversal tx id: got %q, want tx_reversal_ok", got.TaxTransactionID)
+	}
+}

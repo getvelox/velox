@@ -34,6 +34,15 @@ type InvoiceNumberer interface {
 // Stripe error shouldn't leave the invoice stuck in draft.
 type TaxCommitter interface {
 	CommitTax(ctx context.Context, tenantID, invoiceID, calculationID string) error
+	// CheckTaxCalculationUsable answers, BEFORE the finalize transition:
+	// can this invoice's build-time calculation still be committed? Non-nil
+	// means it is expired at the provider and can never commit — the one
+	// commit failure the post-finalize path must NOT swallow, because the
+	// orphan reconciler is blocked by the same age rule and the invoice
+	// would end up collected with tax printed but never reported. All
+	// internal uncertainty (store unwired, row missing, lookup error)
+	// returns nil: only a PROVEN expiry may block a finalize.
+	CheckTaxCalculationUsable(ctx context.Context, tenantID, invoiceID, calculationID string) error
 }
 
 // TaxReverser issues a reversal of the invoice's committed tax transaction
@@ -946,6 +955,32 @@ func (s *Service) Finalize(ctx context.Context, tenantID, id string) (domain.Inv
 		// that cannot have happened.
 		return domain.Invoice{}, errs.InvalidState("tax calculation failed — operator intervention required")
 	}
+	// Expired-calculation check, BEFORE the transition — and ONLY for a
+	// calculation whose transaction was never recorded. The tax commit
+	// below deliberately does not unwind a finalize (transient provider
+	// errors defer to the orphan reconciler, which re-commits within its
+	// window) — but an EXPIRED calculation is permanent: the reconciler
+	// is blocked by the same age rule, so deferring it produces an
+	// invoice collected with tax printed and never reported to Stripe.
+	// Refusing here, while the invoice is still a draft, is the only
+	// point where the guard's own remedy — "retry tax to refresh, then
+	// finalize" — is still available.
+	//
+	// The TaxTransactionID gate is load-bearing, found by walking the
+	// first version of this check against a live engine-built draft:
+	// cycle invoices commit their tax AT BUILD TIME (best-effort, right
+	// after the row is durable), so the common paused-collection draft
+	// already carries its transaction and its aged calc needs NO commit
+	// at finalize. Blocking that shape would send the operator to "retry
+	// tax", minting a second calculation beside a committed transaction —
+	// double-reported tax. Only the shape where the build-time commit
+	// FAILED (calc present, transaction absent) both needs the commit and
+	// can never get it once expired.
+	if s.taxCommitter != nil && inv.TaxCalculationID != "" && inv.TaxTransactionID == "" {
+		if err := s.taxCommitter.CheckTaxCalculationUsable(ctx, tenantID, id, inv.TaxCalculationID); err != nil {
+			return domain.Invoice{}, err
+		}
+	}
 	// Anchor issue + due dates to the finalize moment for operator-composed
 	// (manual) invoices, mirroring Stripe's finalized_at: a manual draft is
 	// "issued" when the operator finalizes it — possibly on a later test-clock
@@ -985,7 +1020,10 @@ func (s *Service) Finalize(ctx context.Context, tenantID, id string) (domain.Inv
 	// calculation id = manual/none provider — skip silently. Commit failure
 	// does not unwind finalize: the invoice is already authoritative; we log
 	// and continue so the customer-facing state stays consistent.
-	if s.taxCommitter != nil && finalized.TaxCalculationID != "" {
+	// TaxTransactionID gate mirrors the pre-check above: an already-
+	// committed calc (build-time commit succeeded) has nothing left to
+	// commit, and re-committing an aged one only produces expiry noise.
+	if s.taxCommitter != nil && finalized.TaxCalculationID != "" && finalized.TaxTransactionID == "" {
 		if err := s.taxCommitter.CommitTax(ctx, tenantID, finalized.ID, finalized.TaxCalculationID); err != nil {
 			slog.Warn("invoice: tax commit failed at finalize",
 				"error", err, "tenant_id", tenantID, "invoice_id", finalized.ID,

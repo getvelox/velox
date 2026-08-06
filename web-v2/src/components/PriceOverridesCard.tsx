@@ -55,7 +55,12 @@ function latestByKey(rules: RatingRule[]): Map<string, RatingRule> {
   return out
 }
 
-export function PriceOverridesCard({ customerId, customerTestClockId }: { customerId: string; customerTestClockId?: string }) {
+// readOnly mirrors the archived-customer gate the rest of the customer page
+// applies via !isArchived. The card renders below a banner that says "All
+// data is read-only", so leaving its Add/End controls live let an operator
+// open a full "Save override" form — and end an existing deal — on a customer
+// the page had just declared frozen.
+export function PriceOverridesCard({ customerId, customerTestClockId, readOnly = false }: { customerId: string; customerTestClockId?: string; readOnly?: boolean }) {
   const queryClient = useQueryClient()
   const [creating, setCreating] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<PriceOverride | null>(null)
@@ -81,9 +86,11 @@ export function PriceOverridesCard({ customerId, customerTestClockId }: { custom
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
         <CardTitle className="text-sm">Price overrides</CardTitle>
-        <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
-          Add override
-        </Button>
+        {!readOnly && (
+          <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
+            Add override
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {isLoading ? (
@@ -116,14 +123,16 @@ export function PriceOverridesCard({ customerId, customerTestClockId }: { custom
                       {o.reason ? `${o.reason} · ` : ''}since {formatDate(o.created_at)}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDelete(o)}
-                    aria-label={`End override on ${list?.name || o.rule_key}`}
-                    className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1"
-                  >
-                    <Trash2 size={15} />
-                  </button>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(o)}
+                      aria-label={`End override on ${list?.name || o.rule_key}`}
+                      className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
                 </div>
               )
             })}
