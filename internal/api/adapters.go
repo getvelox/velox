@@ -678,6 +678,7 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 		// JSON numbers decode to float64; dunning_warning payloads
 		// stamp attempt_number for pairing with retry rows.
 		attempt, _ := r.Payload["attempt_number"].(float64)
+		trigger, _ := r.Payload["trigger"].(string)
 		out = append(out, invoice.EmailEventRow{
 			ID:             r.ID,
 			EmailType:      r.EmailType,
@@ -688,6 +689,7 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 			LastError:      r.LastError,
 			To:             to,
 			AttemptNumber:  int(attempt),
+			Trigger:        trigger,
 			SimEffectiveAt: r.SimEffectiveAt,
 		})
 	}
@@ -699,7 +701,7 @@ func (a *invoiceEmailEventsAdapter) ListByInvoice(ctx context.Context, tenantID,
 // doesn't bleed an interface name into the api/payment dep graph.
 // Satisfied by both *email.Sender and *email.OutboxSender.
 type paymentSetupEmailSender interface {
-	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error
+	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool, trigger string) error
 }
 
 // customerSentEmailsAdapter bridges email.OutboxStore.ListByCustomer →
@@ -789,7 +791,7 @@ func (a *noPaymentMethodNotifierAdapter) NotifyNoPaymentMethod(ctx context.Conte
 		return "", fmt.Errorf("create payment update token: %w", err)
 	}
 	updateURL := fmt.Sprintf("%s?token=%s", a.paymentUpdateURL, rawToken)
-	if err := a.email.SendPaymentSetupRequest(ctx, tenantID, to, name, inv.InvoiceNumber, inv.AmountDueCents, inv.Currency, updateURL, inv.Status == domain.InvoiceUncollectible); err != nil {
+	if err := a.email.SendPaymentSetupRequest(ctx, tenantID, to, name, inv.InvoiceNumber, inv.AmountDueCents, inv.Currency, updateURL, inv.Status == domain.InvoiceUncollectible, trigger); err != nil {
 		return "", err
 	}
 	// Audit the engine-fired send so the operator can answer

@@ -31,7 +31,7 @@ func (r *recordingDeliverer) SendPaymentFailed(_ context.Context, _, _ string, _
 	r.sent = append(r.sent, TypePaymentFailed)
 	return nil
 }
-func (r *recordingDeliverer) SendPaymentSetupRequest(_ context.Context, _, _, _, _ string, _ int64, _, _ string, _ bool) error {
+func (r *recordingDeliverer) SendPaymentSetupRequest(_ context.Context, _, _, _, _ string, _ int64, _, _ string, _ bool, _ string) error {
 	r.sent = append(r.sent, TypePaymentSetupRequest)
 	return nil
 }

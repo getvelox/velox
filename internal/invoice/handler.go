@@ -149,6 +149,12 @@ type EmailEventRow struct {
 	// attempt it warns about (payload attempt_number = run.AttemptCount
 	// at send time). 0 for non-dunning types and legacy rows.
 	AttemptNumber int
+	// Trigger names why the row was enqueued (payload trigger), for
+	// types where two visually-identical rows can share one invoice —
+	// today the setup-link email: finalize_no_pm /
+	// auto_charge_retry_no_pm / operator_resend. Empty for legacy rows
+	// and types that carry no trigger.
+	Trigger string
 	// SimEffectiveAt is the billing-axis anchor stamped at enqueue
 	// (ADR-104): the simulated instant that caused the send. Nil for
 	// live-mode mail and for legacy rows enqueued before the anchor
@@ -1879,6 +1885,29 @@ func describeEmailEvent(emailType, outboxStatus, deliveryState string) (string, 
 	return desc, "succeeded"
 }
 
+// emailTriggerDetail maps an email row's enqueue trigger to the cause
+// subline rendered beneath its timeline row. Only the setup-link email
+// carries one today: it is the one type where two rows on one invoice
+// are otherwise indistinguishable (the finalize-time send and an
+// operator's Resend land with identical copy, and on a frozen clock,
+// identical timestamps). Legacy rows enqueued before the trigger was
+// recorded return "" and render exactly as before — degraded to the
+// old ambiguity, never to a guessed cause.
+func emailTriggerDetail(emailType, trigger string) string {
+	if emailType != "payment_setup_request" {
+		return ""
+	}
+	switch trigger {
+	case "finalize_no_pm":
+		return "Sent automatically — no payment method on file at finalize"
+	case "auto_charge_retry_no_pm":
+		return "Sent automatically — a charge attempt found no payment method"
+	case "operator_resend":
+		return "Resent by an operator"
+	}
+	return ""
+}
+
 // emailClause renders a suppressed dunning email row as a lowercase
 // clause for threading into the matching dunning row's detail subline
 // ("reminder sent — bounced"). Same status/verdict grammar as
@@ -2357,6 +2386,11 @@ func (h *Handler) paymentTimeline(w http.ResponseWriter, r *http.Request) {
 					EventType:    "email." + evt.EmailType,
 					Status:       status,
 					Description:  desc,
+					// Cause subline (PR #640 pattern: uniform machine title,
+					// cause underneath). Without it, a finalize-time setup
+					// link and an operator's Resend rendered byte-identical —
+					// two rows, same instant, no way to answer "why twice?".
+					Detail:       emailTriggerDetail(evt.EmailType, evt.Trigger),
 					Error:        evt.LastError,
 					IsSimulated:  sim,
 					RecordedAt:   rfc3339OrEmpty(recorded),

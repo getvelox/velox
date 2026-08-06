@@ -459,7 +459,7 @@ func (f *fakeDeliverer) SendPaymentFailed(_ context.Context, tenantID, to string
 	f.lastPublicToken = publicToken
 	return nil
 }
-func (f *fakeDeliverer) SendPaymentSetupRequest(_ context.Context, tenantID, to, name, inv string, amount int64, cur, url string, _ bool) error {
+func (f *fakeDeliverer) SendPaymentSetupRequest(_ context.Context, tenantID, to, name, inv string, amount int64, cur, url string, _ bool, _ string) error {
 	f.calls++
 	f.lastType, f.lastTenant, f.lastTo, f.lastName, f.lastInvoice = email.TypePaymentSetupRequest, tenantID, to, name, inv
 	f.lastAmount, f.lastCurrency, f.lastUpdateURL = amount, cur, url
@@ -509,6 +509,7 @@ func callDeliverer(ctx context.Context, d email.EmailDeliverer, row email.Outbox
 		AmountCents      int64    `json:"amount_cents"`
 		Currency         string   `json:"currency"`
 		AttemptNumber    int      `json:"attempt_number"`
+		Trigger          string   `json:"trigger"`
 		MaxAttempts      int      `json:"max_attempts"`
 		NextRetryDate    string   `json:"next_retry_date"`
 		Reason           string   `json:"reason"`
@@ -538,7 +539,7 @@ func callDeliverer(ctx context.Context, d email.EmailDeliverer, row email.Outbox
 	case email.TypePaymentFailed:
 		return d.SendPaymentFailed(ctx, row.TenantID, m.To, m.Cc, m.CustomerName, m.InvoiceNumber, m.Reason, m.PublicToken)
 	case email.TypePaymentSetupRequest:
-		return d.SendPaymentSetupRequest(ctx, row.TenantID, m.To, m.CustomerName, m.InvoiceNumber, m.AmountCents, m.Currency, m.UpdateURL, m.InvoiceWrittenOff)
+		return d.SendPaymentSetupRequest(ctx, row.TenantID, m.To, m.CustomerName, m.InvoiceNumber, m.AmountCents, m.Currency, m.UpdateURL, m.InvoiceWrittenOff, m.Trigger)
 	case email.TypeCreditNote:
 		return d.SendCreditNote(ctx, row.TenantID, m.To, m.Cc, m.CustomerName, m.CreditNoteNumber, m.InvoiceNumber, m.AmountCents, m.Currency, m.PDF)
 	default:

@@ -63,10 +63,20 @@ type outboxMessage struct {
 	CreditNoteNumber string `json:"credit_note_number,omitempty"`
 	AmountCents      int64  `json:"amount_cents,omitempty"`
 	Currency         string `json:"currency,omitempty"`
-	AttemptNumber    int    `json:"attempt_number,omitempty"`
-	MaxAttempts      int    `json:"max_attempts,omitempty"`
-	NextRetryDate    string `json:"next_retry_date,omitempty"`
-	Reason           string `json:"reason,omitempty"`
+	// Trigger names WHY this row was enqueued, for rows whose cause an
+	// operator cannot infer from the row itself. Two setup-link emails on
+	// one invoice — the finalize-time one and an operator's Resend — were
+	// byte-identical on the timeline, so "why did this happen twice?" had
+	// no answer on the page. The cause is already recorded in the audit
+	// log; this carries it onto the row that displays it, the same way
+	// AttemptNumber carries the pairing key for dunning reminders.
+	// Vocabulary matches the notifier's trigger argument
+	// (finalize_no_pm / auto_charge_retry_no_pm / operator_resend).
+	Trigger       string `json:"trigger,omitempty"`
+	AttemptNumber int    `json:"attempt_number,omitempty"`
+	MaxAttempts   int    `json:"max_attempts,omitempty"`
+	NextRetryDate string `json:"next_retry_date,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 	// FailureReason carries the latest decline-or-error message for
 	// dunning_warning + payment_failed templates. Surfaced inline so
 	// the customer can act (insufficient_funds → top up; lost_card →
@@ -242,7 +252,7 @@ func (s *OutboxSender) SendPaymentFailed(ctx context.Context, tenantID, to strin
 
 // SendPaymentSetupRequest enqueues a payment-setup-request email
 // (customer must set up a PM on a finalized invoice).
-func (s *OutboxSender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error {
+func (s *OutboxSender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool, trigger string) error {
 	if updateURL == "" {
 		return fmt.Errorf("update_url required: refusing to enqueue payment-setup-request email with no link")
 	}
@@ -254,6 +264,7 @@ func (s *OutboxSender) SendPaymentSetupRequest(ctx context.Context, tenantID, to
 		Currency:          currency,
 		UpdateURL:         updateURL,
 		InvoiceWrittenOff: writtenOff,
+		Trigger:           trigger,
 	})
 }
 
