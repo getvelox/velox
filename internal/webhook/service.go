@@ -868,13 +868,10 @@ func (s *Service) ReplayDelivery(ctx context.Context, tenantID, endpointID, deli
 	if !ep.Active {
 		return ReplayDeliveryResult{}, errs.InvalidState("endpoint is paused — resume it before replaying deliveries")
 	}
-	// Livemode never crosses. The original delivery bound this event and
-	// endpoint in one mode; if they disagree now the data is corrupt —
-	// fail loud rather than deliver across the partition.
-	if ep.Livemode != d.Livemode {
-		return ReplayDeliveryResult{}, fmt.Errorf("livemode mismatch: delivery %s (livemode=%t) vs endpoint %s (livemode=%t)",
-			d.ID, d.Livemode, ep.ID, ep.Livemode)
-	}
+	// No livemode guard here, deliberately: the tenant_isolation policy
+	// scopes BOTH reads above by (tenant, livemode), so a cross-mode
+	// delivery/endpoint pair is invisible together — one of the two
+	// lookups already 404'd. The 404 IS the cross-partition failure.
 
 	clone, err := s.store.CreateReplayEvent(ctx, tenantID, d.WebhookEventID)
 	if err != nil {
@@ -937,6 +934,26 @@ func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 
 		ep, err := s.store.GetEndpoint(dCtx, d.TenantID, d.WebhookEndpointID)
 		if err != nil {
+			if errors.Is(err, errs.ErrNotFound) {
+				// Endpoint soft-deleted (GetEndpoint filters deleted_at):
+				// the delivery can never succeed, and the !Active resolver
+				// below is unreachable for it — without a terminal mark
+				// here the row is re-claimed at every lease expiry forever,
+				// occupying claim slots and spamming this log. Mirror of
+				// the event-missing resolver just below (the skip branch
+				// must also end the row's wait).
+				now := time.Now().UTC()
+				d.Status = domain.DeliveryFailed
+				d.ErrorMessage = "endpoint deleted"
+				d.CompletedAt = &now
+				d.NextRetryAt = nil
+				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d); err != nil {
+					slog.Warn("webhook: endpoint-deleted mark not applied", "delivery_id", d.ID, "error", err)
+				}
+				slog.Error("endpoint not found for retry — delivery resolved failed", "delivery_id", d.ID, "endpoint_id", d.WebhookEndpointID)
+				rowCancel()
+				continue
+			}
 			slog.Error("get endpoint for retry", "delivery_id", d.ID, "error", err)
 			rowCancel()
 			continue

@@ -229,12 +229,17 @@ function EndpointsTab() {
                       })()}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{formatDate(ep.created_at)}</TableCell>
-                    <TableCell className="text-right">
+                    {/* stopPropagation on the CELL, not the buttons: a disabled
+                        Button carries pointer-events-none, so clicks on it
+                        hit-test through to the cell — button-level handlers
+                        never see them, and without this the fall-through would
+                        bubble to the row's navigate and unmount a mid-flight
+                        rotation before its show-once secret dialog rendered. */}
+                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-end gap-1">
                         <Button variant="outline" size="sm" className="h-7 text-xs"
                           disabled={!!rotatingId}
-                          onClick={async (e) => {
-                            e.stopPropagation()
+                          onClick={async () => {
                             if (rotateInFlight.current) return
                             rotateInFlight.current = true
                             setRotatingId(ep.id)
@@ -253,11 +258,11 @@ function EndpointsTab() {
                           {rotatingId === ep.id ? <><Loader2 size={12} className="animate-spin mr-1" />Rotating…</> : 'Rotate Secret'}
                         </Button>
                         <Button variant="outline" size="sm" className="h-7 text-xs"
-                          onClick={(e) => { e.stopPropagation(); setEditTarget(ep) }}>
+                          onClick={() => setEditTarget(ep)}>
                           Edit
                         </Button>
                         <Button variant="outline" size="sm" className="h-7 text-xs text-destructive hover:text-destructive"
-                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(ep) }}>
+                          onClick={() => setDeleteTarget(ep)}>
                           Delete
                         </Button>
                       </div>

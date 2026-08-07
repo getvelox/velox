@@ -1055,6 +1055,51 @@ func TestReplayDelivery_PausedEndpointRejected_NoOrphanClone(t *testing.T) {
 	}
 }
 
+// TestRetryPending_DeletedEndpointResolvesDelivery pins the retry
+// worker's deleted-endpoint resolver: a pending delivery whose endpoint
+// has been (soft-)deleted must be marked failed terminally — not skipped.
+// Pre-fix the GetEndpoint-error branch logged and continued, so the row
+// was re-claimed at every lease expiry forever: GetEndpoint filters
+// deleted_at, which made the !Active resolver below it unreachable for
+// deleted endpoints (a skip that never ends the row's wait).
+func TestRetryPending_DeletedEndpointResolvesDelivery(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 500})
+	ctx := context.Background()
+
+	ep, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/hook", Events: []string{"invoice.finalized"},
+	})
+	_ = svc.Dispatch(ctx, "t1", "invoice.finalized", map[string]any{"id": "inv_1"})
+	if got := store.deliveries[0].Status; got != domain.DeliveryPending {
+		t.Fatalf("fixture delivery status = %s, want pending after a 500 attempt", got)
+	}
+
+	if err := svc.DeleteEndpoint(ctx, "t1", ep.Endpoint.ID); err != nil {
+		t.Fatalf("delete endpoint: %v", err)
+	}
+	// Make the row due (the failed attempt scheduled its retry in the future).
+	past := time.Now().Add(-time.Minute)
+	store.dmu.Lock()
+	store.deliveries[0].NextRetryAt = &past
+	store.dmu.Unlock()
+
+	if err := svc.RetryPendingDeliveries(ctx); err != nil {
+		t.Fatalf("retry pending: %v", err)
+	}
+
+	d := store.deliveries[0]
+	if d.Status != domain.DeliveryFailed {
+		t.Errorf("delivery status = %s, want failed — the deleted-endpoint row is still cycling through the retry pool", d.Status)
+	}
+	if d.ErrorMessage != "endpoint deleted" {
+		t.Errorf("error message = %q, want %q", d.ErrorMessage, "endpoint deleted")
+	}
+	if d.NextRetryAt != nil || d.CompletedAt == nil {
+		t.Errorf("terminal mark incomplete: next_retry_at=%v completed_at=%v", d.NextRetryAt, d.CompletedAt)
+	}
+}
+
 // TestReplayDelivery_WrongEndpointPath404s: a real delivery id reached
 // under a DIFFERENT endpoint's route resolves as not-found — the URL
 // pairing is authorization shape, not a hint.

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -40,6 +40,12 @@ export default function WebhookEndpointDetailPage() {
   const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState<string | null>(null)
   const [replayingId, setReplayingId] = useState<string | null>(null)
+  // Re-entrancy guard: `disabled` + the replayingId check only take effect
+  // from the NEXT render, so two clicks dispatched in one tick both pass
+  // them (the rotate handler on the endpoints page documents this race
+  // double-firing for real). A ref updates synchronously and holds inside
+  // the tick. Firing twice matters: each fire is a real outbound webhook.
+  const replayInFlight = useRef(false)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['webhook-endpoint-deliveries', id],
@@ -49,21 +55,37 @@ export default function WebhookEndpointDetailPage() {
     // refetch keeps the page honest without an SSE dependency.
     refetchInterval: 10_000,
   })
+  // Header numbers come from the SAME stats roll-up as the endpoints
+  // table's band — all-time, completed-only denominator — so the page an
+  // operator lands on can never contradict the band they clicked. The
+  // delivery LIST below is the latest 50; deriving the header from that
+  // window would show green over a red band the moment the recent tail
+  // is healthy.
+  const { data: statsData } = useQuery({
+    queryKey: ['webhook-endpoint-stats'],
+    queryFn: () => api.getWebhookEndpointStats(),
+    refetchInterval: 10_000,
+  })
 
   const endpoint = data?.endpoint
   const deliveries = data?.data ?? []
-  const stats = summarize(deliveries)
+  const stats = statsData?.data.find(s => s.endpoint_id === id)
+  const completed = stats ? stats.succeeded + stats.failed : 0
+  const pendingCount = stats ? stats.total_deliveries - completed : 0
 
   const handleReplay = async (d: EndpointDelivery) => {
-    if (!id || replayingId) return
+    if (!id || replayInFlight.current) return
+    replayInFlight.current = true
     setReplayingId(d.id)
     try {
       await api.replayWebhookDelivery(id, d.id)
       toast.success('Redelivery queued to this endpoint')
       queryClient.invalidateQueries({ queryKey: ['webhook-endpoint-deliveries', id] })
+      queryClient.invalidateQueries({ queryKey: ['webhook-endpoint-stats'] })
     } catch (err) {
       showApiError(err, 'Failed to replay delivery')
     } finally {
+      replayInFlight.current = false
       setReplayingId(null)
     }
   }
@@ -112,13 +134,18 @@ export default function WebhookEndpointDetailPage() {
           {endpoint?.description && (
             <p className="text-sm text-muted-foreground mt-1">{endpoint.description}</p>
           )}
+          {endpoint && !endpoint.active && (
+            <p className="text-sm text-muted-foreground mt-1">
+              Paused — no events are delivered and replays are unavailable until this endpoint is resumed.
+            </p>
+          )}
           {endpoint && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-sm text-muted-foreground">
               <span>
-                {stats.completed === 0
+                {completed === 0
                   ? 'Nothing completed yet'
-                  : <>Success rate <span className={rateColor(stats.rate)}>{stats.rate.toFixed(1)}%</span> over {stats.completed} completed</>}
-                {stats.pending > 0 && <> {'·'} {stats.pending} pending</>}
+                  : <>Success rate <span className={rateColor(stats?.success_rate ?? 0)}>{(stats?.success_rate ?? 0).toFixed(1)}%</span> over {completed} completed</>}
+                {pendingCount > 0 && <> {'·'} {pendingCount} pending</>}
               </span>
               <span className="flex flex-wrap gap-1">
                 {(endpoint.events || []).map(ev => (
@@ -169,33 +196,15 @@ export default function WebhookEndpointDetailPage() {
               )}
             </CardContent>
           </Card>
+          {deliveries.length === 50 && (
+            <p className="text-xs text-muted-foreground mt-2">
+              Showing the latest 50 deliveries. The success rate above covers this endpoint's full history.
+            </p>
+          )}
         </>
       )}
     </Layout>
   )
-}
-
-// summarize mirrors the backend's endpointSuccessRate: completed-only
-// denominator (succeeded + failed), pending excluded — the page-level
-// numbers must agree with the band the operator clicked to get here.
-// Computed over the visible window (latest 50), so it can differ from
-// the all-time band after long histories; the copy says "over N
-// completed" to keep the scope honest.
-function summarize(deliveries: EndpointDelivery[]) {
-  let succeeded = 0
-  let failed = 0
-  let pending = 0
-  for (const d of deliveries) {
-    if (d.status === 'succeeded') succeeded++
-    else if (d.status === 'failed') failed++
-    else pending++
-  }
-  const completed = succeeded + failed
-  return {
-    completed,
-    pending,
-    rate: completed === 0 ? 0 : (succeeded / completed) * 100,
-  }
 }
 
 function rateColor(rate: number) {
@@ -249,17 +258,19 @@ function DeliveryRows({
         <TableCell className="text-sm text-muted-foreground" title={d.created_at}>
           {timeAgo(d.created_at, wallClockNow())}
         </TableCell>
-        <TableCell className="text-right">
+        {/* stopPropagation on the CELL: a disabled Button carries
+            pointer-events-none, so clicks on it hit-test through to the
+            cell — without this, pressing a disabled Replay would toggle
+            the row expansion instead. The paused explanation lives in
+            the page header (a tooltip on a disabled button never shows,
+            for the same pointer-events reason). */}
+        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
           <Button
             variant="outline"
             size="sm"
             className="h-7 text-xs"
             disabled={replayDisabled}
-            title={replayDisabled && !replaying ? 'Resume the endpoint to replay deliveries' : undefined}
-            onClick={(e) => {
-              e.stopPropagation()
-              onReplay()
-            }}
+            onClick={onReplay}
           >
             <RefreshCw size={12} className={replaying ? 'mr-1 animate-spin' : 'mr-1'} />
             {replaying ? 'Replaying…' : 'Replay'}
