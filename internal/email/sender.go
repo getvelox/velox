@@ -574,7 +574,7 @@ func (s *Sender) SendPaymentSetupLink(ctx context.Context, tenantID, to, custome
 // charging an invoice). Sent at finalize when the customer has no PM
 // on file. Distinct from SendPaymentFailed which fires after a charge
 // has already been attempted and declined.
-func (s *Sender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error {
+func (s *Sender) SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool, _ string) error {
 	if updateURL == "" {
 		return fmt.Errorf("update_url required: refusing to send payment-setup-request email with no link")
 	}

@@ -56,7 +56,7 @@ type EmailDeliverer interface {
 	SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error
 	SendPaymentFailed(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, reason, publicToken string) error
 	SendCreditNote(ctx context.Context, tenantID, to string, cc []string, customerName, creditNoteNumber, invoiceNumber string, amountCents int64, currency string, pdfBytes []byte) error
-	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool) error
+	SendPaymentSetupRequest(ctx context.Context, tenantID, to, customerName, invoiceNumber string, amountDueCents int64, currency, updateURL string, writtenOff bool, trigger string) error
 	SendPaymentSetupLink(ctx context.Context, tenantID, to, customerName, operatorNote, setupURL string) error
 	SendPasswordReset(ctx context.Context, tenantID, to, displayName, resetURL string) error
 	SendMemberInvite(ctx context.Context, tenantID, to, inviterEmail, tenantName, acceptURL string) error
@@ -262,7 +262,7 @@ func (d *Dispatcher) handle(ctx context.Context, row OutboxRow) error {
 			msg.Reason, msg.PublicToken)
 	case TypePaymentSetupRequest:
 		return d.sender.SendPaymentSetupRequest(ctx, row.TenantID, msg.To, msg.CustomerName, msg.InvoiceNumber,
-			msg.AmountCents, msg.Currency, msg.UpdateURL, msg.InvoiceWrittenOff)
+			msg.AmountCents, msg.Currency, msg.UpdateURL, msg.InvoiceWrittenOff, msg.Trigger)
 	case TypePaymentSetupLink:
 		return d.sender.SendPaymentSetupLink(ctx, row.TenantID, msg.To, msg.CustomerName,
 			msg.OperatorNote, msg.SetupURL)
