@@ -15,7 +15,9 @@ import {
 // log and email outbox (ADR-030 forensic layer).
 import { timeAgo, wallClockNow, timeUntil } from '@/lib/effectiveNow'
 import { showApiError } from '@/lib/formErrors'
+import { useNavigate } from 'react-router-dom'
 import { Layout } from '@/components/Layout'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -44,6 +46,7 @@ type StreamStatus = 'connecting' | 'live' | 'reconnecting' | 'error'
 
 export default function WebhookEventsPage() {
   usePageTitle('Webhook events')
+  const navigate = useNavigate()
   // Buffer of frames keyed by event_id. We dedupe on event_id because the
   // bus can emit two frames for the same event (pending → succeeded), and
   // the snapshot path can race with the first live frame; collapsing in
@@ -151,17 +154,31 @@ export default function WebhookEventsPage() {
 
   return (
     <Layout>
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Webhook Events</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Real-time tail of every event dispatched to your endpoints. Click a row to see per-attempt delivery history and replay.
-          </p>
-        </div>
+      {/* Same header + tab strip as /webhooks: Endpoints and Events are two
+          tabs of ONE surface, not two products. This page owns the Events
+          tab; selecting Endpoints navigates back. The duplicate plain list
+          that used to live behind /webhooks?tab=events is gone — this view
+          is the only events surface. */}
+      <div>
+        <h1 className="text-2xl font-semibold text-foreground">Webhooks</h1>
+        <p className="text-sm text-muted-foreground mt-1">Manage outbound webhook endpoints and events</p>
+      </div>
+
+      <Tabs value="events" onValueChange={(t) => { if (t === 'endpoints') navigate('/webhooks') }} className="mt-6">
+        <TabsList>
+          <TabsTrigger value="endpoints">Endpoints</TabsTrigger>
+          <TabsTrigger value="events">Events</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      <div className="flex items-start justify-between gap-4 mt-4">
+        <p className="text-sm text-muted-foreground">
+          Real-time tail of every event dispatched to your endpoints. Click a row to see per-attempt delivery history and replay.
+        </p>
         <ConnectionPill status={status} count={sortedFrames.length} />
       </div>
 
-      <Card className="mt-6">
+      <Card className="mt-4">
         <CardContent className="p-0">
           {sortedFrames.length === 0 ? (
             <EmptyState
