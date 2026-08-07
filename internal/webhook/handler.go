@@ -317,9 +317,16 @@ func (h *Handler) replayEventV2(w http.ResponseWriter, r *http.Request) {
 //
 // Snake_case throughout — pinned by TestWireShape_WebhookEventDeliveries.
 type DeliveryView struct {
-	ID                   string     `json:"id"`
-	EventID              string     `json:"event_id"`
+	ID      string `json:"id"`
+	EventID string `json:"event_id"`
+	// EndpointID stays for machine use, but the timeline is an operator
+	// surface: EndpointURL/EndpointDescription are what let a human
+	// answer "which of my receivers is this?" without cross-referencing
+	// an opaque id against a page that never displays ids. Resolved by
+	// the store's historical join, so they survive endpoint deletion.
 	EndpointID           string     `json:"endpoint_id"`
+	EndpointURL          string     `json:"endpoint_url"`
+	EndpointDescription  string     `json:"endpoint_description"`
 	AttemptNo            int        `json:"attempt_no"`
 	Status               string     `json:"status"`
 	StatusCode           int        `json:"status_code"`
@@ -402,6 +409,8 @@ func (h *Handler) listDeliveriesEnriched(w http.ResponseWriter, r *http.Request)
 			ID:                   d.ID,
 			EventID:              d.WebhookEventID,
 			EndpointID:           d.WebhookEndpointID,
+			EndpointURL:          d.EndpointURL,
+			EndpointDescription:  d.EndpointDescription,
 			AttemptNo:            i + 1,
 			Status:               string(d.Status),
 			StatusCode:           d.HTTPStatusCode,

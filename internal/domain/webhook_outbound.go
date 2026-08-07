@@ -68,6 +68,13 @@ type WebhookDelivery struct {
 	NextRetryAt       *time.Time     `json:"next_retry_at,omitempty"`
 	CreatedAt         time.Time      `json:"created_at"`
 	CompletedAt       *time.Time     `json:"completed_at,omitempty"`
+	// EndpointURL / EndpointDescription are hydrated only by the
+	// delivery-listing JOIN, for historical attribution on the operator
+	// timeline: a delivery must stay attributable to a human-readable
+	// receiver even after that endpoint is deleted (0168 deletes are
+	// soft, so the join still resolves). Writers never set these.
+	EndpointURL         string `json:"endpoint_url,omitempty"`
+	EndpointDescription string `json:"endpoint_description,omitempty"`
 }
 
 // EventDispatcher fires outbound webhook events.

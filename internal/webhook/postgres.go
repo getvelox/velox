@@ -876,12 +876,20 @@ func (s *PostgresStore) ListDeliveries(ctx context.Context, tenantID, eventID st
 	// every replay clone — stitched into one timeline. We pull both
 	// arms in a single query so the unified ORDER BY created_at ASC is
 	// applied across the whole tree without an in-memory merge.
+	// The endpoint join is deliberately UNFILTERED (no deleted_at /
+	// active check): deliveries are history, and the timeline must keep
+	// naming the receiver a row was sent to even after the operator
+	// deletes that endpoint. LEFT JOIN so a delivery row is never
+	// dropped by attribution — worst case the URL comes back empty and
+	// the caller falls back to the raw id.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT d.id, d.tenant_id, d.livemode, d.webhook_endpoint_id, d.webhook_event_id, d.status,
 			COALESCE(d.http_status_code, 0), COALESCE(d.response_body,''), COALESCE(d.error_message,''),
-			d.attempt_count, d.next_retry_at, d.created_at, d.completed_at
+			d.attempt_count, d.next_retry_at, d.created_at, d.completed_at,
+			COALESCE(ep.url,''), COALESCE(ep.description,'')
 		FROM webhook_deliveries d
 		JOIN webhook_events e ON e.id = d.webhook_event_id
+		LEFT JOIN webhook_endpoints ep ON ep.id = d.webhook_endpoint_id
 		WHERE e.id = $1 OR e.replay_of_event_id = $1
 		ORDER BY d.created_at ASC
 	`, eventID)
@@ -895,7 +903,8 @@ func (s *PostgresStore) ListDeliveries(ctx context.Context, tenantID, eventID st
 		var d domain.WebhookDelivery
 		if err := rows.Scan(&d.ID, &d.TenantID, &d.Livemode, &d.WebhookEndpointID, &d.WebhookEventID,
 			&d.Status, &d.HTTPStatusCode, &d.ResponseBody, &d.ErrorMessage,
-			&d.AttemptCount, &d.NextRetryAt, &d.CreatedAt, &d.CompletedAt); err != nil {
+			&d.AttemptCount, &d.NextRetryAt, &d.CreatedAt, &d.CompletedAt,
+			&d.EndpointURL, &d.EndpointDescription); err != nil {
 			return nil, err
 		}
 		deliveries = append(deliveries, d)
