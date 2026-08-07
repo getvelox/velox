@@ -96,6 +96,7 @@ export default function WebhooksPage() {
 /* ─── Endpoints Tab ─── */
 
 function EndpointsTab() {
+  const navigate = useNavigate()
   const [showCreate, setShowCreate] = useState(false)
   const [createdSecret, setCreatedSecret] = useState<{ secret: string; secondary_valid_until?: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<WebhookEndpoint | null>(null)
@@ -192,10 +193,14 @@ function EndpointsTab() {
                   const rotationActive =
                     !!ep.secondary_secret_expires_at &&
                     untilMs(ep.secondary_secret_expires_at, wallClockNow()) > 0
+                  // Row click opens the endpoint's delivery history — the
+                  // success-rate band is an aggregate; the drill-down is
+                  // where "which deliveries failed, and why" gets answered.
+                  // Action buttons stopPropagation so they keep their jobs.
                   return (
-                  <TableRow key={ep.id}>
+                  <TableRow key={ep.id} className="cursor-pointer" onClick={() => navigate(`/webhooks/endpoints/${ep.id}`)}>
                     <TableCell className="font-mono text-sm max-w-xs" title={ep.url}>
-                      <div className="truncate">{ep.url}</div>
+                      <div className="truncate hover:underline">{ep.url}</div>
                       {rotationActive && ep.secondary_secret_expires_at && (
                         <div className="text-xs text-emerald-700 dark:text-emerald-400 font-normal mt-0.5">
                           Dual-signing until {formatDateTime(ep.secondary_secret_expires_at)}
@@ -224,7 +229,13 @@ function EndpointsTab() {
                       })()}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{formatDate(ep.created_at)}</TableCell>
-                    <TableCell className="text-right">
+                    {/* stopPropagation on the CELL, not the buttons: a disabled
+                        Button carries pointer-events-none, so clicks on it
+                        hit-test through to the cell — button-level handlers
+                        never see them, and without this the fall-through would
+                        bubble to the row's navigate and unmount a mid-flight
+                        rotation before its show-once secret dialog rendered. */}
+                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-end gap-1">
                         <Button variant="outline" size="sm" className="h-7 text-xs"
                           disabled={!!rotatingId}

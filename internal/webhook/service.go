@@ -801,6 +801,112 @@ func (s *Service) Replay(ctx context.Context, tenantID, eventID string) (ReplayR
 	}, nil
 }
 
+// ListEndpointDeliveries returns one endpoint plus its delivery history
+// (newest first). The endpoint lookup runs first so a bad id 404s rather
+// than returning an empty list that reads as "healthy receiver, no
+// traffic".
+func (s *Service) ListEndpointDeliveries(ctx context.Context, tenantID, endpointID string, limit int) (domain.WebhookEndpoint, []domain.WebhookDelivery, error) {
+	ep, err := s.store.GetEndpoint(ctx, tenantID, endpointID)
+	if err != nil {
+		return domain.WebhookEndpoint{}, nil, err
+	}
+	deliveries, err := s.store.ListDeliveriesByEndpoint(ctx, tenantID, endpointID, limit)
+	if err != nil {
+		return domain.WebhookEndpoint{}, nil, err
+	}
+	return ep, deliveries, nil
+}
+
+// ReplayDeliveryResult is the response for a single-receiver replay.
+type ReplayDeliveryResult struct {
+	// EventID is the freshly-minted replay clone (replay_of set), same
+	// shape as an event-wide replay — the delivery timeline folds it
+	// into the original's chain.
+	EventID string `json:"event_id"`
+	// ReplayOf is the root original event of the audit chain.
+	ReplayOf string `json:"replay_of"`
+	// DeliveryID is the new delivery row created for the target
+	// endpoint — the drill-down highlights it on refetch.
+	DeliveryID string `json:"delivery_id"`
+	Status     string `json:"status"`
+}
+
+// ReplayDelivery re-sends one delivery's event to THAT delivery's
+// endpoint only — the industry replay unit (Stripe "Resend"/"Retry now",
+// GitHub "Redeliver", Svix per-attempt resend). Event-wide Replay fans
+// the clone out to every matching endpoint, which re-delivers to
+// receivers that already succeeded; this path exists so fixing ONE
+// broken receiver doesn't spray duplicates at the healthy ones.
+//
+// Same audit chain as Replay: a clone event (replay_of = root original)
+// plus a born-leased delivery row — the original delivery is history and
+// is never mutated.
+func (s *Service) ReplayDelivery(ctx context.Context, tenantID, endpointID, deliveryID string) (ReplayDeliveryResult, error) {
+	d, err := s.store.GetDelivery(ctx, tenantID, deliveryID)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			return ReplayDeliveryResult{}, fmt.Errorf("%w: webhook delivery", errs.ErrNotFound)
+		}
+		return ReplayDeliveryResult{}, fmt.Errorf("get delivery: %w", err)
+	}
+	// The route carries both ids; a delivery reached under another
+	// endpoint's path is treated as absent, not as a hint.
+	if d.WebhookEndpointID != endpointID {
+		return ReplayDeliveryResult{}, fmt.Errorf("%w: webhook delivery", errs.ErrNotFound)
+	}
+
+	ep, err := s.store.GetEndpoint(ctx, tenantID, endpointID)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			return ReplayDeliveryResult{}, fmt.Errorf("%w: webhook endpoint", errs.ErrNotFound)
+		}
+		return ReplayDeliveryResult{}, fmt.Errorf("get endpoint: %w", err)
+	}
+	// Guards run BEFORE the clone is minted: a rejected replay must leave
+	// no event row behind (an orphan clone with zero deliveries would
+	// surface as a phantom "no_endpoints" row in the live tail).
+	if !ep.Active {
+		return ReplayDeliveryResult{}, errs.InvalidState("endpoint is paused — resume it before replaying deliveries")
+	}
+	// No livemode guard here, deliberately: the tenant_isolation policy
+	// scopes BOTH reads above by (tenant, livemode), so a cross-mode
+	// delivery/endpoint pair is invisible together — one of the two
+	// lookups already 404'd. The 404 IS the cross-partition failure.
+
+	clone, err := s.store.CreateReplayEvent(ctx, tenantID, d.WebhookEventID)
+	if err != nil {
+		return ReplayDeliveryResult{}, fmt.Errorf("create replay event: %w", err)
+	}
+	rootID := d.WebhookEventID
+	if clone.ReplayOfEventID != nil && *clone.ReplayOfEventID != "" {
+		rootID = *clone.ReplayOfEventID
+	}
+
+	if s.bus != nil {
+		s.bus.Publish(tenantID, FrameFromEvent(clone, "pending", nil))
+	}
+
+	deliveries, err := s.store.CreateDeliveriesForEvent(postgres.WithLivemode(ctx, clone.Livemode), tenantID, clone.ID, []string{ep.ID}, birthLeaseWindow)
+	if err != nil {
+		return ReplayDeliveryResult{}, fmt.Errorf("create replay delivery: %w", err)
+	}
+	s.spawnAttempts(ctx, clone, []domain.WebhookEndpoint{ep}, deliveries)
+
+	slog.Info("webhook delivery replayed",
+		"delivery_id", d.ID,
+		"new_delivery_id", deliveries[0].ID,
+		"endpoint_id", ep.ID,
+		"event_id", clone.ID,
+		"replay_of", rootID,
+	)
+	return ReplayDeliveryResult{
+		EventID:    clone.ID,
+		ReplayOf:   rootID,
+		DeliveryID: deliveries[0].ID,
+		Status:     "queued",
+	}, nil
+}
+
 // RetryPendingDeliveries picks up deliveries due for retry and re-attempts them.
 func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 	deliveries, err := s.store.ListPendingDeliveries(ctx, 10)
@@ -828,6 +934,26 @@ func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 
 		ep, err := s.store.GetEndpoint(dCtx, d.TenantID, d.WebhookEndpointID)
 		if err != nil {
+			if errors.Is(err, errs.ErrNotFound) {
+				// Endpoint soft-deleted (GetEndpoint filters deleted_at):
+				// the delivery can never succeed, and the !Active resolver
+				// below is unreachable for it — without a terminal mark
+				// here the row is re-claimed at every lease expiry forever,
+				// occupying claim slots and spamming this log. Mirror of
+				// the event-missing resolver just below (the skip branch
+				// must also end the row's wait).
+				now := time.Now().UTC()
+				d.Status = domain.DeliveryFailed
+				d.ErrorMessage = "endpoint deleted"
+				d.CompletedAt = &now
+				d.NextRetryAt = nil
+				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d); err != nil {
+					slog.Warn("webhook: endpoint-deleted mark not applied", "delivery_id", d.ID, "error", err)
+				}
+				slog.Error("endpoint not found for retry — delivery resolved failed", "delivery_id", d.ID, "endpoint_id", d.WebhookEndpointID)
+				rowCancel()
+				continue
+			}
 			slog.Error("get endpoint for retry", "delivery_id", d.ID, "error", err)
 			rowCancel()
 			continue

@@ -46,6 +46,8 @@ func (h *Handler) Routes() chi.Router {
 	r.Patch("/endpoints/{id}", h.updateEndpoint)
 	r.Delete("/endpoints/{id}", h.deleteEndpoint)
 	r.Post("/endpoints/{id}/rotate-secret", h.rotateSecret)
+	r.Get("/endpoints/{id}/deliveries", h.listEndpointDeliveries)
+	r.Post("/endpoints/{id}/deliveries/{deliveryID}/replay", h.replayDelivery)
 	r.Get("/events", h.listEvents)
 	r.Get("/events/{id}/deliveries", h.listDeliveries)
 	r.Post("/events/{id}/replay", h.replayEvent)
@@ -306,6 +308,101 @@ func (h *Handler) replayEventV2(w http.ResponseWriter, r *http.Request) {
 			"replay_of": res.ReplayOf,
 		})
 	}
+	respond.JSON(w, r, http.StatusOK, res)
+}
+
+// EndpointDeliveryView is the endpoint drill-down row: one receiver's
+// history across events, so each row names the business fact it carried
+// (event_type) rather than the receiver (which is the page's own
+// subject). Snake_case pinned by TestWireShape_EndpointDeliveries.
+type EndpointDeliveryView struct {
+	ID        string `json:"id"`
+	EventID   string `json:"event_id"`
+	EventType string `json:"event_type"`
+	// IsReplay marks rows born from an operator replay (event-wide or
+	// single-receiver) — the drill-down badges them the same way the
+	// event timeline does.
+	IsReplay        bool       `json:"is_replay"`
+	ReplayOfEventID string     `json:"replay_of_event_id,omitempty"`
+	Status          string     `json:"status"`
+	StatusCode      int        `json:"status_code"`
+	AttemptCount    int        `json:"attempt_count"`
+	ResponseBody    string     `json:"response_body"`
+	Error           string     `json:"error"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+	NextRetryAt     *time.Time `json:"next_retry_at"`
+}
+
+// listEndpointDeliveries serves GET /endpoints/{id}/deliveries — the
+// endpoint drill-down. The endpoint itself rides along so a direct URL
+// load of the detail page needs one request, and a deleted endpoint 404s
+// instead of rendering an empty-but-healthy-looking history.
+func (h *Handler) listEndpointDeliveries(w http.ResponseWriter, r *http.Request) {
+	tenantID := auth.TenantID(r.Context())
+	endpointID := chi.URLParam(r, "id")
+
+	ep, deliveries, err := h.svc.ListEndpointDeliveries(r.Context(), tenantID, endpointID, 50)
+	if errors.Is(err, errs.ErrNotFound) {
+		respond.NotFound(w, r, "webhook endpoint")
+		return
+	}
+	if err != nil {
+		respond.InternalError(w, r)
+		slog.ErrorContext(r.Context(), "list endpoint deliveries", "error", err)
+		return
+	}
+
+	out := make([]EndpointDeliveryView, 0, len(deliveries))
+	for _, d := range deliveries {
+		out = append(out, EndpointDeliveryView{
+			ID:              d.ID,
+			EventID:         d.WebhookEventID,
+			EventType:       d.EventType,
+			IsReplay:        d.EventReplayOfID != "",
+			ReplayOfEventID: d.EventReplayOfID,
+			Status:          string(d.Status),
+			StatusCode:      d.HTTPStatusCode,
+			AttemptCount:    d.AttemptCount,
+			ResponseBody:    truncateBody(d.ResponseBody),
+			Error:           d.ErrorMessage,
+			CreatedAt:       d.CreatedAt,
+			CompletedAt:     d.CompletedAt,
+			NextRetryAt:     d.NextRetryAt,
+		})
+	}
+
+	respond.JSON(w, r, http.StatusOK, map[string]any{
+		"endpoint": ep,
+		"data":     out,
+	})
+}
+
+// replayDelivery serves POST /endpoints/{id}/deliveries/{deliveryID}/replay
+// — the single-receiver replay. Unlike the event-wide replay it never
+// touches other endpoints, so fixing one broken receiver doesn't spray
+// duplicates at the healthy ones.
+func (h *Handler) replayDelivery(w http.ResponseWriter, r *http.Request) {
+	tenantID := auth.TenantID(r.Context())
+	endpointID := chi.URLParam(r, "id")
+	deliveryID := chi.URLParam(r, "deliveryID")
+
+	res, err := h.svc.ReplayDelivery(r.Context(), tenantID, endpointID, deliveryID)
+	if err != nil {
+		respond.FromError(w, r, err, "webhook_delivery")
+		return
+	}
+
+	if h.auditLogger != nil {
+		_ = h.auditLogger.Log(r.Context(), tenantID, domain.AuditActionUpdate, "webhook_delivery", deliveryID, "", map[string]any{
+			"action":          "replayed_to_endpoint",
+			"endpoint_id":     endpointID,
+			"replay_event_id": res.EventID,
+			"new_delivery_id": res.DeliveryID,
+			"replay_of":       res.ReplayOf,
+		})
+	}
+
 	respond.JSON(w, r, http.StatusOK, res)
 }
 

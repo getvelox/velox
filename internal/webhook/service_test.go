@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -240,8 +241,13 @@ func (m *memStore) CreateDelivery(ctx context.Context, tenantID string, d domain
 	d.ID = fmt.Sprintf("vlx_whd_%d", len(m.deliveries)+1)
 	d.TenantID = tenantID
 	d.CreatedAt = time.Now().UTC()
-	m.deliveries = append(m.deliveries, d)
 	lm := postgres.Livemode(ctx)
+	// Mirror the real store: the 0021 trigger stamps livemode from the
+	// session GUC and the INSERT hydrates it via RETURNING — a fake row
+	// frozen at the zero value would trip (or mask) livemode guards the
+	// real store can't.
+	d.Livemode = lm
+	m.deliveries = append(m.deliveries, d)
 	m.deliveryLivemodes = append(m.deliveryLivemodes, lm)
 	signal := m.deliverySignal
 	m.dmu.Unlock()
@@ -280,6 +286,50 @@ func (m *memStore) ListDeliveries(_ context.Context, _, eventID string) ([]domai
 		if _, ok := tree[d.WebhookEventID]; ok {
 			result = append(result, d)
 		}
+	}
+	return result, nil
+}
+
+func (m *memStore) GetDelivery(_ context.Context, tenantID, id string) (domain.WebhookDelivery, error) {
+	m.dmu.Lock()
+	defer m.dmu.Unlock()
+	for _, d := range m.deliveries {
+		if d.ID == id && d.TenantID == tenantID {
+			return d, nil
+		}
+	}
+	return domain.WebhookDelivery{}, errs.ErrNotFound
+}
+
+// ListDeliveriesByEndpoint mirrors the real store's drill-down query:
+// one endpoint's rows newest-first, each hydrated with its event's type
+// and replay pivot (the postgres store does this via JOIN — a fake that
+// skipped hydration would let the handler's is_replay mapping go
+// untested).
+func (m *memStore) ListDeliveriesByEndpoint(_ context.Context, tenantID, endpointID string, limit int) ([]domain.WebhookDelivery, error) {
+	m.dmu.Lock()
+	defer m.dmu.Unlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	evByID := make(map[string]domain.WebhookEvent, len(m.events))
+	for _, e := range m.events {
+		evByID[e.ID] = e
+	}
+	var result []domain.WebhookDelivery
+	// m.deliveries appends in creation order; walk backwards for DESC.
+	for i := len(m.deliveries) - 1; i >= 0 && len(result) < limit; i-- {
+		d := m.deliveries[i]
+		if d.WebhookEndpointID != endpointID || d.TenantID != tenantID {
+			continue
+		}
+		if e, ok := evByID[d.WebhookEventID]; ok {
+			d.EventType = e.EventType
+			if e.ReplayOfEventID != nil {
+				d.EventReplayOfID = *e.ReplayOfEventID
+			}
+		}
+		result = append(result, d)
 	}
 	return result, nil
 }
@@ -905,6 +955,177 @@ func TestReplay_PinsLivemodeOnDelivery(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("replay delivery goroutine did not fire")
+	}
+}
+
+// TestReplayDelivery_ScopedToOneEndpoint pins the property that makes the
+// single-receiver replay worth having over event-wide Replay: with TWO
+// endpoints subscribed to the event, replaying one endpoint's delivery
+// creates exactly ONE new delivery — targeted at that endpoint — while
+// the other receiver gets nothing. (Event-wide Replay on the same fixture
+// would create two.)
+func TestReplayDelivery_ScopedToOneEndpoint(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 200})
+	ctx := context.Background()
+
+	epA, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/a", Events: []string{"invoice.finalized"},
+	})
+	epB, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/b", Events: []string{"invoice.finalized"},
+	})
+	_ = svc.Dispatch(ctx, "t1", "invoice.finalized", map[string]any{"id": "inv_1"})
+	if len(store.deliveries) != 2 {
+		t.Fatalf("initial deliveries: got %d, want 2", len(store.deliveries))
+	}
+
+	var bDelivery domain.WebhookDelivery
+	for _, d := range store.deliveries {
+		if d.WebhookEndpointID == epB.Endpoint.ID {
+			bDelivery = d
+		}
+	}
+
+	res, err := svc.ReplayDelivery(ctx, "t1", epB.Endpoint.ID, bDelivery.ID)
+	if err != nil {
+		t.Fatalf("replay delivery: %v", err)
+	}
+	if res.Status != "queued" || res.DeliveryID == "" {
+		t.Errorf("result = %+v, want status=queued with a delivery_id", res)
+	}
+	if res.ReplayOf != bDelivery.WebhookEventID {
+		t.Errorf("replay_of = %q, want the original event %q", res.ReplayOf, bDelivery.WebhookEventID)
+	}
+
+	if len(store.deliveries) != 3 {
+		t.Fatalf("deliveries after scoped replay: got %d, want 3 (exactly one new)", len(store.deliveries))
+	}
+	newest := store.deliveries[len(store.deliveries)-1]
+	if newest.WebhookEndpointID != epB.Endpoint.ID {
+		t.Errorf("new delivery targets %q, want the replayed endpoint %q", newest.WebhookEndpointID, epB.Endpoint.ID)
+	}
+	for _, d := range store.deliveries {
+		if d.WebhookEndpointID == epA.Endpoint.ID && d.ID != store.deliveries[0].ID && d.ID != store.deliveries[1].ID {
+			t.Errorf("endpoint A received a delivery from B's scoped replay: %+v", d)
+		}
+	}
+	// The clone must carry the replay pivot so the timeline folds it in.
+	clone := store.events[len(store.events)-1]
+	if clone.ReplayOfEventID == nil || *clone.ReplayOfEventID != bDelivery.WebhookEventID {
+		t.Errorf("clone replay_of = %v, want %q", clone.ReplayOfEventID, bDelivery.WebhookEventID)
+	}
+}
+
+// TestReplayDelivery_PausedEndpointRejected_NoOrphanClone pins guard
+// ordering: a replay to a paused endpoint is rejected BEFORE the clone
+// event is minted. Pre-ordering, the rejection path would leave behind a
+// zero-delivery clone that renders as a phantom "no_endpoints" row in
+// the live tail.
+func TestReplayDelivery_PausedEndpointRejected_NoOrphanClone(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 200})
+	ctx := context.Background()
+
+	ep, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/hook", Events: []string{"invoice.finalized"},
+	})
+	_ = svc.Dispatch(ctx, "t1", "invoice.finalized", map[string]any{"id": "inv_1"})
+	deliveryID := store.deliveries[0].ID
+	eventsBefore := len(store.events)
+
+	inactive := false
+	if _, err := svc.UpdateEndpoint(ctx, "t1", ep.Endpoint.ID, UpdateEndpointInput{Active: &inactive}); err != nil {
+		t.Fatalf("pause endpoint: %v", err)
+	}
+
+	_, err := svc.ReplayDelivery(ctx, "t1", ep.Endpoint.ID, deliveryID)
+	if err == nil {
+		t.Fatal("expected paused-endpoint replay to be rejected")
+	}
+	var de *errs.DomainError
+	if !errors.As(err, &de) || de.Kind != errs.ErrInvalidState {
+		t.Errorf("error = %v, want errs.InvalidState (maps to 409 — a state conflict, not bad input)", err)
+	}
+	if len(store.events) != eventsBefore {
+		t.Errorf("events after rejected replay: got %d, want %d — rejection minted an orphan clone", len(store.events), eventsBefore)
+	}
+	if len(store.deliveries) != 1 {
+		t.Errorf("deliveries after rejected replay: got %d, want 1", len(store.deliveries))
+	}
+}
+
+// TestRetryPending_DeletedEndpointResolvesDelivery pins the retry
+// worker's deleted-endpoint resolver: a pending delivery whose endpoint
+// has been (soft-)deleted must be marked failed terminally — not skipped.
+// Pre-fix the GetEndpoint-error branch logged and continued, so the row
+// was re-claimed at every lease expiry forever: GetEndpoint filters
+// deleted_at, which made the !Active resolver below it unreachable for
+// deleted endpoints (a skip that never ends the row's wait).
+func TestRetryPending_DeletedEndpointResolvesDelivery(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 500})
+	ctx := context.Background()
+
+	ep, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/hook", Events: []string{"invoice.finalized"},
+	})
+	_ = svc.Dispatch(ctx, "t1", "invoice.finalized", map[string]any{"id": "inv_1"})
+	if got := store.deliveries[0].Status; got != domain.DeliveryPending {
+		t.Fatalf("fixture delivery status = %s, want pending after a 500 attempt", got)
+	}
+
+	if err := svc.DeleteEndpoint(ctx, "t1", ep.Endpoint.ID); err != nil {
+		t.Fatalf("delete endpoint: %v", err)
+	}
+	// Make the row due (the failed attempt scheduled its retry in the future).
+	past := time.Now().Add(-time.Minute)
+	store.dmu.Lock()
+	store.deliveries[0].NextRetryAt = &past
+	store.dmu.Unlock()
+
+	if err := svc.RetryPendingDeliveries(ctx); err != nil {
+		t.Fatalf("retry pending: %v", err)
+	}
+
+	d := store.deliveries[0]
+	if d.Status != domain.DeliveryFailed {
+		t.Errorf("delivery status = %s, want failed — the deleted-endpoint row is still cycling through the retry pool", d.Status)
+	}
+	if d.ErrorMessage != "endpoint deleted" {
+		t.Errorf("error message = %q, want %q", d.ErrorMessage, "endpoint deleted")
+	}
+	if d.NextRetryAt != nil || d.CompletedAt == nil {
+		t.Errorf("terminal mark incomplete: next_retry_at=%v completed_at=%v", d.NextRetryAt, d.CompletedAt)
+	}
+}
+
+// TestReplayDelivery_WrongEndpointPath404s: a real delivery id reached
+// under a DIFFERENT endpoint's route resolves as not-found — the URL
+// pairing is authorization shape, not a hint.
+func TestReplayDelivery_WrongEndpointPath404s(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 200})
+	ctx := context.Background()
+
+	epA, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/a", Events: []string{"invoice.finalized"},
+	})
+	epB, _ := svc.CreateEndpoint(ctx, "t1", CreateEndpointInput{
+		URL: "http://localhost:9999/b", Events: []string{"invoice.finalized"},
+	})
+	_ = svc.Dispatch(ctx, "t1", "invoice.finalized", map[string]any{"id": "inv_1"})
+
+	var aDelivery domain.WebhookDelivery
+	for _, d := range store.deliveries {
+		if d.WebhookEndpointID == epA.Endpoint.ID {
+			aDelivery = d
+		}
+	}
+
+	_, err := svc.ReplayDelivery(ctx, "t1", epB.Endpoint.ID, aDelivery.ID)
+	if !errors.Is(err, errs.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound for a delivery under the wrong endpoint", err)
 	}
 }
 

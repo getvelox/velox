@@ -119,8 +119,10 @@ func AlreadyExists(field, message string) *DomainError {
 
 // InvalidState rejects an operation because the target resource is in a state
 // that disallows it (e.g. "can only activate draft subscriptions"). Maps to
-// HTTP 422. These errors are not about a specific form field — the user
-// usually needs a toast or inline banner, not a field highlight.
+// HTTP 409 (see respond/errors.go: the input is fine, the resource's state is
+// the conflict — 422 would mean "fix your input"). These errors are not about
+// a specific form field — the user usually needs a toast or inline banner,
+// not a field highlight.
 //
 //	return errs.InvalidState("can only activate draft subscriptions")
 func InvalidState(message string) *DomainError {

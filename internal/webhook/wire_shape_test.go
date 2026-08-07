@@ -15,6 +15,75 @@ import (
 	"github.com/sagarsuperuser/velox/internal/domain"
 )
 
+// TestWireShape_EndpointDeliveries pins the endpoint drill-down response:
+// {endpoint: {...}, data: [{snake_case delivery rows}]}. The drill-down
+// page reads every one of these keys; a dropped tag renders as a blank
+// column, not a compile error.
+func TestWireShape_EndpointDeliveries(t *testing.T) {
+	store := newMemStore()
+	svc := NewTestService(store, &mockHTTPClient{statusCode: 200})
+	h := NewHandler(svc)
+
+	tenantID := "vlx_tenant_epdrill"
+	ctx := auth.WithTenantID(context.Background(), tenantID)
+	ep, err := svc.CreateEndpoint(ctx, tenantID, CreateEndpointInput{
+		URL: "http://localhost:9001/sink", Events: []string{"*"},
+	})
+	if err != nil {
+		t.Fatalf("create endpoint: %v", err)
+	}
+	if err := svc.Dispatch(ctx, tenantID, "invoice.finalized", map[string]any{"invoice_id": "vlx_inv_42"}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Mount("/v1/webhook-endpoints", h.Routes())
+	req := httptest.NewRequest("GET", "/v1/webhook-endpoints/endpoints/"+ep.Endpoint.ID+"/deliveries", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Endpoint map[string]any   `json:"endpoint"`
+		Data     []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Endpoint["id"] != ep.Endpoint.ID {
+		t.Errorf("endpoint.id = %v, want %s", resp.Endpoint["id"], ep.Endpoint.ID)
+	}
+	if _, leaked := resp.Endpoint["secret"]; leaked {
+		t.Error("endpoint payload carries a 'secret' key — signing material on a read surface")
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("data rows = %d, want 1", len(resp.Data))
+	}
+	row := resp.Data[0]
+	for _, k := range []string{
+		"id", "event_id", "event_type", "is_replay", "status", "status_code",
+		"attempt_count", "response_body", "error", "created_at", "completed_at", "next_retry_at",
+	} {
+		if _, ok := row[k]; !ok {
+			t.Errorf("delivery row missing %q (keys=%v)", k, mapKeys(row))
+		}
+	}
+	if row["event_type"] != "invoice.finalized" {
+		t.Errorf("event_type = %v, want invoice.finalized — hydration lost on the wire", row["event_type"])
+	}
+
+	// 404 contract: a made-up endpoint id must not render an empty-but-
+	// healthy-looking history.
+	req404 := httptest.NewRequest("GET", "/v1/webhook-endpoints/endpoints/vlx_whe_nope/deliveries", nil).WithContext(ctx)
+	rec404 := httptest.NewRecorder()
+	r.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Errorf("unknown endpoint: status = %d, want 404", rec404.Code)
+	}
+}
+
 // TestWireShape_WebhookEventsStream_SnakeCase pins the SSE frame schema
 // the dashboard's EventSource consumer reads. Drift here (e.g. someone
 // drops a json:"event_id" tag) silently breaks the live tail at runtime
