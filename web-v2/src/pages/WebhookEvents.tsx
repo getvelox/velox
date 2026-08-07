@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Activity, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
 
@@ -72,6 +72,13 @@ export default function WebhookEventsPage() {
   }, [customersData])
   const [status, setStatus] = useState<StreamStatus>('connecting')
   const [expanded, setExpanded] = useState<string | null>(null)
+  // Clone event id of the operator's most recent replay. The timeline
+  // highlights and scrolls to its deliveries — in a family of 30+ rows
+  // the just-created delivery lands at the BOTTOM of the chronological
+  // list, off-screen, so without this the auto-expand shows everything
+  // except the thing the operator just did.
+  const [highlightEventId, setHighlightEventId] = useState<string | null>(null)
+  const queryClient = useQueryClient()
   const eventSourceRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
@@ -143,9 +150,14 @@ export default function WebhookEventsPage() {
     try {
       const res = await api.replayWebhookEventV2(id)
       toast.success(`Replayed event \u2014 clone ${res.event_id.slice(0, 12)}\u2026 queued`)
-      // The clone will arrive on the SSE stream within a tick; expand
-      // the original row so the operator can watch the new attempt land
-      // on the deliveries timeline.
+      // Expand the replayed row AND refetch its timeline. A timeline
+      // that was already open holds a mounted query nothing else
+      // invalidates \u2014 pre-fix it silently kept showing the pre-replay
+      // family, so "watch the new attempt land" showed everything but.
+      // Prefix-invalidate: every family member's timeline shows the
+      // same stitched story, so all mounted copies must move together.
+      setHighlightEventId(res.event_id)
+      queryClient.invalidateQueries({ queryKey: ['webhook-deliveries'] })
       setExpanded(id)
     } catch (err) {
       showApiError(err, 'Failed to replay event')
@@ -211,6 +223,7 @@ export default function WebhookEventsPage() {
                       key={frame.event_id}
                       frame={frame}
                       expanded={isExpanded}
+                      highlightEventId={highlightEventId}
                       onToggle={() => setExpanded(isExpanded ? null : frame.event_id)}
                       onReplay={() => handleReplay(frame.event_id)}
                     />
@@ -232,12 +245,14 @@ export default function WebhookEventsPage() {
 function FrameRows({
   frame,
   expanded,
+  highlightEventId,
   onToggle,
   onReplay,
   customerName,
 }: {
   frame: WebhookEventStreamFrame
   expanded: boolean
+  highlightEventId: string | null
   onToggle: () => void
   onReplay: () => void
   customerName: Record<string, string>
@@ -292,7 +307,7 @@ function FrameRows({
       {expanded && (
         <TableRow className="bg-muted/30">
           <TableCell colSpan={6} className="p-0">
-            <DeliveryTimeline eventID={frame.event_id} />
+            <DeliveryTimeline eventID={frame.event_id} highlightEventId={highlightEventId} />
           </TableCell>
         </TableRow>
       )}
@@ -305,11 +320,30 @@ function FrameRows({
 // flag) compares request_payload_sha256 across attempts — Stripe-style
 // replays don't mutate the payload, so this collapses to "identical" in
 // the common case.
-function DeliveryTimeline({ eventID }: { eventID: string }) {
+function DeliveryTimeline({ eventID, highlightEventId }: { eventID: string; highlightEventId: string | null }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ['webhook-deliveries', eventID],
     queryFn: () => api.listWebhookDeliveries(eventID),
+    // The family keeps moving while the row is open: replay attempts
+    // land async, and a pending delivery resolves on the retry worker's
+    // 30s cadence. A mounted (= expanded) timeline polls so those flips
+    // arrive without collapsing and re-expanding the row.
+    refetchInterval: 5_000,
   })
+
+  const deliveries = data?.deliveries ?? []
+  // First delivery born from the operator's latest replay — the ring
+  // marks all of them, the scroll goes to the first.
+  const firstHighlight = highlightEventId
+    ? deliveries.findIndex(d => d.event_id === highlightEventId)
+    : -1
+  const highlightRef = useRef<HTMLLIElement | null>(null)
+  useEffect(() => {
+    if (firstHighlight >= 0) {
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      highlightRef.current?.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
+    }
+  }, [firstHighlight])
 
   if (isLoading) {
     return (
@@ -325,7 +359,6 @@ function DeliveryTimeline({ eventID }: { eventID: string }) {
       </div>
     )
   }
-  const deliveries = data?.deliveries ?? []
   if (deliveries.length === 0) {
     return (
       <div className="px-6 py-4 text-sm text-muted-foreground">
@@ -333,17 +366,33 @@ function DeliveryTimeline({ eventID }: { eventID: string }) {
       </div>
     )
   }
+  // The timeline stitches the ORIGINAL event's deliveries together with
+  // every replay clone's — one shared story, oldest first. Say so in the
+  // header: a row whose own fan-out was 3 deliveries can legitimately
+  // show a 30-row timeline once operators have replayed it, and an
+  // unexplained count reads as a bug.
+  const replayCount = new Set(deliveries.filter(d => d.is_replay).map(d => d.event_id)).size
   return (
     <div className="px-6 py-4">
       <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-3">
         {/* "deliveries", not "attempts": each row is one delivery, whose own
             retry ladder can span up to 6 HTTP attempts (attempt_count). The
             old label under-counted reality by up to 6×. */}
-        Delivery Timeline ({deliveries.length} {deliveries.length === 1 ? 'delivery' : 'deliveries'})
+        Delivery Timeline ({deliveries.length} {deliveries.length === 1 ? 'delivery' : 'deliveries'}
+        {replayCount > 0 && ` · original + ${replayCount} ${replayCount === 1 ? 'replay' : 'replays'}`})
       </h3>
       <ol className="space-y-3">
         {deliveries.map((d, i) => (
-          <li key={d.id} className="border border-border rounded-md bg-card">
+          <li
+            key={d.id}
+            ref={i === firstHighlight ? highlightRef : undefined}
+            className={
+              'border rounded-md bg-card' +
+              (highlightEventId && d.event_id === highlightEventId
+                ? ' border-primary ring-2 ring-primary/40'
+                : ' border-border')
+            }
+          >
             <DeliveryRow delivery={d} prevSha={i > 0 ? deliveries[i - 1].request_payload_sha256 : null} />
           </li>
         ))}

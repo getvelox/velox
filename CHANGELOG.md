@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Clicking Replay on a webhook event now shows you what it did (2026-08-07).** Replay auto-expands the event's delivery timeline "so the operator can watch the new attempt land" — but if the timeline was already open it never refreshed, so it kept showing the pre-replay state (verified: 29 rows on screen, 32 in the database), and even on a fresh open the new delivery sat at the bottom of the oldest-first list, off-screen, unmarked. An operator's honest read was "a dropdown opened with a pile of attempts, and my replay isn't in it." Three changes: the open timeline refetches the moment a replay is queued, the just-created deliveries are highlighted and scrolled into view, and the header now explains its own count — "38 deliveries · original + 13 replays" — because the timeline deliberately stitches the original event together with every replay clone, and an unexplained 38 on a row that fanned out to 3 receivers reads as a bug. Open timelines also poll while expanded, so a pending delivery's resolution arrives without collapsing and re-expanding the row.
+
 ### Added
 
 - **Webhook endpoints now open into their own delivery history (2026-08-07).** The endpoints table showed each receiver's success rate as a colored percentage — and that was the whole story: the number couldn't be clicked, so "which deliveries failed, and why?" had no answer on the endpoint side of the page. The band was an aggregate with no interior. Clicking an endpoint now opens its delivery history: every delivery sent to that receiver, newest first, each row naming the event it carried, its status, HTTP code, attempt count and next-retry time, with the receiver's response body one click away. This is the industry's primary webhook-debugging surface (Stripe, GitHub, Svix and Lago all organize delivery debugging endpoint-first); the Events tab remains the account-wide view — the only place that can show an event no receiver was subscribed to.
