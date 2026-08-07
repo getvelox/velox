@@ -367,8 +367,15 @@ function DeliveryRow({
               <Badge variant="outline" className="font-mono text-xs">HTTP {delivery.status_code}</Badge>
             )}
           </div>
-          <div className="text-xs text-muted-foreground mt-1 font-mono break-all">
-            endpoint {delivery.endpoint_id}
+          {/* Operator-first attribution: name the receiver by URL (and
+              the operator's own description), not by an opaque id the
+              endpoints page never displays. The id stays available on
+              hover for support tickets / API cross-reference. */}
+          <div className="text-xs text-muted-foreground mt-1 break-all" title={delivery.endpoint_id}>
+            <span className="font-mono">{delivery.endpoint_url || delivery.endpoint_id}</span>
+            {delivery.endpoint_description && (
+              <span className="ml-1">· {delivery.endpoint_description}</span>
+            )}
           </div>
           <div className="text-xs text-muted-foreground mt-1" title={formatDateTime(delivery.attempted_at)}>
             attempted {timeAgo(delivery.attempted_at, wallClockNow())}

@@ -1576,6 +1576,11 @@ export interface WebhookDeliveryView {
   id: string
   event_id: string
   endpoint_id: string
+  // Human attribution for the timeline: resolved server-side by a
+  // historical join, so they name the receiver even after the endpoint
+  // is deleted. Empty string only if the endpoint row is truly gone.
+  endpoint_url: string
+  endpoint_description: string
   attempt_no: number
   status: string  // "pending" | "succeeded" | "failed"
   status_code: number

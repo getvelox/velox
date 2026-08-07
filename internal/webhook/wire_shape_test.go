@@ -319,6 +319,8 @@ func TestWireShape_WebhookEventDeliveries(t *testing.T) {
 		"id",
 		"event_id",
 		"endpoint_id",
+		"endpoint_url",
+		"endpoint_description",
 		"attempt_no",
 		"status",
 		"status_code",
