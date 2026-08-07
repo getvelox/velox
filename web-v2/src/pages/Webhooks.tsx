@@ -1,7 +1,6 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { CopyButton } from '@/components/CopyButton'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -46,7 +45,7 @@ import {
 } from '@/components/ui/form'
 import { TableSkeleton } from '@/components/ui/TableSkeleton'
 
-import { Loader2, Plus, Webhook, Activity } from 'lucide-react'
+import { Loader2, Plus, Webhook } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { ScrollPane } from '@/components/ui/scroll-pane'
 
@@ -61,9 +60,17 @@ type CreateEndpointData = z.infer<typeof createEndpointSchema>
 
 export default function WebhooksPage() {
   usePageTitle('Webhooks')
-  const [searchParams, setSearchParams] = useSearchParams()
-  const tab = (searchParams.get('tab') === 'events' ? 'events' : 'endpoints') as 'endpoints' | 'events'
-  const setTab = (t: string) => setSearchParams(t === 'endpoints' ? {} : { tab: t })
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  // /webhooks?tab=events used to render a SECOND, strictly-worse events
+  // list (no status, no deliveries, no live updates) beside the real one
+  // at /webhooks/events — two screens claiming to answer "did my receiver
+  // get it?", one of them missing the answer column. The duplicate is
+  // gone; old bookmarks land on the real surface.
+  useEffect(() => {
+    if (searchParams.get('tab') === 'events') navigate('/webhooks/events', { replace: true })
+  }, [searchParams, navigate])
 
   return (
     <Layout>
@@ -72,7 +79,7 @@ export default function WebhooksPage() {
         <p className="text-sm text-muted-foreground mt-1">Manage outbound webhook endpoints and events</p>
       </div>
 
-      <Tabs value={tab} onValueChange={setTab} className="mt-6">
+      <Tabs value="endpoints" onValueChange={(t) => { if (t === 'events') navigate('/webhooks/events') }} className="mt-6">
         <TabsList>
           <TabsTrigger value="endpoints">Endpoints</TabsTrigger>
           <TabsTrigger value="events">Events</TabsTrigger>
@@ -80,9 +87,6 @@ export default function WebhooksPage() {
 
         <TabsContent value="endpoints">
           <EndpointsTab />
-        </TabsContent>
-        <TabsContent value="events">
-          <EventsTab />
         </TabsContent>
       </Tabs>
     </Layout>
@@ -709,88 +713,5 @@ function CreateEndpointDialog({ onClose, onCreated }: { onClose: () => void; onC
         </Form>
       </DialogContent>
     </Dialog>
-  )
-}
-
-/* ─── Events Tab ─── */
-
-function EventsTab() {
-  const { data: eventsData, isLoading: loading, error: loadError, refetch } = useQuery({
-    queryKey: ['webhook-events'],
-    queryFn: () => api.listWebhookEvents(),
-  })
-
-  const events = eventsData?.data ?? []
-  const errorMsg = loadError instanceof Error ? loadError.message : loadError ? String(loadError) : null
-
-  const handleReplay = async (id: string) => {
-    try {
-      await api.replayWebhookEvent(id)
-      toast.success('Event replayed')
-    } catch (err) {
-      showApiError(err, 'Failed to replay event')
-    }
-  }
-
-  return (
-    <>
-      <div className="flex justify-end mt-4">
-        <Button size="sm" variant="outline" onClick={() => { window.location.href = '/webhooks/events' }}>
-          <Activity size={14} className="mr-2" />
-          Open Live Tail
-        </Button>
-      </div>
-    <Card className="mt-4">
-      <CardContent className="p-0">
-        {errorMsg ? (
-          <div className="p-8 text-center">
-            <p className="text-sm text-destructive mb-3">{errorMsg}</p>
-            <Button variant="outline" size="sm" onClick={() => refetch()}>Retry</Button>
-          </div>
-        ) : loading ? (
-          <TableSkeleton columns={4} />
-        ) : events.length === 0 ? (
-          <EmptyState
-            icon={Activity}
-            title="No webhook events"
-            description="Events will appear here as they are dispatched to your endpoints."
-          />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Event Type</TableHead>
-                <TableHead>Event ID</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="text-right"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {events.map(ev => (
-                <TableRow key={ev.id}>
-                  <TableCell><Badge variant="outline">{ev.event_type}</Badge></TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
-                    {/* The prefix is the same on every row (vlx_whevt_…) —
-                        show the distinguishing tail and make the full id
-                        copyable instead of printing 2 useful characters. */}
-                    <span className="inline-flex items-center gap-1" title={ev.id}>
-                      …{ev.id.slice(-8)}
-                      <CopyButton text={ev.id} />
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">{formatDate(ev.created_at)}</TableCell>
-                  <TableCell className="text-right">
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleReplay(ev.id)}>
-                      Replay
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
-    </Card>
-    </>
   )
 }

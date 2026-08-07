@@ -498,8 +498,10 @@ export const api = {
   deleteWebhookEndpoint: (id: string) => apiRequest<{ status: string }>('DELETE', `/webhook-endpoints/endpoints/${id}`),
   rotateWebhookSecret: (id: string) => apiRequest<{ secret: string; secondary_valid_until?: string }>('POST', `/webhook-endpoints/endpoints/${id}/rotate-secret`),
   getWebhookEndpointStats: () => apiRequest<{ data: { endpoint_id: string; total_deliveries: number; succeeded: number; failed: number; success_rate: number }[] }>('GET', '/webhook-endpoints/endpoints/stats'),
-  listWebhookEvents: () => apiRequest<{ data: WebhookEvent[] }>('GET', '/webhook-endpoints/events'),
-  replayWebhookEvent: (id: string) => apiRequest<{ status: string }>('POST', `/webhook-endpoints/events/${id}/replay`),
+  // listWebhookEvents/replayWebhookEvent (the legacy plain-list pair) were
+  // deleted with the duplicate /webhooks?tab=events surface — the live
+  // events view at /webhooks/events is the ONLY events UI. The backend
+  // routes stay for programmatic consumers.
 
   // Week 6 real-time event UI. Replay returns the freshly-cloned event so
   // the UI can highlight it in the live tail; deliveries-list returns the
