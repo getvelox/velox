@@ -288,12 +288,13 @@ var auditRouteRegistry = map[routeKey]auditDecl{
 	{"POST", "/v1/dunning/runs/{id}/resolve"}:         explicit("dunning.Handler.resolveRun → Log(update, dunning_run) — operator's manual resolution."),
 
 	// --- webhook endpoints / events --------------------------------------
-	{"POST", "/v1/webhook-endpoints/endpoints"}:                    explicit("webhook.Handler.createEndpoint → Log(create, webhook_endpoint)."),
-	{"PATCH", "/v1/webhook-endpoints/endpoints/{id}"}:              explicit("webhook.Handler.updateEndpoint → Log(update, webhook_endpoint)."),
-	{"DELETE", "/v1/webhook-endpoints/endpoints/{id}"}:             explicit("webhook.Handler.deleteEndpoint → Log(delete, webhook_endpoint)."),
-	{"POST", "/v1/webhook-endpoints/endpoints/{id}/rotate-secret"}: explicit("webhook.Handler.rotateSecret → Log(rotate, webhook_endpoint) — never records the secret."),
-	{"POST", "/v1/webhook-endpoints/events/{id}/replay"}:           explicit("webhook.Handler.replayEvent → Log(update, webhook_event: replayed)."),
-	{"POST", "/v1/webhook_events/{id}/replay"}:                     explicit("webhook.Handler.replayEventV2 → Log(update, webhook_event: replayed)."),
+	{"POST", "/v1/webhook-endpoints/endpoints"}:                                     explicit("webhook.Handler.createEndpoint → Log(create, webhook_endpoint)."),
+	{"PATCH", "/v1/webhook-endpoints/endpoints/{id}"}:                               explicit("webhook.Handler.updateEndpoint → Log(update, webhook_endpoint)."),
+	{"DELETE", "/v1/webhook-endpoints/endpoints/{id}"}:                              explicit("webhook.Handler.deleteEndpoint → Log(delete, webhook_endpoint)."),
+	{"POST", "/v1/webhook-endpoints/endpoints/{id}/rotate-secret"}:                  explicit("webhook.Handler.rotateSecret → Log(rotate, webhook_endpoint) — never records the secret."),
+	{"POST", "/v1/webhook-endpoints/events/{id}/replay"}:                            explicit("webhook.Handler.replayEvent → Log(update, webhook_event: replayed)."),
+	{"POST", "/v1/webhook_events/{id}/replay"}:                                      explicit("webhook.Handler.replayEventV2 → Log(update, webhook_event: replayed)."),
+	{"POST", "/v1/webhook-endpoints/endpoints/{id}/deliveries/{deliveryID}/replay"}: explicit("webhook.Handler.replayDelivery → Log(update, webhook_delivery: replayed_to_endpoint) — records target endpoint + replay clone ids."),
 
 	// --- settings / Stripe connection -------------------------------------
 	{"PUT", "/v1/settings"}:                         explicit("tenant.SettingsHandler.upsert → Log(update, setting) with a FIELD-LEVEL diff. A save that changes no field mutates nothing semantically and declares MarkSkip."),

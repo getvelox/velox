@@ -71,7 +71,9 @@ var requestScopedOwnTxWriters = map[string]int{
 	"dunning/update": 3,
 	"dunning/delete": 1,
 	"webhook/create": 1,
-	"webhook/update": 3,
+	// update ×4: endpoint PATCH, both event-replay handlers, and the
+	// single-receiver delivery replay (endpoint drill-down).
+	"webhook/update": 4,
 	"webhook/delete": 1,
 	"webhook/rotate": 1,
 }

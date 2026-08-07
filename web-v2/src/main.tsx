@@ -98,6 +98,7 @@ const DunningPage = lazy(() => import('@/pages/Dunning'))
 const DunningPoliciesPage = lazy(() => import('@/pages/DunningPolicies'))
 const WebhooksPage = lazy(() => import('@/pages/Webhooks'))
 const WebhookEventsPage = lazy(() => import('@/pages/WebhookEvents'))
+const WebhookEndpointDetailPage = lazy(() => import('@/pages/WebhookEndpointDetail'))
 const ApiKeysPage = lazy(() => import('@/pages/ApiKeys'))
 const TestClocksPage = lazy(() => import('@/pages/TestClocks'))
 const TestClockDetailPage = lazy(() => import('@/pages/TestClockDetail'))
@@ -149,6 +150,7 @@ const App = () => (
               <Route path="/dunning-policies" element={<ProtectedRoute><DunningPoliciesPage /></ProtectedRoute>} />
               <Route path="/webhooks" element={<ProtectedRoute><WebhooksPage /></ProtectedRoute>} />
               <Route path="/webhooks/events" element={<ProtectedRoute><WebhookEventsPage /></ProtectedRoute>} />
+              <Route path="/webhooks/endpoints/:id" element={<ProtectedRoute><WebhookEndpointDetailPage /></ProtectedRoute>} />
               <Route path="/api-keys" element={<ProtectedRoute><ApiKeysPage /></ProtectedRoute>} />
               <Route path="/test-clocks" element={<ProtectedRoute><TestClocksPage /></ProtectedRoute>} />
               <Route path="/test-clocks/:id" element={<ProtectedRoute><TestClockDetailPage /></ProtectedRoute>} />

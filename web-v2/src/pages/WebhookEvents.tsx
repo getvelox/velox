@@ -336,7 +336,10 @@ function DeliveryTimeline({ eventID }: { eventID: string }) {
   return (
     <div className="px-6 py-4">
       <h3 className="text-xs font-semibold uppercase text-muted-foreground mb-3">
-        Delivery Timeline ({deliveries.length} {deliveries.length === 1 ? 'attempt' : 'attempts'})
+        {/* "deliveries", not "attempts": each row is one delivery, whose own
+            retry ladder can span up to 6 HTTP attempts (attempt_count). The
+            old label under-counted reality by up to 6×. */}
+        Delivery Timeline ({deliveries.length} {deliveries.length === 1 ? 'delivery' : 'deliveries'})
       </h3>
       <ol className="space-y-3">
         {deliveries.map((d, i) => (

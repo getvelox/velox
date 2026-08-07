@@ -75,6 +75,12 @@ type WebhookDelivery struct {
 	// soft, so the join still resolves). Writers never set these.
 	EndpointURL         string `json:"endpoint_url,omitempty"`
 	EndpointDescription string `json:"endpoint_description,omitempty"`
+	// EventType / EventReplayOfID are hydrated only by the endpoint-scoped
+	// delivery-listing JOIN (the endpoint drill-down): that surface lists
+	// deliveries ACROSS events, so each row must say which business fact it
+	// carried without a per-row event fetch. Writers never set these.
+	EventType       string `json:"event_type,omitempty"`
+	EventReplayOfID string `json:"event_replay_of_id,omitempty"`
 }
 
 // EventDispatcher fires outbound webhook events.

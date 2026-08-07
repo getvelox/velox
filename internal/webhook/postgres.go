@@ -911,3 +911,75 @@ func (s *PostgresStore) ListDeliveries(ctx context.Context, tenantID, eventID st
 	}
 	return deliveries, rows.Err()
 }
+
+func (s *PostgresStore) GetDelivery(ctx context.Context, tenantID, id string) (domain.WebhookDelivery, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return domain.WebhookDelivery{}, err
+	}
+	defer postgres.Rollback(tx)
+
+	var d domain.WebhookDelivery
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, tenant_id, livemode, webhook_endpoint_id, webhook_event_id, status,
+			COALESCE(http_status_code, 0), COALESCE(response_body,''), COALESCE(error_message,''),
+			attempt_count, next_retry_at, created_at, completed_at
+		FROM webhook_deliveries WHERE id = $1
+	`, id).Scan(&d.ID, &d.TenantID, &d.Livemode, &d.WebhookEndpointID, &d.WebhookEventID,
+		&d.Status, &d.HTTPStatusCode, &d.ResponseBody, &d.ErrorMessage,
+		&d.AttemptCount, &d.NextRetryAt, &d.CreatedAt, &d.CompletedAt)
+	if err == sql.ErrNoRows {
+		return domain.WebhookDelivery{}, errs.ErrNotFound
+	}
+	if err != nil {
+		return domain.WebhookDelivery{}, err
+	}
+	return d, nil
+}
+
+// ListDeliveriesByEndpoint is the endpoint drill-down: one receiver's
+// delivery history, newest first. The events join hydrates each row with
+// the business fact it carried (event_type) and its replay pivot — this
+// surface lists deliveries ACROSS events, so a row must be readable
+// without a second fetch. INNER JOIN is safe here: a delivery row is
+// created in the same tx as its event (or referencing an event that
+// already committed, on the replay path), so the FK target always exists.
+func (s *PostgresStore) ListDeliveriesByEndpoint(ctx context.Context, tenantID, endpointID string, limit int) ([]domain.WebhookDelivery, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer postgres.Rollback(tx)
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT d.id, d.tenant_id, d.livemode, d.webhook_endpoint_id, d.webhook_event_id, d.status,
+			COALESCE(d.http_status_code, 0), COALESCE(d.response_body,''), COALESCE(d.error_message,''),
+			d.attempt_count, d.next_retry_at, d.created_at, d.completed_at,
+			e.event_type, COALESCE(e.replay_of_event_id,'')
+		FROM webhook_deliveries d
+		JOIN webhook_events e ON e.id = d.webhook_event_id
+		WHERE d.webhook_endpoint_id = $1
+		ORDER BY d.created_at DESC
+		LIMIT $2
+	`, endpointID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var deliveries []domain.WebhookDelivery
+	for rows.Next() {
+		var d domain.WebhookDelivery
+		if err := rows.Scan(&d.ID, &d.TenantID, &d.Livemode, &d.WebhookEndpointID, &d.WebhookEventID,
+			&d.Status, &d.HTTPStatusCode, &d.ResponseBody, &d.ErrorMessage,
+			&d.AttemptCount, &d.NextRetryAt, &d.CreatedAt, &d.CompletedAt,
+			&d.EventType, &d.EventReplayOfID); err != nil {
+			return nil, err
+		}
+		deliveries = append(deliveries, d)
+	}
+	return deliveries, rows.Err()
+}

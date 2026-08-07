@@ -62,6 +62,12 @@ type Store interface {
 	CreateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery) (domain.WebhookDelivery, error)
 	UpdateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery) (domain.WebhookDelivery, error)
 	ListDeliveries(ctx context.Context, tenantID, eventID string) ([]domain.WebhookDelivery, error)
+	GetDelivery(ctx context.Context, tenantID, id string) (domain.WebhookDelivery, error)
+	// ListDeliveriesByEndpoint is the endpoint drill-down query: every
+	// delivery sent to ONE receiver, newest first, each row hydrated with
+	// its event's type + replay pivot (the surface lists deliveries across
+	// events, so rows must be self-describing).
+	ListDeliveriesByEndpoint(ctx context.Context, tenantID, endpointID string, limit int) ([]domain.WebhookDelivery, error)
 
 	// Stats
 	GetEndpointStats(ctx context.Context, tenantID string) ([]EndpointStats, error)

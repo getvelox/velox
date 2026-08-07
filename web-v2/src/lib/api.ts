@@ -498,6 +498,22 @@ export const api = {
   deleteWebhookEndpoint: (id: string) => apiRequest<{ status: string }>('DELETE', `/webhook-endpoints/endpoints/${id}`),
   rotateWebhookSecret: (id: string) => apiRequest<{ secret: string; secondary_valid_until?: string }>('POST', `/webhook-endpoints/endpoints/${id}/rotate-secret`),
   getWebhookEndpointStats: () => apiRequest<{ data: { endpoint_id: string; total_deliveries: number; succeeded: number; failed: number; success_rate: number }[] }>('GET', '/webhook-endpoints/endpoints/stats'),
+  // Endpoint drill-down: ONE receiver's delivery history (newest first),
+  // each row naming the business fact it carried (event_type). The
+  // endpoint rides along so a direct URL load of the detail page is one
+  // request, and an unknown id 404s instead of rendering an empty-but-
+  // healthy-looking history.
+  listWebhookEndpointDeliveries: (id: string) =>
+    apiRequest<{ endpoint: WebhookEndpoint; data: EndpointDelivery[] }>('GET', `/webhook-endpoints/endpoints/${id}/deliveries`),
+  // Single-receiver replay (Stripe "Resend" / GitHub "Redeliver" unit):
+  // re-sends one delivery's event to THAT endpoint only. The event-wide
+  // replay fans out to every subscriber — wrong tool after fixing one
+  // broken receiver, since it sprays duplicates at the healthy ones.
+  replayWebhookDelivery: (endpointId: string, deliveryId: string) =>
+    apiRequest<{ event_id: string; replay_of: string; delivery_id: string; status: string }>(
+      'POST',
+      `/webhook-endpoints/endpoints/${endpointId}/deliveries/${deliveryId}/replay`,
+    ),
   // listWebhookEvents/replayWebhookEvent (the legacy plain-list pair) were
   // deleted with the duplicate /webhooks?tab=events surface — the live
   // events view at /webhooks/events is the ONLY events UI. The backend
@@ -1540,6 +1556,26 @@ export interface WebhookEndpoint {
   // secrets so the receiver's verifier can be staged without an outage.
   secondary_secret_last4?: string
   secondary_secret_expires_at?: string
+}
+
+// One row of an endpoint's delivery history (the drill-down surface).
+// Snake_case keys pinned by TestWireShape_EndpointDeliveries. attempt_count
+// is the HTTP attempt ladder INSIDE this delivery (1..6); a replayed event
+// shows up as a separate row with is_replay set, never as extra attempts.
+export interface EndpointDelivery {
+  id: string
+  event_id: string
+  event_type: string
+  is_replay: boolean
+  replay_of_event_id?: string
+  status: 'pending' | 'succeeded' | 'failed'
+  status_code: number
+  attempt_count: number
+  response_body: string
+  error: string
+  created_at: string
+  completed_at: string | null
+  next_retry_at: string | null
 }
 
 export interface WebhookEvent {

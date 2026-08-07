@@ -96,6 +96,7 @@ export default function WebhooksPage() {
 /* ─── Endpoints Tab ─── */
 
 function EndpointsTab() {
+  const navigate = useNavigate()
   const [showCreate, setShowCreate] = useState(false)
   const [createdSecret, setCreatedSecret] = useState<{ secret: string; secondary_valid_until?: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<WebhookEndpoint | null>(null)
@@ -192,10 +193,14 @@ function EndpointsTab() {
                   const rotationActive =
                     !!ep.secondary_secret_expires_at &&
                     untilMs(ep.secondary_secret_expires_at, wallClockNow()) > 0
+                  // Row click opens the endpoint's delivery history — the
+                  // success-rate band is an aggregate; the drill-down is
+                  // where "which deliveries failed, and why" gets answered.
+                  // Action buttons stopPropagation so they keep their jobs.
                   return (
-                  <TableRow key={ep.id}>
+                  <TableRow key={ep.id} className="cursor-pointer" onClick={() => navigate(`/webhooks/endpoints/${ep.id}`)}>
                     <TableCell className="font-mono text-sm max-w-xs" title={ep.url}>
-                      <div className="truncate">{ep.url}</div>
+                      <div className="truncate hover:underline">{ep.url}</div>
                       {rotationActive && ep.secondary_secret_expires_at && (
                         <div className="text-xs text-emerald-700 dark:text-emerald-400 font-normal mt-0.5">
                           Dual-signing until {formatDateTime(ep.secondary_secret_expires_at)}
@@ -228,7 +233,8 @@ function EndpointsTab() {
                       <div className="flex items-center justify-end gap-1">
                         <Button variant="outline" size="sm" className="h-7 text-xs"
                           disabled={!!rotatingId}
-                          onClick={async () => {
+                          onClick={async (e) => {
+                            e.stopPropagation()
                             if (rotateInFlight.current) return
                             rotateInFlight.current = true
                             setRotatingId(ep.id)
@@ -247,11 +253,11 @@ function EndpointsTab() {
                           {rotatingId === ep.id ? <><Loader2 size={12} className="animate-spin mr-1" />Rotating…</> : 'Rotate Secret'}
                         </Button>
                         <Button variant="outline" size="sm" className="h-7 text-xs"
-                          onClick={() => setEditTarget(ep)}>
+                          onClick={(e) => { e.stopPropagation(); setEditTarget(ep) }}>
                           Edit
                         </Button>
                         <Button variant="outline" size="sm" className="h-7 text-xs text-destructive hover:text-destructive"
-                          onClick={() => setDeleteTarget(ep)}>
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(ep) }}>
                           Delete
                         </Button>
                       </div>
