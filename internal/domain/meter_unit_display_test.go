@@ -6,8 +6,8 @@ import "testing"
 // convention: token rates quote per 1M tokens (how Anthropic, OpenAI and
 // Metronome all list them), everything else per single unit. The FE twin
 // is web-v2/src/lib/priceDisplay.ts unitScale — the two mappings must move
-// together, and each side pins its own so a one-sided edit fails a test
-// instead of splitting the dashboard from the PDF.
+// together. Only THIS side is test-pinned; the TS twin has no test, so a
+// one-sided edit there fails nothing — check both files on any change.
 func TestMeterUnitDisplayScale(t *testing.T) {
 	cases := []struct {
 		unit      string

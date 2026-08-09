@@ -7,7 +7,7 @@
 [![CI](https://github.com/getvelox/velox/actions/workflows/ci.yml/badge.svg)](https://github.com/getvelox/velox/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Release](https://img.shields.io/github/v/tag/sagarsuperuser/velox?label=release)](CHANGELOG.md)
+[![Release](https://img.shields.io/github/v/tag/getvelox/velox?label=release)](CHANGELOG.md)
 
 **Pre-1.0.** The public API is stabilising but not yet frozen — breaking changes land on MINOR until 1.0.0 ([versioning policy](CHANGELOG.md)).
 

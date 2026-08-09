@@ -55,7 +55,7 @@ services:
 
   velox-api:
     # Buildable locally as well as pullable. Without the build stanza this
-    # service could ONLY come from the registry, and ghcr.io/sagarsuperuser/velox
+    # service could ONLY come from the registry, and ghcr.io/getvelox/velox
     # is not anonymously readable (an unauthenticated manifest fetch returns
     # 401), so the documented `docker compose up -d --build` failed with
     # "error from registry: denied" for anyone who had not already been granted

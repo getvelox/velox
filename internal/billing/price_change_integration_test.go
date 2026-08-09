@@ -120,10 +120,12 @@ func usageLineTotal(t *testing.T, f *thresholdFixture, ctx context.Context, invo
 			usageLines = append(usageLines, l)
 			// Every usage line must carry its meter's unit (migration
 			// 0173): it's what lets the invoice surfaces render token
-			// rates per-1M. Asserted here — in the helper every cycle
-			// test funnels through — so dropping the stamp at ANY of the
-			// engine's line-construction sites fails real-Postgres tests,
-			// not just the one that happened to look.
+			// rates per-1M. Asserted here — in the helper the cycle-close,
+			// threshold and preview tests funnel through — so dropping the
+			// stamp at THOSE construction sites fails real-Postgres tests.
+			// NOT covered: the two buildCancelLineItems sites (engine.go
+			// cancel path). They stamp correctly today, but no test routes
+			// a cancel invoice through this assertion (2026-08-09 audit).
 			if l.MeterUnit == "" {
 				t.Fatalf("usage line %q has no MeterUnit — the 0173 stamp was dropped at its construction site", l.Description)
 			}

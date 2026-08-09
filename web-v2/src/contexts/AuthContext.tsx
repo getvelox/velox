@@ -96,7 +96,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const setMode = useCallback(async (livemode: boolean) => {
+    // Flipping user.livemode below remounts the entire app subtree
+    // (ModeAwareQueryProvider is keyed on it), and that render saturates
+    // the main thread the moment it starts. The sidebar's mode switch
+    // begins its 200ms thumb glide on click (Layout.tsx ModeToggle,
+    // duration-200 — change these together); a local sub-20ms round
+    // trip lets the remount land mid-glide, freezing the thumb and then
+    // snapping it. Hold the flip until the glide can complete. Real
+    // network latency usually covers this anyway — the floor only pads
+    // fast responses, never delays failure, and steps aside when the
+    // user prefers reduced motion (the thumb doesn't animate then).
+    const glideDone = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? Promise.resolve()
+      : new Promise(resolve => setTimeout(resolve, 240))
     await authApi.setMode(livemode)
+    await glideDone
     setUser(prev => (prev ? { ...prev, livemode } : prev))
     // Notify other tabs sharing this session cookie. Without this,
     // Tab B keeps its amber "TEST" pill while the server-side

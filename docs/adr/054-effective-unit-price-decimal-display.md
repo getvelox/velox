@@ -100,8 +100,9 @@ the PDF reads the compact "$3.00 / 1M" (the unit word is already in the
 description, and the full form overflowed the Qty column — caught on
 render). The RAW unit is stamped, not a resolved scale, so the convention
 lives in exactly one place per renderer (`domain.MeterUnitDisplayScale` in
-Go, `unitScale` in TS — deliberately tiny twins, each pinned by its own
-test) and an invoice stays a stable document: editing a meter never
+Go, `unitScale` in TS — deliberately tiny twins; the Go side is pinned
+by `TestMeterUnitDisplayScale`, the TS side is untested — change both
+together) and an invoice stays a stable document: editing a meter never
 re-labels history. Backfill is exact (the meter_id join), unlike the 0142
 nominal-rate backfill which was impossible for overridden lines — verified
 in place: 109/109 pre-migration usage lines named on migrate.

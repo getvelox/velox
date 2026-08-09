@@ -121,69 +121,98 @@ function NavLink({
   )
 }
 
-// ModeToggle — operator switches the dashboard between test and live
-// without signing out. Backed by POST /v1/auth/mode, which updates
-// dashboard_sessions.livemode for the current cookie session; every
-// downstream API call inherits the new mode via session middleware.
-// Stripe / Vercel / Linear all use a top-of-chrome toggle in this
-// position.
-// ModeToggle — segmented control showing both modes with the active
-// one highlighted, so the affordance is explicit. Linear, Vercel,
-// Stripe all use this shape for binary mode/environment switches:
-// click the inactive segment to switch. Backed by POST /v1/auth/mode,
-// which updates dashboard_sessions.livemode for the current cookie
-// session; every downstream API call inherits the new mode via session
-// middleware.
+// ModeToggle — segmented control switching the dashboard between test
+// and live without signing out. Backed by POST /v1/auth/mode, which
+// updates dashboard_sessions.livemode for the current cookie session;
+// every downstream API call inherits the new mode via session
+// middleware. Lives at the TOP of the sidebar (the environment-switcher
+// slot — Clerk/WorkOS put it top-left near the org; Stripe/Razorpay
+// top-right): top-prominent, but sidebar-native so no empty top-bar
+// band. Deliberately NOT inside the test-only nav section — a section
+// headed "Test mode" cannot host the control whose other half is Live,
+// and that section unmounts in live mode, which would strand the way
+// back.
 function ModeToggle({ livemode, busy, onToggle }: { livemode: boolean; busy: boolean; onToggle: () => void }) {
-  const segment = (active: boolean, label: 'Test' | 'Live', activeText: string) => (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      aria-label={`${label} mode`}
-      disabled={busy || active}
-      onClick={() => { if (!active) onToggle() }}
-      className={cn(
-        // Segments are transparent hit-targets layered OVER the sliding
-        // thumb below; z-10 keeps labels above it.
-        'relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-200',
-        active ? activeText : 'text-muted-foreground hover:text-foreground cursor-pointer',
-        busy && !active && 'opacity-50 cursor-not-allowed',
-      )}
-    >
-      {busy && active ? (
-        <Loader2 size={11} className="animate-spin" aria-hidden="true" />
-      ) : (
-        <span
-          className={cn(
-            'h-1.5 w-1.5 rounded-full transition-colors duration-200',
-            active ? (label === 'Live' ? 'bg-emerald-500' : 'bg-amber-500') : 'bg-muted-foreground/40',
-            // Live is real money moving — the dot breathes like a record
-            // light. Test stays still.
-            active && label === 'Live' && 'animate-pulse',
-          )}
-        />
-      )}
-      {label}
-    </button>
-  )
+  // Optimistic visual position. The mode switch remounts the whole app
+  // subtree (ModeAwareQueryProvider is keyed on livemode — same remount
+  // that once ate the Toaster), so a thumb keyed to the SERVER state can
+  // never be seen to move: by the time livemode flips, this instance is
+  // gone and its replacement mounts already-arrived. Instead the thumb
+  // slides to the TARGET the moment it is clicked — the 200ms glide plays
+  // during the request — and the post-remount instance simply agrees with
+  // where it landed. AuthContext.setMode holds the livemode flip until the
+  // glide can finish (240ms floor — change these durations together), or
+  // a fast local round trip remounts mid-glide and the thumb freezes then
+  // snaps. On failure the render-phase reset below slides it back.
+  const [pending, setPending] = useState<boolean | null>(null)
+  // Failure reset, done during render (React's sanctioned adjust-state-on-
+  // props-change pattern — an effect here trips the cascading-render lint):
+  // if the request finished and the server mode did NOT move to the pending
+  // target, drop the optimism and let the thumb slide back. Success needs no
+  // reset — the mode switch remounts this component with fresh state.
+  if (pending !== null && !busy && livemode !== pending) setPending(null)
+  const visual = pending ?? livemode
+
+  const segment = (target: boolean, label: 'Test' | 'Live', activeText: string) => {
+    const active = visual === target
+    return (
+      <button
+        type="button"
+        role="radio"
+        aria-checked={livemode === target}
+        aria-label={`${label} mode`}
+        disabled={busy || livemode === target}
+        onClick={() => {
+          if (livemode !== target && !busy) {
+            setPending(target)
+            onToggle()
+          }
+        }}
+        className={cn(
+          // Segments are transparent hit-targets layered OVER the sliding
+          // thumb below; z-10 keeps labels above it.
+          'relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-200',
+          active ? activeText : 'text-muted-foreground hover:text-foreground cursor-pointer',
+          busy && !active && 'opacity-50 cursor-not-allowed',
+        )}
+      >
+        {busy && active ? (
+          // The spinner rides the segment the operator is switching TO —
+          // pending-state affordance on the thing they clicked, not on the
+          // mode they are leaving.
+          <Loader2 size={11} className="animate-spin" aria-hidden="true" />
+        ) : (
+          <span
+            className={cn(
+              'h-1.5 w-1.5 rounded-full transition-colors duration-200',
+              active ? (label === 'Live' ? 'bg-emerald-500' : 'bg-amber-500') : 'bg-muted-foreground/40',
+              // Live is real money moving — the dot breathes like a record
+              // light (stilled under prefers-reduced-motion). Test stays still.
+              active && label === 'Live' && 'animate-pulse motion-reduce:animate-none',
+            )}
+          />
+        )}
+        {label}
+      </button>
+    )
+  }
   return (
     <div role="radiogroup" aria-label="Test or live mode" className="relative flex w-full items-center rounded-lg bg-muted/60 p-1">
       {/* The sliding thumb: one raised surface that TRAVELS between the two
-          positions (200ms ease-out) instead of two segments swapping
-          backgrounds — the segmented-control motion language of iOS/Linear.
+          positions (200ms ease-out; instant under prefers-reduced-motion).
           Width is half the track minus the 4px padding ring; translate-x
-          moves it exactly one thumb-width. */}
+          moves it exactly one thumb-width. Driven by the OPTIMISTIC visual
+          position (see above) so the glide is actually visible. */}
       <span
         aria-hidden="true"
         className={cn(
           'absolute left-1 top-1 bottom-1 w-[calc(50%-4px)] rounded-md bg-card shadow-sm ring-1 ring-black/5 dark:ring-white/10',
-          'transition-transform duration-200 ease-out',
-          livemode && 'translate-x-full',
+          'transition-transform duration-200 ease-out motion-reduce:transition-none',
+          visual && 'translate-x-full',
         )}
       />
-      {segment(!livemode, 'Test', 'text-amber-700 dark:text-amber-300')}
-      {segment(livemode, 'Live', 'text-emerald-700 dark:text-emerald-400')}
+      {segment(false, 'Test', 'text-amber-700 dark:text-amber-300')}
+      {segment(true, 'Live', 'text-emerald-700 dark:text-emerald-400')}
     </div>
   )
 }
@@ -375,14 +404,6 @@ export function Layout({ children }: { children: ReactNode }) {
         )}
       </ScrollPane>
 
-      {/* Mode switch — session context, so it sits with the session-identity
-          block below rather than in the nav. Deliberately NOT inside the
-          test-only nav section: a section headed "Test mode" cannot host the
-          control whose other half is Live (and that section unmounts in live
-          mode, which would strand the way back). Living in the fixed sidebar
-          also retires the top-bar row this pill used to occupy — a full-width
-          band that was empty except for this one control, spending ~85px of
-          every page on nothing. */}
       {/* Footer — account menu (who am I). The mode switch lives at the TOP
           of the sidebar (environment-switcher slot), not here. */}
       <div className="p-2 border-t border-border">
@@ -480,7 +501,12 @@ export function Layout({ children }: { children: ReactNode }) {
       </aside>
 
       {/* Sidebar - mobile */}
+      {/* inert when closed: the drawer is only translated off-canvas, so
+          without it every control inside — including the Test/Live switch —
+          stays tab-reachable while invisible; the first Tab press on mobile
+          could focus (and Enter could flip) the mode switch sight unseen. */}
       <aside
+        inert={!sidebarOpen}
         className={cn(
           'fixed inset-y-0 left-0 z-40 w-60 bg-card border-r border-border flex flex-col transition-transform duration-200 md:hidden',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'

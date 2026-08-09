@@ -1,10 +1,11 @@
 /**
  * The horizontal band every authed surface sits in.
  *
- * One constant rather than a repeated literal because THREE layers have to
- * agree on it — the page content, the sticky top bar above it, and Settings'
- * fixed save bar below — and when they disagree the misalignment is only
- * visible on a wide monitor, which is exactly where nobody develops.
+ * One constant rather than a repeated literal because multiple layers have
+ * to agree on it — the page content, Settings' fixed save bar, and (mobile
+ * only, since #768 removed the desktop top bar) the hamburger bar — and when
+ * they disagree the misalignment is only visible on a wide monitor, which is
+ * exactly where nobody develops.
  *
  * It was previously a bare `max-w-7xl mx-auto` written out at each site, and
  * they had already drifted: the top bar had no cap at all, so on a 2560px
