@@ -308,6 +308,22 @@ export function Layout({ children }: { children: ReactNode }) {
         </button>
       </div>
 
+      {/* Mode switch — top of the sidebar, the environment-switcher slot
+          (Clerk/WorkOS pattern). Every reference product puts the test/live
+          switch at the TOP (Stripe/Razorpay top-right; Clerk/WorkOS top-left
+          near the org). We keep it sidebar-native rather than a top bar so
+          there's no empty full-width band, but at the TOP where the eye and
+          muscle memory expect it. */}
+      {user && (
+        <div className="px-3 pt-3">
+          <ModeToggle
+            livemode={user.livemode}
+            busy={modeBusy}
+            onToggle={handleToggleMode}
+          />
+        </div>
+      )}
+
       {/* Search trigger */}
       <div className="px-3 pt-3">
         <button
@@ -367,19 +383,9 @@ export function Layout({ children }: { children: ReactNode }) {
           also retires the top-bar row this pill used to occupy — a full-width
           band that was empty except for this one control, spending ~85px of
           every page on nothing. */}
-      {/* Footer — one session cluster behind a single border: the mode
-          switch (which environment am I acting in) directly above the
-          account menu (who am I). Full-width segmented control, raised
-          active segment — the sidebar's version of Stripe's top-bar
-          toggle, styled to the Linear/Vercel weight of the footer. */}
-      <div className="p-2 border-t border-border space-y-1.5">
-        {user && (
-          <ModeToggle
-            livemode={user.livemode}
-            busy={modeBusy}
-            onToggle={handleToggleMode}
-          />
-        )}
+      {/* Footer — account menu (who am I). The mode switch lives at the TOP
+          of the sidebar (environment-switcher slot), not here. */}
+      <div className="p-2 border-t border-border">
         {user && (
           <DropdownMenu>
             <DropdownMenuTrigger
