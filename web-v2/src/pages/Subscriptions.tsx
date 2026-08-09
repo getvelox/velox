@@ -42,6 +42,7 @@ import { Plus, Search, Download, ArrowUpDown, ArrowUp, ArrowDown, Repeat } from 
 import { EmptyState } from '@/components/EmptyState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { effectiveNow } from '@/lib/effectiveNow'
+import { useTestClocks } from '@/hooks/useClockFrozenMap'
 
 const PAGE_SIZE = 25
 
@@ -125,10 +126,9 @@ export default function SubscriptionsPage() {
 
   // Test clocks → frozen_time map so per-row "Trial ends in N days"
   // reads from simulation time when the sub is pinned to a clock.
-  const { data: testClocksData } = useQuery({
-    queryKey: ['test-clocks-for-trial-badge'],
-    queryFn: () => api.listTestClocks(),
-  })
+  // useTestClocks is mode-gated (no fetch in live, where the server
+  // refuses the resource) and shares one cache entry app-wide.
+  const { data: testClocksData } = useTestClocks()
   const clockFrozenMap = useMemo(() => {
     const m: Record<string, string> = {}
     ;(testClocksData?.data ?? []).forEach(c => { m[c.id] = c.frozen_time })

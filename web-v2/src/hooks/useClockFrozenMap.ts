@@ -1,6 +1,7 @@
 import { useMemo, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
 import { effectiveNow, type EffectiveNow } from '@/lib/effectiveNow'
 
 // useClockFrozenMap returns a `test_clock_id -> frozen_time` lookup so any
@@ -19,11 +20,27 @@ import { effectiveNow, type EffectiveNow } from '@/lib/effectiveNow'
 // of that copy in CostDashboard is exactly what left its cycle progress reading
 // wall-clock time on clock-pinned subs. Centralizing it here removes the
 // per-call-site drift that caused the miss.
-export function useClockFrozenMap(): Record<string, string> {
-  const { data } = useQuery({
+// useTestClocks is THE fetch of the test-clock list — every consumer
+// (frozen-time maps here, the clock-name lookup in Subscriptions, the
+// has-clocks check in Pricing's rule dialog) derives from this one query.
+// Test clocks are a test-mode-only resource: the server 403s the list in
+// live mode, and a live entity can never carry a test_clock_id, so the
+// data could never be consulted there anyway. Don't ask — gating lived
+// per call site before this hook, and three inline copies each earned a
+// 403 console error in live mode (the exact per-call-site drift the file
+// header describes). All consumers are operator-authed surfaces; the
+// public cost dashboard is a separate component with its own payload.
+export function useTestClocks() {
+  const { user } = useAuth()
+  return useQuery({
     queryKey: ['test-clocks'],
     queryFn: () => api.listTestClocks(),
+    enabled: !(user?.livemode ?? false),
   })
+}
+
+export function useClockFrozenMap(): Record<string, string> {
+  const { data } = useTestClocks()
   return useMemo(() => {
     const m: Record<string, string> = {}
     ;(data?.data ?? []).forEach(c => {

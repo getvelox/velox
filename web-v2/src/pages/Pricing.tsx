@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { useTestClocks } from '@/hooks/useClockFrozenMap'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -499,10 +500,10 @@ function CreateRuleDialog({ rules, prefill, onClose, onCreated }: { rules: Ratin
   // the current simulated period (catalog stamps are wall-clock, ADR-070
   // caveat, observed live in the FLOW B9 walk). Surface that whenever the
   // tenant has clocks so simulation results don't silently surprise.
-  const { data: clocksData } = useQuery({
-    queryKey: ['test-clocks'],
-    queryFn: () => api.listTestClocks(),
-  })
+  // useTestClocks is mode-gated: in live mode it never fetches (the server
+  // refuses the resource) and hasClocks stays false — correct, since the
+  // caveat below can only ever apply to test-clock simulation.
+  const { data: clocksData } = useTestClocks()
   const hasClocks = (clocksData?.data ?? []).length > 0
   // Prefill = "publish new version": every field seeds from the current
   // version (rates cents→dollars via exact decimal shift) and the key is
