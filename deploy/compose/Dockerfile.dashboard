@@ -29,7 +29,7 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 
-LABEL org.opencontainers.image.source="https://github.com/sagarsuperuser/velox"
+LABEL org.opencontainers.image.source="https://github.com/getvelox/velox"
 LABEL org.opencontainers.image.description="Velox dashboard (web-v2 SPA)"
 LABEL org.opencontainers.image.licenses="MIT"
 

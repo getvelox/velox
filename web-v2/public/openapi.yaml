@@ -7,10 +7,10 @@ info:
   version: "2026-04-07"
   license:
     name: MIT
-    url: https://github.com/sagarsuperuser/velox/blob/main/LICENSE
+    url: https://github.com/getvelox/velox/blob/main/LICENSE
   contact:
     name: Velox
-    url: https://github.com/sagarsuperuser/velox
+    url: https://github.com/getvelox/velox
 
 servers:
   - url: http://localhost:8080
