@@ -17,6 +17,7 @@ import { statusBadgeVariant, statusBorderColor } from '@/lib/status'
 import { InitialsAvatar } from '@/components/InitialsAvatar'
 import { DueBadge } from '@/components/DueBadge'
 import { effectiveNow } from '@/lib/effectiveNow'
+import { useClockFrozenMap } from '@/hooks/useClockFrozenMap'
 import { SimulatedBadge } from '@/components/TestClockBadge'
 
 import { Button } from '@/components/ui/button'
@@ -160,14 +161,13 @@ export default function InvoicesPage() {
     queryFn: () => api.listSubscriptions(),
   })
 
-  // Test clocks list → frozen_time lookup so per-row "Due in N days"
-  // badges read from simulation time when the row's subscription is
-  // pinned to a clock. Without this, the badge defaults to wall-clock
-  // and understates urgency on test-clock-driven invoices.
-  const { data: testClocksData } = useQuery({
-    queryKey: ['test-clocks-for-due-badge'],
-    queryFn: () => api.listTestClocks(),
-  })
+  // Test clocks → frozen_time lookup so per-row "Due in N days" badges
+  // read from simulation time when the row's subscription is pinned to a
+  // clock. Without it, the badge defaults to wall-clock and understates
+  // urgency on test-clock-driven invoices. The hook is mode-gated (no
+  // fetch in live, where the server refuses the resource) and returns {}
+  // there — every live row correctly falls back to wall time.
+  const clockFrozenMap = useClockFrozenMap()
 
   const invoices = invoicesData?.data ?? []
   const total = invoicesData?.total ?? 0
@@ -184,12 +184,6 @@ export default function InvoicesPage() {
     ;(subscriptionsData?.data ?? []).forEach(s => { if (s.test_clock_id) m[s.id] = s.test_clock_id })
     return m
   }, [subscriptionsData])
-
-  const clockFrozenMap = useMemo(() => {
-    const m: Record<string, string> = {}
-    ;(testClocksData?.data ?? []).forEach(c => { m[c.id] = c.frozen_time })
-    return m
-  }, [testClocksData])
 
   // Search + date range are server-side (search=, from=, to= query
   // params) — the rows arriving here are already filtered across the

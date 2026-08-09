@@ -42,9 +42,28 @@ function toUserContext(s: SessionInfo): UserContext | null {
   }
 }
 
+// Customer-facing pages reached from emailed links — hosted invoice,
+// payment update and its return page. Their visitors are end customers
+// with no operator session, so the whoami bootstrap below is a
+// guaranteed 401 in their console, and nothing on these routes renders
+// operator state. The /login-family routes are NOT listed: their
+// PublicOnlyRoute redirect depends on the probe.
+function isCustomerTokenRoute(pathname: string): boolean {
+  return (
+    pathname.startsWith('/invoice/') ||
+    pathname === '/update-payment' ||
+    pathname === '/payment-method-added'
+  )
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserContext | null>(null)
-  const [loading, setLoading] = useState(true)
+  // On customer-token routes the probe never runs (see the effect), so
+  // auth is "loaded" from the first render: user null, loading false.
+  // window.location, not useLocation — this provider sits above the
+  // router; the check is per page load, which is what the probe is too.
+  const skipProbe = isCustomerTokenRoute(window.location.pathname)
+  const [loading, setLoading] = useState(!skipProbe)
 
   const refresh = useCallback(async () => {
     try {
@@ -67,9 +86,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // an await, so no cascading sync render exists. The linter's
   // interprocedural pass can't see through the async boundary.
   useEffect(() => {
+    if (skipProbe) return
     // eslint-disable-next-line react-hooks/set-state-in-effect -- async session fetch; all state sets are post-await
     refresh().finally(() => setLoading(false))
-  }, [refresh])
+  }, [refresh, skipProbe])
 
   const login = useCallback(async (email: string, password: string) => {
     const res = await authApi.login(email, password)
