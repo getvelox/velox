@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -68,6 +69,22 @@ type Meter struct {
 	RatingRuleVersionID string    `json:"rating_rule_version_id"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// MeterUnitDisplayScale is the display-scale convention for a meter unit:
+// token rates are quoted per 1M tokens (how every AI provider and rate
+// card lists them — Anthropic, OpenAI, Metronome); everything else quotes
+// per single unit. Returns the decimal shift to apply to a per-unit rate
+// and the "per" label. The FE twin is web-v2/src/lib/priceDisplay.ts
+// unitScale — the two mappings are deliberately tiny and each side pins
+// its own with a test; change them together.
+func MeterUnitDisplayScale(unit string) (shift int32, per string) {
+	switch u := strings.ToLower(strings.TrimSpace(unit)); u {
+	case "tokens", "token":
+		return 6, "1M tokens"
+	default:
+		return 0, ""
+	}
 }
 
 type BillingInterval string

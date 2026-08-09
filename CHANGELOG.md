@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Token rates now read the way the industry quotes them (2026-08-09).** Invoice surfaces — the operator dashboard, the customer-facing hosted page, and the PDF — display token unit prices per million ("$3.00 / 1M tokens") instead of the per-token form ("$0.000003"), matching how Anthropic, OpenAI, and Metronome all list rates and how the Pricing section already displayed them. Nothing about the math changed: rates are stored and billed at exact per-unit precision; only the label moved. Existing invoices were converted in place.
+
 ### Changed
 
 - **README rewritten for first-time readers (2026-08-09).** The real invoice output and a dashboard screenshot now lead; every billing term is defined at first use (dunning, commits, proration, credit notes); a table of contents was added; the worst wall-paragraphs were split. Fact pass against the current product: stale line counts refreshed, "80+ ADRs" is now "110+", and one lie fixed — "live event stream" sat in the deferred list ten weeks after it shipped as the webhook Live Tail.

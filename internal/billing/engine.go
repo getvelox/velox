@@ -2905,6 +2905,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 					lineItems = append(lineItems, domain.InvoiceLineItem{
 						LineType:                 domain.LineTypeUsage,
 						MeterID:                  meterID,
+						MeterUnit:                meter.Unit,
 						Description:              usageLineDescription(meter, rulesByID[agg.RuleID]),
 						Quantity:                 qty.IntPart(),
 						QuantityDecimal:          qty,
@@ -2979,6 +2980,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 			lineItems = append(lineItems, domain.InvoiceLineItem{
 				LineType:                 domain.LineTypeUsage,
 				MeterID:                  meterID,
+				MeterUnit:                meter.Unit,
 				Description:              fmt.Sprintf("%s (%s)", meter.Name, meter.Unit),
 				Quantity:                 quantity.IntPart(),
 				QuantityDecimal:          quantity,
@@ -4171,6 +4173,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 					lineItems = append(lineItems, domain.InvoiceLineItem{
 						LineType:                 domain.LineTypeUsage,
 						MeterID:                  meterID,
+						MeterUnit:                meter.Unit,
 						Description:              usageLineDescription(meter, rulesByID[agg.RuleID]) + " - canceled mid-period",
 						Quantity:                 qty.IntPart(),
 						QuantityDecimal:          qty,
@@ -4249,6 +4252,7 @@ func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscripti
 			lineItems = append(lineItems, domain.InvoiceLineItem{
 				LineType:                 domain.LineTypeUsage,
 				MeterID:                  meterID,
+				MeterUnit:                meter.Unit,
 				Description:              fmt.Sprintf("%s (%s) - canceled mid-period", meter.Name, meter.Unit),
 				Quantity:                 quantity.IntPart(),
 				QuantityDecimal:          quantity,

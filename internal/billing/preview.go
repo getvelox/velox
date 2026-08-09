@@ -29,6 +29,7 @@ type PreviewLine struct {
 	LineType            string          `json:"line_type"`
 	Description         string          `json:"description"`
 	MeterID             string          `json:"meter_id,omitempty"`
+	MeterUnit           string          `json:"meter_unit,omitempty"`
 	RatingRuleVersionID string          `json:"rating_rule_version_id,omitempty"`
 	RuleKey             string          `json:"rule_key,omitempty"`
 	DimensionMatch      map[string]any  `json:"dimension_match,omitempty"`
@@ -357,6 +358,7 @@ func (e *Engine) previewMeter(ctx context.Context, tenantID, customerID, meterID
 			LineType:                 "usage",
 			Description:              desc,
 			MeterID:                  meterID,
+			MeterUnit:                meter.Unit,
 			RatingRuleVersionID:      ratingRule.ID,
 			RuleKey:                  ratingRule.RuleKey,
 			DimensionMatch:           dimMatch,

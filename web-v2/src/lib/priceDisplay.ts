@@ -100,3 +100,20 @@ export function priceRate(r: PricedRule, unit: string): string {
       return `${money(r.flat_amount_cents ?? '0', scale, cur)} / ${per}`
   }
 }
+
+// invoiceLineRate renders an invoice line's unit price in operator units:
+// token lines read "$3.00 / 1M tokens" (the same convention the Pricing
+// section uses — unitScale above); everything else falls back to the exact
+// per-unit rate string the caller supplies. `rate` is the already-formatted
+// per-unit fallback (formatRate output) so non-scaled lines render byte-
+// identically to before this helper existed.
+export function invoiceLineRate(
+  li: { unit_amount_decimal?: string; meter_unit?: string },
+  currency: string | undefined,
+  fallback: string,
+): string {
+  if (!li.meter_unit || !li.unit_amount_decimal) return fallback
+  const { scale, per } = unitScale(li.meter_unit)
+  if (scale === 0) return fallback
+  return `${money(li.unit_amount_decimal, scale, currency)} / ${per}`
+}

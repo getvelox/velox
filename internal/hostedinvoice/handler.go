@@ -198,10 +198,13 @@ type viewLineItem struct {
 	// so the public page renders sub-cent rates (e.g. $0.003) instead of the
 	// whole-cent UnitAmountCents collapsing them to "$0.00" (ADR-054).
 	UnitAmountDecimal string `json:"unit_amount_decimal,omitempty"`
-	AmountCents       int64  `json:"amount_cents"`
-	TaxAmountCents    int64  `json:"tax_amount_cents,omitempty"`
-	TotalAmountCents  int64  `json:"total_amount_cents"`
-	Currency          string `json:"currency"`
+	// MeterUnit lets the public page render token rates per-1M
+	// ("$3.00 / 1M tokens"), matching the operator dashboard and the PDF.
+	MeterUnit        string `json:"meter_unit,omitempty"`
+	AmountCents      int64  `json:"amount_cents"`
+	TaxAmountCents   int64  `json:"tax_amount_cents,omitempty"`
+	TotalAmountCents int64  `json:"total_amount_cents"`
+	Currency         string `json:"currency"`
 }
 
 type viewBillTo struct {
@@ -502,6 +505,7 @@ func toViewLineItems(items []domain.InvoiceLineItem) []viewLineItem {
 			Quantity:          it.Quantity,
 			UnitAmountCents:   it.UnitAmountCents,
 			UnitAmountDecimal: it.DisplayUnitAmountDecimal().String(),
+			MeterUnit:         it.MeterUnit,
 			AmountCents:       it.AmountCents,
 			TaxAmountCents:    it.TaxAmountCents,
 			TotalAmountCents:  it.TotalAmountCents,

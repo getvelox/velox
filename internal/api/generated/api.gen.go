@@ -1267,8 +1267,11 @@ type InvoiceLineItem struct {
 	LineType           InvoiceLineType        `json:"line_type"`
 	Metadata           map[string]interface{} `json:"metadata,omitempty"`
 	MeterId            string                 `json:"meter_id,omitempty"`
-	PricingMode        string                 `json:"pricing_mode,omitempty"`
-	Quantity           int64                  `json:"quantity"`
+
+	// MeterUnit The meter's unit ("tokens", "seconds", …), stamped on usage lines at write time so invoice surfaces can apply the display-scale convention (token rates read "$3.00 / 1M tokens"). Empty on non-usage lines and on lines written before the 0173 backfill.
+	MeterUnit   string `json:"meter_unit,omitempty"`
+	PricingMode string `json:"pricing_mode,omitempty"`
+	Quantity    int64  `json:"quantity"`
 
 	// QuantityDecimal Exact (possibly fractional) usage quantity as a decimal string (e.g. "1.5"). The integer `quantity` is this truncated, kept for back-compat (Stripe quantity_decimal parity). "0" means none — use `quantity`. Line amounts stay whole cents.
 	QuantityDecimal     string `json:"quantity_decimal,omitempty"`

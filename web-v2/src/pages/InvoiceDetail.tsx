@@ -7,6 +7,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
 import { invalidateMoneySurfaces } from '@/lib/invalidateMoney'
+import { invoiceLineRate } from '@/lib/priceDisplay'
 import { api, downloadPDF, formatCents, formatRate, formatDate, formatDateTime, formatTaxRate, getCurrencySymbol, type TenantSettings, type DunningRun, type TimelineEvent, type Invoice as ApiInvoice, type CreditNote } from '@/lib/api'
 import { formatCivilPeriod } from '@/lib/dates'
 import { creditNoteCeilings, hasCardPayment } from '@/lib/creditNoteCeilings'
@@ -1130,7 +1131,7 @@ export default function InvoiceDetailPage() {
                           ? Number(item.quantity_decimal).toLocaleString(undefined, { maximumFractionDigits: 12 })
                           : item.quantity.toLocaleString()}
                       </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums text-sm">{formatRate(item.unit_amount_decimal ?? item.unit_amount_cents, invoice.currency)}</TableCell>
+                      <TableCell className="text-right font-mono tabular-nums text-sm">{invoiceLineRate(item, invoice.currency, formatRate(item.unit_amount_decimal ?? item.unit_amount_cents, invoice.currency))}</TableCell>
                       <TableCell className="text-right font-mono tabular-nums text-sm font-medium">{formatCents(item.amount_cents, invoice.currency)}</TableCell>
                     </TableRow>
                   )

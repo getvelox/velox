@@ -939,6 +939,9 @@ export interface LineItem {
   // amount ÷ quantity. Render with formatRate so sub-cent rates don't collapse
   // to "$0.00" like unit_amount_cents would.
   unit_amount_decimal?: string
+  // Meter unit stamped on usage lines ("tokens", …) — drives the per-1M
+  // display convention on invoice surfaces (priceDisplay.invoiceLineRate).
+  meter_unit?: string
   amount_cents: number
   total_amount_cents: number
   tax_amount_cents?: number

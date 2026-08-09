@@ -726,6 +726,13 @@ components:
           $ref: "#/components/schemas/InvoiceLineType"
         meter_id:
           type: string
+        meter_unit:
+          type: string
+          description: >
+            The meter's unit ("tokens", "seconds", …), stamped on usage lines
+            at write time so invoice surfaces can apply the display-scale
+            convention (token rates read "$3.00 / 1M tokens"). Empty on
+            non-usage lines and on lines written before the 0173 backfill.
         description:
           type: string
         quantity:

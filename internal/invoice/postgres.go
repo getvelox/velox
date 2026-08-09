@@ -1305,8 +1305,8 @@ func (s *PostgresStore) CreateLineItem(ctx context.Context, tenantID string, ite
 			description, quantity, unit_amount_cents, amount_cents, tax_rate, tax_amount_cents,
 			total_amount_cents, currency, pricing_mode, rating_rule_version_id,
 			billing_period_start, billing_period_end, metadata, created_at,
-			tax_jurisdiction, tax_code, tax_reason, quantity_decimal, nominal_unit_amount_decimal)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+			tax_jurisdiction, tax_code, tax_reason, quantity_decimal, nominal_unit_amount_decimal, meter_unit)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		RETURNING id, invoice_id, tenant_id, line_type, COALESCE(meter_id,''), description,
 			quantity, unit_amount_cents, amount_cents, tax_rate, tax_amount_cents,
 			total_amount_cents, currency, COALESCE(pricing_mode,''),
@@ -1318,7 +1318,7 @@ func (s *PostgresStore) CreateLineItem(ctx context.Context, tenantID string, ite
 		postgres.NullableString(item.PricingMode), postgres.NullableString(item.RatingRuleVersionID),
 		postgres.NullableTime(item.BillingPeriodStart), postgres.NullableTime(item.BillingPeriodEnd),
 		metaJSON, now, item.TaxJurisdiction, item.TaxCode, item.TaxabilityReason, item.QuantityDecimal,
-		nominalRateArg(item.NominalUnitAmountDecimal),
+		nominalRateArg(item.NominalUnitAmountDecimal), postgres.NullableString(item.MeterUnit),
 	).Scan(&item.ID, &item.InvoiceID, &item.TenantID, &item.LineType, &item.MeterID,
 		&item.Description, &item.Quantity, &item.UnitAmountCents, &item.AmountCents,
 		&item.TaxRate, &item.TaxAmountCents, &item.TotalAmountCents, &item.Currency,
@@ -1349,7 +1349,7 @@ func (s *PostgresStore) ListLineItems(ctx context.Context, tenantID, invoiceID s
 			total_amount_cents, currency, COALESCE(pricing_mode,''),
 			COALESCE(rating_rule_version_id,''), billing_period_start, billing_period_end,
 			metadata, created_at, tax_jurisdiction, tax_code, tax_reason, quantity_decimal,
-			commit_granted_cents, commit_expires_at, nominal_unit_amount_decimal
+			commit_granted_cents, commit_expires_at, nominal_unit_amount_decimal, COALESCE(meter_unit,'')
 		FROM invoice_line_items WHERE invoice_id = $1
 		ORDER BY created_at ASC
 	`, invoiceID)
@@ -1369,7 +1369,7 @@ func (s *PostgresStore) ListLineItems(ctx context.Context, tenantID, invoiceID s
 			&item.Currency, &item.PricingMode, &item.RatingRuleVersionID,
 			&item.BillingPeriodStart, &item.BillingPeriodEnd, &metaJSON, &item.CreatedAt,
 			&item.TaxJurisdiction, &item.TaxCode, &item.TaxabilityReason, &item.QuantityDecimal,
-			&item.CommitGrantedCents, &item.CommitExpiresAt, &nominal); err != nil {
+			&item.CommitGrantedCents, &item.CommitExpiresAt, &nominal, &item.MeterUnit); err != nil {
 			return nil, err
 		}
 		item.NominalUnitAmountDecimal = scanNominalRate(nominal)
@@ -1493,8 +1493,8 @@ func (s *PostgresStore) AddLineItemAtomicAudited(
 			total_amount_cents, currency, pricing_mode, rating_rule_version_id,
 			billing_period_start, billing_period_end, metadata, created_at,
 			tax_jurisdiction, tax_code, tax_reason, quantity_decimal,
-			commit_granted_cents, commit_expires_at, nominal_unit_amount_decimal)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+			commit_granted_cents, commit_expires_at, nominal_unit_amount_decimal, meter_unit)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
 		RETURNING id, invoice_id, tenant_id, line_type, COALESCE(meter_id,''), description,
 			quantity, unit_amount_cents, amount_cents, tax_rate, tax_amount_cents,
 			total_amount_cents, currency, COALESCE(pricing_mode,''),
@@ -1508,7 +1508,7 @@ func (s *PostgresStore) AddLineItemAtomicAudited(
 		postgres.NullableTime(item.BillingPeriodStart), postgres.NullableTime(item.BillingPeriodEnd),
 		metaJSON, now, item.TaxJurisdiction, item.TaxCode, item.TaxabilityReason, item.QuantityDecimal,
 		item.CommitGrantedCents, postgres.NullableTime(item.CommitExpiresAt),
-		nominalRateArg(item.NominalUnitAmountDecimal),
+		nominalRateArg(item.NominalUnitAmountDecimal), postgres.NullableString(item.MeterUnit),
 	).Scan(&item.ID, &item.InvoiceID, &item.TenantID, &item.LineType, &item.MeterID,
 		&item.Description, &item.Quantity, &item.UnitAmountCents, &item.AmountCents,
 		&item.TaxRate, &item.TaxAmountCents, &item.TotalAmountCents, &item.Currency,
@@ -1847,8 +1847,8 @@ func (s *PostgresStore) createWithLineItemsInTx(ctx context.Context, tx *sql.Tx,
 				tax_amount_cents, total_amount_cents, currency, pricing_mode,
 				rating_rule_version_id, billing_period_start, billing_period_end, metadata, created_at,
 				tax_jurisdiction, tax_code, tax_reason, quantity_decimal,
-				commit_granted_cents, commit_expires_at, nominal_unit_amount_decimal)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+				commit_granted_cents, commit_expires_at, nominal_unit_amount_decimal, meter_unit)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
 		`, itemID, inv.ID, tenantID, items[i].LineType, postgres.NullableString(items[i].MeterID),
 			items[i].Description, items[i].Quantity, items[i].UnitAmountCents, items[i].AmountCents,
 			items[i].TaxRate, items[i].TaxAmountCents, items[i].TotalAmountCents,
@@ -1857,7 +1857,7 @@ func (s *PostgresStore) createWithLineItemsInTx(ctx context.Context, tx *sql.Tx,
 			postgres.NullableTime(items[i].BillingPeriodStart), postgres.NullableTime(items[i].BillingPeriodEnd),
 			itemMetaJSON, now, items[i].TaxJurisdiction, items[i].TaxCode, items[i].TaxabilityReason, items[i].QuantityDecimal,
 			items[i].CommitGrantedCents, postgres.NullableTime(items[i].CommitExpiresAt),
-			nominalRateArg(items[i].NominalUnitAmountDecimal),
+			nominalRateArg(items[i].NominalUnitAmountDecimal), postgres.NullableString(items[i].MeterUnit),
 		)
 		if err != nil {
 			return domain.Invoice{}, fmt.Errorf("create line item %d: %w", i, err)
