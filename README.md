@@ -27,7 +27,7 @@ Tokens (claude-sonnet-4.5 · cache_read)  200,000    →   $0.06
 Margin (billed $3.88 vs provider cost $1.28)            67.1%
 ```
 
-![The full Velox invoice page: an attention card explaining the collection state in plain language, the invoice document with one line per (model, token_type) and unit prices quoted per 1M tokens, and an activity timeline of every billing event](docs/assets/invoice-token-lines.png)
+![The full Velox invoice page for a paid invoice: the document with one line per (model, token_type) and unit prices quoted per 1M tokens, and an activity timeline running from cycle close to an operator-recorded bank-transfer payment](docs/assets/invoice-token-lines.png)
 
 Three things happened there that most billing stacks can't do:
 
