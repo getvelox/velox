@@ -76,8 +76,10 @@ type Meter struct {
 // card lists them — Anthropic, OpenAI, Metronome); everything else quotes
 // per single unit. Returns the decimal shift to apply to a per-unit rate
 // and the "per" label. The FE twin is web-v2/src/lib/priceDisplay.ts
-// unitScale — the two mappings are deliberately tiny and each side pins
-// its own with a test; change them together.
+// unitScale — the two mappings are deliberately tiny; change them
+// together. Only the Go side is test-pinned (TestMeterUnitDisplayScale);
+// the TS twin has NO test, so a one-sided edit there fails nothing —
+// re-read this before touching either mapping.
 func MeterUnitDisplayScale(unit string) (shift int32, per string) {
 	switch u := strings.ToLower(strings.TrimSpace(unit)); u {
 	case "tokens", "token":

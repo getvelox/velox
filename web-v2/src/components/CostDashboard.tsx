@@ -16,6 +16,7 @@
 // across 7 reference platforms confirmed this two-surface structure
 // is the industry-standard answer.
 
+import { money, unitScale } from '@/lib/priceDisplay'
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -778,7 +779,14 @@ function RuleRow({
         <span>
           {qty.toLocaleString(undefined, { maximumFractionDigits: 4 })} {unit}
           {rateCents != null && Number(rateCents) > 0 && !isOther && (
-            <span className="ml-2">@ {formatRate(rateCents, currency)}/{unit}</span>
+            // Token rates quote per-1M — the same convention as the Pricing
+            // pages and (since #766) every invoice surface; a per-token
+            // "@ $0.000003/tokens" here contradicted the invoice one click away.
+            <span className="ml-2">
+              @ {unitScale(unit).scale > 0
+                ? `${money(String(rateCents), unitScale(unit).scale, currency)} / ${unitScale(unit).per}`
+                : `${formatRate(rateCents, currency)}/${unit}`}
+            </span>
           )}
         </span>
         <span>{pct.toFixed(pct < 1 ? 1 : 0)}%</span>
