@@ -27,7 +27,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Runtime stage — distroless has no shell, no package manager, minimal CVE surface
 FROM gcr.io/distroless/static-debian12:nonroot
 
-LABEL org.opencontainers.image.source="https://github.com/sagarsuperuser/velox"
+LABEL org.opencontainers.image.source="https://github.com/getvelox/velox"
 LABEL org.opencontainers.image.description="Velox — usage-based billing engine"
 LABEL org.opencontainers.image.licenses="MIT"
 

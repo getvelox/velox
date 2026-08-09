@@ -22,7 +22,7 @@ the compose stack and a hand-rolled install.
 ## Local development (host Go toolchain, not a deployment)
 
 ```bash
-git clone https://github.com/sagarsuperuser/velox.git
+git clone https://github.com/getvelox/velox.git
 cd velox
 
 cp .env.example .env   # make dev reads it; local defaults work as-is

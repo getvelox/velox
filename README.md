@@ -4,7 +4,7 @@
 
 **The open-source billing engine for AI and usage-heavy SaaS — runs in your own VPC.**
 
-[![CI](https://github.com/sagarsuperuser/velox/actions/workflows/ci.yml/badge.svg)](https://github.com/sagarsuperuser/velox/actions/workflows/ci.yml)
+[![CI](https://github.com/getvelox/velox/actions/workflows/ci.yml/badge.svg)](https://github.com/getvelox/velox/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Release](https://img.shields.io/github/v/tag/sagarsuperuser/velox?label=release)](CHANGELOG.md)
@@ -179,7 +179,7 @@ Stating these loudly so the wrong customers self-select out:
 Prereqs: Docker, Go 1.25+, Node 20+ (dashboard), `jq` (demo script).
 
 ```bash
-git clone https://github.com/sagarsuperuser/velox.git && cd velox
+git clone https://github.com/getvelox/velox.git && cd velox
 
 # Backend — Postgres + bootstrap demo tenant + operator user + API keys
 cp .env.example .env # make dev reads it; the defaults work for local dev as-is

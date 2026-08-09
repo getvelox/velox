@@ -13,6 +13,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Changed
 
+- **Repository moved to the `getvelox` organization (2026-08-09).** The canonical URL is now `https://github.com/getvelox/velox`; the old `sagarsuperuser/velox` path redirects permanently. Documentation and container links were updated. The Go module path is intentionally unchanged (`github.com/sagarsuperuser/velox`) — Velox is an application, not an imported library, so the path is internal and a rename would be churn with no consumer; `go get` resolves via GitHub's redirect regardless.
+
+### Changed
+
 - **The Test/Live switch looks and feels like a modern control (2026-08-09).** One raised surface now slides between Test and Live instead of the two sides swapping colors, and in Live mode the green dot gently pulses — a quiet reminder that real money is moving. Buttons across the app also gained subtle depth and a proper hover response; primary buttons previously gave no visual feedback on hover at all.
 - **The Test/Live switch moved into the sidebar, next to your account (2026-08-09).** It used to sit alone in a top bar whose only job was holding it — a full-width empty band under the mode banner on every page. The switch now lives at the bottom of the sidebar above the account block (which already shows which mode you're in), where it stays visible in both modes; the orange test-mode banner is unchanged. On phones, the top bar remains for the menu button, and the switch is inside the menu.
 

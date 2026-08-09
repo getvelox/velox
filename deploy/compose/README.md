@@ -14,7 +14,7 @@ Migrations run on first boot.
 ## 1. Clone and configure
 
 ```bash
-git clone https://github.com/sagarsuperuser/velox.git
+git clone https://github.com/getvelox/velox.git
 cd velox/deploy/compose
 cp .env.example .env
 ```

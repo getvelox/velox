@@ -8,7 +8,7 @@ Thank you for your interest in contributing to Velox.
 # Prerequisites: Go 1.25+, Docker, jq
 
 # Clone
-git clone https://github.com/sagarsuperuser/velox.git
+git clone https://github.com/getvelox/velox.git
 cd velox
 
 # Start Postgres
