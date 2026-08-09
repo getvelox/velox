@@ -27,12 +27,12 @@ Tokens (claude-sonnet-4.5 · cache_read)  200,000    →   $0.06
 Margin (billed $3.88 vs provider cost $1.28)            67.1%
 ```
 
-![A finalized Velox invoice with one line per (model, token_type), decimal per-token unit prices, and whole-cent totals](docs/assets/invoice-token-lines.png)
+![A finalized Velox invoice with one line per (model, token_type), unit prices quoted per 1M tokens, and whole-cent totals](docs/assets/invoice-token-lines.png)
 
 Three things happened there that most billing stacks can't do:
 
 - **One meter carried every token dimension** — `model × token_type` live on the event, not on a zoo of per-combination meters.
-- **Prices are decimal per-unit** ($3.00 / 1M tokens = $0.000003/token) and bill linearly, while invoice totals stay whole cents.
+- **Prices are decimal per-unit and read the way the industry quotes them** — stored exactly ($3.00 / 1M tokens = $0.000003/token), billed linearly, displayed per-1M on the invoice, the hosted page, and the PDF.
 - **The margin line is in-app** — Velox stamped the provider's cost onto every event at ingest, so "which customers lose us money?" is one API call, not a warehouse project.
 
 **Jump to:** [Why Velox exists](#why-velox-exists) · [The wedge in code](#the-wedge-in-code) · [What's in the box](#whats-in-the-box) · [How it fits](#how-it-fits) · [What Velox is not](#what-velox-is-not) · [Quick start](#quick-start) · [Architecture](#architecture) · [Engineering](#engineering) · [Roadmap](#roadmap)
@@ -327,7 +327,6 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
 
 ### Explicitly deferred (on hold pending design partner)
 
-- Per-million rate display for token meters (`$3.00 / 1M tokens` shown as such in the UI)
 - Helm chart + Terraform AWS module + multi-replica HA
 - Stripe Billing migration tool (`velox-import`)
 - SOC 2 / GDPR-deletion / audit-log retention enterprise-readiness docs

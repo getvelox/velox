@@ -118,6 +118,15 @@ func usageLineTotal(t *testing.T, f *thresholdFixture, ctx context.Context, invo
 		if l.LineType == domain.LineTypeUsage {
 			total += l.AmountCents
 			usageLines = append(usageLines, l)
+			// Every usage line must carry its meter's unit (migration
+			// 0173): it's what lets the invoice surfaces render token
+			// rates per-1M. Asserted here — in the helper every cycle
+			// test funnels through — so dropping the stamp at ANY of the
+			// engine's line-construction sites fails real-Postgres tests,
+			// not just the one that happened to look.
+			if l.MeterUnit == "" {
+				t.Fatalf("usage line %q has no MeterUnit — the 0173 stamp was dropped at its construction site", l.Description)
+			}
 		}
 	}
 	return total, usageLines

@@ -547,6 +547,7 @@ func (e *Engine) evaluateThresholds(ctx context.Context, sub domain.Subscription
 		lineItems = append(lineItems, domain.InvoiceLineItem{
 			LineType:            lineType,
 			MeterID:             pl.MeterID,
+			MeterUnit:           pl.MeterUnit,
 			Description:         pl.Description,
 			Quantity:            quantity,
 			QuantityDecimal:     qtyDecimal,

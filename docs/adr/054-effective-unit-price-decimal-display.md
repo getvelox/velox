@@ -77,6 +77,38 @@ The decision above shipped **invoice-line only**. Two other surfaces show a usag
 
 **No schema change** — the usage view is computed live per request; nothing is persisted (contrast the invoice line, which stamps `nominal_unit_amount_decimal` at build because it can't re-derive on read past an override). Pinned by a `DisplayUnitAmountDecimalFor` domain test (flat nominal wins over the diverging effective; graduated → effective; zero-qty guard) and a `CustomerUsageService.Get` regression that reproduces the screenshot (1,750 tokens billed 3¢ at 0.0015¢/token → row shows nominal `0.0015`, not effective `0.0017142857…`).
 
+## Amendment (2026-08-09): per-1M display on invoice surfaces — the arc's last residual
+
+The 07-07 re-examination recorded the second industry finding — AI-native
+peers show token rates PER MILLION (Metronome: "display and price per
+million tokens on the invoice"; Anthropic and OpenAI both quote $/MTok) —
+and deferred it pending a design partner, because at the time an invoice
+line had no persisted link to its meter.
+
+Both premises have since changed: `invoice_line_items.meter_id` ships, and
+the Pricing section already displays per-1M via the unit-keyed convention
+in `web-v2/src/lib/priceDisplay.ts` (`unitScale`: unit `tokens`/`token` →
+per 1M). The trigger was also re-judged as mis-set by the same reasoning
+that closed the cost-dashboard hashing gate early: the harm (an "AI-native"
+engine whose invoices quote `$0.000003` in a world that quotes `$3.00/1M`)
+lands during first EVALUATION — before a design partner exists to ask.
+
+**Decision.** Migration 0173 stamps the meter's `unit` string onto usage
+lines at write time (`meter_unit`), and every invoice renderer applies the
+one display convention: dashboard and hosted page read "$3.00 / 1M tokens",
+the PDF reads the compact "$3.00 / 1M" (the unit word is already in the
+description, and the full form overflowed the Qty column — caught on
+render). The RAW unit is stamped, not a resolved scale, so the convention
+lives in exactly one place per renderer (`domain.MeterUnitDisplayScale` in
+Go, `unitScale` in TS — deliberately tiny twins, each pinned by its own
+test) and an invoice stays a stable document: editing a meter never
+re-labels history. Backfill is exact (the meter_id join), unlike the 0142
+nominal-rate backfill which was impossible for overridden lines — verified
+in place: 109/109 pre-migration usage lines named on migrate.
+
+Still deferred from this arc: the `credit_note_line_items` sub-cent display
+gap (§Risks) — unchanged premises, unchanged trigger.
+
 ## References
 - ADR-045 (decimal per-unit pricing rates — line amounts stay int64), ADR-053 (single source of truth posture).
 - Memory: `project_decimal_pricing_rates`, `feedback_no_heuristic_proxies`, `project_tax_field_propagation_drift`, `feedback_verify_stripe_parity_claims`.

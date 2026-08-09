@@ -3667,6 +3667,8 @@ export interface components {
             tenant_id?: string;
             line_type: components["schemas"]["InvoiceLineType"];
             meter_id?: string;
+            /** @description The meter's unit ("tokens", "seconds", …), stamped on usage lines at write time so invoice surfaces can apply the display-scale convention (token rates read "$3.00 / 1M tokens"). Empty on non-usage lines and on lines written before the 0173 backfill. */
+            meter_unit?: string;
             description: string;
             /** Format: int64 */
             quantity: number;

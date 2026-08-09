@@ -443,13 +443,20 @@ type InvoiceTaxRetryUpdate struct {
 }
 
 type InvoiceLineItem struct {
-	ID          string              `json:"id"`
-	InvoiceID   string              `json:"invoice_id"`
-	TenantID    string              `json:"tenant_id,omitempty"`
-	LineType    InvoiceLineItemType `json:"line_type"`
-	MeterID     string              `json:"meter_id,omitempty"`
-	Description string              `json:"description"`
-	Quantity    int64               `json:"quantity"`
+	ID        string              `json:"id"`
+	InvoiceID string              `json:"invoice_id"`
+	TenantID  string              `json:"tenant_id,omitempty"`
+	LineType  InvoiceLineItemType `json:"line_type"`
+	MeterID   string              `json:"meter_id,omitempty"`
+	// MeterUnit is the meter's unit string stamped at write time on usage
+	// lines ("tokens", "seconds", …), so invoice renderers can apply the
+	// pricing section's display-scale convention (tokens quote per 1M —
+	// see MeterUnitDisplayScale) without a join that would re-label
+	// historical documents when a meter is edited. Empty on non-usage
+	// lines and on lines written before migration 0173's backfill ran.
+	MeterUnit   string `json:"meter_unit,omitempty"`
+	Description string `json:"description"`
+	Quantity    int64  `json:"quantity"`
 	// QuantityDecimal is the exact (possibly fractional) usage quantity. The
 	// integer Quantity above is it truncated, kept for back-compat (Stripe
 	// `quantity_decimal` / Chargebee `quantity_in_decimal` parity). Zero means

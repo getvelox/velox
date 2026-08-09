@@ -3,6 +3,7 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { formatCents, formatRate, formatDate, formatTaxRate } from '@/lib/api'
+import { invoiceLineRate } from '@/lib/priceDisplay'
 import { invoiceAmountLabel } from '@/lib/invoiceTerminal'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -58,6 +59,7 @@ interface HostedInvoicePayload {
     // Full-precision per-unit price in decimal cents (e.g. "0.3" = $0.003);
     // render with formatRate so sub-cent rates don't collapse to "$0.00".
     unit_amount_decimal?: string
+    meter_unit?: string
     amount_cents: number
     tax_amount_cents?: number
     total_amount_cents: number
@@ -513,7 +515,7 @@ export default function HostedInvoicePage() {
                             : li.quantity}
                         </td>
                         <td className="px-4 py-3 text-right text-muted-foreground tabular-nums hidden sm:table-cell">
-                          {formatRate(li.unit_amount_decimal ?? li.unit_amount_cents, li.currency)}
+                          {invoiceLineRate(li, li.currency, formatRate(li.unit_amount_decimal ?? li.unit_amount_cents, li.currency))}
                         </td>
                         <td className="px-4 py-3 text-right text-foreground tabular-nums">
                           {formatCents(li.amount_cents, li.currency)}

@@ -20,6 +20,9 @@ export interface InvoiceLineItem {
   tenant_id?: string;
   line_type: InvoiceLineType;
   meter_id?: string;
+  /** The meter's unit ("tokens", "seconds", …), stamped on usage lines at write time so invoice surfaces can apply the display-scale convention (token rates read "$3.00 / 1M tokens"). Empty on non-usage lines and on lines written before the 0173 backfill.
+   */
+  meter_unit?: string;
   description: string;
   quantity: number;
   /** Exact (possibly fractional) usage quantity as a decimal string (e.g. "1.5"). The integer `quantity` is this truncated, kept for back-compat (Stripe quantity_decimal parity). "0" means none — use `quantity`. Line amounts stay whole cents.
