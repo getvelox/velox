@@ -341,6 +341,24 @@ export function Layout({ children }: { children: ReactNode }) {
         )}
       </ScrollPane>
 
+      {/* Mode switch — session context, so it sits with the session-identity
+          block below rather than in the nav. Deliberately NOT inside the
+          test-only nav section: a section headed "Test mode" cannot host the
+          control whose other half is Live (and that section unmounts in live
+          mode, which would strand the way back). Living in the fixed sidebar
+          also retires the top-bar row this pill used to occupy — a full-width
+          band that was empty except for this one control, spending ~85px of
+          every page on nothing. */}
+      {user && (
+        <div className="px-3 py-2 border-t border-border">
+          <ModeToggle
+            livemode={user.livemode}
+            busy={modeBusy}
+            onToggle={handleToggleMode}
+          />
+        </div>
+      )}
+
       {/* Footer — enterprise account menu. Trigger row shows identity +
           chevron; dropdown (opens upward) surfaces theme toggle and sign-out
           in a full-bleed menu, matching Linear/Vercel/Notion. Version tag
@@ -490,33 +508,22 @@ export function Layout({ children }: { children: ReactNode }) {
               </span>
             </div>
           )}
-          {/* Top bar — always visible. Mobile adds a hamburger, desktop leaves
-              the left empty; the right carries the Test/Live toggle.
-              The BAR spans full width (its border is the chrome's edge), but
-              its CONTENTS ride the same band as the page below — otherwise the
-              mode toggle drifts to the viewport edge and reads as belonging to
-              nothing. Measured before this: toggle right edge 2544 vs content
-              right edge 2040 on a 2560px viewport. */}
-          <div className="border-b border-border bg-card">
-            <div className={cn(CONTENT_BAND, 'flex items-center gap-3 px-4 md:px-8 py-3')}>
+          {/* Top bar — MOBILE ONLY (hamburger + logo). On desktop this row
+              no longer exists: its only occupant was the mode toggle, which
+              made it a full-width band that was ~85px of empty chrome on
+              every page (a reader reviewing the README hero caught it). The
+              toggle now lives in the fixed sidebar above the account block;
+              the mode BANNER above stays sticky and is the loud signal. */}
+          <div className="md:hidden border-b border-border bg-card">
+            <div className={cn(CONTENT_BAND, 'flex items-center gap-3 px-4 py-3')}>
               <button
                 onClick={() => setSidebarOpen(true)}
                 aria-label="Open menu"
-                className="md:hidden text-muted-foreground hover:text-foreground"
+                className="text-muted-foreground hover:text-foreground"
               >
                 <Menu size={22} />
               </button>
-              <div className="md:hidden">
-                <VeloxLogo size="sm" />
-              </div>
-              <div className="flex-1" />
-              {user && (
-                <ModeToggle
-                  livemode={user.livemode}
-                  busy={modeBusy}
-                  onToggle={handleToggleMode}
-                />
-              )}
+              <VeloxLogo size="sm" />
             </div>
           </div>
         </div>
