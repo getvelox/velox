@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- **README rewritten for first-time readers (2026-08-09).** The real invoice output and a dashboard screenshot now lead; every billing term is defined at first use (dunning, commits, proration, credit notes); a table of contents was added; the worst wall-paragraphs were split. Fact pass against the current product: stale line counts refreshed, "80+ ADRs" is now "110+", and one lie fixed — "live event stream" sat in the deferred list ten weeks after it shipped as the webhook Live Tail.
+
 ### Fixed
 
 - **Clicking Replay on a webhook event now shows you what it did (2026-08-07).** Replay auto-expands the event's delivery timeline "so the operator can watch the new attempt land" — but if the timeline was already open it never refreshed, so it kept showing the pre-replay state (verified: 29 rows on screen, 32 in the database), and even on a fresh open the new delivery sat at the bottom of the oldest-first list, off-screen, unmarked. An operator's honest read was "a dropdown opened with a pile of attempts, and my replay isn't in it." Three changes: the open timeline refetches the moment a replay is queued, the just-created deliveries are highlighted and scrolled into view, and the header now explains its own count — "38 deliveries · original + 13 replays" — because the timeline deliberately stitches the original event together with every replay clone, and an unexplained 38 on a row that fanned out to 3 receivers reads as a bug. Open timelines also poll while expanded, so a pending delivery's resolution arrives without collapsing and re-expanding the row.
