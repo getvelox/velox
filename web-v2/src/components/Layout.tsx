@@ -135,7 +135,7 @@ function NavLink({
 // session; every downstream API call inherits the new mode via session
 // middleware.
 function ModeToggle({ livemode, busy, onToggle }: { livemode: boolean; busy: boolean; onToggle: () => void }) {
-  const segment = (active: boolean, label: 'Test' | 'Live', activeColor: string) => (
+  const segment = (active: boolean, label: 'Test' | 'Live', activeText: string) => (
     <button
       type="button"
       role="radio"
@@ -144,28 +144,46 @@ function ModeToggle({ livemode, busy, onToggle }: { livemode: boolean; busy: boo
       disabled={busy || active}
       onClick={() => { if (!active) onToggle() }}
       className={cn(
-        'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors',
-        active
-          ? activeColor
-          : 'text-muted-foreground hover:text-foreground hover:bg-accent cursor-pointer',
+        // Segments are transparent hit-targets layered OVER the sliding
+        // thumb below; z-10 keeps labels above it.
+        'relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-200',
+        active ? activeText : 'text-muted-foreground hover:text-foreground cursor-pointer',
         busy && !active && 'opacity-50 cursor-not-allowed',
       )}
     >
       {busy && active ? (
         <Loader2 size={11} className="animate-spin" aria-hidden="true" />
       ) : (
-        <span className={cn(
-          'h-1.5 w-1.5 rounded-full',
-          active ? (label === 'Live' ? 'bg-emerald-500' : 'bg-amber-500') : 'bg-muted-foreground/40',
-        )} />
+        <span
+          className={cn(
+            'h-1.5 w-1.5 rounded-full transition-colors duration-200',
+            active ? (label === 'Live' ? 'bg-emerald-500' : 'bg-amber-500') : 'bg-muted-foreground/40',
+            // Live is real money moving — the dot breathes like a record
+            // light. Test stays still.
+            active && label === 'Live' && 'animate-pulse',
+          )}
+        />
       )}
       {label}
     </button>
   )
   return (
-    <div role="radiogroup" aria-label="Test or live mode" className="flex items-center rounded-full border border-border bg-muted/40 p-0.5">
-      {segment(!livemode, 'Test', 'bg-amber-500/15 text-amber-800 dark:text-amber-300 ring-1 ring-amber-500/30')}
-      {segment(livemode, 'Live', 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30')}
+    <div role="radiogroup" aria-label="Test or live mode" className="relative flex w-full items-center rounded-lg bg-muted/60 p-1">
+      {/* The sliding thumb: one raised surface that TRAVELS between the two
+          positions (200ms ease-out) instead of two segments swapping
+          backgrounds — the segmented-control motion language of iOS/Linear.
+          Width is half the track minus the 4px padding ring; translate-x
+          moves it exactly one thumb-width. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          'absolute left-1 top-1 bottom-1 w-[calc(50%-4px)] rounded-md bg-card shadow-sm ring-1 ring-black/5 dark:ring-white/10',
+          'transition-transform duration-200 ease-out',
+          livemode && 'translate-x-full',
+        )}
+      />
+      {segment(!livemode, 'Test', 'text-amber-700 dark:text-amber-300')}
+      {segment(livemode, 'Live', 'text-emerald-700 dark:text-emerald-400')}
     </div>
   )
 }
@@ -349,21 +367,19 @@ export function Layout({ children }: { children: ReactNode }) {
           also retires the top-bar row this pill used to occupy — a full-width
           band that was empty except for this one control, spending ~85px of
           every page on nothing. */}
-      {user && (
-        <div className="px-3 py-2 border-t border-border">
+      {/* Footer — one session cluster behind a single border: the mode
+          switch (which environment am I acting in) directly above the
+          account menu (who am I). Full-width segmented control, raised
+          active segment — the sidebar's version of Stripe's top-bar
+          toggle, styled to the Linear/Vercel weight of the footer. */}
+      <div className="p-2 border-t border-border space-y-1.5">
+        {user && (
           <ModeToggle
             livemode={user.livemode}
             busy={modeBusy}
             onToggle={handleToggleMode}
           />
-        </div>
-      )}
-
-      {/* Footer — enterprise account menu. Trigger row shows identity +
-          chevron; dropdown (opens upward) surfaces theme toggle and sign-out
-          in a full-bleed menu, matching Linear/Vercel/Notion. Version tag
-          lives inside the menu so the sidebar itself stays lean. */}
-      <div className="p-2 border-t border-border">
+        )}
         {user && (
           <DropdownMenu>
             <DropdownMenuTrigger
