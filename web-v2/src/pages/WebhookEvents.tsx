@@ -15,6 +15,7 @@ import {
 // log and email outbox (ADR-030 forensic layer).
 import { timeAgo, wallClockNow, timeUntil } from '@/lib/effectiveNow'
 import { showApiError } from '@/lib/formErrors'
+import { useSingleFlight } from '@/hooks/useSingleFlight'
 import { useNavigate } from 'react-router-dom'
 import { Layout } from '@/components/Layout'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -146,7 +147,10 @@ export default function WebhookEventsPage() {
     })
   }, [frames])
 
-  const handleReplay = async (id: string) => {
+  // Single-flight: event replay fans out to EVERY matching endpoint and mints
+  // a fresh clone per call (no server dedup), so a double-click would send the
+  // payload twice to every subscriber under distinct ids they can't collapse.
+  const handleReplay = useSingleFlight(async (id: string) => {
     try {
       const res = await api.replayWebhookEventV2(id)
       toast.success(`Replayed event \u2014 clone ${res.event_id.slice(0, 12)}\u2026 queued`)
@@ -162,7 +166,7 @@ export default function WebhookEventsPage() {
     } catch (err) {
       showApiError(err, 'Failed to replay event')
     }
-  }
+  })
 
   return (
     <Layout>

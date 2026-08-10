@@ -10,6 +10,7 @@ import { invalidateMoneySurfaces } from '@/lib/invalidateMoney'
 import { api, downloadCreditNotePDF, formatCents, formatDate, formatDateTime, getCurrencySymbol } from '@/lib/api'
 import type { CreditNote, Invoice, Customer } from '@/lib/api'
 import { applyApiError, showApiError } from '@/lib/formErrors'
+import { useSingleFlight } from '@/hooks/useSingleFlight'
 import { downloadCSV } from '@/lib/csv'
 import { creditNoteStats } from '@/lib/creditNoteStats'
 import { Layout } from '@/components/Layout'
@@ -782,8 +783,15 @@ function CreateCreditNoteDialog({ open, onOpenChange, customerMap, onCreated }: 
     },
   })
 
+  // Single-flight: this dialog auto-issues, and the backend's per-invoice lock
+  // caps but does not dedup — a same-tick double-submit issues a SECOND credit
+  // note (real second refund/credit) whenever it still fits under the cap.
+  // mutateAsync lets the ref guard await the in-flight call.
+  const submitOnce = useSingleFlight(async (data: CreditNoteFormData) => {
+    await createMutation.mutateAsync(data)
+  })
   const onSubmit = form.handleSubmit((data) => {
-    createMutation.mutate(data)
+    void submitOnce(data)
   })
 
   return (
