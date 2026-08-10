@@ -18,6 +18,7 @@ import { useGetInvoice } from '@/lib/gen/queries.gen'
 import type { Invoice } from '@/lib/gen/schemas/invoice'
 import type { InvoiceLineItem as LineItem } from '@/lib/gen/schemas/invoiceLineItem'
 import { applyApiError, showApiError } from '@/lib/formErrors'
+import { useSingleFlight } from '@/hooks/useSingleFlight'
 import { taxReasonLabel } from '@/lib/taxReasons'
 import { DueBadge } from '@/components/DueBadge'
 import { effectiveNow } from '@/lib/effectiveNow'
@@ -2021,7 +2022,10 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
   const canSubmit =
     reasonOk && amountOk && allocationMatches && !refundOverCap && !amountOverCreditable && !submitting
 
-  const onSubmit = async (e: React.FormEvent) => {
+  // Single-flight: the per-invoice lock only enforces the over-credit CAP, not
+  // dedup — a double-fire that still fits under the remaining creditable amount
+  // issues a SECOND credit note (a real second card refund / balance credit).
+  const onSubmit = useSingleFlight(async (e: React.FormEvent) => {
     e.preventDefault()
     if (!canSubmit) return
     setSubmitting(true)
@@ -2046,7 +2050,7 @@ function IssueCreditDialog({ invoice, existingCreditNotes, onClose, onCreated }:
     } finally {
       setSubmitting(false)
     }
-  }
+  })
 
   const fmt = (cents: number) => `${getCurrencySymbol()}${(cents / 100).toFixed(2)}`
 

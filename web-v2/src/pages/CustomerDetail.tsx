@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useEffectiveNow } from '@/hooks/useClockFrozenMap'
+import { useSingleFlight } from '@/hooks/useSingleFlight'
 import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm, Controller } from 'react-hook-form'
@@ -1879,7 +1880,11 @@ function NewInvoiceDialog({ customerId, customer, billingProfile, onClose, onCre
   // together or not at all. Finalize/send remain separate transitions
   // (Stripe-parity); if one of those fails after the draft exists, the
   // partial-success branch below tells the operator what survived.
-  const submit = async (action: 'draft' | 'send') => {
+  // Single-flight: the backend deliberately allows coexisting one-off invoices
+  // for the same (customer, period) and no Idempotency-Key is sent — a same-tick
+  // double-click creates TWO invoices (and, on 'send', two finalized invoices +
+  // two emails). The ref collapses the double-fire the lagging `isBusy` cannot.
+  const submit = useSingleFlight(async (action: 'draft' | 'send') => {
     const cleaned = validate()
     if (!cleaned) return
     // Service period (optional): both-or-neither, start on/before end. The
@@ -1953,7 +1958,7 @@ function NewInvoiceDialog({ customerId, customer, billingProfile, onClose, onCre
     } finally {
       setSubmitting(null)
     }
-  }
+  })
 
   const isBusy = submitting !== null
 
