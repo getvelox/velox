@@ -332,9 +332,11 @@ export const api = {
     return apiRequest<{ data: CreditLedgerEntry[]; total: number }>('GET', `/credits/ledger/${customerId}${q ? '?' + q : ''}`)
   },
 
-  // Customer portal
+  // Customer Detail — composed per-customer view (formerly /customer-portal,
+  // renamed away from the ADR-051 removed self-serve portal's name).
+  // Unknown/cross-tenant customer ids now 404 instead of a 200 empty shell.
   customerOverview: (customerId: string) =>
-    apiRequest<CustomerOverview>('GET', `/customer-portal/${customerId}/overview`),
+    apiRequest<CustomerOverview>('GET', `/customers/${customerId}/overview`),
 
   // Usage
   usageSummary: (customerId: string, from?: string, to?: string) => {
