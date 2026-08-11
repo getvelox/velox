@@ -1674,9 +1674,15 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 			r.With(auth.Require(auth.PermCustomerWrite)).Mount("/checkout", checkoutH.Routes())
 		}
 
-		// Customer portal — consolidated views across domains
-		portal := newCustomerPortalHandler(subStore, invoiceStore, usageStore)
-		r.With(auth.Require(auth.PermCustomerRead)).Mount("/customer-portal", portal.Routes())
+		// Customer Detail — the dashboard's per-customer composed views,
+		// registered in the same /customers/{...} namespace as usage /
+		// margin / payment-methods. Formerly mounted at /customer-portal,
+		// a name that collided with the REMOVED self-serve portal
+		// (ADR-051); renamed so that name means only the removed feature.
+		customerDetail := newCustomerDetailHandler(customerStore, subStore, invoiceStore)
+		r.With(auth.Require(auth.PermCustomerRead)).Get("/customers/{customer_id}/overview", customerDetail.overview)
+		r.With(auth.Require(auth.PermCustomerRead)).Get("/customers/{customer_id}/invoices", customerDetail.listInvoices)
+		r.With(auth.Require(auth.PermCustomerRead)).Get("/customers/{customer_id}/subscriptions", customerDetail.listSubscriptions)
 		// Legacy /v1/payment-portal/{id}/update-payment-method removed:
 		// all "add a payment method" flows now go through
 		// paymentmethods.Service.CreateSetupSession (single path).

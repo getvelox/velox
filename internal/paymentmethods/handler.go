@@ -152,6 +152,21 @@ func (h *Handler) operatorList(w http.ResponseWriter, r *http.Request) {
 		respond.BadRequest(w, r, "missing tenant or customer id")
 		return
 	}
+	// Existence check: List legally returns empty for an unknown customer,
+	// so without this a typo'd or cross-tenant id read as "no cards on
+	// file" (200 []) instead of "no such customer" (the walked 200-empty-
+	// shell class; post-billing closeout, open item 2). Reuses the same
+	// lookup the setup-email path already 404s through.
+	if h.customerLookup != nil {
+		if _, _, err := h.customerLookup.GetForSetupLink(r.Context(), tenantID, customerID); err != nil {
+			if errors.Is(err, errs.ErrNotFound) {
+				respond.NotFound(w, r, "customer")
+				return
+			}
+			respond.InternalError(w, r)
+			return
+		}
+	}
 	pms, err := h.svc.List(r.Context(), tenantID, customerID)
 	if err != nil {
 		respond.InternalError(w, r)
