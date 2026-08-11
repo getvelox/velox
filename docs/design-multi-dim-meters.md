@@ -321,6 +321,6 @@ Per memory `feedback_prefer_battle_tested_libs`: use `shopspring/decimal`, do no
 - [x] `GET /v1/customers/{id}/usage` powering the cost dashboard
 - [x] Unit tests: ingest, aggregation per mode, subset-match, priority-claim
 - [x] Integration tests: real Postgres, RLS-isolated tenants, decimal precision, idempotency
-- [x] `cmd/velox-bench/main.go` + 50k events/sec benchmark validation
+- [x] `cmd/velox-bench/main.go` (the 50k events/sec target was never validated — measured local baseline is ~2.5k ev/s single-row-INSERT-bound; see the bench ship commit 537e00ca for p50/p95/p99)
 - [x] OpenAPI spec update (`api/openapi.yaml`)
 - [x] CHANGELOG entry + public changelog rollup

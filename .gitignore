@@ -32,3 +32,13 @@ velox-api
 /*.png
 /*.jpg
 /*.jpeg
+
+# Compiled binaries at the repo root (an 18.8MB velox-bootstrap Mach-O
+# slipped into git via #374 — go build drops artifacts named after the
+# package in CWD; bin/ is already ignored, the root wasn't).
+/velox
+/velox-bootstrap
+/velox-cli
+/velox-doctor
+/velox-bench
+/velox-migrate-safety

@@ -362,6 +362,10 @@ func (s *PostgresStore) ExpireGrantAtomic(ctx context.Context, tenantID, custome
 		CustomerID:  customerID,
 		EntryType:   domain.CreditExpiry,
 		AmountCents: -remaining,
+		// velox-doctor's expired_grant_headroom_reopened check JOINs on this
+		// exact string ('Expired grant ' || grant id) to pair expiry entries
+		// with their grants — change the format and the check goes silently
+		// blind. Change both together (internal/doctor/checks.go).
 		Description: fmt.Sprintf("Expired grant %s", grantID),
 		CreatedAt:   expiresAt.Time,
 	}); err != nil {

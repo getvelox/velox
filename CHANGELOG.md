@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Go-module audit: confirmed defects fixed (2026-08-11).** An 18.8MB compiled `velox-bootstrap` binary had been tracked in git since #374 — removed, and root-level build artifacts are now gitignored. Seven nil-guards in the server's scheduler wiring guarded services that `api.NewServer` constructs unconditionally — dead code whose only possible future effect was converting a loud wiring failure into a silently disabled money worker (tax retry, clawback retry, trial expiry, pause-resume, payment reconciliation); the wiring is now unconditional. Two doc lies corrected: the multi-dim-meters design doc claimed the 50k events/sec benchmark was "validated" (it was never measured — the recorded local baseline is ~2.5k ev/s), and `velox --help` called DATABASE_URL required when the split DB_* shape is first-class. The credit-expiry writer now marks the string coupling that velox-doctor's expired-grant check JOINs on, so a format change can't silently blind the check.
+
 ### Changed
 
 - **Repository moved to the `getvelox` organization (2026-08-09).** The canonical URL is now `https://github.com/getvelox/velox`; the old `sagarsuperuser/velox` path redirects permanently. Documentation and container links were updated. The Go module path is intentionally unchanged (`github.com/sagarsuperuser/velox`) — Velox is an application, not an imported library, so the path is internal and a rename would be churn with no consumer; `go get` resolves via GitHub's redirect regardless.

@@ -60,7 +60,7 @@ func main() {
 		case "status":
 			runMigrateStatus()
 		case "rollback":
-			runMigrateRollback(subcmd)
+			runMigrateRollback()
 		case "":
 			runMigrate()
 		default:
@@ -170,35 +170,31 @@ func serve() {
 		billingInterval = 5 * time.Minute
 	}
 	scheduler := billing.NewScheduler(server.BillingEngine, billingInterval, 50, server.DunningSvc, server.SettingsStore, nil, server.CreditSvc)
-	if server.TokenSvc != nil {
-		scheduler.SetTokenCleaner(server.TokenSvc)
-	}
+	// Every service below is constructed unconditionally by api.NewServer —
+	// a nil can only mean a broken refactor. Wire unconditionally: the
+	// scheduler's own tick-time nil-guards are a seam for TEST
+	// configurations, and hiding a wiring bug behind them would skip a
+	// money-path worker silently, forever. (Seven dead nil-guards here did
+	// exactly that in theory until the 2026-08-11 module audit.)
+	scheduler.SetTokenCleaner(server.TokenSvc)
 	scheduler.SetIdempotencyCleaner(mw.NewIdempotencyCleaner(db))
-	if server.InvoiceSvc != nil {
-		scheduler.SetTaxRetrier(server.InvoiceSvc)
-	}
-	if server.CreditNoteSvc != nil {
-		// Re-issue clawback credit-note drafts whose post-commit Issue() failed
-		// (created atomically with a subscription downgrade/removal). ADR-056
-		// follow-up — closes the post-commit fire-and-forget clawback gap.
-		scheduler.SetClawbackRetrier(server.CreditNoteSvc)
-	}
-	if server.SubscriptionSvc != nil {
-		// Wall-clock trial expiry (Bug #8 — non-clock-pinned subs):
-		// each tick, flip trialing subs to active at trial_end_at so
-		// the dashboard doesn't lie about lifecycle state for up to
-		// ~30 days past actual trial-end.
-		scheduler.SetTrialExpirer(server.SubscriptionSvc)
-		// Wall-clock pause-resume — clear pause_collection on subs
-		// whose resumes_at has elapsed BEFORE the cycle scan reads the
-		// due list. Stripe-parity (resume AT resumes_at, not next cycle
-		// close). Without this, a paused sub whose next_billing_at is
-		// in the future stays paused indefinitely.
-		scheduler.SetPauseResumer(server.SubscriptionSvc)
-	}
-	if server.PaymentReconciler != nil {
-		scheduler.SetPaymentReconciler(server.PaymentReconciler)
-	}
+	scheduler.SetTaxRetrier(server.InvoiceSvc)
+	// Re-issue clawback credit-note drafts whose post-commit Issue() failed
+	// (created atomically with a subscription downgrade/removal). ADR-056
+	// follow-up — closes the post-commit fire-and-forget clawback gap.
+	scheduler.SetClawbackRetrier(server.CreditNoteSvc)
+	// Wall-clock trial expiry (Bug #8 — non-clock-pinned subs):
+	// each tick, flip trialing subs to active at trial_end_at so
+	// the dashboard doesn't lie about lifecycle state for up to
+	// ~30 days past actual trial-end.
+	scheduler.SetTrialExpirer(server.SubscriptionSvc)
+	// Wall-clock pause-resume — clear pause_collection on subs
+	// whose resumes_at has elapsed BEFORE the cycle scan reads the
+	// due list. Stripe-parity (resume AT resumes_at, not next cycle
+	// close). Without this, a paused sub whose next_billing_at is
+	// in the future stays paused indefinitely.
+	scheduler.SetPauseResumer(server.SubscriptionSvc)
+	scheduler.SetPaymentReconciler(server.PaymentReconciler)
 	// Leader gating: each replica tries the billing / dunning advisory locks
 	// per tick; the winner runs the work, the losers skip. On crash the TCP
 	// session drops and Postgres auto-releases — no zombie locks.
@@ -215,9 +211,7 @@ func serve() {
 	// volumes there's never more than a handful of in-flight
 	// advances.
 	catchupQueue := testclock.NewCatchupQueue(100)
-	if server.TestClockSvc != nil {
-		server.TestClockSvc.SetCatchupQueue(catchupQueue)
-	}
+	server.TestClockSvc.SetCatchupQueue(catchupQueue)
 	catchupWorker := testclock.NewCatchupWorker(catchupQueue, func(ctx context.Context, job testclock.CatchupJob) error {
 		return server.TestClockSvc.RunCatchup(ctx, job)
 	})
@@ -264,13 +258,11 @@ func serve() {
 	// boot — operators can still create new clocks; only legacy
 	// stuck ones miss out, and they can be deleted manually.
 	catchupWorker.Start()
-	if server.TestClockSvc != nil {
-		recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := server.TestClockSvc.RecoverInFlight(recoveryCtx); err != nil {
-			slog.Error("test-clock catchup recovery failed", "error", err)
-		}
-		recoveryCancel()
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := server.TestClockSvc.RecoverInFlight(recoveryCtx); err != nil {
+		slog.Error("test-clock catchup recovery failed", "error", err)
 	}
+	recoveryCancel()
 
 	// Outbox dispatchers (always-on per ADR-040). Webhook outbox drains
 	// webhook_outbox → Service.Dispatch; email outbox drains email_outbox
@@ -375,7 +367,7 @@ func runMigrateStatus() {
 	fmt.Printf("version: %d, dirty: %v\n", v, dirty)
 }
 
-func runMigrateRollback(_ string) {
+func runMigrateRollback() {
 	v, err := migrate.Rollback(loadDSN(), 1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback failed: %v\n", err)
@@ -396,7 +388,9 @@ Commands:
   help                 Show this help
 
 Environment:
-  DATABASE_URL              PostgreSQL connection string — admin/migration role (required)
+  DATABASE_URL              PostgreSQL connection string — admin/migration role (or the
+                            split DB_HOST/DB_NAME/DB_USER/DB_PASSWORD shape; full list in
+                            deploy/compose/.env.example)
   APP_DATABASE_URL          Runtime connection for the least-privilege velox_app role (RLS
                             enforced). Used verbatim; REQUIRED in staging/production. Local
                             dev derives velox_app:velox_app from DATABASE_URL when unset.
