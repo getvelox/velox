@@ -45,7 +45,7 @@ keep their SDKs aligned with their HTTP surface.
    request through `apiRequest` so cookies, error envelope parsing,
    and `Velox-Request-Id` capture all keep working unchanged.
 5. Run the local gates: `go build ./...`, `go vet ./...`,
-   `go test ./... -short`, `cd web-v2 && npx tsc --noEmit`.
+   `go test ./... -short`, `cd web-v2 && npx tsc -b` (NOT `--noEmit`, which is a no-op under this repo's composite project references).
 6. Commit the spec change and the regenerated files together. CI runs
    `make gen` and then `git diff --exit-code`; an uncommitted
    regenerated file fails the build.

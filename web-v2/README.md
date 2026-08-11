@@ -1,73 +1,45 @@
-# React + TypeScript + Vite
+# web-v2 — the Velox dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite single-page app: the operator dashboard (customers,
+invoices, subscriptions, pricing, dunning, webhooks) plus the customer-facing
+public pages (hosted invoice, payment update, shared cost dashboard).
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install        # .npmrc pins legacy-peer-deps — a plain install works
+npm run dev        # Vite on :5173, proxying /v1 to the Go server on :8080
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The dev server needs the backend running — from the repo root:
+`make dev` (or the two commands in the root README's Quick start).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Node 22+ (CI runs 22; anything below 20.19 breaks Vite).
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## The checks CI runs on this directory
+
+```bash
+npx tsc -b         # strict typecheck. NOT `tsc --noEmit` — that silently
+                   # checks nothing here (composite project references).
+npm run lint       # eslint
+npm test           # vitest
+npm run build      # tsc -b + vite build — the strictest of the four
 ```
+
+## Generated code — do not hand-edit
+
+`src/lib/gen/**` is generated from `api/openapi.yaml` at the repo root.
+Change the spec, then run `make gen` from the root (npm-level generators are
+not the same thing); CI's codegen-drift job fails any PR where the spec and
+generated artifacts disagree.
+
+## Conventions worth knowing before a first PR
+
+- Relative-time / "now"-dependent UI must resolve "now" via
+  `src/hooks/useClockFrozenMap.ts` (test clocks freeze time per entity);
+  an eslint rule bans bare `Date.now()` in the affected surfaces.
+- Money is formatted through `src/lib/priceDisplay.ts` — exact string math,
+  never `parseFloat` on money strings.
+- Every user-visible change updates `CHANGELOG.md`, and UI-visible behavior
+  changes update the matching flow in `MANUAL_TEST.md` (same PR — see
+  CONTRIBUTING.md).

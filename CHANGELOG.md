@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Documentation
+
+- **The contributor path now tells the whole truth (2026-08-11).** A five-angle audit walked CONTRIBUTING.md literally and found the setup commands honest (compose, migrations, and even integration tests work exactly as written, zero extra config) — but CI enforced roughly ten gates the docs never mentioned, and the frontend path failed at step one: a plain `npm install` errored on a peer conflict whose workaround lived only inside the CI workflow file. Fixed at the root: `web-v2/.npmrc` makes the documented install work as written; CONTRIBUTING gains a "What CI runs on your PR" table (every gate with its local command) and a frontend section; `web-v2/README.md` is now about Velox instead of the untouched Vite starter template; the openapi workflow doc no longer recommends the `tsc --noEmit` no-op; a PR template carries the two house rules CI can't check (CHANGELOG same PR, MANUAL_TEST for UI changes, money-path site-set); and the bug template asks the questions that matter for a billing engine — version, deployment shape, test-vs-live mode, and surface.
+
 ### Security
 
 - **`js-yaml` pinned to 4.3.1 (2026-08-11).** Dependabot flagged CVE-2026-59870 (quadratic CPU in `!!omap` resolution, high) in web-v2's lockfile. Build-time-only exposure — js-yaml arrives via eslint/openapi-typescript/orval, never ships to the browser bundle — but the fix is a one-line override, applied with the repo's standing `--legacy-peer-deps` convention. Toolchain verified: tsc, eslint, and the production build all pass on 4.3.1.

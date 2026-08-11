@@ -176,7 +176,7 @@ Stating these loudly so the wrong customers self-select out:
 
 ## Quick start
 
-Prereqs: Docker, Go 1.25+, Node 20+ (dashboard), `jq` (demo script).
+Prereqs: Docker, Go 1.25+, Node 22+ (dashboard), `jq` (demo script).
 
 ```bash
 git clone https://github.com/getvelox/velox.git && cd velox
