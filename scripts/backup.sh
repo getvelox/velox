@@ -74,9 +74,32 @@ trap cleanup_on_failure ERR
 # Preflight checks
 # ---------------------------------------------------------------------------
 
-command -v pg_dump >/dev/null 2>&1 || die "pg_dump not found in PATH." 1
+# PG_DUMP lets an operator point at a version-matched binary when the host
+# tools don't match the server — e.g. a containerized one:
+#   PG_DUMP="docker run --rm -i --network host postgres:16-alpine pg_dump"
+# (The archive is written via stdout, so a wrapped binary needs no mounts.)
+PG_DUMP="${PG_DUMP:-pg_dump}"
+
+command -v ${PG_DUMP%% *} >/dev/null 2>&1 || die "pg_dump not found in PATH." 1
 
 mkdir -p "$BACKUP_DIR" || die "Cannot create backup directory: $BACKUP_DIR" 1
+
+# A pg_dump whose MAJOR is newer than the server's produces archives the
+# server's own major cannot restore (the 2026-08-11 restore drill caught
+# exactly this: pg_dump 18 emitted SET transaction_timeout, a PG17+ GUC,
+# and the postgres:16 restore rolled back). A backup you cannot restore
+# into your own fleet is not a backup — fail loudly at dump time, when the
+# operator can still fix it, not at restore time, when they cannot.
+# Override (e.g. deliberately migrating majors via dump/restore):
+# VELOX_BACKUP_TOOL_MISMATCH_OK=yes
+TOOL_MAJOR=$($PG_DUMP --version | sed -E 's/.* ([0-9]+)(\.[0-9]+)?.*/\1/')
+if command -v psql >/dev/null 2>&1; then
+  SERVER_MAJOR=$(psql "$DATABASE_URL" -tAc "SHOW server_version" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/')
+  if [ -n "$SERVER_MAJOR" ] && [ -n "$TOOL_MAJOR" ] && [ "$TOOL_MAJOR" -gt "$SERVER_MAJOR" ] \
+     && [ "${VELOX_BACKUP_TOOL_MISMATCH_OK:-no}" != "yes" ]; then
+    die "pg_dump major ($TOOL_MAJOR) is newer than the server major ($SERVER_MAJOR): the archive may not restore into postgres $SERVER_MAJOR. Use matching tools (e.g. PG_DUMP=\"docker run --rm -i --network host postgres:${SERVER_MAJOR}-alpine pg_dump\") or set VELOX_BACKUP_TOOL_MISMATCH_OK=yes if the mismatch is deliberate." 1
+  fi
+fi
 
 # Test database connectivity.
 if command -v pg_isready >/dev/null 2>&1; then
@@ -99,13 +122,15 @@ START_TIME=$(date +%s)
 # pipeline under `set -eo pipefail` would propagate pg_dump's own status (1),
 # which the header reserves for configuration errors. The || suppresses the
 # ERR trap, so clean up the partial file explicitly.
-pg_dump \
+# The archive travels via STDOUT (not --file) so PG_DUMP can be a wrapped
+# binary — docker, ssh — that has no view of the host filesystem.
+$PG_DUMP \
   --dbname="$DATABASE_URL" \
   --format=custom \
   --compress=6 \
   --verbose \
-  --file="$BACKUP_FILE" \
-  2>&1 | while IFS= read -r line; do log "  pg_dump: $line"; done \
+  2> >(while IFS= read -r line; do log "  pg_dump: $line"; done) \
+  > "$BACKUP_FILE" \
   || { cleanup_on_failure; die "pg_dump failed." 2; }
 
 if [ ! -f "$BACKUP_FILE" ]; then

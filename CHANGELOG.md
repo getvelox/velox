@@ -11,6 +11,10 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The disaster-recovery path never worked — the first-ever restore drill proved it, and it's fixed (2026-08-11).** The plans audit flagged that the backup/restore scripts had never been exercised; the doc pointing at "a tested restore drill" was a lie. Running the drill found four real defects in one afternoon: a `pg_dump` newer than the server produces archives the server's own major cannot restore (now failed loudly at dump time, with a containerized-tools remedy in the message); the same mismatch on the restore side rolls the whole single-transaction restore back (same guard, restore side); restoring into a FRESH cluster — the actual disaster scenario — always rolled back because the `velox_app` role doesn't exist there and the archive's GRANTs fail (restore.sh now refuses up front with the exact `CREATE ROLE` remedy, and the drill rehearses the full documented procedure); and restore.sh's own post-restore validation query referenced a column that doesn't exist, broken since the day it was written. Both scripts now accept wrapped binaries (`PG_DUMP`/`PG_RESTORE`, archives via stdio) so version-matched containerized tools just work. Drill re-run after the fixes: PASS — backup 1s, restore 3s, five critical tables count-matched. The drill history table now lives in the backup doc.
+
 ### Documentation
 
 - **LiteLLM integration guide updated to the current callback format (2026-08-11).** LiteLLM moved its docs to a dedicated repo and superseded the `success_callback: ["generic"]` + env-var configuration with named `callback_settings` entries (`callback_type: generic_api`). Our guide now teaches the current form, notes the legacy form still works, and states explicitly that the ingest endpoint accepts single, batched, and `{"events": []}` payload shapes — verified against the handler.

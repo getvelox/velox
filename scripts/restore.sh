@@ -98,9 +98,33 @@ DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:/]*)[:/].*|\1|')
 DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
 DB_NAME=$(echo "$DATABASE_URL" | sed -E 's|.*://[^/]*/([^?]*).*|\1|')
 
-# Check required tools.
-command -v pg_restore >/dev/null 2>&1 || die "pg_restore not found in PATH." 1
+# Check required tools. PG_RESTORE lets an operator point at a
+# version-matched binary when host tools don't match the target server —
+# e.g. PG_RESTORE="docker run --rm -i --network host postgres:16-alpine pg_restore"
+# (the archive is fed via stdin, so a wrapped binary needs no mounts).
+PG_RESTORE="${PG_RESTORE:-pg_restore}"
+command -v ${PG_RESTORE%% *} >/dev/null 2>&1 || die "pg_restore not found in PATH." 1
 command -v psql >/dev/null 2>&1 || die "psql not found in PATH." 1
+
+# pg_restore emits client-version SET commands (SET transaction_timeout is
+# PG17+) regardless of the archive's origin, so a pg_restore major newer
+# than the TARGET server rolls the whole single-transaction restore back.
+# The 2026-08-11 drill hit exactly this. Fail before touching the target.
+RESTORE_TOOL_MAJOR=$($PG_RESTORE --version | sed -E 's/.* ([0-9]+)(\.[0-9]+)?.*/\1/')
+TARGET_MAJOR=$(psql "$DATABASE_URL" -tAc "SHOW server_version" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/')
+if [ -n "$TARGET_MAJOR" ] && [ -n "$RESTORE_TOOL_MAJOR" ] && [ "$RESTORE_TOOL_MAJOR" -gt "$TARGET_MAJOR" ] \
+   && [ "${VELOX_RESTORE_TOOL_MISMATCH_OK:-no}" != "yes" ]; then
+  die "pg_restore major ($RESTORE_TOOL_MAJOR) is newer than the target server major ($TARGET_MAJOR) — its client SET commands will roll the restore back. Use matching tools (e.g. PG_RESTORE=\"docker run --rm -i --network host postgres:${TARGET_MAJOR}-alpine pg_restore\") or set VELOX_RESTORE_TOOL_MISMATCH_OK=yes." 1
+fi
+
+# Velox archives carry GRANTs to the velox_app runtime role (ADR-073). On a
+# FRESH target — the disaster-recovery case — that role does not exist, one
+# GRANT fails, and --single-transaction rolls the whole restore back. Roles
+# are cluster-level, so pg_dump of a database cannot carry them; the target
+# must provision them first. Fail before touching anything, with the remedy.
+if ! psql "$DATABASE_URL" -tAc "SELECT 1 FROM pg_roles WHERE rolname='velox_app'" 2>/dev/null | grep -q 1; then
+  die "Target cluster has no 'velox_app' role — the archive's GRANTs will roll the restore back. Create it first (CREATE ROLE velox_app LOGIN PASSWORD '<your-password>'; see docker/init.sql for the dev shape and docs/ops/backup-considerations.md for the restore runbook), then re-run." 1
+fi
 
 # Test database connectivity.
 if command -v pg_isready >/dev/null 2>&1; then
@@ -158,14 +182,16 @@ if [ "$FILE_TYPE" = "custom" ]; then
   # --if-exists avoids errors when objects don't exist.
   # --no-owner skips ownership commands (the restoring user becomes owner).
   # --single-transaction ensures atomic restore — all or nothing.
-  pg_restore \
+  # Archive via STDIN (custom format supports it) so PG_RESTORE can be a
+  # wrapped binary with no view of the host filesystem.
+  $PG_RESTORE \
     --dbname="$DATABASE_URL" \
     --clean \
     --if-exists \
     --no-owner \
     --single-transaction \
     --verbose \
-    "$BACKUP_FILE" \
+    < "$BACKUP_FILE" \
     2>&1 | while IFS= read -r line; do log "  pg_restore: $line"; done \
     || die "pg_restore failed — the single-transaction restore was rolled back." 2
 
@@ -197,7 +223,7 @@ log "Running post-restore validation..."
 
 # Check that critical tables exist and have data.
 VALIDATION_QUERY="
-  SELECT table_name, n_live_tup AS row_count
+  SELECT relname AS table_name, n_live_tup AS row_count
   FROM pg_stat_user_tables
   WHERE schemaname = 'public'
   ORDER BY n_live_tup DESC

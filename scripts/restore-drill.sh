@@ -51,7 +51,19 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SOURCE_DATABASE_URL="${SOURCE_DATABASE_URL:-${DATABASE_URL:-}}"
+# Default the ephemeral target to the SOURCE SERVER's major, so the drill
+# rehearses the restore that matters: back into your own fleet's version.
+# (A hardcoded 16 here hid nothing while backup.sh could still dump with
+# newer host tools — the 2026-08-11 first drill failed exactly there.)
+if [ -z "${DRILL_PG_IMAGE:-}" ] && command -v psql >/dev/null 2>&1; then
+  _SRC_MAJOR=$(psql "${SOURCE_DATABASE_URL:-$DATABASE_URL}" -tAc "SHOW server_version" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/')
+  [ -n "$_SRC_MAJOR" ] && DRILL_PG_IMAGE="postgres:${_SRC_MAJOR}-alpine"
+fi
 DRILL_PG_IMAGE="${DRILL_PG_IMAGE:-postgres:16-alpine}"
+# The restore into the ephemeral target must use tools matching ITS major —
+# host pg_restore can be newer (see restore.sh guard). Feed a wrapped binary
+# unless the operator overrode PG_RESTORE explicitly.
+export PG_RESTORE="${PG_RESTORE:-docker run --rm -i --network host $DRILL_PG_IMAGE pg_restore}"
 DRILL_PG_PORT="${DRILL_PG_PORT:-15432}"
 DRILL_CONTAINER_NAME="${DRILL_CONTAINER_NAME:-velox-drill-$$}"
 DRILL_LOG="${DRILL_LOG:-$HOME/.velox/drill.log}"
@@ -177,6 +189,12 @@ while [ "$(date +%s)" -lt "$WAIT_DEADLINE" ]; do
 done
 [ -n "$READY" ] || die "Ephemeral Postgres did not become ready within 60s." 5
 log "Ephemeral Postgres is ready."
+
+# Provision the Velox runtime role the archive's GRANTs reference — the same
+# step the DR runbook prescribes on a fresh cluster (restore.sh refuses to
+# run without it, so the drill rehearses the full documented procedure).
+docker exec "$DRILL_CONTAINER_NAME" psql -U velox -d velox_drill -q -c \
+  "CREATE ROLE velox_app LOGIN PASSWORD 'velox_app'" || die "Could not provision velox_app role in ephemeral cluster." 5
 
 TARGET_URL="postgres://velox:velox@localhost:${DRILL_PG_PORT}/velox_drill?sslmode=disable"
 
