@@ -241,6 +241,25 @@ the validation checks above. Schedule quarterly restore drills:
 
 A backup you've never restored is hope, not a backup.
 
+### Managed Postgres (RDS, Aurora, Cloud SQL)
+
+On managed Postgres the division of labor changes: the provider's native
+snapshots + point-in-time recovery are your PRIMARY mechanism (turn them on,
+set retention — they beat anything a dump script offers), and the WAL-archive
+recipe below does not apply (managed services don't expose that access). What
+this repo's tooling still gives you there, and why you still run the drill
+quarterly:
+
+1. **App-level verification** — the provider proves snapshots exist; only the
+   drill proves Velox boots against a restore and the money tables
+   count-match.
+2. **Portability** — provider snapshots restore only into the same service; a
+   logical dump is your proof the billing data isn't cloud-locked.
+3. **The guards fire where managed setups actually break** — managed servers
+   run pinned majors while laptop/CI tools run newer (the exact mismatch the
+   2026-08-11 drill caught), and a fresh managed instance has no `velox_app`
+   role either.
+
 ### Fresh-cluster restores: provision roles first
 
 Roles are cluster-level; a database dump cannot carry them. On a fresh
