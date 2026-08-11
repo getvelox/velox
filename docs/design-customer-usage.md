@@ -198,7 +198,7 @@ Standard `BeginTx(ctx, postgres.TxTenant, tenantID)`. The customer lookup natura
 
 ### End-to-end test (against running stack)
 
-`cmd/velox-customer-usage-e2e/main.go` (or extend `velox-recipes-e2e`): instantiate `anthropic_style`, create a customer, ingest 100 events across 3 dimension combinations, call `GET /v1/customers/{id}/usage`, assert the response matches an inline expected fixture. Catches contract drift between this design and the actual cycle scan.
+Delivered as `internal/usage/customer_usage_integration_test.go` (real Postgres: ingest across dimension combinations, `GET /v1/customers/{id}/usage` asserted against expected fixtures) plus MANUAL_TEST FLOW S2 for the running-stack smoke. The standalone e2e binary this section originally proposed (`cmd/velox-customer-usage-e2e`, or extending `velox-recipes-e2e`) was never built — neither ever existed in git.
 
 ## Migrations
 
