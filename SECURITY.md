@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **security@velox.dev** with a description of the issue. Encrypted reports are accepted via age (`age --recipient age1velox...`); the public key lives at `https://velox.dev/.well-known/age.txt` once the project is mature enough to require it. For now, email is sufficient.
+Use GitHub's **[private vulnerability reporting](https://github.com/getvelox/velox/security/advisories/new)** (Security tab → Report a vulnerability) — reports reach the maintainer privately, with no email required. If you prefer email: **sagar@sagarwaidande.org**.
 
 Please do **not** open public GitHub issues for suspected vulnerabilities.
 
