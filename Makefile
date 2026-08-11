@@ -4,10 +4,6 @@
 build:
 	go build -o bin/velox ./cmd/velox
 
-# Build the operator CLI binary (Week 7)
-cli:
-	go build -o bin/velox-cli ./cmd/velox-cli
-
 # Run the server locally
 run: build
 	./bin/velox
