@@ -520,7 +520,7 @@ Recipes inherit the `NUMERIC(38, 12)` quantity type from `usage_events`; no reci
 - [x] Per-recipe one-pagers in `docs/recipes/*.md` rendered at `/docs/recipes`
 - [x] Unit tests: YAML parse, override validation, template render
 - [x] Integration tests: instantiate / preview / force / RLS / atomicity rollback
-- [x] `cmd/velox-recipes-e2e/main.go` + assertion against multi-dim meter pricing
+- [x] End-to-end coverage — delivered as MANUAL_TEST FLOW S2 (recipe instantiate → in_advance plan → LiteLLM ingest → hybrid cycle invoice → public cost dashboard) plus the integration tests above; the `cmd/velox-recipes-e2e` binary this line originally named was never built (no commit ever contained it)
 - [x] OpenAPI spec update (`api/openapi.yaml`)
 - [x] CHANGELOG entry + public changelog rollup
 
