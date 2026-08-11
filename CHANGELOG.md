@@ -17,6 +17,7 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Removed
 
+- **Orphaned `internal/platform/metadata` deleted (2026-08-11).** A 92-line Stripe-parity metadata-shape validator born wired into coupon writes — and orphaned the day ADR-039 cut coupons, which removed its only consumer but left the package. Zero references anywhere since (found by the module-census reachability pass: every other internal package has live consumers). If coupons ever return, it lives in git history.
 - **`velox-cli` deleted (2026-08-11).** The operator CLI (`sub list` + `invoice send`, ~1,130 LOC) was born from a roadmap calendar (Week 7, #37), not from a defect or a demand: both commands sat strictly behind the dashboard (its invoice send couldn't express the ADR-082 CC list), nothing in the repo exercised the binary beyond building it, and its README promised subcommands wrapping features the lean-cut had already deleted. The 2026-05-16 MANUAL_TEST trim recorded the verdict — "niche utility with no DP demand" — this change acts on it. Drops `spf13/cobra` and two indirect dependencies, whose only consumer it was. Re-add cost if a real operator-automation need ever names itself: ~1-2 days — though the right shape then is probably scripts against the REST API, not a Go binary.
 
 ### Changed
