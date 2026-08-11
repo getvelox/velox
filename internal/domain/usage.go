@@ -41,8 +41,9 @@ type UsageEvent struct {
 	ProviderCostMicros *int64 `json:"provider_cost_micros,omitempty"`
 	// ProviderCostSource: 'table' (inferred from provider_cost_rates),
 	// 'not_applicable' (no costable dims — non-token meters), 'observed'
-	// (sender-supplied per-half cost — named fast-follow, not yet
-	// written). Empty = unresolved/pre-feature.
+	// (the sender's own per-half cost, ADR-079 D4 — wins over inference;
+	// stamped by usage/postgres.go when ObservedCostMicros is set).
+	// Empty = unresolved/pre-feature.
 	ProviderCostSource string `json:"provider_cost_source,omitempty"`
 }
 
