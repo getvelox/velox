@@ -240,3 +240,30 @@ the validation checks above. Schedule quarterly restore drills:
 5. Run the smoke tests in `MANUAL_TEST.md` (FLOW S1).
 
 A backup you've never restored is hope, not a backup.
+
+### Fresh-cluster restores: provision roles first
+
+Roles are cluster-level; a database dump cannot carry them. On a fresh
+cluster — the disaster-recovery case — create the runtime role BEFORE
+restoring, or the archive's GRANTs roll the single-transaction restore
+back (restore.sh now refuses up front with this remedy):
+
+```sql
+CREATE ROLE velox_app LOGIN PASSWORD '<your-password>';
+```
+
+### Tool-version rule
+
+`pg_dump`/`pg_restore` majors newer than the server produce archives the
+server's major can't restore (dump side) or client `SET` commands the
+target rejects (restore side). Both scripts fail loudly on mismatch; use
+matching tools, e.g. `PG_DUMP="docker run --rm -i --network host
+postgres:16-alpine pg_dump"` (archives travel via stdio, so wrapped
+binaries need no mounts).
+
+### Drill history
+
+| Date | Result | Notes |
+|---|---|---|
+| 2026-08-11 | **FAIL → 4 defects → PASS** (7s total: backup 1s, restore 3s; 5 critical tables count-matched) | First-ever run. Found: (1) host `pg_dump` 18 vs server 16 → unrestorable archive; (2) host `pg_restore` 18 vs target 16 → client `SET transaction_timeout` rolled restore back; (3) fresh-cluster restore rolled back on missing `velox_app` role — the DR path had never worked; (4) restore.sh's validation query referenced a nonexistent column (`table_name` vs `relname`) — broken since birth. All four fixed same day; drill re-run green. |
+
