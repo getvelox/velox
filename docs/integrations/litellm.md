@@ -30,17 +30,25 @@ curl -X POST "$VELOX/v1/meters" \
 
 ## 2. Configure the LiteLLM proxy
 
-Add to your `litellm_config.yaml`:
+Add to your `litellm_config.yaml` (LiteLLM's `generic_api` callback — current
+format as of LiteLLM's 2026-08 docs):
 
 ```yaml
 litellm_settings:
-  success_callback: ["generic"]
-  failure_callback: ["generic"]
+  callbacks: ["velox"]
 
-environment_variables:
-  GENERIC_LOGGER_ENDPOINT: "https://<your-velox-host>/v1/integrations/litellm/spend"
-  GENERIC_LOGGER_HEADERS: "Authorization=Bearer vlx_secret_test_…"
+callback_settings:
+  velox:
+    callback_type: generic_api
+    endpoint: "https://<your-velox-host>/v1/integrations/litellm/spend"
+    headers:
+      Authorization: Bearer vlx_secret_test_…
 ```
+
+The older env-var form (`success_callback: ["generic"]` +
+`GENERIC_LOGGER_ENDPOINT`/`GENERIC_LOGGER_HEADERS`) still works on current
+LiteLLM but is legacy. Either way, Velox accepts single, batched
+(`json_array`), and `{"events": [...]}` payload shapes.
 
 Point `<your-velox-host>` at your Velox API (local dev: `http://localhost:8080`). Use a **secret** key — publishable keys don't have `PermUsageWrite`.
 
