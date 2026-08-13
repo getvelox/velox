@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/shopspring/decimal"
 
 	"github.com/sagarsuperuser/velox/internal/auth"
 )
@@ -206,7 +207,7 @@ func TestMRRMovementPoint_JSONShape(t *testing.T) {
 }
 
 func TestUsagePoint_JSONShape(t *testing.T) {
-	p := UsagePoint{Date: "2026-04-01", Events: 100, Quantity: 5000}
+	p := UsagePoint{Date: "2026-04-01", Events: 100, Quantity: decimal.NewFromInt(5000)}
 	data, _ := json.Marshal(p)
 	var m map[string]any
 	_ = json.Unmarshal(data, &m)

@@ -85,8 +85,61 @@ type apiEvent struct {
 	Timestamp          *json.RawMessage `json:"timestamp,omitempty"`
 }
 
-// resolve converts public API identifiers to internal IDs.
-func (h *Handler) resolve(ctx context.Context, tenantID string, evt apiEvent) (IngestInput, error) {
+// resolveCache memoizes the customer and meter lookups for the lifetime of
+// ONE request. Each lookup opens its own RLS transaction (BEGIN + three
+// set_config calls + the SELECT), so a 1000-event batch for one customer and
+// one meter paid 2000 of them — the dominant cost of batch ingest, and pure
+// waste, since a batch is overwhelmingly one customer's traffic.
+//
+// The scope is deliberately per-request and NOT a process-lifetime cache: a
+// longer-lived one would keep serving a customer deleted mid-flight or a meter
+// re-keyed by another operator, with no invalidation path. Within a single
+// request that staleness window does not exist.
+type resolveCache struct {
+	customers map[string]string // external customer id -> internal id
+	meters    map[string]string // meter key -> meter id
+}
+
+func newResolveCache() *resolveCache {
+	return &resolveCache{
+		customers: make(map[string]string),
+		meters:    make(map[string]string),
+	}
+}
+
+// The four accessors are nil-safe so the single-event doors can pass nil and
+// take the uncached path without a branch at every call site.
+func (c *resolveCache) customer(key string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	id, ok := c.customers[key]
+	return id, ok
+}
+
+func (c *resolveCache) putCustomer(key, id string) {
+	if c != nil {
+		c.customers[key] = id
+	}
+}
+
+func (c *resolveCache) meter(key string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	id, ok := c.meters[key]
+	return id, ok
+}
+
+func (c *resolveCache) putMeter(key, id string) {
+	if c != nil {
+		c.meters[key] = id
+	}
+}
+
+// resolve converts public API identifiers to internal IDs. cache may be nil
+// (single-event doors), in which case every lookup goes to the store.
+func (h *Handler) resolve(ctx context.Context, tenantID string, evt apiEvent, cache *resolveCache) (IngestInput, error) {
 	extCust := strings.TrimSpace(evt.ExternalCustomerID)
 	eventName := strings.TrimSpace(evt.EventName)
 
@@ -97,14 +150,28 @@ func (h *Handler) resolve(ctx context.Context, tenantID string, evt apiEvent) (I
 		return IngestInput{}, errs.Required("event_name")
 	}
 
-	cust, err := h.customers.GetByExternalID(ctx, tenantID, extCust)
-	if err != nil {
-		return IngestInput{}, errs.Invalid("external_customer_id", fmt.Sprintf("customer %q not found", extCust))
+	// A miss is cached only on success: caching the "not found" verdict would
+	// turn one bad index in a batch into a repeated failure for every later
+	// event naming the same customer, which is the same answer but a slower
+	// and less obvious one to debug.
+	custID, ok := cache.customer(extCust)
+	if !ok {
+		cust, err := h.customers.GetByExternalID(ctx, tenantID, extCust)
+		if err != nil {
+			return IngestInput{}, errs.Invalid("external_customer_id", fmt.Sprintf("customer %q not found", extCust))
+		}
+		custID = cust.ID
+		cache.putCustomer(extCust, custID)
 	}
 
-	meter, err := h.meters.GetMeterByKey(ctx, tenantID, eventName)
-	if err != nil {
-		return IngestInput{}, errs.Invalid("event_name", fmt.Sprintf("meter %q not found", eventName))
+	meterID, ok := cache.meter(eventName)
+	if !ok {
+		meter, err := h.meters.GetMeterByKey(ctx, tenantID, eventName)
+		if err != nil {
+			return IngestInput{}, errs.Invalid("event_name", fmt.Sprintf("meter %q not found", eventName))
+		}
+		meterID = meter.ID
+		cache.putMeter(eventName, meterID)
 	}
 
 	// dimensions takes precedence over properties — see apiEvent doc.
@@ -114,8 +181,8 @@ func (h *Handler) resolve(ctx context.Context, tenantID string, evt apiEvent) (I
 	}
 
 	input := IngestInput{
-		CustomerID:     cust.ID,
-		MeterID:        meter.ID,
+		CustomerID:     custID,
+		MeterID:        meterID,
 		Quantity:       evt.Quantity,
 		Dimensions:     dims,
 		IdempotencyKey: evt.IdempotencyKey,
@@ -153,7 +220,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	input, err := h.resolve(r.Context(), tenantID, evt)
+	input, err := h.resolve(r.Context(), tenantID, evt, nil)
 	if err != nil {
 		respond.FromError(w, r, err, "usage_event")
 		return
@@ -209,7 +276,7 @@ func (h *Handler) backfill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	input, err := h.resolve(r.Context(), tenantID, evt)
+	input, err := h.resolve(r.Context(), tenantID, evt, nil)
 	if err != nil {
 		respond.FromError(w, r, err, "usage_event")
 		return
@@ -389,8 +456,11 @@ func (h *Handler) batchIngest(w http.ResponseWriter, r *http.Request) {
 	// errors[] naming every failing index for the batch 422.
 	var inputs []IngestInput
 	var resolveErrs []string
+	// One cache for the whole batch — see resolveCache. A batch naming one
+	// customer and one meter now costs two lookups instead of 2N.
+	cache := newResolveCache()
 	for i, evt := range events {
-		input, err := h.resolve(r.Context(), tenantID, evt)
+		input, err := h.resolve(r.Context(), tenantID, evt, cache)
 		if err != nil {
 			resolveErrs = append(resolveErrs, fmt.Sprintf("event[%d]: %s", i, err.Error()))
 			continue
