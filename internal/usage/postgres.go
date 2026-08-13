@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -379,45 +380,92 @@ func (s *PostgresStore) AggregateForBillingPeriodByAgg(ctx context.Context, tena
 		return result, nil
 	}
 
+	// One query per DISTINCT aggregation function (at most four) rather
+	// than one per meter. A subscription spanning M meters cost M round
+	// trips per billing period — and billOnePeriod calls this up to four
+	// times (base, pre-cap re-derive, per-interval), so the fan-out was
+	// multiplicative in M.
+	byAgg := make(map[string][]string, 4)
 	for meterID, agg := range meters {
-		aggFunc := "SUM"
-		switch agg {
-		case "max":
-			aggFunc = "MAX"
-		case "count":
-			aggFunc = "COUNT"
-		case "last":
-			var val decimal.Decimal
-			err := tx.QueryRowContext(ctx, `
-				SELECT COALESCE(quantity, 0) FROM usage_events
-				WHERE customer_id = $1 AND meter_id = $2 AND timestamp >= $3 AND timestamp < $4
-				ORDER BY timestamp DESC LIMIT 1
-			`, customerID, meterID, from, to).Scan(&val)
-			// Propagate query errors — swallowing them here silently
-			// drops the meter from the billing total (under-billing at
-			// finalize). Only a positive aggregate is a billable line.
-			if err != nil {
-				return nil, fmt.Errorf("aggregate meter %s (%s): %w", meterID, agg, err)
+		byAgg[agg] = append(byAgg[agg], meterID)
+	}
+	aggs := make([]string, 0, len(byAgg))
+	for agg := range byAgg {
+		aggs = append(aggs, agg)
+	}
+	sort.Strings(aggs)
+
+	for _, agg := range aggs {
+		meterIDs := byAgg[agg]
+		sort.Strings(meterIDs)
+
+		args := []any{tenantID, customerID, from, to}
+		placeholders := make([]string, len(meterIDs))
+		for i, id := range meterIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+5)
+			args = append(args, id)
+		}
+		in := strings.Join(placeholders, ",")
+
+		// tenant_id is in the WHERE clause even though the tx is already
+		// RLS-scoped. The policy is an OR (bypass_rls OR tenant match),
+		// which Postgres can only apply as a post-scan Filter — never an
+		// Index Cond. Every usage_events btree leads with tenant_id, so
+		// without this predicate the leading column is unconstrained and
+		// the aggregate seq-scans EVERY tenant's events. Same defect class
+		// migration 0147 fixed for audit_log.
+		var query string
+		if agg == "last" {
+			// Latest in-period event per meter. id DESC breaks
+			// same-timestamp ties so the billed total is reproducible
+			// across replicas (same rationale as ranked_rules below).
+			query = `SELECT DISTINCT ON (meter_id) meter_id, COALESCE(quantity, 0)
+				FROM usage_events
+				WHERE tenant_id = $1 AND customer_id = $2
+				  AND timestamp >= $3 AND timestamp < $4
+				  AND meter_id IN (` + in + `)
+				ORDER BY meter_id, timestamp DESC, id DESC`
+		} else {
+			aggFunc := "SUM"
+			switch agg {
+			case "max":
+				aggFunc = "MAX"
+			case "count":
+				aggFunc = "COUNT"
 			}
-			if val.IsPositive() {
-				result[meterID] = val
-			}
-			continue
+			query = fmt.Sprintf(`SELECT meter_id, COALESCE(%s(quantity), 0)
+				FROM usage_events
+				WHERE tenant_id = $1 AND customer_id = $2
+				  AND timestamp >= $3 AND timestamp < $4
+				  AND meter_id IN (%s)
+				GROUP BY meter_id`, aggFunc, in)
 		}
 
-		var val decimal.Decimal
-		err := tx.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT COALESCE(%s(quantity), 0) FROM usage_events
-				WHERE customer_id = $1 AND meter_id = $2 AND timestamp >= $3 AND timestamp < $4`,
-				aggFunc),
-			customerID, meterID, from, to).Scan(&val)
-		// Propagate query errors — see the 'last' branch above. A swallowed
-		// error here under-bills the meter at finalize.
+		// Propagate query errors — swallowing them silently drops the
+		// meter from the billing total (under-billing at finalize).
+		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {
-			return nil, fmt.Errorf("aggregate meter %s (%s): %w", meterID, agg, err)
+			return nil, fmt.Errorf("aggregate meters (%s): %w", agg, err)
 		}
-		if val.IsPositive() {
-			result[meterID] = val
+		scanErr := func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var meterID string
+				var val decimal.Decimal
+				if err := rows.Scan(&meterID, &val); err != nil {
+					return err
+				}
+				// Only a positive aggregate is a billable line. A meter
+				// with no events in the period produces no row at all,
+				// which lands in the same place: absent from the map.
+				if val.IsPositive() {
+					result[meterID] = val
+				}
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, fmt.Errorf("aggregate meters (%s): %w", agg, scanErr)
 		}
 	}
 
@@ -442,20 +490,23 @@ func (s *PostgresStore) AggregateDailyBuckets(ctx context.Context, tenantID, cus
 	}
 
 	placeholders := make([]string, len(meterIDs))
-	args := []any{customerID, from, to}
+	args := []any{tenantID, customerID, from, to}
 	for i, id := range meterIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+4)
+		placeholders[i] = fmt.Sprintf("$%d", i+5)
 		args = append(args, id)
 	}
 
+	// tenant_id predicate: see AggregateForBillingPeriodByAgg — RLS alone
+	// cannot drive an index scan here.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT date_trunc('day', timestamp AT TIME ZONE 'UTC') AS bucket_start,
 		       meter_id,
 		       COALESCE(SUM(quantity), 0) AS qty
 		FROM usage_events
-		WHERE customer_id = $1
-		  AND timestamp >= $2
-		  AND timestamp < $3
+		WHERE tenant_id = $1
+		  AND customer_id = $2
+		  AND timestamp >= $3
+		  AND timestamp < $4
 		  AND meter_id IN (`+strings.Join(placeholders, ",")+`)
 		GROUP BY 1, 2
 	`, args...)
@@ -488,16 +539,18 @@ func (s *PostgresStore) AggregateForBillingPeriod(ctx context.Context, tenantID,
 	}
 
 	placeholders := make([]string, len(meterIDs))
-	args := []any{customerID, from, to}
+	args := []any{tenantID, customerID, from, to}
 	for i, id := range meterIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+4)
+		placeholders[i] = fmt.Sprintf("$%d", i+5)
 		args = append(args, id)
 	}
 
+	// tenant_id predicate: see AggregateForBillingPeriodByAgg.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT meter_id, COALESCE(SUM(quantity), 0)
 		FROM usage_events
-		WHERE customer_id = $1 AND timestamp >= $2 AND timestamp < $3
+		WHERE tenant_id = $1 AND customer_id = $2
+			AND timestamp >= $3 AND timestamp < $4
 			AND meter_id IN (`+strings.Join(placeholders, ",")+`)
 		GROUP BY meter_id
 	`, args...)
@@ -647,6 +700,28 @@ func (s *PostgresStore) AggregateByPricingRules(
 	// event billed twice (period bucket + last_ever bucket). Mirroring the
 	// period pass's LATERAL top-1 claim and filtering on the winner's mode
 	// AFTER the claim closes the double-count.
+	//
+	// The probe below is what makes the doc comment above true. This pass is
+	// deliberately unbounded in time — that is what last_ever MEANS — so
+	// running it unconditionally walked the customer's entire lifetime of
+	// events for the meter on every invoice, every preview, and every hourly
+	// threshold scan, including for the overwhelming majority of meters that
+	// have no last_ever rule at all. The probe is an index hit on
+	// (tenant_id, meter_id); the scan it skips is not.
+	var hasLastEver bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM meter_pricing_rules
+			WHERE tenant_id = $1 AND meter_id = $2
+			  AND aggregation_mode = 'last_ever'
+		)
+	`, tenantID, meterID).Scan(&hasLastEver); err != nil {
+		return nil, fmt.Errorf("aggregate by pricing rules (last_ever probe): %w", err)
+	}
+	if !hasLastEver {
+		return out, nil
+	}
+
 	leverRows, err := tx.QueryContext(ctx, `
 		WITH ranked_rules AS (
 			SELECT id, dimension_match, aggregation_mode, rating_rule_version_id,
@@ -704,6 +779,17 @@ func buildUsageWhere(f ListFilter) (string, []any) {
 	var args []any
 	idx := 1
 
+	// Leading predicate, and the reason this is not redundant with the
+	// RLS-scoped tx: the policy is an OR (bypass_rls OR tenant match), so
+	// Postgres applies it as a post-scan Filter and can never use it as an
+	// Index Cond. Every usage_events btree leads with tenant_id — without
+	// this clause the list, the COUNT, and the /usage stat-card aggregate
+	// all seq-scan every tenant's events.
+	if f.TenantID != "" {
+		clauses = append(clauses, fmt.Sprintf("tenant_id = $%d", idx))
+		args = append(args, f.TenantID)
+		idx++
+	}
 	if f.CustomerID != "" {
 		clauses = append(clauses, fmt.Sprintf("customer_id = $%d", idx))
 		args = append(args, f.CustomerID)

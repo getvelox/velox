@@ -44,7 +44,7 @@ func TestResolve_MalformedTimestampRejected(t *testing.T) {
 	t.Run("valid RFC3339 honored", func(t *testing.T) {
 		evt := base
 		evt.Timestamp = rawMsg(`"2026-03-15T10:00:00Z"`)
-		in, err := h.resolve(ctx, "t1", evt)
+		in, err := h.resolve(ctx, "t1", evt, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -64,7 +64,7 @@ func TestResolve_MalformedTimestampRejected(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				evt := base
 				evt.Timestamp = ts
-				_, err := h.resolve(ctx, "t1", evt)
+				_, err := h.resolve(ctx, "t1", evt, nil)
 				if err == nil {
 					t.Fatalf("expected rejection, got nil error")
 				}
@@ -80,7 +80,7 @@ func TestResolve_MalformedTimestampRejected(t *testing.T) {
 
 	t.Run("absent timestamp ok", func(t *testing.T) {
 		evt := base // Timestamp nil
-		in, err := h.resolve(ctx, "t1", evt)
+		in, err := h.resolve(ctx, "t1", evt, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

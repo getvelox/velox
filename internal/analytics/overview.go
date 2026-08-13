@@ -153,9 +153,14 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 			// through and the dashboard reported every terminal-escalated
 			// invoice as still actively retrying.
 			`SELECT COUNT(*) FROM invoice_dunning_runs WHERE state NOT IN ('resolved', 'escalated')` + notSimViaInvoice, nil},
+		// tenant_id is explicit even though the tx is RLS-scoped: the RLS
+		// policy is an OR (bypass_rls OR tenant match), which Postgres can
+		// only apply as a post-scan Filter. usage_events is the one table
+		// here big enough for that to matter — without the predicate this
+		// COUNT seq-scans every tenant's events on every dashboard load.
 		{"usage_events", &resp.UsageEvents,
-			`SELECT COUNT(*) FROM usage_events WHERE timestamp >= $1 AND timestamp < $2` + notSimViaCustomer,
-			[]any{period.Start, period.End}},
+			`SELECT COUNT(*) FROM usage_events WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp < $3` + notSimViaCustomer,
+			[]any{tenantID, period.Start, period.End}},
 		// Issued credit notes whose Stripe refund leg is failed/pending — i.e.
 		// a customer is owed money that hasn't been pushed back yet. The refund
 		// is operator-retried (no auto-sweep), so surfacing the count is what
