@@ -1596,14 +1596,19 @@ export default function InvoiceDetailPage() {
       {/* PDF Preview */}
       {pdfPreviewUrl && (
         <div role="dialog" aria-modal="true" aria-label="Invoice PDF preview" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => { URL.revokeObjectURL(pdfPreviewUrl); setPdfPreviewUrl(null) }}>
-          <div className="relative w-full max-w-4xl h-[85vh] bg-background rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+          {/* flex column, and the iframe below takes flex-1 min-h-0 rather
+              than h-full. h-full resolves against the SHELL (85vh), not the
+              space left under the header, so the frame ran exactly one header
+              past the bottom and overflow-hidden ate that strip — which on a
+              PDF viewer is where the page controls sit. */}
+          <div className="relative w-full max-w-4xl h-[85vh] bg-background rounded-2xl shadow-2xl overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-3 border-b border-border">
               <h2 className="text-sm font-semibold text-foreground">Invoice Preview -- {invoice.invoice_number}</h2>
               <Button variant="ghost" size="sm" onClick={() => { URL.revokeObjectURL(pdfPreviewUrl); setPdfPreviewUrl(null) }}>
                 Close
               </Button>
             </div>
-            <iframe src={pdfPreviewUrl} className="w-full h-full" title="Invoice PDF Preview" />
+            <iframe src={pdfPreviewUrl} className="w-full flex-1 min-h-0" title="Invoice PDF Preview" />
           </div>
         </div>
       )}
