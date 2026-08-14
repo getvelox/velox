@@ -82,6 +82,14 @@ export default defineConfig([
     // as one box including its own close button, so masking it would fade that
     // button — giving dialogs a proper scrolling BODY is a redesign of every
     // dialog in the app, deliberately not bundled into this fix.
+    //
+    // Layout.tsx is NOT here. It was, and that is how the app's largest pane —
+    // <main>, where every page's content lives — kept a hand-rolled
+    // `overflow-auto` while the rule was on. Nothing flagged it, because the
+    // file had been waived wholesale for its menu-shaped parts. A blanket
+    // file-level waiver is only as good as its narrowest member; anything in
+    // Layout that genuinely needs one takes a line-level disable with a reason,
+    // the same as every other caller.
     files: [
       'src/components/ui/dropdown-menu.tsx',
       'src/components/ui/select.tsx',
@@ -89,7 +97,6 @@ export default defineConfig([
       'src/components/ui/dialog.tsx',
       'src/components/ui/scroll-pane.tsx',
       'src/components/Combobox.tsx',
-      'src/components/Layout.tsx',
     ],
     rules: {
       'no-restricted-syntax': noWallClockNow,

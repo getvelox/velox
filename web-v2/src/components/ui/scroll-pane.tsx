@@ -37,8 +37,8 @@ export function ScrollPane({
 }: {
   children: ReactNode
   className?: string
-  /** Element to render. Panes carry real semantics — nav, ul, pre — keep them. */
-  as?: 'div' | 'nav' | 'ul' | 'pre'
+  /** Element to render. Panes carry real semantics — nav, ul, pre, main — keep them. */
+  as?: 'div' | 'nav' | 'ul' | 'pre' | 'main'
 } & React.HTMLAttributes<HTMLElement>) {
   const ref = useRef<HTMLElement | null>(null)
   const [edges, setEdges] = useState<ScrollEdges>({ top: false, bottom: false })
