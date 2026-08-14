@@ -3,7 +3,8 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { api, formatDateTime } from '@/lib/api'
 import { CustomerCombobox } from '@/components/CustomerCombobox'
-import { startOfDayInTZ, endOfDayInTZ } from '@/lib/dates'
+import { startOfDayInTZ, endOfDayInTZ, civilDateAgo } from '@/lib/dates'
+import { RANGES, RANGE_KEYS, DEFAULT_RANGE, parseRange, rangeCaption, resolveWindow } from '@/lib/usageRange'
 import type { Customer, Meter, UsageEvent, UsageEventsAggregate } from '@/lib/api'
 import { downloadCSV } from '@/lib/csv'
 import { showApiError } from '@/lib/formErrors'
@@ -42,12 +43,24 @@ export default function UsageEventsPage() {
   const [urlState, setUrlState] = useUrlState({
     customer: '',
     meter: '',
+    range: DEFAULT_RANGE as string,
     from: '',
     to: '',
     dim: '',
     page: '1',
   })
   const { customer: filterCustomer, meter: filterMeter, from: filterFrom, to: filterTo, dim: filterDim } = urlState
+  const range = parseRange(urlState.range)
+
+  // Recomputed each render so a long-lived tab's window stays anchored to
+  // today rather than to whenever the page was opened.
+  // Named activeWindow, not window — shadowing the DOM global in a React
+  // component is a debugging trap waiting to happen.
+  const activeWindow = useMemo(
+    () => resolveWindow(range, { from: filterFrom, to: filterTo }, civilDateAgo),
+    [range, filterFrom, filterTo],
+  )
+  const { from: effectiveFrom, to: effectiveTo } = activeWindow
   const page = Math.max(1, parseInt(urlState.page) || 1)
   const [events, setEvents] = useState<UsageEvent[]>([])
   const [total, setTotal] = useState(0)
@@ -109,11 +122,11 @@ export default function UsageEventsPage() {
     // which interprets the input string in BROWSER local TZ, so two
     // operators in different TZs filtering "from May 5" got
     // different results. ADR-010.
-    if (filterFrom) parts.push(`from=${startOfDayInTZ(filterFrom)}`)
-    if (filterTo) parts.push(`to=${endOfDayInTZ(filterTo)}`)
+    if (effectiveFrom) parts.push(`from=${startOfDayInTZ(effectiveFrom)}`)
+    if (effectiveTo) parts.push(`to=${endOfDayInTZ(effectiveTo)}`)
     if (filterDim) parts.push(`dimensions=${encodeURIComponent(filterDim)}`)
     return parts.join('&')
-  }, [filterCustomer, filterMeter, filterFrom, filterTo, filterDim])
+  }, [filterCustomer, filterMeter, effectiveFrom, effectiveTo, filterDim])
 
   // Server-side paginated fetch
   const loadEvents = useCallback(() => {
@@ -249,6 +262,8 @@ export default function UsageEventsPage() {
   const activeMeters = aggregate?.active_meters ?? 0
   const activeCustomers = aggregate?.active_customers ?? 0
 
+  const scopeCaption = rangeCaption(range, activeWindow)
+
   const statCards = [
     { label: 'Total Events', value: totalEvents.toLocaleString(), icon: Activity, color: 'text-primary' },
     { label: 'Total Units', value: totalUnitsDisplay, icon: Hash, color: 'text-blue-600' },
@@ -273,7 +288,9 @@ export default function UsageEventsPage() {
       </div>
 
       {/* Filter bar */}
-      <div className="flex items-center gap-3 mt-6">
+      {/* Wraps: 'custom' adds two date pickers, and six controls overflow a
+          1440px viewport, clipping the dimension field. */}
+      <div className="flex flex-wrap items-center gap-3 mt-6">
         <div className="w-52">
           <CustomerCombobox
             value={filterCustomer}
@@ -292,19 +309,35 @@ export default function UsageEventsPage() {
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
         </select>
-        <DatePicker
-          value={filterFrom}
-          onChange={v => setUrlState({ from: v, page: '1' })}
-          placeholder="From date"
-          className="w-44"
-        />
-        <DatePicker
-          value={filterTo}
-          onChange={v => setUrlState({ to: v, page: '1' })}
-          placeholder="To date"
-          className="w-44"
-          minDate={filterFrom ? new Date(filterFrom + 'T00:00:00') : undefined}
-        />
+        <select
+          value={range}
+          onChange={(e) => setUrlState({ range: e.target.value, page: '1' })}
+          className="flex h-9 w-40 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          {RANGE_KEYS.map(k => (
+            <option key={k} value={k}>{RANGES[k].label}</option>
+          ))}
+        </select>
+        {/* The pickers appear only for 'custom'. Showing them beside an active
+            preset would give two controls for one question and no way to tell
+            which is in force. */}
+        {range === 'custom' && (
+          <>
+            <DatePicker
+              value={filterFrom}
+              onChange={v => setUrlState({ from: v, page: '1' })}
+              placeholder="From date"
+              className="w-44"
+            />
+            <DatePicker
+              value={filterTo}
+              onChange={v => setUrlState({ to: v, page: '1' })}
+              placeholder="To date"
+              className="w-44"
+              minDate={filterFrom ? new Date(filterFrom + 'T00:00:00') : undefined}
+            />
+          </>
+        )}
         <input
           type="text"
           value={filterDim}
@@ -342,8 +375,13 @@ export default function UsageEventsPage() {
         </Card>
       ) : (
         <>
+          {/* The cards are totals over the SELECTED window, not all history.
+              Saying so removes the "where did my events go?" reading when an
+              operator lands on the 30-day default. */}
+          <p className="text-xs text-muted-foreground mt-6">{scopeCaption}</p>
+
           {/* Stat cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
             {statCards.map(card => (
               <Card key={card.label}>
                 <CardContent className="px-5 py-4">

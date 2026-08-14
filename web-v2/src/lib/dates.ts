@@ -32,6 +32,24 @@ export function startOfDayInTZ(yyyymmdd: string, timezone?: string): string {
   return fromZonedTime(`${yyyymmdd} 00:00:00.000`, tz).toISOString()
 }
 
+// civilDateAgo returns the yyyy-mm-dd civil date N days or months before
+// today in tenant TZ. Unlike addDaysInTZ it returns the CIVIL date, not an
+// instant: date-range filter state is stored as civil dates and converted at
+// query time by startOfDayInTZ/endOfDayInTZ, so a preset window has to be
+// expressed in the same shape an operator's own picks take.
+//
+// Month arithmetic is calendar-based, not 30-day: "12 months" from Mar 31
+// lands on the previous Mar 31, and JS Date normalizes the overflow days of
+// short months (Mar 31 minus 1 month = Mar 3, not Feb 31) — acceptable for a
+// coarse filter preset, and the same idiom the helpers above use.
+export function civilDateAgo(amount: number, unit: 'day' | 'month', timezone?: string): string {
+  const tz = timezone || tenantTZ()
+  const todayStr = formatInTimeZone(new Date(), tz, 'yyyy-MM-dd')
+  const [y, m, d] = todayStr.split('-').map(Number)
+  const target = unit === 'day' ? new Date(y, m - 1, d - amount) : new Date(y, m - 1 - amount, d)
+  return `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`
+}
+
 // addDaysInTZ rolls forward N days from today in tenant TZ and
 // returns end-of-day-in-tenant-TZ as UTC ISO. The day-arithmetic
 // uses a browser-local Date with explicit y/m/d construction (TZ-
