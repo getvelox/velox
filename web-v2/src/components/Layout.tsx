@@ -515,8 +515,15 @@ export function Layout({ children }: { children: ReactNode }) {
         {sidebarContent}
       </aside>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-auto bg-background">
+      {/* Main content.
+          Goes through ScrollPane for the same reason the sidebar does, and it
+          is the pane where the omission cost most: this is where every page's
+          content lives, so on any window shorter than the page the last card
+          was sliced with nothing on screen saying so. There is no document
+          scrollbar to fall back on either — the shell is exactly viewport
+          height, so the browser draws none, and macOS hides overlay scrollbars
+          until you are already scrolling. */}
+      <ScrollPane as="main" className="flex-1 bg-background">
         {/* Header stack — mode/safety banner + top-bar, pinned together so
             whichever banner is live (Stripe-missing hard blocker in live
             mode, test-mode strip otherwise) can never scroll out of sight.
@@ -578,7 +585,7 @@ export function Layout({ children }: { children: ReactNode }) {
         <div className={cn(CONTENT_BAND, 'p-4 md:p-8')}>
           {children}
         </div>
-      </main>
+      </ScrollPane>
 
       {/* Command Palette */}
       <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} />
