@@ -5,11 +5,11 @@
 #
 # This pin MUST be >= go.mod's `go` directive. The image runs GOTOOLCHAIN=local,
 # so an older builder does not silently download a newer toolchain — it refuses:
-# "go.mod requires go >= 1.25.12 (running go 1.25.11)". CI enforces the ordering
+# "go.mod requires go >= 1.25.13 (running go 1.25.12)". CI enforces the ordering
 # (the go-version-consistency step in .github/workflows/ci.yml), because the
 # docker job only runs on main: bumping go.mod in a PR used to leave main's
 # image build broken with nothing failing until after the merge.
-FROM golang:1.25.12-alpine AS builder
+FROM golang:1.25.13-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
