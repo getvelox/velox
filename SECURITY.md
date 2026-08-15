@@ -17,7 +17,7 @@ We commit to:
 
 ## In scope
 
-- The Velox Go binary (`cmd/velox`, `cmd/velox-bootstrap`, `cmd/velox-bench`, `cmd/velox-doctor`, `cmd/velox-migrate-safety`)
+- The Velox Go binary (`cmd/velox`, `cmd/velox-bootstrap`, `cmd/velox-bench-seed`, `cmd/velox-doctor`, `cmd/velox-migrate-safety`)
 - Code under `internal/` and `pkg/`
 - The migration runner and schema in `internal/platform/migrate/`
 - The web-v2 dashboard (`web-v2/`)

@@ -7,7 +7,7 @@ tmp/
 .env.local
 .DS_Store
 /velox
-/velox-bench
+/velox-bench-seed
 temp.txt
 MANUAL_TEST_BUGS.md
 
@@ -40,5 +40,8 @@ velox-api
 /velox-bootstrap
 /velox-cli
 /velox-doctor
-/velox-bench
+/velox-bench-seed
 /velox-migrate-safety
+
+# k6 writes its run summary next to the script
+scripts/bench-rig/summary.json
