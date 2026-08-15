@@ -138,8 +138,14 @@ separately, because they behave nothing alike:
 
 | Failure | Time until another replica can take over |
 |---|---:|
-| Process dies, host survives (panic, `SIGKILL`, OOM) | **~1 ms** |
+| Process dies, host survives (panic, `SIGKILL`, OOM) | **under 1 ms** |
 | Host disappears without closing the socket (partition, power loss, VM terminate) | **90 s** |
+
+The first figure is a bound, not a stopwatch reading. The test starts timing
+after `wait()` reports the process reaped, and the *first* lock attempt already
+succeeds — so 1 ms is the cost of one round-trip check, and the lock was free
+before we could look. Identical across 6 consecutive runs, which is what a
+measurement pinned to its own granularity looks like.
 
 The second number was **7,875 s (2 h 11 m)** before this work — the Postgres
 default keepalive train — during which every replica skips its tick and billing
