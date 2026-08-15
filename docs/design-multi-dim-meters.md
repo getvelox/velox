@@ -321,6 +321,6 @@ Per memory `feedback_prefer_battle_tested_libs`: use `shopspring/decimal`, do no
 - [x] `GET /v1/customers/{id}/usage` powering the cost dashboard
 - [x] Unit tests: ingest, aggregation per mode, subset-match, priority-claim
 - [x] Integration tests: real Postgres, RLS-isolated tenants, decimal precision, idempotency
-- [x] `cmd/velox-bench/main.go` (the 50k events/sec target was never validated — measured local baseline is ~2.5k ev/s single-row-INSERT-bound; see the bench ship commit 537e00ca for p50/p95/p99)
+- [x] `cmd/velox-bench/main.go` (the 50k events/sec target was never validated. Measured 2026-08-15 on an isolated Postgres 16 container, 8 workers, 10s, via `--batch`: **2,714 ev/s single-event; 8,245 at batch 10; 10,821 at batch 50; 12,095 at batch 500**, the curve flattening after ~50 while per-call latency keeps climbing. The long-standing "single-row-INSERT-bound" reading is WRONG — statement-level profiling attributes **~66% of in-database time to COMMIT and only ~28% to the INSERT**, with the three per-transaction `set_config` calls at 5%. Ingest is fsync/commit-bound, so the lever is commits-per-event (batching), not statements-per-event; the plateau above batch 50 is the INSERT-bound ceiling underneath. Laptop-container numbers — not a cloud benchmark.)
 - [x] OpenAPI spec update (`api/openapi.yaml`)
 - [x] CHANGELOG entry + public changelog rollup

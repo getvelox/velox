@@ -45,7 +45,17 @@ import (
 func main() {
 	workers := flag.Int("workers", 16, "concurrent ingest workers (default 16)")
 	duration := flag.Duration("duration", 30*time.Second, "benchmark wall-clock duration")
+	// batch=1 is the single-event path. Larger values exercise BatchIngest,
+	// which commits ONE transaction per batch — the lever that matters,
+	// because profiling puts ~two thirds of in-database time in COMMIT and
+	// under a third in the INSERT itself. Statement count per event does not
+	// change with batching; commits per event fall as 1/batch.
+	batch := flag.Int("batch", 1, "events per ingest call (1 = single-event path)")
 	flag.Parse()
+
+	if *batch < 1 {
+		log.Fatalf("--batch must be >= 1")
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
@@ -73,8 +83,8 @@ func main() {
 	store := usage.NewPostgresStore(db)
 	svc := usage.NewService(store)
 
-	fmt.Printf("velox-bench: workers=%d duration=%s tenant=%s meter=%s\n",
-		*workers, *duration, tenantID, meterID)
+	fmt.Printf("velox-bench: workers=%d batch=%d duration=%s tenant=%s meter=%s\n",
+		*workers, *batch, *duration, tenantID, meterID)
 
 	var totalEvents int64
 	var totalErrors int64
@@ -95,21 +105,47 @@ func main() {
 			rng := rand.New(rand.NewPCG(uint64(workerID), uint64(workerID)+1))
 			samples := make([]time.Duration, 0, 4096)
 			for time.Now().Before(deadline) {
-				props := pickDimensions(rng)
-				qty := decimal.NewFromInt(int64(rng.IntN(1000) + 1))
-				t0 := time.Now()
-				_, err := svc.Ingest(ctx, tenantID, usage.IngestInput{
-					CustomerID: customerID, MeterID: meterID,
-					Quantity: qty, Dimensions: props,
-				})
-				lat := time.Since(t0)
-				if err != nil {
-					atomic.AddInt64(&totalErrors, 1)
-					firstErr.CompareAndSwap(nil, err.Error())
+				if *batch == 1 {
+					props := pickDimensions(rng)
+					qty := decimal.NewFromInt(int64(rng.IntN(1000) + 1))
+					t0 := time.Now()
+					_, err := svc.Ingest(ctx, tenantID, usage.IngestInput{
+						CustomerID: customerID, MeterID: meterID,
+						Quantity: qty, Dimensions: props,
+					})
+					lat := time.Since(t0)
+					if err != nil {
+						atomic.AddInt64(&totalErrors, 1)
+						firstErr.CompareAndSwap(nil, err.Error())
+						continue
+					}
+					atomic.AddInt64(&totalEvents, 1)
+					samples = append(samples, lat)
 					continue
 				}
-				atomic.AddInt64(&totalEvents, 1)
-				samples = append(samples, lat)
+
+				inputs := make([]usage.IngestInput, *batch)
+				for i := range inputs {
+					inputs[i] = usage.IngestInput{
+						CustomerID: customerID, MeterID: meterID,
+						Quantity:   decimal.NewFromInt(int64(rng.IntN(1000) + 1)),
+						Dimensions: pickDimensions(rng),
+					}
+				}
+				t0 := time.Now()
+				inserted, _, errs := svc.BatchIngest(ctx, tenantID, inputs)
+				lat := time.Since(t0)
+				if len(errs) > 0 {
+					atomic.AddInt64(&totalErrors, int64(len(errs)))
+					firstErr.CompareAndSwap(nil, errs[0].Error())
+				}
+				if inserted > 0 {
+					atomic.AddInt64(&totalEvents, int64(inserted))
+					// Latency is per CALL; per-event latency is this over
+					// batch size. Recorded per call so p99 answers "how long
+					// does a client wait", which is the operational question.
+					samples = append(samples, lat)
+				}
 			}
 			latencyChan <- samples
 		}(i)
