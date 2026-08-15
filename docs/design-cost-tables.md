@@ -25,7 +25,8 @@ the billing engines lack, in the LLM-tooling shape, joined in-app.
 - usage_events.quantity is NUMERIC(38,12) (0054 ALTERed in place).
 - There is NO batch write path: BatchIngest loops per event, each its own
   tx; every writer (live POST, batch, backfill, LiteLLM — plus
-  velox-bench) funnels through Service.ingest → store.Ingest. **Stamping
+  the k6 bench profile, which drives the public endpoint like any other
+  client) funnels through Service.ingest → store.Ingest. **Stamping
   lives in that single funnel; every path is covered by construction.**
 - Event dims: `model` holds canonical FAMILY tokens for known models
   (e.g. `claude-3.5-sonnet`) but RAW ids for unknown ones; `model_raw`

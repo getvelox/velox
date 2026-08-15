@@ -130,9 +130,16 @@ git config --global --add safe.directory /opt/velox
 # The container image is unaffected: the Dockerfile pins its own toolchain.
 export GOTOOLCHAIN=auto GOSUMDB=sum.golang.org
 go build -o /usr/local/bin/velox ./cmd/velox >/tmp/build-velox.log 2>&1
-go build -o /usr/local/bin/velox-bench ./cmd/velox-bench >/tmp/build-bench.log 2>&1
+go build -o /usr/local/bin/velox-bench-seed ./cmd/velox-bench-seed >/tmp/build-seed.log 2>&1
 go build -o /usr/local/bin/velox-bootstrap ./cmd/velox-bootstrap >/tmp/build-boot.log 2>&1
 docker build -t velox:bench . >/tmp/build-image.log 2>&1
+
+# k6 generates the load; velox-bench-seed only creates fixtures and mints a
+# key. Installed on both instances because the loadgen is the one that needs
+# it and the app node is where you end up debugging.
+dnf install -y https://dl.k6.io/rpm/x86_64/k6-v0.49.0-1.x86_64.rpm >/tmp/install-k6.log 2>&1 ||
+  { curl -fsSL https://github.com/grafana/k6/releases/download/v0.49.0/k6-v0.49.0-linux-$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 ).tar.gz |
+      tar xz -C /tmp && mv /tmp/k6-v0.49.0-linux-*/k6 /usr/local/bin/k6; }
 touch /tmp/READY
 UD
 )
