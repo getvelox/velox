@@ -2,6 +2,7 @@ package tax
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sort"
 
@@ -57,6 +58,25 @@ func (m *ManualProvider) Calculate(_ context.Context, req Request) (*Result, err
 		return exemptResult("manual", req, false, req.CustomerExemptReason), nil
 	case StatusReverseCharge:
 		return exemptResult("manual", req, true, ""), nil
+	}
+
+	// A negative line amount is out of contract, and the failure it used to
+	// produce was silent: the per-line base is clamped at zero, so the clamped
+	// line's share drops out of the apportionment while the invoice-level total
+	// still counts it. The residual then exceeds the one-cent-per-line the
+	// largest-remainder loop can move, and the result is line taxes that miss
+	// the total by an arbitrary amount AND a negative tax line — e.g. lines of
+	// +100.00 and −30.00 at 20% return a 14.00 total against line taxes of
+	// [19.99, −0.01].
+	//
+	// billing.collapseTaxRequestLines is the chokepoint that upholds the
+	// invariant (issue #556). This is not a second guard for the same failure:
+	// it converts the remaining silent-wrong-invoice mode into a loud one for
+	// any caller that reaches a provider directly.
+	for i, li := range req.LineItems {
+		if li.AmountCents < 0 {
+			return nil, fmt.Errorf("tax: line %d (%q) has a negative amount (%d) — tax providers must be given net non-negative lines", i, li.Ref, li.AmountCents)
+		}
 	}
 
 	lines := make([]ResultLine, len(req.LineItems))
