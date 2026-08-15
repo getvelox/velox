@@ -29,8 +29,15 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
 done_rows=0
 while [ "$done_rows" -lt "$ROWS" ]; do
   n=$(( ROWS - done_rows )); [ "$n" -gt "$CHUNK" ] && n=$CHUNK
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
-    INSERT INTO usage_events (tenant_id, customer_id, meter_id, quantity, properties, timestamp, livemode)
+  # livemode is NOT taken from the INSERT. A BEFORE trigger overwrites it:
+  #   NEW.livemode := (current_setting('app.livemode', true) IS DISTINCT FROM 'off')
+  # so rows default to livemode=true unless the SESSION sets app.livemode='off'.
+  # Writing `false` in the column list is silently ignored — an earlier run of
+  # this script seeded 5M rows into the wrong partition that way, and the
+  # benchmark then measured a table it did not think it was measuring.
+  # The SET must be in the same psql invocation as the INSERT to share a session.
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "SET app.livemode = 'off';
+    INSERT INTO usage_events (tenant_id, customer_id, meter_id, quantity, properties, timestamp)
     SELECT 'vlx_ten_bench',
            c.id,
            m.id,
@@ -40,8 +47,7 @@ while [ "$done_rows" -lt "$ROWS" ]; do
              'operation', (ARRAY['input','output','embedding','moderation'])[1+floor(random()*4)],
              'cached',    (random() < 0.5)
            ),
-           now() - (random() * interval '30 days'),
-           false
+           now() - (random() * interval '30 days')
     FROM generate_series(1, $n) g
     CROSS JOIN LATERAL (
       SELECT id FROM customers WHERE tenant_id='vlx_ten_bench' ORDER BY random() LIMIT 1
@@ -56,6 +62,15 @@ done
 # ANALYZE, not VACUUM FULL: we want the planner to have current statistics, but
 # leaving the table in its naturally-loaded state (bloat, page fill and all) is
 # closer to a production table than a freshly rewritten one.
+# Verify the rows landed where intended. Trusting the SET without checking is
+# how the previous run produced a confidently-labelled wrong number.
+wrong=$(psql "$DATABASE_URL" -A -t -c "SELECT count(*) FROM usage_events WHERE livemode = true")
+if [ "${wrong:-0}" -gt 0 ]; then
+  echo "FAIL: $wrong rows landed in livemode=true; the app.livemode session GUC did not take" >&2
+  exit 1
+fi
+echo "verified: all seeded rows are livemode=false"
+
 echo "analyzing"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "ANALYZE usage_events;"
 psql "$DATABASE_URL" -A -t -c "

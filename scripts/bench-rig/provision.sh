@@ -26,6 +26,12 @@ set -euo pipefail
 
 REGION="${AWS_REGION:-ap-south-1}"
 AZ="${AZ:-ap-south-1a}"
+# Overridable so the hardware question can be answered without editing this
+# file mid-run. Defaults are the small rig: the point of a small app node is
+# that the measurement is clearly about the software, not the machine.
+APP_TYPE="${APP_TYPE:-c7g.large}"
+GEN_TYPE="${GEN_TYPE:-c7g.xlarge}"
+DB_CLASS="${DB_CLASS:-db.m7g.large}"
 TAGS="Key=Project,Value=velox-bench"
 OUT="${OUT:-$HOME/.velox-bench-rig}"
 BRANCH="${BRANCH:-main}"
@@ -45,6 +51,7 @@ AMI=$(aws_ ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-
   --query 'Parameter.Value' --output text)
 MYIP="$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')/32"
 say "vpc=$VPC subnet=$SUBNET ($AZ) ami=$AMI ssh-from=$MYIP"
+say "shape: app=$APP_TYPE loadgen=$GEN_TYPE db=$DB_CLASS"
 
 say "key pair"
 if ! aws_ ec2 describe-key-pairs --key-names velox-bench-key >/dev/null 2>&1; then
@@ -81,7 +88,7 @@ if ! aws_ rds describe-db-subnet-groups --db-subnet-group-name velox-bench-subne
 fi
 if ! aws_ rds describe-db-instances --db-instance-identifier velox-bench-db >/dev/null 2>&1; then
   aws_ rds create-db-instance --db-instance-identifier velox-bench-db \
-    --db-instance-class db.m7g.large --engine postgres --engine-version 16.14 \
+    --db-instance-class "$DB_CLASS" --engine postgres --engine-version 16.14 \
     --master-username velox --master-user-password "$DBPASS" \
     --allocated-storage 100 --storage-type gp3 \
     --db-subnet-group-name velox-bench-subnets --vpc-security-group-ids "$SG" \
@@ -115,6 +122,13 @@ dnf install -y git golang postgresql16 docker >/tmp/install.log 2>&1
 systemctl enable --now docker >>/tmp/install.log 2>&1
 cd /opt && git clone --depth 1 --branch $BRANCH https://github.com/getvelox/velox.git >/tmp/clone.log 2>&1
 cd /opt/velox
+git config --global --add safe.directory /opt/velox
+# Amazon Linux ships Go with GOTOOLCHAIN=local, so go build REFUSES when go.mod
+# requires a newer patch release than the packaged one — and GOSUMDB=off then
+# blocks downloading the right toolchain. Both must be overridden or every
+# binary silently fails to build while user-data still reports success.
+# The container image is unaffected: the Dockerfile pins its own toolchain.
+export GOTOOLCHAIN=auto GOSUMDB=sum.golang.org
 go build -o /usr/local/bin/velox ./cmd/velox >/tmp/build-velox.log 2>&1
 go build -o /usr/local/bin/velox-bench ./cmd/velox-bench >/tmp/build-bench.log 2>&1
 go build -o /usr/local/bin/velox-bootstrap ./cmd/velox-bootstrap >/tmp/build-boot.log 2>&1
@@ -138,8 +152,8 @@ launch() {
 }
 
 say "EC2"
-APP=$(launch velox-bench-app c7g.large)
-GEN=$(launch velox-bench-loadgen c7g.xlarge)
+APP=$(launch velox-bench-app "$APP_TYPE")
+GEN=$(launch velox-bench-loadgen "$GEN_TYPE")
 echo "  app=$APP loadgen=$GEN"
 
 say "waiting for instances to run"
