@@ -168,4 +168,41 @@ aws_ ec2 wait instance-running --instance-ids $APP $GEN
 aws_ ec2 describe-instances --instance-ids $APP $GEN \
   --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,InstanceId,PrivateIpAddress,PublicIpAddress]' --output text | tee "$OUT/instances.txt"
 
+# Same-AZ is REQUESTED above (--availability-zone for RDS, a subnet in $AZ for
+# the instances) but nothing so far has confirmed it happened. Verify, because
+# the request can be honoured partially: the RDS subnet group must span two AZs
+# to be created at all, so a capacity shortfall or a later failover can put the
+# database in ap-south-1b while the app nodes sit in 1a.
+#
+# This is the one cost line that scales with throughput — every DB round trip
+# becomes billable inter-AZ traffic, plausibly exceeding all the compute
+# combined at 12k ev/s — and it also raises the per-event latency floor the
+# whole benchmark is measuring. A rig that quietly spread across AZs would
+# still produce confident-looking numbers, which is the failure mode worth
+# spending ten lines to prevent.
+say "verifying same-AZ placement"
+INST_AZS=$(aws_ ec2 describe-instances --filters "Name=tag:Project,Values=velox-bench" \
+  "Name=instance-state-name,Values=running,pending" \
+  --query 'Reservations[].Instances[].Placement.AvailabilityZone' --output text | tr '\t' '\n' | sort -u)
+DB_AZ=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db \
+  --query 'DBInstances[0].AvailabilityZone' --output text 2>/dev/null)
+echo "  instances: $(echo "$INST_AZS" | tr '\n' ' ') | rds: ${DB_AZ:-<still creating>}"
+if [ "$(echo "$INST_AZS" | wc -l | tr -d ' ')" != "1" ]; then
+  echo "  FATAL: instances span multiple AZs — cross-AZ traffic would be billed AND measured" >&2
+  echo "  tear down with ./teardown.sh before measuring anything" >&2
+  exit 1
+fi
+# RDS reports its AZ only once it leaves 'creating'; an empty value here is not
+# a pass, so say so rather than printing a checkmark over an unchecked thing.
+if [ -z "$DB_AZ" ] || [ "$DB_AZ" = "None" ]; then
+  echo "  RDS AZ not yet assigned — RE-CHECK before measuring:" >&2
+  echo "    aws --region $REGION rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].AvailabilityZone' --output text" >&2
+elif [ "$DB_AZ" != "$(echo "$INST_AZS" | tr -d ' ')" ]; then
+  echo "  FATAL: app nodes are in $INST_AZS but RDS is in $DB_AZ" >&2
+  echo "  every DB round trip would be billed inter-AZ; tear down and re-provision" >&2
+  exit 1
+else
+  echo "  confirmed: instances and RDS all in $DB_AZ"
+fi
+
 say "PROVISIONED — billing has started. Tear down with ./teardown.sh"
