@@ -9,8 +9,8 @@ What happens to your invoices when the billing process dies mid-run.
 This is the one benchmark we think is worth publishing first, because it is the
 question a billing system can least afford to answer with a shrug — and the one
 most likely to be answered by a slide rather than a test. Everything below is
-reproducible from a clean checkout with `docker compose up -d postgres` and one
-`go test` command, printed at the bottom.
+reproducible from a clean checkout with `docker compose up -d postgres` and two
+`go test` commands, printed at the bottom.
 
 **Date:** 2026-08-15 · **Commit:** see `git log` for `test/track-a-exactly-once`
 · **Hardware:** developer laptop, Postgres 16 in Docker, single node.
@@ -139,13 +139,60 @@ separately, because they behave nothing alike:
 | Failure | Time until another replica can take over |
 |---|---:|
 | Process dies, host survives (panic, `SIGKILL`, OOM) | **under 1 ms** |
-| Host disappears without closing the socket (partition, power loss, VM terminate) | **90 s** |
+| Host disappears without closing the socket (partition, power loss, VM terminate) | **95 s, measured** |
 
 The first figure is a bound, not a stopwatch reading. The test starts timing
 after `wait()` reports the process reaped, and the *first* lock attempt already
 succeeds — so 1 ms is the cost of one round-trip check, and the lock was free
 before we could look. Identical across 6 consecutive runs, which is what a
 measurement pinned to its own granularity looks like.
+
+### The partition case, actually severed
+
+The 90 s figure used to be arithmetic — we set the keepalives and computed
+`60 + 10×3`. It was the only number in this document that had never been
+observed, and the one most likely to be wrong, because keepalives depend on the
+network path honouring them.
+
+So we severed a real link. A holder process in its own container takes the lock
+against Postgres over a private Docker network; `docker network disconnect`
+then removes its interface, which stops packets **without sending a FIN** —
+what a partition, a power cut, or a security-group change looks like from the
+server's side. The holder process stays alive throughout, so nothing is being
+measured except Postgres deciding the peer is gone.
+
+| Keepalives (idle / interval / count) | Predicted window | Observed |
+|---|---:|---:|
+| 10 / 5 / 2 | 10–20 s | **13 s**, **21 s** — released |
+| **60 / 10 / 3 (production)** | **60–90 s** | **95 s** — released |
+| 7200 / 75 / 9 (Postgres default) | 7200–7875 s | **still held at 248 s**, when we stopped waiting |
+
+Predicted is a *window*, not a point: the first probe fires up to `idle` seconds
+after the last activity, so where the sever lands inside that interval moves the
+result. Two runs at 10/5/2 gave 13 s and 21 s, which is the granularity being
+honest about itself rather than an inconsistency.
+
+The production setting recovers in 95 s against a 60–90 s predicted window —
+just outside it, by about the 2 s polling interval plus scheduling slop. The default —
+what this code did before the keepalive fix — was still holding the lock 2.6×
+longer than that when the experiment ended, and by arithmetic would hold it for
+over two hours.
+
+**One trap, because it cost us a wrong answer first.** The holder session must
+be **idle**, not running a query. Our first attempt held the lock with
+`pg_sleep(3600)`, and the lock survived 185 s of partition with aggressive
+10/5/2 keepalives — which looked like the mechanism failing. It was not: a
+backend executing a query never touches its socket, so it cannot notice the peer
+is gone no matter what the kernel concludes. `pg_stat_activity` said
+`state=active` and that was the tell. The real scheduler holds this lock on an
+idle connection while work happens elsewhere, so the test must too. Reproduce
+with a session that is `state=idle` or you will measure the wrong thing — the
+packaged drill asserts this and refuses to run otherwise:
+
+```bash
+./scripts/partition-drill.sh 60 10 3   # production setting
+./scripts/partition-drill.sh           # no SET: the pre-fix default
+```
 
 The second number was **7,875 s (2 h 11 m)** before this work — the Postgres
 default keepalive train — during which every replica skips its tick and billing
@@ -170,9 +217,11 @@ document is arguing against.
   is covered by other tests, not by this one.
 - **No payment provider in the loop.** The charger is a sentinel that fails
   loudly if reached, so this measures invoice generation, not settlement.
-- **The 90 s figure is a configuration bound, not a demonstrated partition.** We
-  assert the keepalive settings on the lock connection and compute the window;
-  we do not sever a real network link. The 1 ms figure *is* directly measured.
+- **Both failover figures are now measured, not computed** — the partition case
+  by severing a real network link (see above). What is still *not* covered:
+  failover between physical machines, and Postgres itself dying. A leader dying
+  is not the same event as its database dying, and only the first is measured
+  here.
 
 ## Reproducing
 

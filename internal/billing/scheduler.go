@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	mw "github.com/sagarsuperuser/velox/internal/api/middleware"
@@ -109,6 +110,61 @@ type Lock interface {
 	Release()
 }
 
+// roleState remembers whether this replica currently holds a singleton role,
+// so a CHANGE can be logged once rather than the state being logged every
+// tick.
+//
+// The skip used to log at Debug, which meant production at Info emitted
+// nothing at all: a replica that stopped leading, or one that never started,
+// looked exactly like one doing its job. That invisibility is what let a
+// stranded lock halt billing for over two hours without a single log line
+// (see TryAdvisoryLock). Bounding the window to 90s fixed the duration; it did
+// not make the state visible.
+//
+// Transitions, not levels, are what deserve a line. Leadership changes on
+// deploys, restarts and failover — rare events — so this costs two lines per
+// change instead of one per replica per tick forever.
+//
+// Deliberately NOT implemented here: a "this replica has been following for N
+// hours, something may be wrong" warning. A follower cannot distinguish a
+// healthy leader from a dead one holding a stranded lock — both look like "the
+// lock is taken" — so any such warning would fire constantly on every healthy
+// multi-replica deployment. Detecting cluster-wide stall needs a leader-side
+// heartbeat that followers compare against, which is a larger design than this
+// gap warrants now that the stranding window is 90 seconds.
+type roleState struct {
+	mu    sync.Mutex
+	known bool
+	lead  bool
+	since time.Time
+}
+
+// observe records the current leadership state and returns a log line to emit,
+// or "" when nothing changed. Returning the message rather than logging keeps
+// the lock scope tight and the call sites readable.
+func (r *roleState) observe(now time.Time, lead bool) (msg string, heldFor time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.known && r.lead == lead {
+		return "", 0
+	}
+	prior := now.Sub(r.since)
+	first := !r.known
+	r.known, r.lead, r.since = true, lead, now
+
+	switch {
+	case first && lead:
+		return "acquired leadership", 0
+	case first && !lead:
+		return "following; another replica holds the lock", 0
+	case lead:
+		return "acquired leadership", prior
+	default:
+		return "lost leadership; another replica holds the lock", prior
+	}
+}
+
 // Locker acquires cluster-wide singleton locks by key — typically backed by
 // Postgres advisory locks. Returned (nil, false, nil) means another leader
 // holds the lock; caller should skip the tick. Nil Locker disables leader
@@ -117,8 +173,25 @@ type Locker interface {
 	TryAdvisoryLock(ctx context.Context, key int64) (Lock, bool, error)
 }
 
+// logRoleChange emits one Info line when this replica's leadership for a role
+// changes, and nothing at all when it has not. Info, not Debug: an operator
+// running at the default level needs to see which replica is doing the work.
+func logRoleChange(r *roleState, role string, lead bool) {
+	msg, prior := r.observe(time.Now(), lead)
+	if msg == "" {
+		return
+	}
+	if prior > 0 {
+		slog.Info(role+": "+msg, "previous_state_held_for", prior.Round(time.Second).String())
+		return
+	}
+	slog.Info(role + ": " + msg)
+}
+
 // Scheduler runs the billing cycle engine and dunning processor on a periodic interval.
 type Scheduler struct {
+	billingRole       roleState
+	dunningRole       roleState
 	engine            *Engine
 	dunning           DunningProcessor
 	tenants           TenantLister
@@ -276,9 +349,10 @@ func (s *Scheduler) runBillingHalf(ctx context.Context) {
 			return
 		}
 		if !acquired {
-			slog.Debug("billing scheduler: another leader holds the lock; skipping tick")
+			logRoleChange(&s.billingRole, "billing scheduler", false)
 			return
 		}
+		logRoleChange(&s.billingRole, "billing scheduler", true)
 		defer lock.Release()
 	}
 
@@ -496,9 +570,10 @@ func (s *Scheduler) runDunningHalf(ctx context.Context) {
 			return
 		}
 		if !acquired {
-			slog.Debug("dunning scheduler: another leader holds the lock; skipping tick")
+			logRoleChange(&s.dunningRole, "dunning scheduler", false)
 			return
 		}
+		logRoleChange(&s.dunningRole, "dunning scheduler", true)
 		defer lock.Release()
 	}
 
