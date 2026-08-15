@@ -1,6 +1,6 @@
-> **Companion:** [sustained-throughput.md](sustained-throughput.md) — the rate
-> one node holds at a p99 budget, and why it is ~40% lower than our own
-> max-throughput figure.
+> **Companion:** [sustained-throughput.md](sustained-throughput.md) — 10,203
+> events/sec measured on AWS at $0.032 per million, and why the same code on a
+> laptop looked 9× faster than it is.
 
 # Correctness under failure
 
