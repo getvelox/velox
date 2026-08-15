@@ -139,6 +139,17 @@ function inclusiveEndYMD(endISO: string, tz: string): [number, number, number] {
   return [back.getFullYear(), back.getMonth() + 1, back.getDate()]
 }
 
+// inclusiveEndCivilYMD is inclusiveEndYMD rendered as yyyy-mm-dd rather than
+// for display. Use it when a half-open period_end has to become a filter bound:
+// date-range filters are INCLUSIVE of their end day, so passing the raw
+// exclusive boundary through would widen the window by a full day and pull in
+// events that belong to the NEXT period — which, on a drill-down from an
+// invoice line, means showing usage the invoice did not bill.
+export function inclusiveEndCivilYMD(endISO: string, timezone?: string): string {
+  const [y, m, d] = inclusiveEndYMD(endISO, timezone || tenantTZ())
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+}
+
 // formatCivilDate renders the INCLUSIVE last covered day of a half-open
 // period_end as "MMM d, yyyy" ("Jun 30, 2028"). Use for a single period-boundary
 // label that means "last day covered" (e.g. a cycle's end). NOT for event dates

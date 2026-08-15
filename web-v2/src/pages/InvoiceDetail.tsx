@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -9,7 +9,7 @@ import { toast } from 'sonner'
 import { invalidateMoneySurfaces } from '@/lib/invalidateMoney'
 import { invoiceLineRate } from '@/lib/priceDisplay'
 import { api, downloadPDF, formatCents, formatRate, formatDate, formatDateTime, formatTaxRate, getCurrencySymbol, type TenantSettings, type DunningRun, type TimelineEvent, type Invoice as ApiInvoice, type CreditNote } from '@/lib/api'
-import { formatCivilPeriod } from '@/lib/dates'
+import { formatCivilPeriod, formatYMDInTZ, inclusiveEndCivilYMD } from '@/lib/dates'
 import { creditNoteCeilings, hasCardPayment } from '@/lib/creditNoteCeilings'
 import { pollIntervalForInvoice } from '@/lib/invoicePolling'
 import { InvoiceAttention } from '@/components/InvoiceAttention'
@@ -45,7 +45,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 
-import { Loader2, Mail, CreditCard, Link2, RotateCw, Info, MoreHorizontal, Download, Eye, XCircle, Receipt, AlertOctagon, History } from 'lucide-react'
+import { Loader2, Mail, CreditCard, Link2, RotateCw, Info, MoreHorizontal, Download, Eye, XCircle, Receipt, AlertOctagon, History, ArrowRight } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -201,6 +201,43 @@ export default function InvoiceDetailPage() {
 
   const invoice = invoiceData?.invoice
   const lineItems: LineItem[] = invoiceData?.line_items ?? []
+
+  // Lines sharing a meter mean the drill-down cannot be exact: the filter
+  // scopes to customer + meter + period, so when several pricing rules rate
+  // the same meter (the multi-dimensional case — input vs output tokens) every
+  // one of those lines resolves to the same event set. Counting them lets the
+  // link say which it is instead of hedging on every invoice.
+  const linesPerMeter = useMemo(() => {
+    const n: Record<string, number> = {}
+    for (const l of lineItems) {
+      if (l.line_type === 'usage' && l.meter_id) n[l.meter_id] = (n[l.meter_id] ?? 0) + 1
+    }
+    return n
+  }, [lineItems])
+
+  // usageEventsHref deep-links a usage line to the events that produced it.
+  //
+  // Only usage lines qualify: meter_id is stamped by the billing engine on
+  // those alone, and a base fee or tax line has no events behind it to show.
+  //
+  // Scope is meter + customer + period rather than the line's pricing rule,
+  // because the rule's dimension_match is not stamped on the line today. That
+  // makes the link exact for single-rule meters and a superset otherwise.
+  const usageEventsHref = (item: LineItem): string | null => {
+    if (item.line_type !== 'usage' || !item.meter_id || !invoice) return null
+    const startISO = item.billing_period_start || invoice.billing_period_start
+    const endISO = item.billing_period_end || invoice.billing_period_end
+    if (!startISO || !endISO) return null
+    const tz = invoice.billing_timezone
+    const params = new URLSearchParams({
+      customer: invoice.customer_id,
+      meter: item.meter_id,
+      range: 'custom',
+      from: formatYMDInTZ(startISO, tz),
+      to: inclusiveEndCivilYMD(endISO, tz),
+    })
+    return `/usage?${params.toString()}`
+  }
 
   const { data: customer } = useQuery({
     queryKey: ['customer', invoice?.customer_id],
@@ -1125,6 +1162,26 @@ export default function InvoiceDetailPage() {
                           <div className="text-xs text-muted-foreground mt-0.5">
                             Covers {formatCivilPeriod(item.billing_period_start, item.billing_period_end, invoice.billing_timezone)}
                           </div>
+                        )}
+                        {/* Dispute drill-down: the first question about any
+                            usage line is "which events add up to this?", and
+                            reconstructing the filter by hand (customer, meter,
+                            exact period) is the step people get wrong. The
+                            period end is stamped HALF-OPEN while the usage
+                            filter's end day is INCLUSIVE, so the bound is
+                            converted rather than passed through — otherwise
+                            the drill-down shows a day of events this invoice
+                            never billed. */}
+                        {usageEventsHref(item) && (
+                          <Link
+                            to={usageEventsHref(item)!}
+                            className="text-xs text-primary hover:underline mt-0.5 inline-flex items-center gap-1"
+                          >
+                            {item.meter_id && (linesPerMeter[item.meter_id] ?? 0) > 1
+                              ? 'View all events on this meter'
+                              : 'View the events behind this line'}
+                            <ArrowRight size={11} />
+                          </Link>
                         )}
                       </TableCell>
                       <TableCell className="text-right font-mono tabular-nums text-sm">
