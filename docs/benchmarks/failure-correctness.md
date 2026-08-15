@@ -1,3 +1,7 @@
+> **Companion:** [sustained-throughput.md](sustained-throughput.md) — the rate
+> one node holds at a p99 budget, and why it is 41% lower than our own
+> max-throughput figure.
+
 # Correctness under failure
 
 What happens to your invoices when the billing process dies mid-run.
