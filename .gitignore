@@ -43,5 +43,6 @@ velox-api
 /velox-bench-seed
 /velox-migrate-safety
 
-# k6 writes its run summary next to the script
+# k6 writes its run summary into whatever directory it is invoked from
 scripts/bench-rig/summary.json
+scripts/bench-rig/**/summary.json
