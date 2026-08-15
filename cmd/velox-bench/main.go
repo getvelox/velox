@@ -291,8 +291,26 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 	return sorted[i]
 }
 
+// pct renders a percentile, or refuses to when there are too few samples to
+// resolve it. A p99.9 computed from 324 samples is just the maximum wearing a
+// percentile's name — batching makes this easy to hit, since it divides the
+// call count by the batch size. Reporting it anyway is how a benchmark ends up
+// quoting its own worst sample as a tail statistic.
 func pct(sorted []time.Duration, p float64) string {
+	if need := minSamplesFor(p); len(sorted) < need {
+		return fmt.Sprintf("n/a (%d samples, need %d)", len(sorted), need)
+	}
 	return percentile(sorted, p).Round(time.Microsecond).String()
+}
+
+// minSamplesFor is how many samples a percentile needs before it is distinct
+// from the maximum: 1/(1-p) puts one sample beyond it, and we ask for ten so
+// the estimate rests on more than a single observation.
+func minSamplesFor(p float64) int {
+	if p >= 100 {
+		return 0
+	}
+	return int(10.0 / (1.0 - p/100.0))
 }
 
 // Fixture identifiers. The external id and meter key are the handles the

@@ -106,6 +106,18 @@ PASS: p99 27.341ms within budget 50ms at 1800 events/sec
 FAIL: p99 331.981ms exceeds budget 50ms
 ```
 
+Percentiles the sample count cannot resolve are refused rather than printed:
+
+```
+p99:        n/a (324 samples, need 999)
+p99.9:      n/a (324 samples, need 10000)
+```
+
+A p99.9 drawn from 324 samples is just the maximum wearing a percentile's name.
+Batching makes this easy to walk into, since it divides the call count by the
+batch size — a batch-10 run reports a tenth as many samples as it looks like it
+should.
+
 There is a third verdict, and it is the one that matters for honesty: if p99 is
 inside budget **but the offered rate was not actually delivered**, the run fails
 anyway. A system that quietly drops to half the requested load will otherwise
