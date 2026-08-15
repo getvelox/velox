@@ -84,6 +84,17 @@ func main() {
 	// router, auth middleware, JSON decode, and the customer/meter resolution
 	// that the in-process path receives pre-resolved.
 	httpBase := flag.String("http", "", "base URL of a running velox server (e.g. http://localhost:8080). Empty = in-process")
+	// Fan-out across customers and meters. One customer and one meter keeps
+	// every hot index page resident and every foreign-key lookup cached, which
+	// no real tenant enjoys. Defaults stay at 1 so existing numbers remain
+	// comparable; the published run sets these.
+	customers := flag.Int("customers", 1, "distinct customers to spread events across")
+	meters := flag.Int("meters", 1, "distinct meters to spread events across")
+	// Real clients send idempotency keys — there is a whole replay path for
+	// them — and the column carries a UNIQUE (tenant_id, livemode,
+	// idempotency_key) index, so every event pays an extra unique-index write
+	// that a benchmark omitting them never measures.
+	idem := flag.Bool("idempotency-keys", false, "send a unique idempotency key with every event (adds a unique-index write)")
 	apiKey := flag.String("api-key", os.Getenv("VELOX_API_KEY"), "Bearer key for --http mode (default $VELOX_API_KEY)")
 	flag.Parse()
 
@@ -116,7 +127,7 @@ func main() {
 	// ingest.
 	ctx := postgres.WithLivemode(context.Background(), false)
 
-	tenantID, customerID, meterID := bootstrapFixtures(ctx, db)
+	tenantID, customerIDs, meterIDs, extCustIDs, meterKeys := bootstrapFixtures(ctx, db, *customers, *meters)
 	store := usage.NewPostgresStore(db)
 	svc := usage.NewService(store)
 
@@ -133,14 +144,14 @@ func main() {
 		}
 		snd = &httpSender{
 			client: newHTTPClient(*workers), baseURL: strings.TrimRight(*httpBase, "/"),
-			apiKey: *apiKey, externalCustomerID: benchCustomerExternalID, eventName: benchMeterKey,
+			apiKey: *apiKey, externalCustomerIDs: extCustIDs, eventNames: meterKeys,
 		}
 	} else {
-		snd = &inProcessSender{svc: svc, tenantID: tenantID, customerID: customerID, meterID: meterID}
+		snd = &inProcessSender{svc: svc, tenantID: tenantID, customerIDs: customerIDs, meterIDs: meterIDs}
 	}
 
-	fmt.Printf("velox-bench: workers=%d batch=%d duration=%s tenant=%s meter=%s\n",
-		*workers, *batch, *duration, tenantID, meterID)
+	fmt.Printf("velox-bench: workers=%d batch=%d duration=%s tenant=%s customers=%d meters=%d idem=%v\n",
+		*workers, *batch, *duration, tenantID, len(customerIDs), len(meterIDs), *idem)
 	fmt.Printf("transport:  %s\n", snd.describe())
 
 	var totalEvents int64
@@ -172,6 +183,7 @@ func main() {
 			rng := rand.New(rand.NewPCG(uint64(workerID), uint64(workerID)+1))
 			samples := make([]time.Duration, 0, 4096)
 			slot := 0
+			seq := 0
 			for time.Now().Before(deadline) {
 				// due is when this request SHOULD have been sent. When the
 				// system falls behind, due is already in the past and the
@@ -195,8 +207,19 @@ func main() {
 				evts := make([]event, *batch)
 				for i := range evts {
 					evts[i] = event{
-						quantity:   decimal.NewFromInt(int64(rng.IntN(1000) + 1)),
-						dimensions: pickDimensions(rng),
+						quantity:    decimal.NewFromInt(int64(rng.IntN(1000) + 1)),
+						dimensions:  pickDimensions(rng),
+						customerIdx: rng.IntN(*customers),
+						meterIdx:    rng.IntN(*meters),
+					}
+					if *idem {
+						// Unique per event. A colliding key would exercise the
+						// REPLAY path instead of the write path, which is a
+						// different measurement; uniqueness keeps this an
+						// honest insert benchmark that still pays the
+						// unique-index cost.
+						seq++
+						evts[i].idempotencyKey = fmt.Sprintf("bench-%d-%d-%d", workerID, seq, rng.Uint64())
 					}
 				}
 
@@ -362,7 +385,15 @@ var (
 // Idempotent: safe to run repeatedly. Uses TxBypass because we're in a
 // CLI tool with full DB access; the runtime path will set tenant_id
 // per-request via TxTenant as usual.
-func bootstrapFixtures(ctx context.Context, db *postgres.DB) (string, string, string) {
+func bootstrapFixtures(ctx context.Context, db *postgres.DB, nCustomers, nMeters int) (
+	tenantID string, customerIDs, meterIDs, externalCustomerIDs, meterKeys []string,
+) {
+	if nCustomers < 1 {
+		nCustomers = 1
+	}
+	if nMeters < 1 {
+		nMeters = 1
+	}
 
 	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
@@ -370,34 +401,45 @@ func bootstrapFixtures(ctx context.Context, db *postgres.DB) (string, string, st
 	}
 	defer postgres.Rollback(tx)
 
-	_, err = tx.ExecContext(ctx, `
+	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO tenants (id, name, status) VALUES ($1, 'velox-bench', 'active')
 		ON CONFLICT (id) DO NOTHING
-	`, benchTenant)
-	if err != nil {
+	`, benchTenant); err != nil {
 		log.Fatalf("upsert tenant: %v", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO customers (id, tenant_id, external_id, display_name, email, livemode)
-		VALUES ($1, $2, $3, 'Bench Customer', 'bench@velox.local', false)
-		ON CONFLICT (id) DO UPDATE SET livemode = false
-	`, benchCustomer, benchTenant, benchCustomerExternalID)
-	if err != nil {
-		log.Fatalf("upsert customer: %v", err)
+	// Deterministic ids so repeated runs reuse the same fixtures rather than
+	// growing the customer table on every invocation.
+	for i := 0; i < nCustomers; i++ {
+		id := fmt.Sprintf("%s_%03d", benchCustomer, i)
+		ext := fmt.Sprintf("%s-%03d", benchCustomerExternalID, i)
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO customers (id, tenant_id, external_id, display_name, email, livemode)
+			VALUES ($1, $2, $3, 'Bench Customer', 'bench@velox.local', false)
+			ON CONFLICT (id) DO UPDATE SET livemode = false
+		`, id, benchTenant, ext); err != nil {
+			log.Fatalf("upsert customer %d: %v", i, err)
+		}
+		customerIDs = append(customerIDs, id)
+		externalCustomerIDs = append(externalCustomerIDs, ext)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO meters (id, tenant_id, name, key, unit, aggregation, livemode)
-		VALUES ($1, $2, 'Bench Tokens', $3, 'tokens', $4, false)
-		ON CONFLICT (id) DO UPDATE SET livemode = false
-	`, benchMeter, benchTenant, benchMeterKey, string(domain.AggSum))
-	if err != nil {
-		log.Fatalf("upsert meter: %v", err)
+	for i := 0; i < nMeters; i++ {
+		id := fmt.Sprintf("%s_%03d", benchMeter, i)
+		key := fmt.Sprintf("%s_%03d", benchMeterKey, i)
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO meters (id, tenant_id, name, key, unit, aggregation, livemode)
+			VALUES ($1, $2, 'Bench Tokens', $3, 'tokens', $4, false)
+			ON CONFLICT (id) DO UPDATE SET livemode = false
+		`, id, benchTenant, key, string(domain.AggSum)); err != nil {
+			log.Fatalf("upsert meter %d: %v", i, err)
+		}
+		meterIDs = append(meterIDs, id)
+		meterKeys = append(meterKeys, key)
 	}
 
 	if err := tx.Commit(); err != nil {
 		log.Fatalf("commit bootstrap: %v", err)
 	}
-	return benchTenant, benchCustomer, benchMeter
+	return benchTenant, customerIDs, meterIDs, externalCustomerIDs, meterKeys
 }

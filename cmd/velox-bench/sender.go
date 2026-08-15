@@ -30,36 +30,51 @@ type sender interface {
 type event struct {
 	quantity   decimal.Decimal
 	dimensions map[string]any
+	// customerIdx / meterIdx select which seeded customer and meter this event
+	// belongs to. Spreading load across many of each is what makes index and
+	// buffer-cache behaviour resemble a real tenant; one of each keeps every
+	// hot page resident, which no real tenant enjoys.
+	customerIdx int
+	meterIdx    int
+	// idempotencyKey is empty unless --idempotency-keys is set. The column
+	// carries a UNIQUE (tenant_id, livemode, idempotency_key) index, so
+	// sending one costs an extra unique-index write per event.
+	idempotencyKey string
 }
 
 // --- in-process ---------------------------------------------------------
 
 type inProcessSender struct {
-	svc                  *usage.Service
-	tenantID, customerID string
-	meterID              string
+	svc         *usage.Service
+	tenantID    string
+	customerIDs []string
+	meterIDs    []string
 }
 
 func (s *inProcessSender) describe() string {
 	return "in-process (usage.Service — excludes router, auth, JSON decode)"
 }
 
+func (s *inProcessSender) in(e event) usage.IngestInput {
+	return usage.IngestInput{
+		CustomerID:     s.customerIDs[e.customerIdx%len(s.customerIDs)],
+		MeterID:        s.meterIDs[e.meterIdx%len(s.meterIDs)],
+		Quantity:       e.quantity,
+		Dimensions:     e.dimensions,
+		IdempotencyKey: e.idempotencyKey,
+	}
+}
+
 func (s *inProcessSender) send(ctx context.Context, events []event) (int, error) {
 	if len(events) == 1 {
-		if _, err := s.svc.Ingest(ctx, s.tenantID, usage.IngestInput{
-			CustomerID: s.customerID, MeterID: s.meterID,
-			Quantity: events[0].quantity, Dimensions: events[0].dimensions,
-		}); err != nil {
+		if _, err := s.svc.Ingest(ctx, s.tenantID, s.in(events[0])); err != nil {
 			return 0, err
 		}
 		return 1, nil
 	}
 	inputs := make([]usage.IngestInput, len(events))
 	for i, e := range events {
-		inputs[i] = usage.IngestInput{
-			CustomerID: s.customerID, MeterID: s.meterID,
-			Quantity: e.quantity, Dimensions: e.dimensions,
-		}
+		inputs[i] = s.in(e)
 	}
 	inserted, _, errs := s.svc.BatchIngest(ctx, s.tenantID, inputs)
 	if len(errs) > 0 {
@@ -76,10 +91,10 @@ func (s *inProcessSender) send(ctx context.Context, events []event) (int, error)
 // middleware, JSON decode, and the customer/meter resolution the in-process
 // path is handed for free.
 type httpSender struct {
-	client             *http.Client
-	baseURL, apiKey    string
-	externalCustomerID string
-	eventName          string
+	client              *http.Client
+	baseURL, apiKey     string
+	externalCustomerIDs []string
+	eventNames          []string
 }
 
 func (s *httpSender) describe() string {
@@ -91,16 +106,18 @@ type wireEvent struct {
 	EventName          string          `json:"event_name"`
 	Quantity           decimal.Decimal `json:"quantity"`
 	Dimensions         map[string]any  `json:"dimensions,omitempty"`
+	IdempotencyKey     string          `json:"idempotency_key,omitempty"`
 }
 
 func (s *httpSender) send(ctx context.Context, events []event) (int, error) {
 	wire := make([]wireEvent, len(events))
 	for i, e := range events {
 		wire[i] = wireEvent{
-			ExternalCustomerID: s.externalCustomerID,
-			EventName:          s.eventName,
+			ExternalCustomerID: s.externalCustomerIDs[e.customerIdx%len(s.externalCustomerIDs)],
+			EventName:          s.eventNames[e.meterIdx%len(s.eventNames)],
 			Quantity:           e.quantity,
 			Dimensions:         e.dimensions,
+			IdempotencyKey:     e.idempotencyKey,
 		}
 	}
 
