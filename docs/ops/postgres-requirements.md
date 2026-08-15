@@ -106,6 +106,28 @@ boot** behind them:
   evidence → the process exits with an actionable error instead of
   starting a server that would stop invoicing.
 
+### Dead-leader detection window
+
+A leader that *crashes* is free: the kernel closes its sockets, Postgres
+reads EOF, and the advisory lock releases in milliseconds. A leader whose
+**host disappears without closing the socket** — network partition, power
+loss, VM terminate or pause, a security-group change — is not. No FIN ever
+arrives, so Postgres cannot tell that session from a healthy idle client
+and the lock survives. Every replica then skips its tick, and because that
+skip logs at `Debug`, a production log at `Info` shows nothing at all.
+
+The only bound on that outage is TCP keepalive. Postgres defaults give
+`tcp_keepalives_idle` 7200s + `interval` 75s × `count` 9 = **7875s
+(2h11m)** of silently halted billing. Velox therefore sets these on the
+lock-holding connection itself (they are `context=user`, so no superuser
+is needed) to **60 + 10×3 = 90s**.
+
+Operators: if you front Postgres with anything that terminates or rewrites
+TCP — a load balancer, a service mesh, an NLB with its own idle timeout —
+confirm it does not strip keepalives, and keep any idle timeout it enforces
+*above* 60s so it doesn't sever healthy lock connections mid-tick.
+`TestLeaderFailover_LockConnBoundsDetectionWindow` is the regression gate.
+
 Within a supported topology the rest of the stack is unremarkable:
 session GUCs (`app.tenant_id`, `app.bypass_rls`) are set with
 `set_config(.., true)` (transaction-scoped), no session-lifetime

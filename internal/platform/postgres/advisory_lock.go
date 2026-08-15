@@ -56,9 +56,39 @@ type AdvisoryLock struct {
 // queries/transactions, and pg_try_advisory_xact_lock would release the moment
 // the first tx commits. Session-scoped holds until we explicitly unlock.
 //
-// Leader failure safety: if this process crashes mid-tick, the TCP connection
-// dies, Postgres closes the session, and the lock is auto-released — another
-// replica picks up on its next tick. No zombie-lock recovery needed.
+// Leader failure safety, and the reason keepalives are set below. Two
+// distinct death modes, only one of which is self-healing:
+//
+//  1. The process dies but the HOST survives (panic, SIGKILL, OOM-kill,
+//     container stop). The kernel closes the socket, Postgres reads EOF,
+//     the session ends, the lock releases in milliseconds. Nothing to do.
+//
+//  2. The HOST vanishes without closing the socket (network partition,
+//     power loss, VM terminate/pause, security-group change). No FIN ever
+//     arrives. Postgres cannot distinguish this from a healthy idle client,
+//     so the session — and the lock — survive until TCP keepalives declare
+//     the peer dead. With Postgres defaults that is
+//     tcp_keepalives_idle(7200s) + interval(75s) × count(9) = 7875s ≈ 2h11m.
+//
+// Mode 2 is the one that hurts: for that whole window every replica's tick
+// hits "another leader holds the lock" and returns, so billing silently
+// stops. Nothing errors, and the skip is logged at Debug, so a production
+// log at Info level says nothing at all. That is why we bound it here
+// rather than trusting the default: these settings have context='user' in
+// pg_settings, so a plain (non-superuser) session may set them on itself,
+// and Postgres applies them to the live socket immediately.
+const (
+	// keepaliveIdleSecs is how long the socket may sit idle before the
+	// first probe. The lock is only held for the duration of a tick, so
+	// probing aggressively costs nothing.
+	keepaliveIdleSecs = 60
+	// keepaliveIntervalSecs / keepaliveCount bound the probe train after
+	// the first unanswered probe. Detection window is therefore
+	// 60 + 10×3 = 90s, down from 7875s.
+	keepaliveIntervalSecs = 10
+	keepaliveCount        = 3
+)
+
 func (db *DB) TryAdvisoryLock(ctx context.Context, key int64) (*AdvisoryLock, bool, error) {
 	conn, err := db.Pool.Conn(ctx)
 	if err != nil {
@@ -75,7 +105,44 @@ func (db *DB) TryAdvisoryLock(ctx context.Context, key int64) (*AdvisoryLock, bo
 		return nil, false, nil
 	}
 
+	// Bound the dead-leader detection window on the connection that now
+	// holds the lock (see mode 2 above). Failing loud rather than
+	// continuing with the 2h default is deliberate and matches the posture
+	// VerifyAdvisoryLockTopology already takes at boot: a connection where
+	// a context='user' SET does not work is not the direct session-scoped
+	// connection this lock's correctness assumes, and holding a singleton
+	// lock on it is precisely what we must not do. Release first — we
+	// already own the lock at this point.
+	if _, err := conn.ExecContext(ctx,
+		fmt.Sprintf("SET tcp_keepalives_idle = %d; SET tcp_keepalives_interval = %d; SET tcp_keepalives_count = %d",
+			keepaliveIdleSecs, keepaliveIntervalSecs, keepaliveCount),
+	); err != nil {
+		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+		_ = conn.Close()
+		return nil, false, fmt.Errorf("advisory lock: bound keepalives on key=%d: %w", key, err)
+	}
+
 	return &AdvisoryLock{conn: conn, key: key}, true, nil
+}
+
+// KeepaliveSettings reports the TCP keepalive values in force on the
+// connection holding this lock, and the resulting worst-case seconds before
+// Postgres reaps the session if the holder's host vanishes without closing
+// the socket. Exported so tests can assert the detection window stays
+// bounded — the failure it guards against is silent, so nothing else would
+// notice a regression.
+func (l *AdvisoryLock) KeepaliveSettings(ctx context.Context) (idle, interval, count, windowSecs int, err error) {
+	if l == nil || l.conn == nil {
+		return 0, 0, 0, 0, fmt.Errorf("advisory lock: no connection held")
+	}
+	if err := l.conn.QueryRowContext(ctx,
+		`SELECT current_setting('tcp_keepalives_idle')::int,
+		        current_setting('tcp_keepalives_interval')::int,
+		        current_setting('tcp_keepalives_count')::int`,
+	).Scan(&idle, &interval, &count); err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("advisory lock: read keepalive settings: %w", err)
+	}
+	return idle, interval, count, idle + interval*count, nil
 }
 
 // Release frees the lock and returns the connection to the pool. Uses a
