@@ -153,6 +153,23 @@ WHERE g.entry_type = 'grant' AND g.consumed_cents < g.amount_cents;`,
 		SQL:    `SELECT id, tenant_id, code, status, canceled_at, cancel_at, cancel_at_period_end, updated_at FROM subscriptions WHERE (status = 'canceled') <> (canceled_at IS NOT NULL);`,
 	},
 	{
+		Name:   "cycle_invoice_unique_per_subscription_period",
+		Domain: "invoices",
+		Why:    "each closed billing period bills exactly once per subscription; a second live cycle invoice for the same period is a double charge",
+		// This duplicates what idx_invoices_billing_idempotency already
+		// enforces, and that is the point: the two fail independently. An
+		// index can be absent after a restore, dropped by a migration, left
+		// INVALID by a failed CREATE INDEX CONCURRENTLY (which enforces
+		// nothing while still appearing in pg_indexes), or quietly narrowed
+		// by a predicate change — migration 0101 narrowed this exact
+		// predicate once already. In every one of those cases the write path
+		// keeps succeeding and nothing raises an error, so the only way to
+		// learn about it is to look for the duplicate rows themselves.
+		// Measured: with the index removed, four concurrent billing leaders
+		// produced 129 invoices across 40 periods and reported no failures.
+		SQL: `SELECT i.id, i.tenant_id, i.subscription_id, i.billing_period_start, i.billing_period_end, i.status, i.total_amount_cents FROM invoices i WHERE i.subscription_id IS NOT NULL AND i.status <> 'voided' AND i.source_plan_changed_at IS NULL AND EXISTS (SELECT 1 FROM invoices d WHERE d.tenant_id = i.tenant_id AND d.subscription_id = i.subscription_id AND d.billing_period_start = i.billing_period_start AND d.billing_period_end = i.billing_period_end AND d.status <> 'voided' AND d.source_plan_changed_at IS NULL AND d.id <> i.id);`,
+	},
+	{
 		Name:   "billing_period_never_inverted",
 		Domain: "subscriptions",
 		Why:    "a billing period can never strictly invert (start > end)",
