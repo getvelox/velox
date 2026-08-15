@@ -9,8 +9,8 @@ What happens to your invoices when the billing process dies mid-run.
 This is the one benchmark we think is worth publishing first, because it is the
 question a billing system can least afford to answer with a shrug — and the one
 most likely to be answered by a slide rather than a test. Everything below is
-reproducible from a clean checkout with `docker compose up -d postgres` and one
-`go test` command, printed at the bottom.
+reproducible from a clean checkout with `docker compose up -d postgres` and two
+`go test` commands, printed at the bottom.
 
 **Date:** 2026-08-15 · **Commit:** see `git log` for `test/track-a-exactly-once`
 · **Hardware:** developer laptop, Postgres 16 in Docker, single node.
