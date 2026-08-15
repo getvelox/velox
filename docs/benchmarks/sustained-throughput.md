@@ -1,7 +1,7 @@
 # Sustained throughput
 
 The ingest rate one node holds while latency stays inside a budget — and why
-that number is 41% lower than the throughput figure we could have published
+that number is ~40% lower than the throughput figure we could have published
 instead.
 
 **Status: local harness, provisional numbers.** These were measured on a
@@ -23,7 +23,11 @@ throughput: 3061 events/sec
 p99:        4.9ms
 ```
 
-**3,061 events/sec at a 4.9 ms p99** is a perfectly true sentence and a useless
+Across four runs that figure is **2,981 / 3,019 / 3,031 / 3,061 — call it
+~3,000 events/sec**. Quoting the single best run, as the block above does, is
+already a small lie of the kind this document exists to avoid.
+
+**~3,000 events/sec at a 4.9 ms p99** is a perfectly true sentence and a useless
 one. In a closed-loop benchmark each worker sends its next request only after
 the previous one returns, so the system is saturated by construction and the
 offered load is *defined* by how fast the system happens to be. The latency it
@@ -59,12 +63,19 @@ buyer can reproduce and one that flatters us.
 | 2,200 | 2,199 | 4.3 ms | 29.8 ms | 62.4 ms | 95.2 ms |
 | 2,400 | 2,399 | 4.9 ms | 37.3 ms | 77.4 ms | 114.0 ms |
 
-The offered rate is met exactly up to 2,400 — the system does not fall behind.
-What degrades is the tail: p99 rises 4.3× between 800 and 2,400 while p50 barely
-moves. Throughput alone would have shown none of that.
+The offered rate is met to within 0.1% up to 2,400 — the system does not fall
+behind. What degrades is the tail: between 800 and 2,400 events/sec **p50 grows
+about 1.4× (3.5 → 4.9 ms) while p99 grows about 5× (14.5 → 77.4 ms)**.
+Throughput alone would have shown none of that.
+
+Treat that 5× as the shape, not as a precise figure: those two rows come from
+separate runs, and the repeatability table below shows p99 varying by 1.8× at a
+fixed rate. What survives the noise is the direction — the tail degrades several
+times faster than the median, which is the whole reason to quote a rate at an
+SLO rather than a throughput ceiling.
 
 **Against a p99 ≤ 50 ms budget, the sustained rate is ~1,800 events/sec** —
-about **41% below** the 3,061 the closed-loop run reports.
+about **40% below** the ~3,000 the closed-loop runs report.
 
 ## Repeatability
 
@@ -117,10 +128,11 @@ service time rather than queueing. Both modes run back to back, twice:
 | 1 | 7.78 ms | 15.24 ms | 14.0 ms | 23.4 ms |
 | 2 | 7.14 ms | 15.26 ms | 14.9 ms | 30.8 ms |
 
-**The HTTP path costs about 2.1× the in-process path on p50**, and the two HTTP
-measurements agree to within 0.02 ms. That is the number to carry: anyone
-quoting the in-process figure as an API throughput number is overstating it by
-roughly a factor of two on latency alone.
+**The HTTP path costs about 2.0× the in-process path on p50** — the per-pass
+ratios are 1.96× and 2.14×, and the ratio of the means is 2.04×. The two HTTP
+measurements agree to within 0.02 ms; the spread comes from the in-process side.
+That is the number to carry: anyone quoting the in-process figure as an API
+latency number is understating it by roughly a factor of two.
 
 ### Why there is no HTTP throughput number here
 
@@ -151,7 +163,7 @@ run one.**
 
 - **The rate/latency curve is in-process, not HTTP.** It excludes the router,
   auth middleware, JSON decoding, and the customer/meter resolution the real
-  request path performs. Measured overhead for those is ~2.1× on p50, so
+  request path performs. Measured overhead for those is ~2.0× on p50, so
   **treat the curve as an upper bound on what an API client would see.**
 - **No HTTP throughput ceiling is published**, on purpose — see above. The
   machine could not produce a monotonic one.
