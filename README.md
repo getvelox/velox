@@ -35,7 +35,7 @@ Three things happened there that most billing stacks can't do:
 - **Prices are decimal per-unit and read the way the industry quotes them** — stored exactly ($3.00 / 1M tokens = $0.000003/token), billed linearly, displayed per-1M on the invoice, the hosted page, and the PDF.
 - **The margin line is in-app** — Velox stamped the provider's cost onto every event at ingest, so "which customers lose us money?" is one API call, not a warehouse project.
 
-**Jump to:** [Why Velox exists](#why-velox-exists) · [The wedge in code](#the-wedge-in-code) · [What's in the box](#whats-in-the-box) · [How it fits](#how-it-fits) · [What Velox is not](#what-velox-is-not) · [Quick start](#quick-start) · [Architecture](#architecture) · [Engineering](#engineering) · [Roadmap](#roadmap)
+**Jump to:** [Why Velox exists](#why-velox-exists) · [The wedge in code](#the-wedge-in-code) · [What's in the box](#whats-in-the-box) · [How it fits](#how-it-fits) · [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) · [What Velox is not](#what-velox-is-not) · [Quick start](#quick-start) · [Architecture](#architecture) · [Engineering](#engineering) · [Roadmap](#roadmap)
 
 ---
 
@@ -43,13 +43,15 @@ Three things happened there that most billing stacks can't do:
 
 Velox owns the billing layer above the card charge: pricing, subscriptions, usage metering, invoicing, credits, and dunning — the automatic retry-and-escalate process that runs when a payment fails. Stripe still executes the card charge underneath (as a plain PaymentIntent), so the 0.5% Stripe Billing fee disappears and your customers' billing data never leaves your infrastructure.
 
-It's built around three market truths that Stripe Billing structurally cannot serve:
+It's built around three market truths that Stripe Billing structurally cannot serve — and one that every billing system is judged on:
 
 **1. AI apps price in dimensions, not units.** Real model pricing today is `model × token_type × tier`, where `token_type` alone has five disjoint roles (`input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`). Stripe's Meter API forces one meter per dimension *combination* — a wall of meters and ugly subscription wiring to model a single LLM's pricing. Velox puts dimensions on the event and lets one meter carry them all. If you already run a [LiteLLM](docs/integrations/litellm.md) proxy, its spend callback ingests straight into Velox — no SDK.
 
 **2. AI infra sells commit + usage.** "Pay $9k up front, get $10k of usage to draw down" is the default AI-infra contract. Stripe Billing has no commit primitive, and the engines that do (Orb, Metronome) are closed-source SaaS. In Velox a commit is one line on an invoice: when the invoice finalizes, the prepaid balance funds atomically, usage drains it — promotional credits first — and `credit.balance_low / _depleted / _recovered` webhooks drive your top-up nudges.
 
-**3. Regulated tenants can't ship billing data to Stripe's servers.** GDPR-strict EU, India's RBI data-localization rules, healthcare-adjacent SaaS, government procurement. Stripe's whole model is "send us the data." Velox runs in your VPC, and one deployment cleanly serves many internal tenants behind Postgres Row-Level Security.
+**3. Regulated tenants can't ship billing data to Stripe's servers.** GDPR-strict EU, India's RBI data-localization rules, healthcare-adjacent SaaS, government procurement. Stripe's whole model is "send us the data." Velox runs in your VPC, and one deployment cleanly serves many internal tenants behind Postgres Row-Level Security — and the binary makes no outbound calls of its own: no licence check, no usage telemetry, no vendor endpoint. Grep for it.
+
+**4. Every bill gets disputed, and the only answer is the raw events.** Ask engineers who have run metered billing what vendors get wrong and this is what comes back — *"you will get a query on a bill by a customer… and you need to be able to dig into the raw data… to validate there was no billing error."* Velox is built for that moment. Raw events are stored, never pre-aggregated away. The rate is **snapshotted onto the invoice line**, so re-pricing tomorrow can't silently rewrite what you billed last month. Every usage line links straight to the events behind it, filtered to that customer, meter and period. And the audit log is append-only, enforced by database triggers rather than convention.
 
 ---
 
@@ -121,8 +123,10 @@ Token roles are disjoint, so each `{model, token_type}` is exactly one rule at e
 
 ### Self-host first
 
-- **Docker Compose** — single-VM install, ~5 min from clone to invoice
-- **Data sovereignty** — customer billing data never leaves your infrastructure
+- **One application process** — a single Go binary. No queue broker, no worker fleet, no separate scheduler: background jobs are goroutines and the job queue is a Postgres table, so there is one thing to deploy, restart and reason about. The Compose file adds Postgres, Redis (distributed rate limiting only), the static dashboard and an nginx front door — five containers, one of which is Velox. Single VM, ~5 min from clone to invoice.
+- **MIT, and nothing is gated** — no licence key, no premium tier, no feature that unlocks when you pay. That includes **dunning**, the feature that recovers your failed payments. (Worth checking against whatever else you're evaluating; open-core billing engines commonly put dunning, SSO and RBAC behind a key. Velox has no SSO or RBAC to gate — see [What Velox is not](#what-velox-is-not).)
+- **Nothing phones home** — no licence check, no telemetry, no analytics SDK. OpenTelemetry tracing exists and exports to *your* collector when you configure one.
+- **Data sovereignty** — customer billing data never leaves your infrastructure. Note this transfers the compliance obligations to you rather than removing them; "self-hosted so it's compliant by default" is not a claim we'll make.
 - **Append-only audit log** — tamper-evidence enforced by database triggers, not convention
 - **Row-Level Security** — one deployment cleanly serves N internal tenants
 
@@ -150,14 +154,33 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
 | Prepaid commits + drawdown | ✅      | ❌             | ⚠️ wallets  | ✅                | ❌                |
 | Per-customer margin (COGS) | ✅ in-app | ❌           | ❌          | ❌ warehouse join | ❌                |
 | Pricing                  | OSS       | 0.5% of GMV    | OSS / cloud | $30K+/yr          | OSS / cloud       |
+| Licence                  | MIT       | proprietary    | AGPL-3.0    | proprietary       | Apache-2.0        |
+| Dunning without paying³  | ✅        | ✅             | ❌          | ✅                | n/a               |
 | Data sovereignty         | ✅        | ❌             | ⚠️          | ❌                | ✅                |
 
 ¹ Metronome was acquired by Stripe (Jan 2026) — still SaaS-only, so your billing data lives on Stripe's servers either way.
 ² OpenMeter (acquired by Kong, Sep 2025) is expanding from metering into billing — closing the engine gap, but not the self-host-with-Stripe-grade-depth one.
+³ Open-core self-hosting isn't automatically free of gates. Lago's self-hosted edition checks a `LAGO_LICENSE` key against their licence server, and a 30-entry `PREMIUM_INTEGRATIONS` list decides what's enabled — `auto_dunning` is on it, alongside SSO, RBAC, progressive billing and every accounting/CRM integration ([source](https://github.com/getlago/lago-api/blob/main/app/models/organization.rb)). Velox has no licence key and gates nothing; the honest caveat is that some of what Lago gates (SSO, RBAC, revenue recognition) Velox simply doesn't have — see [What Velox is not](#what-velox-is-not).
 
 Velox lives in the empty cell: **OSS + self-host + AI-native + full billing engine.**
 
 The decision tree, honestly: pick **Stripe Billing** (or Stripe + Metronome) for hosted SaaS billing; pick **Lago** for generic OSS billing without an AI-shaped wedge; pick **Orb/Metronome** if you can't self-host and can budget for usage-based contracts; pick **Velox** when you need AI-native billing that runs in your own VPC.
+
+---
+
+## "Fewer dependencies" — but will it take our volume?
+
+Fair question, and the honest answer has three parts.
+
+**Where the Postgres-only ceiling actually is.** Lago — the closest comparable, and one that *does* ship a Kafka + ClickHouse tier — publishes **10,000 events/sec on a single Postgres instance**, and their own documentation says *"Many production deployments never need Kafka."* Ten thousand a second is roughly 26 billion events a month. For an AI product metering LLM calls at one to three events each, that is billions of API calls a month before the architecture is the constraint.
+
+**What we have actually measured, and what we haven't.** Velox's recorded figure is **~2.5k events/sec**, and we would rather tell you its weaknesses than quote it flatly: it was measured in-process against the ingest service — no HTTP, no auth, no customer resolution — with single events rather than batches, on a developer laptop. The real end-to-end number is therefore *lower*, not higher. An end-to-end benchmark on named cloud hardware, with the methodology and raw data published, is in progress; until it lands, treat the number above as a floor with a caveat rather than a specification.
+
+**The ladder, which stays boring for a long time.** Before Velox needs a new dependency: use the batch endpoint (one commit amortises the write cost across up to 1,000 events), add replicas (multi-node leader election via Postgres advisory locks already ships), partition `usage_events` by month, set a retention window on raw events, and move analytics to a read replica. Each rung is ordinary Postgres operations. A columnar store only earns its place when you want arbitrary slicing over years of raw events, or sustained ingest well past the figure above — and at that point it belongs beside Velox as a read-side sidecar, not underneath it. Money never leaves Postgres.
+
+**And if you already run Kafka, keep it.** Velox does not want to own your transport. Point a consumer at the batch ingest endpoint and your existing pipeline feeds it directly — the same shape teams already use to avoid duplicating a metering stack they consider core. Velox is deliberately the last mile: rating, invoicing, credits, dunning, collection.
+
+One structural note that makes all of the above easier than it looks: Velox scales as a **fleet, not a cluster**. Every tenant runs their own deployment carrying only their own volume, so the aggregate pressure that forces a shared SaaS platform onto Kafka never accumulates in any single instance.
 
 ---
 
