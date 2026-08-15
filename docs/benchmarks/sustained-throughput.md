@@ -101,18 +101,64 @@ anyway. A system that quietly drops to half the requested load will otherwise
 report beautiful latency, and reporting that as a pass would be the most
 misleading thing this tool could do.
 
+## End-to-end over HTTP
+
+Everything above calls `usage.Service.Ingest` in-process. `--http` drives the
+public endpoint instead — `POST /v1/usage-events`, Bearer auth, JSON in and
+out, customer and meter resolved by their public handles rather than handed to
+the service pre-resolved. Same pacing code, same coordinated-omission
+correction; the only difference is the transport.
+
+**Per-request cost at 100 events/sec** — far below any saturation, so this is
+service time rather than queueing. Both modes run back to back, twice:
+
+| Pass | in-process p50 | HTTP p50 | in-process p99 | HTTP p99 |
+|---:|---:|---:|---:|---:|
+| 1 | 7.78 ms | 15.24 ms | 14.0 ms | 23.4 ms |
+| 2 | 7.14 ms | 15.26 ms | 14.9 ms | 30.8 ms |
+
+**The HTTP path costs about 2.1× the in-process path on p50**, and the two HTTP
+measurements agree to within 0.02 ms. That is the number to carry: anyone
+quoting the in-process figure as an API throughput number is overstating it by
+roughly a factor of two on latency alone.
+
+### Why there is no HTTP throughput number here
+
+There should be one, and it is deliberately absent. The HTTP sweep on this
+machine saturated at ~570 events/sec and produced results that were **not
+monotonic** — 200 events/sec measured a worse p99 (210 ms) than 400 events/sec
+(65 ms). Non-monotonic load response is the signature of interference, not of
+system behaviour.
+
+A control run confirmed it. Re-running the *in-process* case at 1,200
+events/sec while the machine was busy gave p99 29.9 ms against 18.9 ms for the
+identical run earlier — a 1.7× degradation from load alone, with nothing about
+Velox changed. Meanwhile `com.apple.Virtualization` was consuming 287% CPU and
+the Docker backend another 97%: Postgres-in-Docker was using roughly four of
+this laptop's eight cores before the load generator and the server asked for
+any.
+
+All three tiers — load generator, API server, database — are competing for the
+same eight cores. The per-request comparison above survives that because both
+sides pay the same tax and it was measured back to back at a rate far below
+saturation. A throughput ceiling does not survive it, so it is not published.
+**That measurement needs a dedicated instance, and it is the specific reason to
+run one.**
+
 ---
 
 ## What this does not show
 
-- **Not HTTP.** The benchmark calls `usage.Service.Ingest` in-process. It
-  excludes the router, auth middleware, JSON decoding, and the additional
-  transactions the real request path carries. **Treat these as an upper bound on
-  what an HTTP client would see, not an end-to-end figure.** Closing that gap is
-  the next change to the harness, and we expect the honest end-to-end number to
-  be materially lower.
-- **Laptop, shared machine.** Other processes were running. The repeatability
-  table is the evidence of how much that costs; a dedicated instance is the fix.
+- **The rate/latency curve is in-process, not HTTP.** It excludes the router,
+  auth middleware, JSON decoding, and the customer/meter resolution the real
+  request path performs. Measured overhead for those is ~2.1× on p50, so
+  **treat the curve as an upper bound on what an API client would see.**
+- **No HTTP throughput ceiling is published**, on purpose — see above. The
+  machine could not produce a monotonic one.
+- **Laptop, shared machine, and it mattered.** Load average ran 6–10 on eight
+  cores during these runs, with Docker's VM alone taking ~4 of them. The
+  repeatability table and the control run are the evidence of what that costs.
+  A dedicated instance is the fix, not more repeats.
 - **Single node, single Postgres.** No replication, no read replicas, no
   connection pooler.
 - **One meter, one customer, 80 dimension combinations.** Realistic in shape,
@@ -126,14 +172,35 @@ misleading thing this tool could do.
 docker run -d --name velox-bench-pg \
   -e POSTGRES_USER=velox -e POSTGRES_PASSWORD=velox -e POSTGRES_DB=velox \
   -p 55432:5432 postgres:16-alpine
-psql "postgres://velox:velox@localhost:55432/velox" \
-  -c "CREATE ROLE velox_app LOGIN PASSWORD 'velox_app';"   # before migrating
+# The app role must exist AND hold default privileges BEFORE migrating.
+# CREATE ROLE alone is not enough: most tables get their grant from
+# ALTER DEFAULT PRIVILEGES, not from a per-table GRANT in the migration, so
+# skipping this line leaves 11 tables unreadable by the runtime role and the
+# server returns 500 on ingest with "permission denied for table
+# provider_cost_rates". This mirrors deploy/compose/postgres-init.sh.
+psql "postgres://velox:velox@localhost:55432/velox" <<'SQL'
+CREATE ROLE velox_app LOGIN PASSWORD 'velox_app';
+GRANT ALL PRIVILEGES ON DATABASE velox TO velox_app;
+GRANT ALL ON SCHEMA public TO velox_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO velox_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO velox_app;
+SQL
 export DATABASE_URL="postgres://velox:velox@localhost:55432/velox?sslmode=disable"
 go run ./cmd/velox-bootstrap                                # migrates, then seeds
 
 go run ./cmd/velox-bench --workers 8 --duration 20s --rate 1800 --slo-p99 50ms
 go run ./cmd/velox-bench --workers 8 --duration 10s          # closed-loop, for contrast
+
+# End-to-end over HTTP. The bench mints its own key for the bench tenant —
+# the bootstrap tenant's key authenticates to a different tenant and would
+# 404 on every request.
+PORT=8099 LOG_LEVEL=warn go run ./cmd/velox &                # LOG_LEVEL matters:
+                                                             # a line per request is
+                                                             # real synchronous I/O
+go run ./cmd/velox-bench --workers 4 --duration 15s --rate 100 --http http://localhost:8099
 ```
 
-The `CREATE ROLE` must happen before the first migration. Skipping it leaves
-`schema_migrations` dirty at version 1 with no hint about why.
+The role setup must happen before the first migration. Skipping the `CREATE
+ROLE` leaves `schema_migrations` dirty at version 1 with no hint about why;
+skipping the `ALTER DEFAULT PRIVILEGES` lines produces a cluster that migrates
+cleanly and then fails at runtime, which is the more confusing of the two.

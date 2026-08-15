@@ -47,6 +47,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/shopspring/decimal"
 
+	"github.com/sagarsuperuser/velox/internal/auth"
 	"github.com/sagarsuperuser/velox/internal/config"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
@@ -77,6 +79,12 @@ func main() {
 	// come from a rate the system is NOT saturated at.
 	rate := flag.Float64("rate", 0, "target events/sec (open-loop). 0 = closed-loop, spin as fast as possible")
 	sloP99 := flag.Duration("slo-p99", 0, "pass/fail p99 latency budget for this run (0 = no verdict)")
+	// --http switches from the in-process service call to the public HTTP
+	// endpoint. Only this mode produces an end-to-end number: it adds the
+	// router, auth middleware, JSON decode, and the customer/meter resolution
+	// that the in-process path receives pre-resolved.
+	httpBase := flag.String("http", "", "base URL of a running velox server (e.g. http://localhost:8080). Empty = in-process")
+	apiKey := flag.String("api-key", os.Getenv("VELOX_API_KEY"), "Bearer key for --http mode (default $VELOX_API_KEY)")
 	flag.Parse()
 
 	if *batch < 1 {
@@ -112,8 +120,28 @@ func main() {
 	store := usage.NewPostgresStore(db)
 	svc := usage.NewService(store)
 
+	var snd sender
+	if *httpBase != "" {
+		// Mint a key for the BENCH tenant if the caller did not supply one.
+		// The bootstrap tenant's key authenticates to a different tenant than
+		// the bench fixtures live in, so borrowing it would 404 on every
+		// request — the tool provisioning its own key keeps HTTP mode a
+		// one-command setup instead of a manual dance.
+		if *apiKey == "" {
+			*apiKey = mintBenchAPIKey(ctx, db, tenantID)
+			fmt.Printf("api key:    minted for %s (use --api-key to supply your own)\n", tenantID)
+		}
+		snd = &httpSender{
+			client: newHTTPClient(*workers), baseURL: strings.TrimRight(*httpBase, "/"),
+			apiKey: *apiKey, externalCustomerID: benchCustomerExternalID, eventName: benchMeterKey,
+		}
+	} else {
+		snd = &inProcessSender{svc: svc, tenantID: tenantID, customerID: customerID, meterID: meterID}
+	}
+
 	fmt.Printf("velox-bench: workers=%d batch=%d duration=%s tenant=%s meter=%s\n",
 		*workers, *batch, *duration, tenantID, meterID)
+	fmt.Printf("transport:  %s\n", snd.describe())
 
 	var totalEvents int64
 	var totalErrors int64
@@ -164,51 +192,29 @@ func main() {
 						time.Sleep(d)
 					}
 				}
-				if *batch == 1 {
-					props := pickDimensions(rng)
-					qty := decimal.NewFromInt(int64(rng.IntN(1000) + 1))
-					t0 := time.Now()
-					if callInterval > 0 {
-						t0 = due
+				evts := make([]event, *batch)
+				for i := range evts {
+					evts[i] = event{
+						quantity:   decimal.NewFromInt(int64(rng.IntN(1000) + 1)),
+						dimensions: pickDimensions(rng),
 					}
-					_, err := svc.Ingest(ctx, tenantID, usage.IngestInput{
-						CustomerID: customerID, MeterID: meterID,
-						Quantity: qty, Dimensions: props,
-					})
-					lat := time.Since(t0)
-					if err != nil {
-						atomic.AddInt64(&totalErrors, 1)
-						firstErr.CompareAndSwap(nil, err.Error())
-						continue
-					}
-					atomic.AddInt64(&totalEvents, 1)
-					samples = append(samples, lat)
-					continue
 				}
 
-				inputs := make([]usage.IngestInput, *batch)
-				for i := range inputs {
-					inputs[i] = usage.IngestInput{
-						CustomerID: customerID, MeterID: meterID,
-						Quantity:   decimal.NewFromInt(int64(rng.IntN(1000) + 1)),
-						Dimensions: pickDimensions(rng),
-					}
-				}
 				t0 := time.Now()
 				if callInterval > 0 {
 					t0 = due
 				}
-				inserted, _, errs := svc.BatchIngest(ctx, tenantID, inputs)
+				accepted, err := snd.send(ctx, evts)
 				lat := time.Since(t0)
-				if len(errs) > 0 {
-					atomic.AddInt64(&totalErrors, int64(len(errs)))
-					firstErr.CompareAndSwap(nil, errs[0].Error())
+				if err != nil {
+					atomic.AddInt64(&totalErrors, int64(len(evts)-accepted))
+					firstErr.CompareAndSwap(nil, err.Error())
 				}
-				if inserted > 0 {
-					atomic.AddInt64(&totalEvents, int64(inserted))
-					// Latency is per CALL; per-event latency is this over
-					// batch size. Recorded per call so p99 answers "how long
-					// does a client wait", which is the operational question.
+				if accepted > 0 {
+					atomic.AddInt64(&totalEvents, int64(accepted))
+					// Latency is per CALL; per-event latency is this over batch
+					// size. Recorded per call so p99 answers "how long does a
+					// client wait", which is the operational question.
 					samples = append(samples, lat)
 				}
 			}
@@ -289,6 +295,35 @@ func pct(sorted []time.Duration, p float64) string {
 	return percentile(sorted, p).Round(time.Microsecond).String()
 }
 
+// Fixture identifiers. The external id and meter key are the handles the
+// PUBLIC API uses — HTTP mode names the customer and meter the way a
+// customer's SDK does, by external_customer_id and event_name, rather than by
+// the internal ids the in-process path passes straight through.
+const (
+	benchTenant             = "vlx_ten_bench"
+	benchCustomer           = "vlx_cus_bench"
+	benchMeter              = "vlx_mtr_bench"
+	benchCustomerExternalID = "bench-customer"
+	benchMeterKey           = "bench_tokens"
+)
+
+// mintBenchAPIKey creates a test-mode secret key scoped to the bench tenant
+// and returns the raw value. Uses the real auth service rather than inserting
+// a row by hand: the salt-and-hash format is auth's business, and a
+// hand-rolled copy here would silently stop matching the day that changes.
+func mintBenchAPIKey(ctx context.Context, db *postgres.DB, tenantID string) string {
+	svc := auth.NewService(auth.NewPostgresStore(db))
+	// Bench events are test-mode; the key must be minted in the same mode or
+	// it authenticates into the live partition and sees no bench fixtures.
+	res, err := svc.CreateKey(auth.WithLivemode(ctx, false), tenantID, auth.CreateKeyInput{
+		Name: "velox-bench", KeyType: auth.KeyTypeSecret,
+	})
+	if err != nil {
+		log.Fatalf("mint bench api key: %v", err)
+	}
+	return res.RawKey
+}
+
 // pickDimensions returns a realistic AI-platform dimension set. Mirrors
 // the cardinality assumed in the design doc benchmark plan: 10 models,
 // 4 operations, 2 cache states (~80 unique combinations).
@@ -310,11 +345,6 @@ var (
 // CLI tool with full DB access; the runtime path will set tenant_id
 // per-request via TxTenant as usual.
 func bootstrapFixtures(ctx context.Context, db *postgres.DB) (string, string, string) {
-	const (
-		benchTenant   = "vlx_ten_bench"
-		benchCustomer = "vlx_cus_bench"
-		benchMeter    = "vlx_mtr_bench"
-	)
 
 	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
@@ -332,18 +362,18 @@ func bootstrapFixtures(ctx context.Context, db *postgres.DB) (string, string, st
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO customers (id, tenant_id, external_id, display_name, email, livemode)
-		VALUES ($1, $2, 'bench-customer', 'Bench Customer', 'bench@velox.local', false)
+		VALUES ($1, $2, $3, 'Bench Customer', 'bench@velox.local', false)
 		ON CONFLICT (id) DO UPDATE SET livemode = false
-	`, benchCustomer, benchTenant)
+	`, benchCustomer, benchTenant, benchCustomerExternalID)
 	if err != nil {
 		log.Fatalf("upsert customer: %v", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO meters (id, tenant_id, name, key, unit, aggregation, livemode)
-		VALUES ($1, $2, 'Bench Tokens', 'bench_tokens', 'tokens', $3, false)
+		VALUES ($1, $2, 'Bench Tokens', $3, 'tokens', $4, false)
 		ON CONFLICT (id) DO UPDATE SET livemode = false
-	`, benchMeter, benchTenant, string(domain.AggSum))
+	`, benchMeter, benchTenant, benchMeterKey, string(domain.AggSum))
 	if err != nil {
 		log.Fatalf("upsert meter: %v", err)
 	}
