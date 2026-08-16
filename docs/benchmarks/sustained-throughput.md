@@ -191,6 +191,13 @@ DATABASE_URL=... ./seed-history.sh 20000000
                                # case. measure.sh records the table size before
                                # every run either way, so a reader can tell.
 
+DATABASE_URL=... VELOX_EVS=<measured> ./db-ceiling.sh
+                               # the DENOMINATOR: pgbench on the same database
+                               # and row shape. Leg A = raw commit floor, leg B =
+                               # Velox's per-tx RLS protocol; prints Velox's
+                               # measured ev/s as a fraction of each. Run AFTER
+                               # measure.sh, on the same table state.
+
 ./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats,
                                # latency medians with spread over PASSING runs,
                                # every run gated on: k6 exit 0, no drops, no
@@ -198,6 +205,17 @@ DATABASE_URL=... ./seed-history.sh 20000000
 
 ./teardown.sh                  # and verify it prints CLEAN
 ```
+
+`db-ceiling.sh` is the control every Velox throughput figure had been missing:
+without the database's own ceiling for this row shape, "10,203 events/sec" has
+no denominator. On a laptop the raw commit floor was ~5.9k rows/s at batch 1
+and ~23k at batch 10; the three per-transaction `set_config` calls that
+row-level security costs took **44–49%** of that floor — a share that grows on
+RDS, where each round trip is ~1 ms rather than ~50 µs; and Velox's single-event
+HTTP path landed at ~12% of the DB-with-RLS figure, which is what the ~26
+statements of auth, resolve and insert cost. Both legs verify their row count
+in the intended livemode partition, and the script refuses to run against
+fixtures seeded in the other mode.
 
 `measure.sh` exits non-zero if **any repeat of any configuration** fails its
 gate, and a configuration is only reported as held at a rate when every repeat
