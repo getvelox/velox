@@ -142,7 +142,7 @@ FAIL=0
 # had all failed still advertised itself as provisioned.
 run() { local log=$1; shift; "$@" >"$log" 2>&1 || { echo "FAILED: $* (see $log)" >>/tmp/failures.log; FAIL=1; }; }
 
-run /tmp/install.log dnf install -y git golang postgresql16 docker tar gzip
+run /tmp/install.log dnf install -y git golang postgresql16 postgresql16-contrib docker tar gzip   # -contrib = pgbench, for db-ceiling.sh
 run /tmp/docker.log systemctl enable --now docker
 cd /opt || exit 1
 run /tmp/clone.log git clone --depth 1 --branch __BRANCH__ https://github.com/getvelox/velox.git
