@@ -17,6 +17,10 @@
 //	reported and NOT counted as delivered throughput
 //
 // MAX_INFLIGHT  concurrent request ceiling; beyond it the stub answers 503
+//
+// /count also reports "duplicates": how many idempotency keys were seen more
+// than once. A correct load profile must produce zero, across runs as well as
+// within one.
 package main
 
 import (
@@ -26,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -39,19 +44,51 @@ func main() {
 		maxInflight = 1 << 20
 	}
 	sem := make(chan struct{}, maxInflight)
-	var events, requests, rejected int64
+	var events, requests, rejected, duplicates int64
+
+	// Idempotency-key ledger. A real ingest endpoint DEDUPLICATES a repeated
+	// key, so a load profile that reuses keys across runs measures the dedupe
+	// path and reports it as throughput. That is not hypothetical: ingest.js
+	// keyed on `k6-<VU>-<ITER>-<seq>`, which restarts identically every run, and
+	// a repeat run claimed 1,000 events ingested while writing ZERO rows.
+	// Tracking duplicates here is what lets calibrate.sh catch that class.
+	var keyMu sync.Mutex
+	seenKeys := map[string]struct{}{}
+	noteKey := func(k string) {
+		if k == "" {
+			return
+		}
+		keyMu.Lock()
+		if _, dup := seenKeys[k]; dup {
+			atomic.AddInt64(&duplicates, 1)
+		} else {
+			seenKeys[k] = struct{}{}
+		}
+		keyMu.Unlock()
+	}
 
 	h := func(batch bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
 			n := int64(1)
+			type keyed struct {
+				IdempotencyKey string `json:"idempotency_key"`
+			}
 			if batch {
-				var arr []json.RawMessage
+				var arr []keyed
 				if err := json.Unmarshal(body, &arr); err != nil {
 					w.WriteHeader(400)
 					return
 				}
 				n = int64(len(arr))
+				for _, e := range arr {
+					noteKey(e.IdempotencyKey)
+				}
+			} else {
+				var one keyed
+				if json.Unmarshal(body, &one) == nil {
+					noteKey(one.IdempotencyKey)
+				}
 			}
 			// Reject beyond capacity, like a real saturated server.
 			select {
@@ -77,7 +114,8 @@ func main() {
 	http.HandleFunc("/v1/usage-events/batch", h(true))
 	http.HandleFunc("/v1/usage-events", h(false))
 	http.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"events":%d,"requests":%d,"rejected":%d}`, atomic.LoadInt64(&events), atomic.LoadInt64(&requests), atomic.LoadInt64(&rejected))
+		fmt.Fprintf(w, `{"events":%d,"requests":%d,"rejected":%d,"duplicates":%d}`,
+			atomic.LoadInt64(&events), atomic.LoadInt64(&requests), atomic.LoadInt64(&rejected), atomic.LoadInt64(&duplicates))
 	})
 	_ = http.ListenAndServe(":8123", nil)
 }

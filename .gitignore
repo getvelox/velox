@@ -43,6 +43,7 @@ velox-api
 /velox-bench-seed
 /velox-migrate-safety
 
-# k6 writes its run summary into whatever directory it is invoked from
-scripts/bench-rig/summary.json
-scripts/bench-rig/**/summary.json
+# k6 writes its run summary into whatever directory it is invoked from, so a
+# path-anchored ignore keeps missing it — this is the third directory it has
+# turned up in. Match the filename anywhere instead.
+summary.json
