@@ -295,6 +295,20 @@ operator's session.
 - Audit `audit_log` for affected tenant pair.
 - Notify both customers + breach review.
 
+## After a large backfill, expect a few minutes of elevated write I/O
+
+Measured on the benchmark rig (2026-08-16): a 20M-row bulk load into
+`usage_events` was followed by ~5 minutes of RDS write IOPS at ~2× baseline —
+autovacuum and the checkpointer working through the load — and one commit
+stall of ~5 s about 20 s after ingest resumed at 200 ev/s. Steady traffic in
+the following 90 minutes across three rates showed nothing similar. This is
+Postgres maintenance, not a Velox defect: if you backfill tens of millions of
+events (`POST /v1/usage-events/backfill`, or a direct load) and then need
+sub-10 ms p99 immediately, wait for `WriteIOPS` to return to baseline first, or
+schedule large backfills off-peak. Watch `ReadIOPS` too — a tail that rises
+with CPU flat is the index working set falling out of cache; see
+`docs/benchmarks/sustained-throughput.md` for the numbers on `db.m7g.2xlarge`.
+
 ## Scheduler interval tuning
 
 The tick interval and batch size are compiled-in, not env-configurable:

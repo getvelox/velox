@@ -83,6 +83,14 @@ DRIFT_FACTOR="${DRIFT_FACTOR:-2.0}"   # last-third p99 more than this x first-th
 CAPTURE="${CAPTURE:-1}"               # raw k6 samples + CloudWatch series per run (best-effort)"
 PROBE_RATE="${PROBE_RATE:-0}"
 PROBE_P99_MS="${PROBE_P99_MS:-500}"
+# PROBE_GATE=0 reports the probe verdict per run but does not fail the run on
+# it. The two gates measure different things — "was ingest sustained?" and
+# "did reads stay within budget?" — and on the real rig the second masked the
+# first: 10,000 ev/s at batch 100 held with p99 66 ms and every row reconciled,
+# and the config was reported NOT SUSTAINED because usage-summary for a
+# customer holding ~190k events costs ~500 ms regardless of write rate. Both
+# facts are published; conflating them publishes neither.
+PROBE_GATE="${PROBE_GATE:-1}"
 CONFIGS="${CONFIGS:-single:200:1 batched:1000:10}"
 RESULTS="${RESULTS:-$OUT/results-$(date -u +%Y%m%dT%H%M%SZ)}"
 SCRIPT_PATH="${SCRIPT_PATH:-}"
@@ -138,7 +146,12 @@ fi
 capture_cloudwatch() { # tag start end
   [ "$TARGET" = "aws" ] || return 0
   local tag=$1 start=$2 end=$3 m
-  for m in CPUUtilization DatabaseConnections WriteIOPS WriteLatency FreeableMemory; do
+  # ReadIOPS / ReadLatency / DiskQueueDepth were added after the real run: the
+  # tail that rose within a 10-minute 5,000 ev/s repeat was invisible in
+  # CPU (61-63 %, flat) and write IOPS (flat) and explained entirely by
+  # ReadIOPS climbing 108 -> 2,486/s as the index working set (18 GB) fell out
+  # of a 32 GB instance's cache, with disk queue depth 10.7 in the last minute.
+  for m in CPUUtilization DatabaseConnections WriteIOPS WriteLatency ReadIOPS ReadLatency DiskQueueDepth FreeableMemory; do
     aws_ cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name "$m" \
       --dimensions Name=DBInstanceIdentifier,Value=velox-bench-db \
       --start-time "$start" --end-time "$end" --period 60 --statistics Average Maximum \
@@ -182,6 +195,20 @@ one_run() {
     -e P99_MS=$P99_MS -e PROBE_RATE=$PROBE_RATE -e PROBE_P99_MS=$PROBE_P99_MS \
     $SCRIPT_PATH" > "$RESULTS/$tag.txt" 2>&1
   local rc=$?
+  # k6 exits 99 when ANY threshold is crossed. With PROBE_GATE=0 the probe's own
+  # threshold must not fail the run: if every breached metric names the probe
+  # scenario, treat the exit as clean. k6 prints the list on one line:
+  #   thresholds on metrics 'a', 'b' have been crossed
+  if [ "$rc" = "99" ] && [ "$PROBE_GATE" = "0" ]; then
+    local breached
+    # Split on the QUOTED separator k6 prints between names ("', '"), never on a
+    # bare comma — metric names carry commas inside their braces
+    # ({scenario:probe,name:usage-summary}) and a bare split severed those.
+    breached=$(grep -o "thresholds on metrics .* have been crossed" "$RESULTS/$tag.txt" | sed "s/thresholds on metrics //; s/ have been crossed//")
+    breached=${breached//"', '"/$'\n'}
+    breached=$(printf '%s\n' "$breached" | tr -d "'" | grep -v '^$')
+    if [ -n "$breached" ] && ! printf '%s\n' "$breached" | grep -qv 'scenario:probe'; then rc=0; fi
+  fi
   t_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ "$CAPTURE" = "1" ]; then
     app_sh "[ -f /tmp/vmstat-$tag.pid ] && kill \$(cat /tmp/vmstat-$tag.pid) 2>/dev/null; true" >/dev/null 2>&1
@@ -204,10 +231,12 @@ one_run() {
   samples=$(printf '%s' "$out" | sed -n 's/^latency samples *\([0-9]*\).*/\1/p' | head -1)
   qsent=$(printf '%s' "$out"   | sed -n 's/^quantity sent *\([0-9]*\).*/\1/p' | head -1)
   drift=$(printf '%s' "$out"   | sed -n 's/^drift p99 first\/last .*(x\([0-9.na\/]*\)).*/\1/p' | head -1)
-  probe="n/a"
+  probe="n/a"; usum="-"
   if [ "$PROBE_RATE" -gt 0 ]; then
+    usum=$(printf '%s' "$out" | sed -n 's/^  usage-summary *p50 [0-9.]*ms *p99 \([0-9.]*\)ms.*/\1/p' | head -1)
     printf '%s' "$out" | grep -q "RESPONSIVE under load" && probe="RESPONSIVE"
     printf '%s' "$out" | grep -q "DEGRADED" && probe="DEGRADED"
+    [ -n "$usum" ] && probe="$probe(usage-summary p99 ${usum}ms)"
   fi
   printf '%s %s %s %s %s %s %s %s %s %s %s %s %s' "${claimed:-0}" "$((after - before))" "${evs:-0}" "${p50:-0}" "${p99:-0}" "${dropped:-0}" "$rc" "${failed:-0}" "${samples:-0}" "$probe" "${qsent:-0}" "$((qafter - qbefore))" "${drift:-n/a}"
 }
@@ -216,7 +245,7 @@ median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{ if (NR==0) print 
 minof()  { printf '%s\n' "$@" | sort -n | head -1; }
 maxof()  { printf '%s\n' "$@" | sort -n | tail -1; }
 
-say "protocol: warmup $WARMUP (discarded), $REPEATS repeats x $DURATION per config, ${COOLDOWN}s cool-down, p99 needs >= $MIN_SAMPLES samples${SUSTAINED:+ [SUSTAINED preset]}"
+say "protocol: warmup $WARMUP (discarded), $REPEATS repeats x $DURATION per config, ${COOLDOWN}s cool-down, p99 needs >= $MIN_SAMPLES samples$([ "${SUSTAINED:-0}" = "1" ] && echo " [SUSTAINED preset]")"
 info "configs: $CONFIGS"
 info "results: $RESULTS"
 
@@ -248,7 +277,7 @@ for cfg in $CONFIGS; do
     [ "${nfail:-0}" = "0" ]      || reasons="$reasons failed=$nfail"
     [ "${claimed:-0}" -gt 0 ]    || reasons="$reasons claimed=0"
     [ "$claimed" = "$written" ]  || reasons="$reasons claimed!=written($claimed/$written)"
-    [ "$probe" != "DEGRADED" ]   || reasons="$reasons probe=DEGRADED"
+    if [ "$PROBE_GATE" = "1" ]; then case "$probe" in DEGRADED*) reasons="$reasons probe=DEGRADED";; esac; fi
     # Content, not just count: the sum of quantities the client sent must be
     # the sum the database gained. Row count alone would pass a server that
     # wrote every row with quantity 0.

@@ -104,8 +104,22 @@ checks corresponds to a bug that actually shipped in this rig once.
 - **On the instances**: `HOME` is unset under cloud-init (Go builds fail
   without `HOME`/`GOPATH`); `ec2-user` is not in the docker group (`sudo
   docker`); k6 has no arm64 rpm (tarball only); `--monitoring` wants
-  `Enabled=true`. `provision.sh` handles all four; they are listed so you
-  recognise them if you change it.
+  `Enabled=true`. `provision.sh` and `bringup.sh` handle all four; they are
+  listed so you recognise them if you change it.
+- **A bulk seed leaves autovacuum busy for minutes.** The first measured repeat
+  after a 22M-row load hit a 5-second stall 20 s in and (correctly) failed;
+  `run.sh` settles after seeding. If you seed by hand, wait before measuring.
+- **Two gates, reported separately.** "Ingest sustained?" and "reads within
+  budget?" are different questions; `PROBE_GATE=0` reports the read probe
+  without failing ingest on it, and the probe is broken down per endpoint.
+  On the real rig `usage-summary` cost ~2.7 µs per event the customer holds
+  (#819) — the budget it meets depends on customer size, not write rate.
+- **Watch the read side of the database.** A tail that rises within a run
+  with CPU and write IOPS flat is the index working set falling out of cache:
+  ReadIOPS, ReadLatency and DiskQueueDepth are captured for that reason.
+- **Never start a long step inside a shell that might be killed** (a tool call
+  with a timeout, a terminal that closes): `nohup … &` it in its own command
+  and watch the log. A whole rung was lost to that once.
 - **macOS bash 3.2** cannot parse a `case` inside a heredoc inside `$( )`.
   Every script here is checked with `/bin/bash -n` for that reason.
 - **A stale calibration stub can hold port 8123** if a previous run was killed
