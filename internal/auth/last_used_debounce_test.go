@@ -30,14 +30,6 @@ func (c *countingStore) TouchLastUsed(ctx context.Context, id string, usedAt tim
 	return c.memStore.TouchLastUsed(ctx, id, usedAt)
 }
 
-func (c *countingStore) count(id string) int64 {
-	v, ok := c.touches.Load(id)
-	if !ok {
-		return 0
-	}
-	return v.(*atomic.Int64).Load()
-}
-
 // settle waits for the async touch goroutines to land: the count must be
 // stable for a short window. Bounded so a bug cannot hang the test.
 func settle(t *testing.T, read func() int64) int64 {
@@ -111,7 +103,7 @@ func TestLastUsed_TouchesAgainAfterInterval(t *testing.T) {
 		t.Fatalf("after the interval elapsed: %d writes total, want exactly 2", got)
 	}
 	// And the value written is the later instant, not the first.
-	k, _ := store.memStore.Get(ctx, "t1", svc.mustKeyID(t, ctx, raw))
+	k, _ := store.Get(ctx, "t1", svc.mustKeyID(t, ctx, raw))
 	if k.LastUsedAt == nil || !k.LastUsedAt.Equal(*now) {
 		t.Fatalf("last_used_at = %v, want %v (the most recent touch)", k.LastUsedAt, *now)
 	}
