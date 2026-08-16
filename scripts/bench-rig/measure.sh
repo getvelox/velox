@@ -44,6 +44,20 @@
 #
 # CONFIGS is a space-separated list of label:RATE:BATCH triples.
 # K6_MODE=max runs the closed-loop ceiling instead (VUS sets the load there).
+#
+# EVIDENCE CAPTURE (CAPTURE=1, the default). The gate says WHETHER a run earned
+# its number; it cannot say WHY a run failed. For that, every run also leaves
+# files in the results directory: the raw k6 sample stream (client side, so a
+# failed drift can be located in time) and, in aws mode, the RDS and app-node
+# CloudWatch series over the run's window, plus a 5-second `vmstat` from the app
+# node itself (EC2 basic CloudWatch is 5-minute granularity — one point per
+# 90 s run — so the on-box sampler is the real app-CPU source and CloudWatch is
+# the independent cross-check; RDS CloudWatch is 60 s and is the only RDS view
+# without an IAM role the bench policy denies). The doc's central claim — "reaching
+# 10k is a database-sizing question" — rested on someone watching a console
+# read 88% CPU; this makes that observation a file. Capture is best-effort and
+# NEVER fails a run. Load the files into Grafana if you want a picture; the
+# verdict does not depend on one.
 set -uo pipefail
 
 TARGET="${TARGET:-aws}"
@@ -65,7 +79,8 @@ WARMUP="${WARMUP:-30s}"
 DURATION="${DURATION:-90s}"
 COOLDOWN="${COOLDOWN:-10}"           # seconds between repeats, so one run's tail is not the next run's start
 MIN_SAMPLES="${MIN_SAMPLES:-1000}"    # a p99 from fewer requests than this is not reported
-DRIFT_FACTOR="${DRIFT_FACTOR:-2.0}"   # last-third p99 more than this x first-third p99 = a slope, not a plateau"
+DRIFT_FACTOR="${DRIFT_FACTOR:-2.0}"   # last-third p99 more than this x first-third p99 = a slope, not a plateau
+CAPTURE="${CAPTURE:-1}"               # raw k6 samples + CloudWatch series per run (best-effort)"
 PROBE_RATE="${PROBE_RATE:-0}"
 PROBE_P99_MS="${PROBE_P99_MS:-500}"
 CONFIGS="${CONFIGS:-single:200:1 batched:1000:10}"
@@ -94,6 +109,7 @@ if [ "$TARGET" = "aws" ]; then
       "Name=instance-state-name,Values=running" \
       --query "Reservations[].Instances[0].$2" --output text; }
   APP_PRIV=$(ip_of velox-bench-app PrivateIpAddress)
+  APP_INSTANCE_ID=$(ip_of velox-bench-app InstanceId)
   GEN_PUB=$(ip_of velox-bench-loadgen PublicIpAddress)
   APP_PUB=$(ip_of velox-bench-app PublicIpAddress)
   [ -n "$GEN_PUB" ] && [ "$GEN_PUB" != "None" ] || die "loadgen instance is not running"
@@ -117,6 +133,25 @@ else
   SCRIPT_PATH="${SCRIPT_PATH:-$HERE/ingest.js}"
 fi
 
+# Server-side series for the run's window. aws mode only; a no-op locally.
+# Every call is best-effort: a CloudWatch hiccup must not fail a measurement.
+capture_cloudwatch() { # tag start end
+  [ "$TARGET" = "aws" ] || return 0
+  local tag=$1 start=$2 end=$3 m
+  for m in CPUUtilization DatabaseConnections WriteIOPS WriteLatency FreeableMemory; do
+    aws_ cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name "$m" \
+      --dimensions Name=DBInstanceIdentifier,Value=velox-bench-db \
+      --start-time "$start" --end-time "$end" --period 60 --statistics Average Maximum \
+      > "$RESULTS/$tag.rds.$m.json" 2>/dev/null || { info "cloudwatch RDS/$m capture failed (non-fatal)"; rm -f "$RESULTS/$tag.rds.$m.json"; }
+  done
+  if [ -n "${APP_INSTANCE_ID:-}" ]; then
+    aws_ cloudwatch get-metric-statistics --namespace AWS/EC2 --metric-name CPUUtilization \
+      --dimensions Name=InstanceId,Value="$APP_INSTANCE_ID" \
+      --start-time "$start" --end-time "$end" --period 60 --statistics Average Maximum \
+      > "$RESULTS/$tag.app.CPUUtilization.json" 2>/dev/null || { info "cloudwatch EC2 capture failed (non-fatal)"; rm -f "$RESULTS/$tag.app.CPUUtilization.json"; }
+  fi
+}
+
 rows() { app_sh "psql '$ADMIN_DSN' -qtA -c \"SELECT count(*) FROM usage_events WHERE tenant_id='vlx_ten_bench'\"" | tr -d '[:space:]'; }
 qsum() { app_sh "psql '$ADMIN_DSN' -qtA -c \"SELECT COALESCE(sum(quantity),0)::bigint FROM usage_events WHERE tenant_id='vlx_ten_bench'\"" | tr -d '[:space:]'; }
 # The table a run writes into is part of the measurement — index maintenance
@@ -128,15 +163,34 @@ one_run() {
   local rate=$1 batch=$2 dur=$3 tag=$4
   local before after qbefore qafter out claimed evs p50 p99 dropped
   before=$(rows); qbefore=$(qsum)
-  gen_sh "k6 run --quiet --summary-export /tmp/k6-$tag.json \
+  local t_start t_end
+  t_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # On-box CPU/iowait/run-queue at 5 s, for the WHOLE run. This is where the
+  # app node's CPU comes from: EC2 basic CloudWatch monitoring publishes at
+  # 5-minute intervals, which is one point for a 90 s run or none. vmstat is
+  # in procps on AL2023; hosts without it (macOS) simply skip.
+  [ "$CAPTURE" = "1" ] && app_sh "command -v vmstat >/dev/null && (nohup vmstat -t 5 > /tmp/vmstat-$tag.log 2>&1 & echo \$! > /tmp/vmstat-$tag.pid) || true" >/dev/null 2>&1
+  local outflag=""
+  [ "$CAPTURE" = "1" ] && outflag="--out json=/tmp/k6-$tag.samples.jsonl.gz"
+  gen_sh "k6 run --quiet --summary-export /tmp/k6-$tag.json $outflag \
     -e BASE=$BASE -e API_KEY=$API_KEY -e CUSTOMERS=$CUSTOMERS \
     -e CUSTOMER_PREFIX=$CUSTOMER_PREFIX -e CUSTOMER_ID_PREFIX=$CUSTOMER_ID_PREFIX \
     -e RATE=$rate -e BATCH=$batch -e DURATION=$dur -e MODE=$K6_MODE ${VUS:+-e VUS=$VUS} \
     -e P99_MS=$P99_MS -e PROBE_RATE=$PROBE_RATE -e PROBE_P99_MS=$PROBE_P99_MS \
     $SCRIPT_PATH" > "$RESULTS/$tag.txt" 2>&1
   local rc=$?
+  t_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ "$CAPTURE" = "1" ]; then
+    app_sh "[ -f /tmp/vmstat-$tag.pid ] && kill \$(cat /tmp/vmstat-$tag.pid) 2>/dev/null; true" >/dev/null 2>&1
+    app_sh "cat /tmp/vmstat-$tag.log 2>/dev/null" > "$RESULTS/$tag.app.vmstat.log" 2>/dev/null || true
+    [ -s "$RESULTS/$tag.app.vmstat.log" ] || rm -f "$RESULTS/$tag.app.vmstat.log"
+  fi
   after=$(rows); qafter=$(qsum)
   gen_sh "cat /tmp/k6-$tag.json" > "$RESULTS/$tag.k6.json" 2>/dev/null || true
+  if [ "$CAPTURE" = "1" ]; then
+    gen_sh "cat /tmp/k6-$tag.samples.jsonl.gz" > "$RESULTS/$tag.samples.jsonl.gz" 2>/dev/null || true
+    capture_cloudwatch "$tag" "$t_start" "$t_end"
+  fi
   out=$(cat "$RESULTS/$tag.txt")
   claimed=$(printf '%s' "$out" | sed -n 's/^events ingested *\([0-9]*\).*/\1/p' | head -1)
   evs=$(printf '%s' "$out"     | sed -n 's/^events\/sec *\([0-9]*\).*/\1/p' | head -1)

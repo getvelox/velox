@@ -142,7 +142,7 @@ FAIL=0
 # had all failed still advertised itself as provisioned.
 run() { local log=$1; shift; "$@" >"$log" 2>&1 || { echo "FAILED: $* (see $log)" >>/tmp/failures.log; FAIL=1; }; }
 
-run /tmp/install.log dnf install -y git golang postgresql16 postgresql16-contrib docker tar gzip   # -contrib = pgbench, for db-ceiling.sh
+run /tmp/install.log dnf install -y git golang postgresql16 postgresql16-contrib docker tar gzip procps-ng   # -contrib = pgbench (db-ceiling.sh); procps-ng = vmstat (measure.sh capture)
 run /tmp/docker.log systemctl enable --now docker
 cd /opt || exit 1
 run /tmp/clone.log git clone --depth 1 --branch __BRANCH__ https://github.com/getvelox/velox.git
@@ -203,6 +203,9 @@ UD
 # The single intentional local substitution — see the note above the heredoc.
 USERDATA=${USERDATA//__BRANCH__/$BRANCH}
 
+# --monitoring Enabled = EC2 detailed monitoring: 1-minute CloudWatch CPU points
+# instead of 5-minute, so measure.sh's capture has more than one point per run.
+# ~$0.003/hr per instance; the on-box vmstat sampler is still the primary source.
 launch() {
   local name="$1" type="$2"
   if [ -n "$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
@@ -212,6 +215,7 @@ launch() {
   aws_ ec2 run-instances --image-id "$AMI" --instance-type "$type" --count 1 \
     --key-name velox-bench-key --security-group-ids "$SG" --subnet-id "$SUBNET" \
     --associate-public-ip-address \
+    --monitoring Enabled \
     --user-data "$USERDATA" \
     --tag-specifications "ResourceType=instance,Tags=[{$TAGS},{Key=Name,Value=$name}]" \
     --query 'Instances[0].InstanceId' --output text

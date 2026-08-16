@@ -162,13 +162,19 @@ the lever, and batching is what did it.
 - **Single-node Postgres**, no replica, no pooler, Single-AZ.
 - **10-minute soak, not 60.** Long enough for autovacuum and checkpoints to
   appear; not long enough for multi-hour effects.
-- **No time-series sink.** k6 can stream to Prometheus/InfluxDB and Grafana has
-  a stock k6 dashboard; the rig deliberately does not depend on one, because a
-  dashboard is for a human watching and cannot fail a run. What a dashboard
-  would show — latency drifting during the run — is instead measured by
-  tagging each request with the third of the run it fell in and comparing the
-  thirds' p99, which IS a gate. Point Grafana at `--out` if you want to watch a
-  soak; it is not part of the protocol.
+- **No dashboard in the loop, but the evidence is captured.** A dashboard is
+  for a human watching and cannot fail a run, so the rig does not depend on
+  one; what a dashboard would show — latency drifting during the run — is
+  measured by tagging each request with the third of the run it fell in and
+  gating on the thirds' p99. What the gate cannot say is *why* a run failed,
+  so every run also leaves files in its results directory: the raw k6 sample
+  stream (`*.samples.jsonl.gz`), a 5-second `vmstat` from the app node
+  (`*.app.vmstat.log` — the real app-CPU source; EC2 basic CloudWatch is
+  5-minute granularity), and the RDS CloudWatch series over the run's window
+  (`*.rds.*.json`, 60 s — the only RDS view without an IAM role the bench
+  policy denies). The claim "RDS at 88% CPU with app headroom" used to be
+  something someone read off a console; now it is a file next to the number.
+  Load them into Grafana if you want a picture; the verdict never depends on it.
 
 ## Reproducing
 
