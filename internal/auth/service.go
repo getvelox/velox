@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -23,10 +25,52 @@ const (
 
 type Service struct {
 	store Store
+
+	// lastTouched debounces the last_used_at write per key: unix-nano of the
+	// last touch this process issued, keyed by api key id. See touchLastUsed.
+	lastTouched sync.Map // map[string]*atomic.Int64
+	// touchInterval is how often, per key, last_used_at is written. A field
+	// so tests can shorten it; production uses lastUsedTouchInterval.
+	touchInterval time.Duration
+	// now is the clock, injectable for the debounce tests.
+	now func() time.Time
 }
 
+// lastUsedTouchInterval: last_used_at is written at most once per key per this
+// interval. The column feeds "Last used 3 minutes ago" on the API-keys page
+// and nothing else — no auth decision reads it — so minute granularity is fine.
+//
+// Why it is not written on every request: it used to be, from a fire-and-forget
+// goroutine per request, and on the AWS benchmark rig that was THE ceiling for
+// a single API key. Every request updated the SAME row; a row lock hands off at
+// about one round trip (~1.75 ms same-AZ), so one key could not exceed ~570
+// requests/s on any hardware, more connections only added waiters, and
+// pg_stat_activity sampled mid-run showed 50-55 of 61 backends waiting on
+// `UPDATE api_keys SET last_used_at`. Issue #818.
+const lastUsedTouchInterval = time.Minute
+
 func NewService(store Store) *Service {
-	return &Service{store: store}
+	return &Service{store: store, touchInterval: lastUsedTouchInterval, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// touchLastUsed writes last_used_at for key id at most once per touchInterval
+// per process, and returns whether it issued the write. Exactly one caller wins
+// a given interval even under a concurrent burst: the per-key timestamp is
+// advanced with a compare-and-swap, so N simultaneous requests produce one
+// UPDATE, not N goroutines queueing on one row.
+func (s *Service) touchLastUsed(id string) bool {
+	nowNs := s.now().UnixNano()
+	v, _ := s.lastTouched.LoadOrStore(id, new(atomic.Int64))
+	last := v.(*atomic.Int64)
+	prev := last.Load()
+	if prev != 0 && nowNs-prev < int64(s.touchInterval) {
+		return false
+	}
+	if !last.CompareAndSwap(prev, nowNs) {
+		return false // another request in this instant won the interval
+	}
+	go func() { _ = s.store.TouchLastUsed(context.Background(), id, time.Unix(0, nowNs).UTC()) }()
+	return true
 }
 
 // CreateKeyResult contains the key record + raw key (shown once).
@@ -212,8 +256,8 @@ func (s *Service) ValidateKey(ctx context.Context, rawKey string) (domain.APIKey
 		return domain.APIKey{}, fmt.Errorf("api key expired: %w", ErrInvalidKey)
 	}
 
-	// Touch last used (async, fire and forget)
-	go func() { _ = s.store.TouchLastUsed(context.Background(), key.ID, time.Now().UTC()) }()
+	// Touch last used — debounced, at most once per key per interval (#818).
+	s.touchLastUsed(key.ID)
 
 	return key, nil
 }
