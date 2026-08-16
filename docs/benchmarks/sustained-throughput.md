@@ -118,12 +118,15 @@ the lever, and batching is what did it.
   computing identical due times from slot 0, firing as a synchronised burst
   rather than a staggered stream. The mean rate was correct, so it went
   unnoticed; the self-inflicted queueing was counted as Velox's latency. Fixing
-  it moved the measured median from 24.8 ms to 6.1 ms. **The rate-controlled
-  latencies above are therefore pessimistic**, not optimistic — wrong in the
-  safe direction, but wrong. The hand-rolled generator has since been deleted
-  in favour of k6's `constant-arrival-rate` executor, which gets scheduling and
-  coordinated omission right by construction; the numbers above predate that
-  swap.
+  it moved the measured median from 24.8 ms to 6.1 ms — but **that fix was a
+  scratch experiment and was never committed**, so every figure on this page
+  was produced by the bursting build. **The rate-controlled latencies above are
+  therefore pessimistic**, not optimistic — wrong in the safe direction, but
+  wrong. The hand-rolled generator has since been deleted entirely in favour of
+  k6's `constant-arrival-rate` executor, which cannot have that bug: there is
+  one central schedule rather than a per-worker one. k6 has not yet been run on
+  this rig, so re-measuring is the way to replace these numbers rather than
+  merely caveat them.
 - **No nginx.** `deploy/compose` puts nginx in front of the app; this measured
   the app container directly, one hop fewer.
 - **Single-node Postgres**, no replica, no pooler, Single-AZ.
