@@ -180,32 +180,28 @@ the lever, and batching is what did it.
 
 ```bash
 cd scripts/bench-rig
+./run.sh                 # the whole thing: calibrate -> clean-check -> provision
+                         # -> watchdog -> bringup -> seed 20M -> SUSTAINED protocol
+                         # -> closed-loop ceiling -> pgbench denominator -> teardown.
+                         # Stops at the first step that fails; one log in
+                         # ~/.velox-bench-rig/run-<timestamp>.log, readable while
+                         # it runs. KEEP=1 leaves the rig up (billing).
+```
 
-# 0. prove the instrument and the account, at no cost
-./calibrate/calibrate.sh          # must print CALIBRATED (six cases)
-./teardown.sh --check             # exit 0 = clean; 2 = COULD NOT LOOK (never "clean")
+`run.sh` only sequences the scripts below; each is runnable on its own, and
+that is how a failed step is re-run:
 
-# 1. hardware — billing starts here
-./provision.sh --yes              # small rig; APP_TYPE/GEN_TYPE/DB_CLASS for the larger one
-( nohup ./watchdog.sh 240 >/tmp/velox-rig-watchdog.log 2>&1 & )   # force teardown at 4h
-
-# 2. hardware -> a running, seeded, verified velox (live mode, 200 customers)
-./bringup.sh                      # waits for RDS + build; refuses cross-AZ, dirty schema,
-                                  # admin-pool fallback, or a 201 that wrote no row
-
-# 3. a table with history (optional but recommended; runs itself on the app node)
-TARGET=aws ./seed-history.sh 20000000
-
-# 4. THE PROTOCOL — every repeat gated; latency medians over passing runs;
-#    evidence files per run. SUSTAINED=1 is what "sustained" means on this page.
+```bash
+./calibrate/calibrate.sh          # 0. instrument: must print CALIBRATED (six cases)
+./teardown.sh --check             #    account: exit 0 = clean; 2 = COULD NOT LOOK
+./provision.sh --yes              # 1. hardware — billing starts here
+( nohup ./watchdog.sh 240 >/tmp/velox-rig-watchdog.log 2>&1 & )
+./bringup.sh                      # 2. running, seeded (live mode, 200 customers), verified
+TARGET=aws ./seed-history.sh 20000000            # 3. history, into the fixtures' partition
 TARGET=aws SUSTAINED=1 CONFIGS="single:200:1 batched:1000:10" PROBE_RATE=5 ./measure.sh
-TARGET=aws K6_MODE=max VUS=16 CONFIGS="ceiling:0:500" DURATION=90s ./measure.sh   # closed-loop ceiling
-
-# 5. the denominator (runs itself on the app node); use the ev/s measure.sh reported
-TARGET=aws BATCH=10 VELOX_EVS=<measured> ./db-ceiling.sh
-
-# 6. done — and verify it says CLEAN
-./teardown.sh
+TARGET=aws K6_MODE=max VUS=16 CONFIGS="ceiling:0:500" DURATION=90s ./measure.sh
+TARGET=aws BATCH=500 VELOX_EVS=<ceiling ev/s> ./db-ceiling.sh   # 5. denominator
+./teardown.sh                     # 6. must end CLEAN
 ```
 
 `db-ceiling.sh` is the control every Velox throughput figure had been missing:

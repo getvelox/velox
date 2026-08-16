@@ -172,7 +172,10 @@ one_run() {
   [ "$CAPTURE" = "1" ] && app_sh "command -v vmstat >/dev/null && (nohup vmstat -t 5 > /tmp/vmstat-$tag.log 2>&1 & echo \$! > /tmp/vmstat-$tag.pid) || true" >/dev/null 2>&1
   local outflag=""
   [ "$CAPTURE" = "1" ] && outflag="--out json=/tmp/k6-$tag.samples.jsonl.gz"
-  gen_sh "k6 run --quiet --summary-export /tmp/k6-$tag.json $outflag \
+  # env -u: k6 exposes the process environment in __ENV, so a knob exported by
+  # whoever launched this (VUS, MODE, ...) that we did NOT pass explicitly would
+  # silently reconfigure the run. Everything ingest.js reads is passed with -e.
+  gen_sh "env -u VUS -u MODE -u PROBE_RATE -u P99_MS -u RUN_ID -u CUSTOMER_ID k6 run --quiet --summary-export /tmp/k6-$tag.json $outflag \
     -e BASE=$BASE -e API_KEY=$API_KEY -e CUSTOMERS=$CUSTOMERS \
     -e CUSTOMER_PREFIX=$CUSTOMER_PREFIX -e CUSTOMER_ID_PREFIX=$CUSTOMER_ID_PREFIX \
     -e RATE=$rate -e BATCH=$batch -e DURATION=$dur -e MODE=$K6_MODE ${VUS:+-e VUS=$VUS} \

@@ -134,6 +134,10 @@ func main() {
 	}
 	http.HandleFunc("/v1/usage-events/batch", h(true))
 	http.HandleFunc("/v1/usage-events", h(false))
+	// Identity check for calibrate.sh's start_stub: proves the process answering
+	// on the port is the one just launched, not a stale stub from an earlier run.
+	stubID := os.Getenv("STUB_ID")
+	http.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, stubID) })
 	http.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"events":%d,"requests":%d,"rejected":%d,"duplicates":%d}`,
 			atomic.LoadInt64(&events), atomic.LoadInt64(&requests), atomic.LoadInt64(&rejected), atomic.LoadInt64(&duplicates))
