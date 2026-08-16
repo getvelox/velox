@@ -215,7 +215,7 @@ launch() {
   aws_ ec2 run-instances --image-id "$AMI" --instance-type "$type" --count 1 \
     --key-name velox-bench-key --security-group-ids "$SG" --subnet-id "$SUBNET" \
     --associate-public-ip-address \
-    --monitoring Enabled \
+    --monitoring Enabled=true \
     --user-data "$USERDATA" \
     --tag-specifications "ResourceType=instance,Tags=[{$TAGS},{Key=Name,Value=$name}]" \
     --query 'Instances[0].InstanceId' --output text

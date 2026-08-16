@@ -86,18 +86,15 @@ while [ "$done_rows" -lt "$ROWS" ]; do
            ),
            now() - (random() * interval '30 days')
     FROM generate_series(1, $n) g
-    -- The LATERAL subqueries MUST reference g. An UNCORRELATED lateral is
-    -- evaluated ONCE per query, not once per row, so the earlier form picked a
-    -- single random customer and gave it the entire 2M-row chunk — exactly the
-    -- one-hot-edge shape the header of this file says it avoids. Measured: 5,000
-    -- generated rows landed on 1 distinct customer of 51; with the correlation,
-    -- 51. The AWS run's 5M seeded rows therefore sat on ~3 customers, not spread.
-    CROSS JOIN LATERAL (
-      SELECT id FROM customers WHERE tenant_id='vlx_ten_bench' AND g.g = g.g ORDER BY random() LIMIT 1
-    ) c
-    CROSS JOIN LATERAL (
-      SELECT id FROM meters WHERE tenant_id='vlx_ten_bench' AND g.g = g.g ORDER BY random() LIMIT 1
-    ) m;"
+    -- Customer and meter ids are picked from arrays built ONCE per statement
+    -- and indexed by random(): O(1) per row. The previous form was a correlated
+    -- LATERAL 'ORDER BY random() LIMIT 1' per row — a 200-row sort for every one
+    -- of 2M rows, ~8 minutes per chunk on RDS. (Its uncorrelated predecessor was
+    -- worse: evaluated once per statement, it put every chunk on ONE customer.)
+    CROSS JOIN (SELECT array_agg(id) AS ids FROM customers WHERE tenant_id='vlx_ten_bench') ca
+    CROSS JOIN (SELECT array_agg(id) AS ids FROM meters    WHERE tenant_id='vlx_ten_bench') ma
+    CROSS JOIN LATERAL (SELECT ca.ids[1 + floor(random() * array_length(ca.ids, 1))::int] AS id WHERE g.g = g.g) c
+    CROSS JOIN LATERAL (SELECT ma.ids[1 + floor(random() * array_length(ma.ids, 1))::int] AS id WHERE g.g = g.g) m;"
   done_rows=$(( done_rows + n ))
   echo "  $done_rows / $ROWS"
 done

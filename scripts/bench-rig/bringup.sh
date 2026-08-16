@@ -173,13 +173,16 @@ info "velox_app can read post-migration tables"
 
 # ---------------------------------------------------------------------------
 say "starting velox ($APP_RUNTIME)"
-app_sh "pkill -f 'velox$' 2>/dev/null; docker rm -f velox-bench 2>/dev/null; true" >/dev/null 2>&1 || true
+# `sudo docker`: on AL2023 ec2-user is not in the docker group, and the first
+# real bring-up sat for minutes polling /health after `docker run` had failed
+# with "permission denied" into a discarded stderr. sudo needs no group.
+app_sh "pkill -f 'velox$' 2>/dev/null; sudo docker rm -f velox-bench 2>/dev/null; true" >/dev/null 2>&1 || true
 if [ "$APP_RUNTIME" = "container" ]; then
-  app_sh "docker run -d --name velox-bench --network host \
+  app_sh "sudo docker run -d --name velox-bench --network host \
     -e ENV=production -e PORT=$APP_PORT -e LOG_LEVEL=$LOG_LEVEL \
     -e DATABASE_URL='$ADMIN_DSN' -e APP_DATABASE_URL='$APP_DSN' \
     ${DB_MAX_OPEN_CONNS:+-e DB_MAX_OPEN_CONNS=$DB_MAX_OPEN_CONNS} \
-    velox:bench" >/dev/null
+    velox:bench" >/dev/null || die "docker run failed on the app node (see above)"
 else
   app_sh "ENV=production PORT=$APP_PORT LOG_LEVEL=$LOG_LEVEL \
     DATABASE_URL='$ADMIN_DSN' APP_DATABASE_URL='$APP_DSN' \
@@ -192,7 +195,7 @@ for _ in $(seq 1 40); do
   sleep 3
 done
 app_sh "curl -sf $BASE_URL/health >/dev/null" 2>/dev/null || {
-  if [ "$APP_RUNTIME" = "container" ]; then app_sh "docker logs --tail 30 velox-bench" 2>&1 | sed 's/^/     /'
+  if [ "$APP_RUNTIME" = "container" ]; then app_sh "sudo docker logs --tail 30 velox-bench" 2>&1 | sed 's/^/     /'
   else app_sh "tail -30 /tmp/velox.log" 2>&1 | sed 's/^/     /'; fi
   die "velox never became healthy on $BASE_URL"
 }
@@ -200,7 +203,7 @@ info "velox healthy on $BASE_URL"
 
 # ADR-073: an app pool that fell back to admin means the request path runs
 # without RLS. The server logs it rather than refusing, so check for it.
-if [ "$APP_RUNTIME" = "container" ]; then applog=$(app_sh "docker logs velox-bench 2>&1" || true)
+if [ "$APP_RUNTIME" = "container" ]; then applog=$(app_sh "sudo docker logs velox-bench 2>&1" || true)
 else applog=$(app_sh "cat /tmp/velox.log" || true); fi
 case "$applog" in
   *"falling back to admin"*) die "velox fell back to the ADMIN pool — RLS is not enforced on the request path, so this would measure a configuration nobody ships" ;;
