@@ -45,15 +45,31 @@ command -v k6 >/dev/null || { echo "FATAL: k6 not installed"; exit 1; }
 go build -o "$STUB" "$HERE/stub.go" || { echo "FATAL: stub build failed"; exit 1; }
 trap 'pkill -f "$STUB" 2>/dev/null; rm -rf "$(dirname "$STUB")"' EXIT
 
+# Kill whatever is LISTENING ON THE PORT, not just this run's binary: the stub
+# lives at a fresh mktemp path every invocation, so a stub left behind by an
+# earlier run (a calibrate killed mid-pipeline before its EXIT trap fired) kept
+# port 8123, the new one failed to bind, and the OLD one — with a different
+# configuration — answered every request. Case 2 then counted 525 failures
+# against an expected 300, and a full run stopped at step 0 for it.
+kill_port() {
+  local pids
+  pids=$(lsof -ti "tcp:$PORT" 2>/dev/null || fuser "$PORT/tcp" 2>/dev/null)
+  [ -n "$pids" ] && { kill $pids 2>/dev/null; sleep 0.3; }
+  return 0
+}
 start_stub() {
-  pkill -f "$STUB" 2>/dev/null; sleep 0.3
-  env "$@" "$STUB" >/dev/null 2>&1 &
+  kill_port
+  pkill -f "$STUB" 2>/dev/null; sleep 0.2
+  # Each stub answers /whoami with the id it was started with, so we can prove
+  # the process answering is the one we just launched and not a stale one.
+  local id; id="calib-$$-$RANDOM"
+  env STUB_ID="$id" "$@" "$STUB" >/dev/null 2>&1 &
   disown 2>/dev/null || true
   for _ in $(seq 1 40); do
-    curl -sf "$BASE/count" >/dev/null 2>&1 && return 0
+    if [ "$(curl -sf "$BASE/whoami" 2>/dev/null)" = "$id" ]; then return 0; fi
     sleep 0.25
   done
-  echo "FATAL: stub never came up on $PORT"; exit 1
+  echo "FATAL: the stub answering on $PORT is not the one just started (stale process on the port?)"; exit 1
 }
 truth() { curl -s "$BASE/count"; }
 field() { python3 -c "import sys,json;print(json.load(sys.stdin)['$1'])"; }
@@ -71,8 +87,15 @@ check() { # label actual expected tolerance
 
 run_k6() { # rate batch duration [extra env args...]
   local rate=$1 batch=$2 dur=$3; shift 3
-  k6 run --quiet -e BASE="$BASE" -e API_KEY=calibration -e RATE="$rate" \
-    -e BATCH="$batch" -e DURATION="$dur" "$@" "$INGEST" 2>&1
+  # k6 exposes the PROCESS environment in __ENV, so any knob ingest.js reads
+  # (PROBE_RATE, VUS, MODE, P99_MS, CUSTOMERS, RUN_ID, ...) that happens to be
+  # exported by the caller silently reconfigures the calibration. run.sh
+  # exports PROBE_RATE=5 for the real measurement; here that turned the probe
+  # scenario ON against the stub and case 2 counted 225 extra 404s. Scrub them.
+  env -u PROBE_RATE -u PROBE_P99_MS -u VUS -u MODE -u P99_MS -u CUSTOMERS -u CUSTOMER_ID \
+      -u CUSTOMER_PREFIX -u CUSTOMER_ID_PREFIX -u RUN_ID -u EVENT -u RATE -u BATCH -u DURATION \
+    k6 run --quiet -e BASE="$BASE" -e API_KEY=calibration -e RATE="$rate" \
+      -e BATCH="$batch" -e DURATION="$dur" -e PROBE_RATE=0 -e MODE=rate "$@" "$INGEST" 2>&1
 }
 num() { grep -E "^$1" /tmp/k6calib.txt | grep -oE '[0-9.]+' | head -1; }
 # p50 needs its own parser: the summary line reads "latency p50/p99  20.3ms /

@@ -54,6 +54,14 @@ if [ "${ncust:-0}" -lt 2 ]; then
   echo "       run velox-bench-seed (BENCH_CUSTOMERS defaults to 200) before seeding history." >&2
   exit 1
 fi
+# Seed into the SAME partition the fixtures live in. velox-bench-seed defaults
+# to live mode now; an earlier version of this script hard-coded 'off' and
+# put 20M rows of "history" in the partition the bench key could never see.
+fixmode=$(psql "$DATABASE_URL" -qtA -c "SELECT CASE WHEN bool_and(livemode) THEN 'on' WHEN bool_and(NOT livemode) THEN 'off' ELSE 'mixed' END FROM customers WHERE tenant_id='vlx_ten_bench'")
+case "$fixmode" in on|off) ;; *) echo "FATAL: bench customers are in mixed livemodes ($fixmode) — re-seed" >&2; exit 1;; esac
+[ "$fixmode" = "on" ] && LM_BOOL=true || LM_BOOL=false
+echo "  livemode partition: $fixmode (matching the fixtures)"
+before_rows=$(psql "$DATABASE_URL" -qtA -c "SELECT count(*) FROM usage_events WHERE tenant_id='vlx_ten_bench' AND livemode=$LM_BOOL")
 
 done_rows=0
 while [ "$done_rows" -lt "$ROWS" ]; do
@@ -65,7 +73,7 @@ while [ "$done_rows" -lt "$ROWS" ]; do
   # this script seeded 5M rows into the wrong partition that way, and the
   # benchmark then measured a table it did not think it was measuring.
   # The SET must be in the same psql invocation as the INSERT to share a session.
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "SET app.livemode = 'off';
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "SET app.livemode = '$fixmode';
     INSERT INTO usage_events (tenant_id, customer_id, meter_id, quantity, properties, timestamp)
     SELECT 'vlx_ten_bench',
            c.id,
@@ -99,12 +107,14 @@ done
 # closer to a production table than a freshly rewritten one.
 # Verify the rows landed where intended. Trusting the SET without checking is
 # how the previous run produced a confidently-labelled wrong number.
-wrong=$(psql "$DATABASE_URL" -A -t -c "SELECT count(*) FROM usage_events WHERE livemode = true")
-if [ "${wrong:-0}" -gt 0 ]; then
-  echo "FAIL: $wrong rows landed in livemode=true; the app.livemode session GUC did not take" >&2
+after_rows=$(psql "$DATABASE_URL" -qtA -c "SELECT count(*) FROM usage_events WHERE tenant_id='vlx_ten_bench' AND livemode=$LM_BOOL")
+gained=$((after_rows - before_rows))
+if [ "$gained" -ne "$ROWS" ]; then
+  echo "FAIL: asked for $ROWS rows in livemode=$fixmode, the partition gained $gained — the app.livemode session GUC did not take, or rows went to the other partition" >&2
   exit 1
 fi
-echo "verified: all seeded rows are livemode=false"
+spread=$(psql "$DATABASE_URL" -qtA -c "SELECT count(DISTINCT customer_id) FROM usage_events WHERE tenant_id='vlx_ten_bench' AND livemode=$LM_BOOL AND idempotency_key IS NULL")
+echo "verified: $gained rows landed in livemode=$fixmode, spread over $spread customers"
 
 echo "analyzing"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "ANALYZE usage_events;"
