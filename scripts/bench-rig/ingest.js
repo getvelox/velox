@@ -51,6 +51,17 @@ const RATE = parseInt(__ENV.RATE || '200', 10)
 const DURATION = __ENV.DURATION || '60s'
 const P99_MS = parseInt(__ENV.P99_MS || '0', 10)
 const MODE = __ENV.MODE || 'rate'
+// Responsiveness probe. Set PROBE_RATE>0 to run a small INTERACTIVE workload
+// concurrently with the ingest load, with its own latency threshold.
+//
+// This is the half of the benchmark that a buyer actually experiences. Nobody
+// experiences "10,203 events/sec"; a finance team experiences whether the
+// invoice page loads on the 1st of the month while ingest is at peak. A
+// throughput number with no concurrent SLO on the read path is the number that
+// flatters the vendor, which is why it is the one vendors publish.
+const PROBE_RATE = parseInt(__ENV.PROBE_RATE || '0', 10)
+const PROBE_P99_MS = parseInt(__ENV.PROBE_P99_MS || '1000', 10)
+const CUSTOMER_ID = __ENV.CUSTOMER_ID || ''
 
 if (!BASE || !API_KEY) {
   throw new Error('BASE and API_KEY are required — run cmd/velox-bench-seed to obtain API_KEY')
@@ -80,37 +91,62 @@ const REQ_RATE = Math.max(1, Math.ceil(RATE / BATCH))
 // mode below it does, which is why VUS is the load there and must be chosen.
 const VUS = parseInt(__ENV.VUS || String(Math.min(512, Math.max(16, Math.ceil(REQ_RATE * 0.5)))), 10)
 
+// Built as a plain object rather than inline in `options`, because a spread
+// placed after the scenarios ternary lands at the TOP level of options — k6
+// rejects it with "unknown field: probe" rather than running one scenario.
+const scenarios = MODE === 'max'
+  ? {
+      ceiling: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+      },
+    }
+  : {
+      offered: {
+        executor: 'constant-arrival-rate',
+        rate: REQ_RATE,
+        timeUnit: '1s',
+        duration: DURATION,
+        preAllocatedVUs: VUS,
+        // A hard cap, deliberately. Letting k6 grow VUs without bound turns
+        // an overload into a slow-motion closed-loop run instead of the
+        // dropped_iterations signal that says "this rate was not sustained".
+        maxVUs: VUS * 4,
+      },
+    }
+
+if (PROBE_RATE > 0) {
+  scenarios.probe = {
+    executor: 'constant-arrival-rate',
+    exec: 'probe',
+    rate: PROBE_RATE,
+    timeUnit: '1s',
+    duration: DURATION,
+    preAllocatedVUs: Math.max(4, PROBE_RATE * 2),
+    maxVUs: Math.max(16, PROBE_RATE * 8),
+  }
+}
+
 export const options = {
   discardResponseBodies: true,
   // k6 computes p(90) and p(95) by default and NOTHING else — asking for
   // values.['p(99)'] without this line silently yields undefined, which prints
   // as a confident 0.0ms. The first run of this script did exactly that.
   summaryTrendStats: ['min', 'med', 'avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
-  scenarios: MODE === 'max'
-    ? {
-        ceiling: {
-          executor: 'constant-vus',
-          vus: VUS,
-          duration: DURATION,
-        },
-      }
-    : {
-        offered: {
-          executor: 'constant-arrival-rate',
-          rate: REQ_RATE,
-          timeUnit: '1s',
-          duration: DURATION,
-          preAllocatedVUs: VUS,
-          // A hard cap, deliberately. Letting k6 grow VUs without bound turns
-          // an overload into a slow-motion closed-loop run instead of the
-          // dropped_iterations signal that says "this rate was not sustained".
-          maxVUs: VUS * 4,
-        },
-      },
+  scenarios,
   thresholds: {
     // A run with errors is not a slower run, it is a different run. Fail it.
     http_req_failed: ['rate==0'],
     ...(P99_MS > 0 ? { http_req_duration: [`p(99)<${P99_MS}`] } : {}),
+    // Scoped to the probe scenario by k6's built-in `scenario` tag. Declaring
+    // the threshold is also what CREATES the sub-metric the summary reads.
+    // This is what makes the responsiveness claim falsifiable: if reads degrade
+    // past the budget under write load, the run FAILS rather than publishing a
+    // throughput number alongside an unusable product.
+    ...(PROBE_RATE > 0
+      ? { 'http_req_duration{scenario:probe}': [`p(99)<${PROBE_P99_MS}`] }
+      : {}),
   },
 }
 
@@ -171,6 +207,21 @@ export default function () {
   if (ok) eventsIngested.add(BATCH)
 }
 
+// The reads a human actually waits on. usage-summary is deliberately first and
+// weighted heaviest: it AGGREGATES the very table ingest is writing to, so it
+// is where write load shows up first.
+export function probe() {
+  const now = new Date()
+  const from = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString()
+  const to = now.toISOString()
+
+  if (CUSTOMER_ID) {
+    http.get(`${BASE}/v1/usage-summary/${CUSTOMER_ID}?from=${from}&to=${to}`, params)
+  }
+  http.get(`${BASE}/v1/invoices?limit=20`, params)
+  http.get(`${BASE}/v1/customers?limit=20`, params)
+}
+
 export function handleSummary(data) {
   const m = data.metrics
   const dropped = m.dropped_iterations ? m.dropped_iterations.values.count : 0
@@ -191,6 +242,13 @@ export function handleSummary(data) {
   // a rate with dropped iterations was NOT sustained, whatever its p99 says.
   if (MODE === 'rate') {
     lines.push(`dropped           ${dropped}${dropped > 0 ? '  <-- RATE NOT SUSTAINED' : ''}`)
+  }
+  if (PROBE_RATE > 0) {
+    const pd = (m['http_req_duration{scenario:probe}'] || {}).values || {}
+    lines.push('')
+    lines.push(`READ PROBE (concurrent, ${PROBE_RATE}/s)`)
+    lines.push(`  p50/p99        ${(pd['p(50)'] || 0).toFixed(1)}ms / ${(pd['p(99)'] || 0).toFixed(1)}ms  (budget p99 < ${PROBE_P99_MS}ms)`)
+    lines.push(`  verdict        ${(pd['p(99)'] || 0) < PROBE_P99_MS ? 'RESPONSIVE under load' : 'DEGRADED — read path missed its budget'}`)
   }
   lines.push('')
 

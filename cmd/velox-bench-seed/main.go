@@ -14,7 +14,8 @@
 //
 // Prints a JSON object to stdout:
 //
-//	{"api_key":"vlx_test_…","external_customer_id":"bench-customer","event_name":"bench_tokens"}
+//	{"api_key":"vlx_…","external_customer_id":"bench-customer",
+//	 "event_name":"bench_tokens","customer_id":"vlx_cus_bench"}
 //
 // Idempotent — safe to re-run. The fixtures are test-mode (livemode=false),
 // so a key minted here authenticates into the same partition the fixtures
@@ -59,7 +60,19 @@ func main() {
 	defer func() { _ = pool.Close() }()
 
 	db := postgres.NewDB(pool, 30*time.Second)
-	ctx := context.Background()
+
+	// The livemode MUST be set explicitly. `customers` and `meters` carry the
+	// same set_livemode trigger as usage_events: it overwrites whatever the
+	// INSERT supplied from the app.livemode session GUC, and BeginTx documents
+	// that an unset value means "defaulting to live". So passing livemode=false
+	// in the INSERT is not enough — a bare context produced LIVE-mode fixtures
+	// alongside a TEST-mode key, and every ingest answered
+	// `customer "bench-customer" not found`.
+	//
+	// This is invisible on a database that already holds correct fixtures,
+	// because the INSERTs are ON CONFLICT DO UPDATE. It only appears on a fresh
+	// one — which is exactly what a benchmark rig provisions.
+	ctx := postgres.WithLivemode(context.Background(), false)
 
 	bootstrapFixtures(ctx, db)
 
@@ -67,6 +80,10 @@ func main() {
 		"api_key":              mintBenchAPIKey(ctx, db),
 		"external_customer_id": benchCustomerExternalID,
 		"event_name":           benchMeterKey,
+		// The INTERNAL id, which /v1/usage-summary/{id} is keyed by. The
+		// responsiveness probe reads that endpoint while ingest runs, and it
+		// cannot construct the id from the external one.
+		"customer_id": benchCustomer,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		log.Fatalf("write credentials: %v", err)
