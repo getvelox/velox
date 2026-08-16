@@ -61,17 +61,9 @@ func main() {
 
 	db := postgres.NewDB(pool, 30*time.Second)
 
-	// The livemode MUST be set explicitly. `customers` and `meters` carry the
-	// same set_livemode trigger as usage_events: it overwrites whatever the
-	// INSERT supplied from the app.livemode session GUC, and BeginTx documents
-	// that an unset value means "defaulting to live". So passing livemode=false
-	// in the INSERT is not enough — a bare context produced LIVE-mode fixtures
-	// alongside a TEST-mode key, and every ingest answered
-	// `customer "bench-customer" not found`.
-	//
-	// This is invisible on a database that already holds correct fixtures,
-	// because the INSERTs are ON CONFLICT DO UPDATE. It only appears on a fresh
-	// one — which is exactly what a benchmark rig provisions.
+	// WithLivemode is required by the key-minting path below (auth opens a
+	// TxTenant, which reads it). It does NOT reach the fixture INSERTs — see
+	// the note in bootstrapFixtures.
 	ctx := postgres.WithLivemode(context.Background(), false)
 
 	bootstrapFixtures(ctx, db)
@@ -99,6 +91,26 @@ func bootstrapFixtures(ctx context.Context, db *postgres.DB) {
 		log.Fatalf("begin bootstrap: %v", err)
 	}
 	defer postgres.Rollback(tx)
+
+	// app.livemode MUST be set on this transaction explicitly.
+	//
+	// `customers` and `meters` carry the same BEFORE INSERT set_livemode
+	// trigger as usage_events: it overwrites whatever the INSERT supplied,
+	// reading the app.livemode GUC, which defaults to LIVE when unset. And
+	// BeginTx sets that GUC only for TxTenant — the TxBypass branch sets
+	// app.bypass_rls and nothing else. So postgres.WithLivemode on the context
+	// is silently INERT here, and the fixtures land live-mode next to a
+	// test-mode key, after which every ingest answers 422
+	// `customer "bench-customer" not found`.
+	//
+	// Two things conspire to hide it. The trigger is INSERT-only, so the
+	// ON CONFLICT DO UPDATE path below writes livemode=false correctly — which
+	// means a SECOND run against the same database repairs it and looks fine.
+	// A fresh database is the only one that shows the bug, and a fresh database
+	// is exactly what a benchmark rig provisions.
+	if _, err = tx.ExecContext(ctx, `SELECT set_config('app.livemode', 'off', true)`); err != nil {
+		log.Fatalf("set livemode on bootstrap tx: %v", err)
+	}
 
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO tenants (id, name, status) VALUES ($1, 'velox-bench', 'active')
