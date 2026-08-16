@@ -11,22 +11,37 @@ availability zone · **Reproduce:** `scripts/bench-rig/`
 
 ## The headline
 
-| Configuration | Sustained | Notes |
-|---|---:|---|
-| Single event per request | **200/s** | p99 119 ms; the wrong way to use the API at volume |
-| Batched (10/request) | **1,000/s** | p99 269 ms; 10-min soak, 600,030 events, **0 errors** |
-| Batched (500/request), larger DB | **10,203/s** | 90 s, 925,000 events, **0 errors** |
+Two kinds of number, and they are not the same kind:
 
-> **These three figures are each n=1**, taken before `measure.sh` existed, and
-> their event counts come from the load generator's own counter rather than from
-> the database. The protocol now runs a discarded warmup, repeats each
-> configuration, publishes a median with its spread, and **reconciles every run
-> against `usage_events`** — a run whose rows disagree with the client's count
-> exits non-zero and cannot be published. Re-measuring under that protocol is
-> what will replace the numbers below.
+**Rate-controlled (open loop — the only rows whose latency is an SLO)**
+
+| Configuration | Held | Notes |
+|---|---:|---|
+| Single event per request | **200/s** | p99 119 ms; **did not hold** once indexes grew (below); the wrong way to use the API at volume |
+| Batched (10/request) | **1,000/s** | p99 269 ms; 10-min soak, 600,030 events, **0 errors** |
+
+**Ceiling (closed loop — 16 workers sending as fast as responses return; a maximum, never a service level)**
+
+| Configuration | Reached | Notes |
+|---|---:|---|
+| Batched (500/request), `db.m7g.2xlarge` | **10,203/s** | 90 s, 925,000 events, **0 errors**; p50 ~800 ms at that point; a sister run reached 10,817 |
+
+> **What every row above shares, stated once:** each is a **single run** (n=1);
+> the event count is the load generator's own counter, not a database count; the
+> generator has since been deleted for a pacing bug (direction: pessimistic); the
+> fixtures were **one tenant, one customer, one meter**; and the run used the
+> **test-mode** ingest path, which does one extra per-event lookup that the
+> production (live-mode) path skips — so production does strictly less work per
+> event than was measured here. The protocol that replaces these numbers
+> (`measure.sh`, below) runs live mode by default, fans out over 200 customers,
+> repeats each configuration, publishes latency medians with spread, and refuses
+> to report a run whose rows do not match what the client claimed.
 
 **Cost at 10k events/sec: ~$1.16/hr** (`c7g.2xlarge` app + `db.m7g.2xlarge`),
-which is **$0.032 per million events**. For comparison, Stripe Billing's 0.5%
+which is **$0.032 per million events** — app and database **compute only**,
+on-demand `ap-south-1`, at the closed-loop ceiling (100% utilisation); storage,
+the load generator, backups and Multi-AZ are excluded. At the rate-controlled
+1,000/s on the same hardware the same arithmetic gives ~10x that per million. For comparison, Stripe Billing's 0.5%
 would cost the same only if a million metered events represented $6.29 of
 revenue.
 
@@ -52,14 +67,21 @@ Nothing was CPU-bound. At 400 ev/s the app node was **54% idle** and the load
 generator **98% idle**. The limit is round trips:
 
 - **1.04 ms** per round trip to RDS *in the same availability zone*
-- **~12 round trips per ingested event** — customer resolve, meter resolve,
-  insert, each its own transaction, plus three `set_config` calls per
-  transaction for row-level security
-- → a **12.2 ms floor per event**, measured at a rate low enough to have no
-  queueing at all
+- **~26 database statements per single-event request on the production
+  path, ~32 on the test-mode path** the published runs used — auth, customer
+  resolve, meter resolve and the insert each open a transaction of their own
+  (BEGIN, three `set_config` calls for row-level security, the query, COMMIT),
+  plus a `last_used_at` touch. Measured with `log_statement=all` against an
+  idle control, not counted from the code. An earlier version of this page said
+  "~12 round trips"; that figure did not describe the code, and its
+  arithmetic (`12 × 1.04 ms`) only coincidentally landed near the floor below.
+- → a **12.2 ms floor per event**, **measured** at a rate low enough to have no
+  queueing at all. Treat that as the measurement; the statement count above is
+  the explanation of its order of magnitude, not a derivation of it.
 
 Batching amortises those round trips and nothing else does: at batch=10 the
-per-event cost fell to **4.2 ms**.
+per-event cost fell to **4.2 ms**, and the statement count falls to **~3.4 per
+event** (~34 per batch of 10, measured the same way).
 
 Write amplification compounds it. `usage_events` carries five indexes including
 a GIN over the `properties` JSONB; at 5.6M rows those indexes were **1,472 MB
@@ -98,7 +120,7 @@ the lesson.
 
 | Laptop finding | Held on real hardware? |
 |---|---|
-| COMMIT is 66% of in-database time, INSERT 28% | **Yes** — a property of the code |
+| COMMIT is 66% of in-database time, INSERT 28% | **Not re-measured on RDS.** Expected to hold — it is a property of commits-per-event, which batching changes and the network does not — but the statement-level split was only ever taken on the laptop |
 | Batch curve flattens after ~50 | **Shape yes** |
 | HTTP costs ~2× in-process p50 | **Roughly** |
 | **1,800 ev/s at p99 ≤ 50 ms** | **No — about 9× optimistic** |
@@ -158,23 +180,29 @@ cd scripts/bench-rig
                                # APP_TYPE / GEN_TYPE / DB_CLASS for the larger rig
 ( nohup ./watchdog.sh 240 & )  # force teardown after 4h if the driver dies
 
-./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats,
-                               # median + spread, and RECONCILIATION of every
-                               # run against the database. Exits non-zero if the
-                               # rows do not match what the client claims.
+./bringup.sh                   # hardware -> a RUNNING, SEEDED, VERIFIED velox
+                               # (LIVE-mode fixtures, 200 customers by default;
+                               # BENCH_LIVEMODE=false / BENCH_CUSTOMERS=n to change)
 
-./bringup.sh                   # hardware -> a RUNNING, SEEDED, VERIFIED velox:
-                               # waits for RDS, creates the database and the
-                               # least-privilege velox_app role (with default
-                               # privileges, BEFORE migrating), migrates, starts
-                               # the container, and ingests one event to prove a
-                               # row actually lands. Prints the k6 command.
+DATABASE_URL=... ./seed-history.sh 20000000
+                               # OPTIONAL but recommended: a table with history,
+                               # spread across the seeded customers. Without it
+                               # the runs measure an EMPTY table — the optimistic
+                               # case. measure.sh records the table size before
+                               # every run either way, so a reader can tell.
+
+./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats,
+                               # latency medians with spread over PASSING runs,
+                               # every run gated on: k6 exit 0, no drops, no
+                               # failures, claimed > 0, claimed == rows written.
 
 ./teardown.sh                  # and verify it prints CLEAN
 ```
 
-`bringup.sh` exists because provisioning hardware is not the same as having
-something to measure. It refuses to continue on any of the failures that used to
+`measure.sh` exits non-zero if **any repeat of any configuration** fails its
+gate, and a configuration is only reported as held at a rate when every repeat
+passed. `bringup.sh` exists because provisioning hardware is not the same as
+having something to measure. It refuses to continue on any of the failures that used to
 be silent: a cross-AZ RDS, a dirty schema, an app role that cannot read the
 tables the migration just created, a server that fell back to the **admin** pool
 (which would measure a configuration with no RLS on the request path, which
@@ -194,14 +222,18 @@ k6 run -e BASE=http://<app-private-ip>:8080 -e API_KEY=... -e CUSTOMER_ID=... \
 ```
 
 `PROBE_RATE` adds a second, concurrent scenario that reads what a human waits
-on — `usage-summary` (which aggregates the very table being written),
-the invoice list, the customer list — and `PROBE_P99_MS` is a **threshold**, so
-a run whose read path degrades under write load **exits non-zero** instead of
-publishing a throughput figure beside an unusable product.
+on — `usage-summary` for a random customer (which aggregates that customer's
+rows in the very table being written), the invoice list, the customer list —
+and `PROBE_P99_MS` (default 500) is a **threshold**, so a run whose read path
+degrades under write load **exits non-zero** instead of publishing a throughput
+figure beside an unusable product. Ingest latency is reported from the ingest
+scenario only; the probe's samples never pool into it. Under `measure.sh` a
+`DEGRADED` probe fails the run. Known limits: the invoice list is empty on a
+bench tenant, and the three endpoints share one verdict.
 
-## Reproducing
+## Traps that cost time and will cost yours
 
-Three traps that cost time and will cost yours:
+
 
 **Amazon Linux ships Go with `GOTOOLCHAIN=local`**, so `go build` refuses when
 `go.mod` requires a newer patch release, `GOSUMDB=off` then blocks downloading

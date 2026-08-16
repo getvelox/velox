@@ -22,9 +22,15 @@ ROWS="${1:-20000000}"
 CHUNK="${CHUNK:-2000000}"
 
 echo "seeding $ROWS usage_events in chunks of $CHUNK"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
-  SELECT count(*) AS customers FROM customers WHERE tenant_id='vlx_ten_bench';
-  SELECT count(*) AS meters    FROM meters    WHERE tenant_id='vlx_ten_bench';"
+ncust=$(psql "$DATABASE_URL" -qtA -c "SELECT count(*) FROM customers WHERE tenant_id='vlx_ten_bench'")
+nmet=$(psql "$DATABASE_URL" -qtA -c "SELECT count(*) FROM meters WHERE tenant_id='vlx_ten_bench'")
+echo "  spreading across $ncust customers and $nmet meters"
+# Refuse the shape this file exists to avoid. Run velox-bench-seed first.
+if [ "${ncust:-0}" -lt 2 ]; then
+  echo "FATAL: only $ncust bench customer(s) exist — every row would land on one customer_id." >&2
+  echo "       run velox-bench-seed (BENCH_CUSTOMERS defaults to 200) before seeding history." >&2
+  exit 1
+fi
 
 done_rows=0
 while [ "$done_rows" -lt "$ROWS" ]; do
@@ -49,11 +55,17 @@ while [ "$done_rows" -lt "$ROWS" ]; do
            ),
            now() - (random() * interval '30 days')
     FROM generate_series(1, $n) g
+    -- The LATERAL subqueries MUST reference g. An UNCORRELATED lateral is
+    -- evaluated ONCE per query, not once per row, so the earlier form picked a
+    -- single random customer and gave it the entire 2M-row chunk — exactly the
+    -- one-hot-edge shape the header of this file says it avoids. Measured: 5,000
+    -- generated rows landed on 1 distinct customer of 51; with the correlation,
+    -- 51. The AWS run's 5M seeded rows therefore sat on ~3 customers, not spread.
     CROSS JOIN LATERAL (
-      SELECT id FROM customers WHERE tenant_id='vlx_ten_bench' ORDER BY random() LIMIT 1
+      SELECT id FROM customers WHERE tenant_id='vlx_ten_bench' AND g.g = g.g ORDER BY random() LIMIT 1
     ) c
     CROSS JOIN LATERAL (
-      SELECT id FROM meters WHERE tenant_id='vlx_ten_bench' ORDER BY random() LIMIT 1
+      SELECT id FROM meters WHERE tenant_id='vlx_ten_bench' AND g.g = g.g ORDER BY random() LIMIT 1
     ) m;"
   done_rows=$(( done_rows + n ))
   echo "  $done_rows / $ROWS"

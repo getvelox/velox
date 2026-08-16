@@ -209,7 +209,11 @@ info "request path is running as velox_app (no admin fallback)"
 
 # ---------------------------------------------------------------------------
 say "seeding bench fixtures"
-seed_json=$(app_sh "DATABASE_URL='$ADMIN_DSN' velox-bench-seed")
+seed_json=$(app_sh "DATABASE_URL='$ADMIN_DSN' ${BENCH_LIVEMODE:+BENCH_LIVEMODE=$BENCH_LIVEMODE} ${BENCH_CUSTOMERS:+BENCH_CUSTOMERS=$BENCH_CUSTOMERS} velox-bench-seed")
+# Record the base URL this script VERIFIED, so measure.sh cannot guess a
+# different one (it once defaulted to :8099 while this served :8080, and a
+# dead port reconciled 0 == 0 as a pass).
+seed_json=$(printf '%s' "$seed_json" | sed "s|}\s*\$|,\"base_url\":\"$BASE_URL\"}|")
 echo "$seed_json" > "$CREDS"; chmod 600 "$CREDS"
 API_KEY=$(printf '%s' "$seed_json" | sed 's/.*"api_key":"\([^"]*\)".*/\1/')
 CUSTOMER=$(printf '%s' "$seed_json" | sed 's/.*"external_customer_id":"\([^"]*\)".*/\1/')
