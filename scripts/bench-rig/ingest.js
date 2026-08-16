@@ -178,7 +178,12 @@ export const options = {
     // past the budget under write load, the run FAILS rather than publishing a
     // throughput number alongside an unusable product.
     ...(PROBE_RATE > 0
-      ? { 'http_req_duration{scenario:probe}': [`p(99)<${PROBE_P99_MS}`] }
+      ? {
+          'http_req_duration{scenario:probe}': [`p(99)<${PROBE_P99_MS}`],
+          'http_req_duration{scenario:probe,name:usage-summary}': ['p(99)>=0'],
+          'http_req_duration{scenario:probe,name:invoices}': ['p(99)>=0'],
+          'http_req_duration{scenario:probe,name:customers}': ['p(99)>=0'],
+        }
       : {}),
   },
 }
@@ -262,9 +267,14 @@ export function probe() {
   const to = now.toISOString()
 
   const cid = CUSTOMER_ID || CUSTOMER_ID_PREFIX + pad3(pickCustomer())
-  const r1 = http.get(`${BASE}/v1/usage-summary/${cid}?from=${from}&to=${to}`, params)
-  const r2 = http.get(`${BASE}/v1/invoices?limit=20`, params)
-  const r3 = http.get(`${BASE}/v1/customers?limit=20`, params)
+  // `name` tags: one sub-metric per endpoint, so the verdict says WHICH read
+  // missed its budget. Pooled, the first real run reported DEGRADED and it took
+  // the raw samples to learn it was usage-summary at ~475 ms with the two list
+  // endpoints at ~3 ms.
+  const tagged = (n) => Object.assign({}, params, { tags: { name: n } })
+  const r1 = http.get(`${BASE}/v1/usage-summary/${cid}?from=${from}&to=${to}`, tagged('usage-summary'))
+  const r2 = http.get(`${BASE}/v1/invoices?limit=20`, tagged('invoices'))
+  const r3 = http.get(`${BASE}/v1/customers?limit=20`, tagged('customers'))
   // A read that errors is a failed probe, not a fast one. http_req_failed
   // already covers 4xx/5xx globally; the check makes it visible per endpoint.
   check(r1, { 'usage-summary 200': (r) => r.status === 200 })
@@ -324,6 +334,10 @@ export function handleSummary(data) {
     lines.push('')
     lines.push(`READ PROBE (concurrent, ${PROBE_RATE}/s)`)
     lines.push(`  p50/p99        ${(pd['p(50)'] || 0).toFixed(1)}ms / ${(pd['p(99)'] || 0).toFixed(1)}ms  (budget p99 < ${PROBE_P99_MS}ms)`)
+    for (const n of ['usage-summary', 'invoices', 'customers']) {
+      const e = (m[`http_req_duration{scenario:probe,name:${n}}`] || {}).values || {}
+      lines.push(`  ${n.padEnd(14)} p50 ${(e['p(50)'] || 0).toFixed(1)}ms  p99 ${(e['p(99)'] || 0).toFixed(1)}ms  (n=${e.count || 0})`)
+    }
     lines.push(`  verdict        ${(pd['p(99)'] || 0) < PROBE_P99_MS ? 'RESPONSIVE under load' : 'DEGRADED — read path missed its budget'}`)
   }
   lines.push('')
