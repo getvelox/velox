@@ -56,7 +56,7 @@ if [ "${TARGET:-local}" = "aws" ]; then
   echo "== running on the app node ($APP_PUB) against $DBHOST"
   # Forward every knob this script honours; TARGET is dropped so it runs locally there.
   exec ssh -o StrictHostKeyChecking=no -i "$KEYFILE" "ec2-user@$APP_PUB" \
-    "TARGET=local DATABASE_URL='$REMOTE_DSN' CLIENTS='${CLIENTS:-16}' DURATION='${DURATION:-60}' BATCH='${BATCH:-1}' VELOX_EVS='${VELOX_EVS:-}' LIVEMODE='${LIVEMODE:-on}' bash -s -- $*" < "$0"
+    "TARGET=local DATABASE_URL='$REMOTE_DSN' CLIENTS='${CLIENTS:-16}' DURATION='${DURATION:-60}' BATCH='${BATCH:-1}' VELOX_EVS='${VELOX_EVS:-}' LIVEMODE='${LIVEMODE:-on}' ROUNDS='${ROUNDS:-2}' bash -s -- $*" < "$0"
 fi
 
 : "${DATABASE_URL:?set DATABASE_URL (admin/owner role — pgbench inserts directly)}"
@@ -86,22 +86,22 @@ maxc=$((ncust - 1))
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 
-# One row, Velox's shape: same columns the store's INSERT writes, random
-# customer from the seeded pool, unique idempotency key, ADR-044-shaped dims.
-row_values() {
-  cat <<SQL
-  ('vlx_evt_pgb_' || gen_random_uuid()::text, '$TENANT',
-   'vlx_cus_bench_' || lpad((floor(random() * $ncust))::int::text, 3, '0'),
-   'vlx_mtr_bench', (floor(random() * 1000) + 1)::numeric,
-   jsonb_build_object('model', (ARRAY['gpt-4','claude-3-opus','gemini-pro','llama-2-70b','mistral-large'])[1 + floor(random()*5)],
-                      'operation', (ARRAY['input','output','embedding','moderation'])[1 + floor(random()*4)],
-                      'cached', random() < 0.5),
-   'pgb-' || gen_random_uuid()::text, now(), 'api', NULL, 'not_applicable')
-SQL
-}
-values_list() { local i; for i in $(seq 1 "$BATCH"); do [ "$i" -gt 1 ] && printf ','; row_values; done; }
-
-INSERT_SQL="INSERT INTO usage_events (id, tenant_id, customer_id, meter_id, quantity, properties, idempotency_key, timestamp, origin, provider_cost_micros, provider_cost_source) VALUES $(values_list);"
+# Velox's row shape: the same columns the store's INSERT writes. Customer ids
+# come from the ACTUAL seeded set (an array literal built once here), not from
+# an assumed 'prefix + 000..n-1' pattern — a database holding an older bench
+# customer alongside the seeded ones made that assumption pick a non-existent
+# id and every insert failed on the foreign key. BATCH rows per statement via
+# generate_series; unique idempotency keys; ADR-044-shaped dims.
+IDS_SQL=$(q "SELECT 'ARRAY[' || string_agg(quote_literal(id), ',') || ']' FROM customers WHERE tenant_id='$TENANT'")
+INSERT_SQL="INSERT INTO usage_events (id, tenant_id, customer_id, meter_id, quantity, properties, idempotency_key, timestamp, origin, provider_cost_micros, provider_cost_source)
+SELECT 'vlx_evt_pgb_' || gen_random_uuid()::text, '$TENANT',
+       (${IDS_SQL})[1 + floor(random() * $ncust)::int],
+       'vlx_mtr_bench', (floor(random() * 1000) + 1)::numeric,
+       jsonb_build_object('model', (ARRAY['gpt-4','claude-3-opus','gemini-pro','llama-2-70b','mistral-large'])[1 + floor(random()*5)],
+                          'operation', (ARRAY['input','output','embedding','moderation'])[1 + floor(random()*4)],
+                          'cached', random() < 0.5),
+       'pgb-' || gen_random_uuid()::text, now(), 'api', NULL, 'not_applicable'
+FROM generate_series(1, $BATCH) g;"
 
 # leg A: session-level GUCs (set once by PGOPTIONS), bare tx around the insert
 cat > "$WORK/legA.sql" <<SQL
@@ -143,13 +143,24 @@ run_leg() { # name script
   echo "$evs" > "$WORK/$name.evs"
 }
 
-say "db-ceiling: $CLIENTS clients, ${DURATION}s, batch $BATCH, $ncust customers, livemode=$LIVEMODE"
+# ROUNDS: the legs are INTERLEAVED (A B A B ...) and the median of each is
+# reported. Run once each, back to back, the comparison is confounded by table
+# state: on the real rig, straight after a 25k-rows/s closed-loop burst, leg A
+# ate the checkpoint/autovacuum churn and leg B came out 53% FASTER — an
+# impossible protocol cost, and exactly what interleaving cancels.
+ROUNDS="${ROUNDS:-2}"
+say "db-ceiling: $CLIENTS clients, ${DURATION}s per leg, batch $BATCH, $ncust customers, livemode=$LIVEMODE, $ROUNDS interleaved rounds"
 q "SELECT 'table: '||count(*)||' rows, '||pg_size_pretty(pg_table_size('usage_events'))||' heap, '||pg_size_pretty(pg_indexes_size('usage_events'))||' idx' FROM usage_events" | sed 's/^/   /'
-run_leg "A commit-floor"  "$WORK/legA.sql"
-run_leg "B velox-tx-protocol" "$WORK/legB.sql"
-
-a=$(cat "$WORK/A commit-floor.evs" 2>/dev/null); b=$(cat "$WORK/B velox-tx-protocol.evs" 2>/dev/null)
-say "decomposition (rows/s, batch $BATCH)"
+: > "$WORK/A.all"; : > "$WORK/B.all"
+for r in $(seq 1 "$ROUNDS"); do
+  info "round $r"
+  run_leg "A commit-floor"  "$WORK/legA.sql";      cat "$WORK/A commit-floor.evs"      >> "$WORK/A.all" 2>/dev/null; echo >> "$WORK/A.all"
+  run_leg "B velox-tx-protocol" "$WORK/legB.sql";  cat "$WORK/B velox-tx-protocol.evs" >> "$WORK/B.all" 2>/dev/null; echo >> "$WORK/B.all"
+done
+median() { sort -n | awk '{a[NR]=$1} END{ if (NR==0) print ""; else if (NR%2==1) print a[(NR+1)/2]; else printf "%.0f\n", (a[NR/2]+a[NR/2+1])/2 }'; }
+a=$(grep -E '^[0-9]+$' "$WORK/A.all" | median); b=$(grep -E '^[0-9]+$' "$WORK/B.all" | median)
+info "medians over $ROUNDS rounds: A $a rows/s, B $b rows/s"
+say "decomposition (median rows/s over $ROUNDS interleaved rounds, batch $BATCH)"
 if [ -n "$a" ] && [ -n "$b" ]; then
   awk -v a="$a" -v b="$b" 'BEGIN{printf "   RLS per-tx protocol costs: %.0f%% of the commit floor  (A %s -> B %s)\n", (1-b/a)*100, a, b}'
 fi

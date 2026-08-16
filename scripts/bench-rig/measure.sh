@@ -216,7 +216,7 @@ median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{ if (NR==0) print 
 minof()  { printf '%s\n' "$@" | sort -n | head -1; }
 maxof()  { printf '%s\n' "$@" | sort -n | tail -1; }
 
-say "protocol: warmup $WARMUP (discarded), $REPEATS repeats x $DURATION per config, ${COOLDOWN}s cool-down, p99 needs >= $MIN_SAMPLES samples${SUSTAINED:+ [SUSTAINED preset]}"
+say "protocol: warmup $WARMUP (discarded), $REPEATS repeats x $DURATION per config, ${COOLDOWN}s cool-down, p99 needs >= $MIN_SAMPLES samples$([ "${SUSTAINED:-0}" = "1" ] && echo " [SUSTAINED preset]")"
 info "configs: $CONFIGS"
 info "results: $RESULTS"
 
