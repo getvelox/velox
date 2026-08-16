@@ -13,7 +13,7 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Fixed
 
-- **`provision.sh` failed at instance launch on the first real run: `--monitoring Enabled` is not valid CLI syntax (2026-08-16).** The detailed-monitoring flag added for 1-minute CloudWatch points wants `--monitoring Enabled=true`; the CLI rejected the bare form after RDS, the key pair and the security group had already been created. Idempotent re-run after the fix launched both instances and the same-AZ check passed. The flag had been syntax-checked with `bash -n` but never executed — the one step in the rig that only AWS itself can validate, and it was.
+- **`provision.sh` failed at instance launch on the first real run: `--monitoring Enabled` is not valid CLI syntax (2026-08-16).** The detailed-monitoring flag added for 1-minute CloudWatch points wants `--monitoring Enabled=true`; the CLI rejected the bare form after RDS, the key pair and the security group had already been created. Idempotent re-run after the fix launched both instances and the same-AZ check passed. The flag had been syntax-checked with `bash -n` but never executed — the one step in the rig that only AWS itself can validate, and it was. **Also found on the first real bring-up**: `ec2-user` is not in the `docker` group on AL2023, so `docker run` over ssh failed with "permission denied" into a discarded stderr and `bringup.sh` sat polling `/health` for minutes. Every docker call on the app node now goes through `sudo`, and a failed `docker run` is fatal and loud instead of swallowed. The idempotent re-run then reached `READY TO MEASURE` on the real rig: container as `velox_app`, no admin fallback, `HTTP 201 and the row landed (0 -> 1)`.
 
 ### Added
 
