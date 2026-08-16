@@ -17,6 +17,14 @@ availability zone · **Reproduce:** `scripts/bench-rig/`
 | Batched (10/request) | **1,000/s** | p99 269 ms; 10-min soak, 600,030 events, **0 errors** |
 | Batched (500/request), larger DB | **10,203/s** | 90 s, 925,000 events, **0 errors** |
 
+> **These three figures are each n=1**, taken before `measure.sh` existed, and
+> their event counts come from the load generator's own counter rather than from
+> the database. The protocol now runs a discarded warmup, repeats each
+> configuration, publishes a median with its spread, and **reconciles every run
+> against `usage_events`** — a run whose rows disagree with the client's count
+> exits non-zero and cannot be published. Re-measuring under that protocol is
+> what will replace the numbers below.
+
 **Cost at 10k events/sec: ~$1.16/hr** (`c7g.2xlarge` app + `db.m7g.2xlarge`),
 which is **$0.032 per million events**. For comparison, Stripe Billing's 0.5%
 would cost the same only if a million metered events represented $6.29 of
@@ -149,6 +157,11 @@ cd scripts/bench-rig
 ./provision.sh --yes           # ~$0.41/hr from this moment; override
                                # APP_TYPE / GEN_TYPE / DB_CLASS for the larger rig
 ( nohup ./watchdog.sh 240 & )  # force teardown after 4h if the driver dies
+
+./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats,
+                               # median + spread, and RECONCILIATION of every
+                               # run against the database. Exits non-zero if the
+                               # rows do not match what the client claims.
 
 ./bringup.sh                   # hardware -> a RUNNING, SEEDED, VERIFIED velox:
                                # waits for RDS, creates the database and the
