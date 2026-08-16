@@ -232,7 +232,7 @@ for cfg in $CONFIGS; do
   info "warmup ($WARMUP, discarded)"
   one_run "$rate" "$batch" "$WARMUP" "$label-warmup" >/dev/null
 
-  p50s=""; p99s=""; passed=0; failed_runs=0; hard_fail=0
+  p50s=""; p99s=""; evss=""; passed=0; failed_runs=0; hard_fail=0
   for r in $(seq 1 "$REPEATS"); do
     state=$(table_state)
     set -- $(one_run "$rate" "$batch" "$DURATION" "$label-run$r")
@@ -263,7 +263,7 @@ for cfg in $CONFIGS; do
     fi
 
     if [ -z "$reasons" ]; then
-      verdict="PASS"; passed=$((passed+1)); p50s="$p50s $p50"; p99s="$p99s $p99"
+      verdict="PASS"; passed=$((passed+1)); p50s="$p50s $p50"; p99s="$p99s $p99"; evss="$evss $evs"
     else
       verdict="FAIL:$reasons"; failed_runs=$((failed_runs+1))
       # A samples-only failure means the PROTOCOL was too short, not that the
@@ -279,7 +279,13 @@ for cfg in $CONFIGS; do
 
   # Statistics over PASSING repeats only, on the variables that actually vary.
   # shellcheck disable=SC2086
-  if [ "$passed" -gt 0 ]; then
+  if [ "$passed" -gt 0 ] && [ "$K6_MODE" = "max" ]; then
+    # Closed loop: the load is the VU count and ev/s is the CEILING reached —
+    # a maximum, never a service level. Latency here describes queue depth.
+    line=$(printf '%-10s CLOSED-LOOP %s VUs batch %s | %s/%s passed | ceiling median %s ev/s (%s-%s) | p50 median %sms | p99 median %sms' \
+      "$label" "${VUS:-?}" "$batch" "$passed" "$REPEATS" \
+      "$(median $evss)" "$(minof $evss)" "$(maxof $evss)" "$(median $p50s)" "$(median $p99s)")
+  elif [ "$passed" -gt 0 ]; then
     line=$(printf '%-10s offered %s ev/s batch %s | %s/%s passed | p50 median %sms (%s-%s) | p99 median %sms (%s-%s)' \
       "$label" "$rate" "$batch" "$passed" "$REPEATS" \
       "$(median $p50s)" "$(minof $p50s)" "$(maxof $p50s)" \

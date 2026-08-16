@@ -31,10 +31,33 @@
 #   DATABASE_URL=postgres://... ./db-ceiling.sh              # both legs
 #   DATABASE_URL=... CLIENTS=16 DURATION=60 BATCH=10 ./db-ceiling.sh
 #   DATABASE_URL=... VELOX_EVS=10203 ./db-ceiling.sh          # prints the ratios
+#   TARGET=aws VELOX_EVS=10203 ./db-ceiling.sh                # on the rig: runs itself on the app node
 #
 # Needs pgbench (postgresql16-contrib on AL2023; libpq on macOS) and the bench
 # fixtures from velox-bench-seed (it spreads rows across those customers).
 set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# TARGET=aws: RDS is --no-publicly-accessible, so this script cannot reach the
+# database from a laptop. Resolve the rig and re-run THIS script on the app
+# node over ssh (piped over stdin — nothing to copy first), with the same
+# environment. The app node has psql and pgbench (postgresql16-contrib).
+# ---------------------------------------------------------------------------
+if [ "${TARGET:-local}" = "aws" ]; then
+  REGION="${AWS_REGION:-ap-south-1}"; OUT="${OUT:-$HOME/.velox-bench-rig}"
+  KEYFILE="$OUT/velox-bench-key.pem"; [ -s "$KEYFILE" ] || { echo "FATAL: no key at $KEYFILE"; exit 1; }
+  aws_() { aws --region "$REGION" "$@"; }
+  APP_PUB=$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=velox-bench-app" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[0].PublicIpAddress' --output text)
+  [ -n "$APP_PUB" ] && [ "$APP_PUB" != "None" ] || { echo "FATAL: app instance not running"; exit 1; }
+  DBHOST=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].Endpoint.Address' --output text)
+  DBPASS=$(cat "$OUT/db-password")
+  REMOTE_DSN="postgres://velox:$DBPASS@$DBHOST:5432/${DBNAME:-velox}?sslmode=require"
+  echo "== running on the app node ($APP_PUB) against $DBHOST"
+  # Forward every knob this script honours; TARGET is dropped so it runs locally there.
+  exec ssh -o StrictHostKeyChecking=no -i "$KEYFILE" "ec2-user@$APP_PUB" \
+    "TARGET=local DATABASE_URL='$REMOTE_DSN' CLIENTS='${CLIENTS:-16}' DURATION='${DURATION:-60}' BATCH='${BATCH:-1}' VELOX_EVS='${VELOX_EVS:-}' LIVEMODE='${LIVEMODE:-on}' bash -s -- $*" < "$0"
+fi
 
 : "${DATABASE_URL:?set DATABASE_URL (admin/owner role — pgbench inserts directly)}"
 CLIENTS="${CLIENTS:-16}"
