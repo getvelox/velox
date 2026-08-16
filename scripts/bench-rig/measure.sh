@@ -146,7 +146,12 @@ fi
 capture_cloudwatch() { # tag start end
   [ "$TARGET" = "aws" ] || return 0
   local tag=$1 start=$2 end=$3 m
-  for m in CPUUtilization DatabaseConnections WriteIOPS WriteLatency FreeableMemory; do
+  # ReadIOPS / ReadLatency / DiskQueueDepth were added after the real run: the
+  # tail that rose within a 10-minute 5,000 ev/s repeat was invisible in
+  # CPU (61-63 %, flat) and write IOPS (flat) and explained entirely by
+  # ReadIOPS climbing 108 -> 2,486/s as the index working set (18 GB) fell out
+  # of a 32 GB instance's cache, with disk queue depth 10.7 in the last minute.
+  for m in CPUUtilization DatabaseConnections WriteIOPS WriteLatency ReadIOPS ReadLatency DiskQueueDepth FreeableMemory; do
     aws_ cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name "$m" \
       --dimensions Name=DBInstanceIdentifier,Value=velox-bench-db \
       --start-time "$start" --end-time "$end" --period 60 --statistics Average Maximum \
