@@ -67,6 +67,19 @@ if [ "${SEED_ROWS:-0}" -gt 0 ]; then
   step "3 seed $SEED_ROWS rows of history"
   if [ "$TARGET" = "aws" ]; then "$HERE/seed-history.sh" "$SEED_ROWS" || fail "seed-history"
   else DATABASE_URL="$ADMIN_DSN" TARGET=local "$HERE/seed-history.sh" "$SEED_ROWS" || fail "seed-history"; fi
+
+  # SETTLE after a bulk load before measuring. On the first real run, the
+  # first 10-minute repeat started ~60 s after a 22M-row seed finished and hit
+  # a single 5-second stall 20 s in — 499 slow requests, 298 dropped
+  # iterations, the repeat correctly FAILED — while RDS write IOPS ran at 2x
+  # baseline for the first five minutes: autovacuum and checkpointing working
+  # through the load. The 30 s warmup cannot absorb that; a settle can. Nothing
+  # else in the following 9.5 minutes, nor in the next repeat, stalled.
+  SETTLE="${SETTLE:-$([ "$TARGET" = "aws" ] && echo 600 || echo 0)}"
+  if [ "$SETTLE" -gt 0 ]; then
+    step "3b settle ${SETTLE}s after the bulk load (autovacuum / checkpoint) before measuring"
+    sleep "$SETTLE"
+  fi
 fi
 
 step "4a measure — SUSTAINED protocol: $CONFIGS (probe $PROBE_RATE/s)"
