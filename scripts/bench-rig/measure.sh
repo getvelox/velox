@@ -53,9 +53,19 @@ P99_MS="${P99_MS:-0}"
 REGION="${AWS_REGION:-ap-south-1}"
 OUT="${OUT:-$HOME/.velox-bench-rig}"
 CREDS="${CREDS:-$OUT/bench-creds.json}"
+# SUSTAINED=1 is the preset for anything that will be published under the word
+# "sustained": five repeats of ten minutes each, with a cool-down between them.
+# The 90 s default is for finding the right rate, not for publishing it —
+# autovacuum, checkpoints and index growth do not show up in 90 s.
+if [ "${SUSTAINED:-0}" = "1" ]; then
+  REPEATS="${REPEATS:-5}"; DURATION="${DURATION:-10m}"; COOLDOWN="${COOLDOWN:-30}"
+fi
 REPEATS="${REPEATS:-3}"
 WARMUP="${WARMUP:-30s}"
 DURATION="${DURATION:-90s}"
+COOLDOWN="${COOLDOWN:-10}"           # seconds between repeats, so one run's tail is not the next run's start
+MIN_SAMPLES="${MIN_SAMPLES:-1000}"    # a p99 from fewer requests than this is not reported
+DRIFT_FACTOR="${DRIFT_FACTOR:-2.0}"   # last-third p99 more than this x first-third p99 = a slope, not a plateau"
 PROBE_RATE="${PROBE_RATE:-0}"
 PROBE_P99_MS="${PROBE_P99_MS:-500}"
 CONFIGS="${CONFIGS:-single:200:1 batched:1000:10}"
@@ -108,6 +118,7 @@ else
 fi
 
 rows() { app_sh "psql '$ADMIN_DSN' -qtA -c \"SELECT count(*) FROM usage_events WHERE tenant_id='vlx_ten_bench'\"" | tr -d '[:space:]'; }
+qsum() { app_sh "psql '$ADMIN_DSN' -qtA -c \"SELECT COALESCE(sum(quantity),0)::bigint FROM usage_events WHERE tenant_id='vlx_ten_bench'\"" | tr -d '[:space:]'; }
 # The table a run writes into is part of the measurement — index maintenance
 # grows with volume, and an empty table is the optimistic case. Record it.
 table_state() { app_sh "psql '$ADMIN_DSN' -qtA -c \"SELECT count(*)||' rows, '||pg_size_pretty(pg_table_size('usage_events'))||' heap, '||pg_size_pretty(pg_indexes_size('usage_events'))||' idx' FROM usage_events\"" | tr -d '\n'; }
@@ -115,8 +126,8 @@ table_state() { app_sh "psql '$ADMIN_DSN' -qtA -c \"SELECT count(*)||' rows, '||
 # One k6 invocation. Echoes: events_claimed rows_written ev_per_sec p50 p99 dropped
 one_run() {
   local rate=$1 batch=$2 dur=$3 tag=$4
-  local before after out claimed evs p50 p99 dropped
-  before=$(rows)
+  local before after qbefore qafter out claimed evs p50 p99 dropped
+  before=$(rows); qbefore=$(qsum)
   gen_sh "k6 run --quiet --summary-export /tmp/k6-$tag.json \
     -e BASE=$BASE -e API_KEY=$API_KEY -e CUSTOMERS=$CUSTOMERS \
     -e CUSTOMER_PREFIX=$CUSTOMER_PREFIX -e CUSTOMER_ID_PREFIX=$CUSTOMER_ID_PREFIX \
@@ -124,7 +135,7 @@ one_run() {
     -e P99_MS=$P99_MS -e PROBE_RATE=$PROBE_RATE -e PROBE_P99_MS=$PROBE_P99_MS \
     $SCRIPT_PATH" > "$RESULTS/$tag.txt" 2>&1
   local rc=$?
-  after=$(rows)
+  after=$(rows); qafter=$(qsum)
   gen_sh "cat /tmp/k6-$tag.json" > "$RESULTS/$tag.k6.json" 2>/dev/null || true
   out=$(cat "$RESULTS/$tag.txt")
   claimed=$(printf '%s' "$out" | sed -n 's/^events ingested *\([0-9]*\).*/\1/p' | head -1)
@@ -134,19 +145,21 @@ one_run() {
   dropped=$(printf '%s' "$out" | sed -n 's/^dropped *\([0-9]*\).*/\1/p' | head -1)
   failed=$(printf '%s' "$out"  | sed -n 's/^requests failed *\([0-9]*\).*/\1/p' | head -1)
   samples=$(printf '%s' "$out" | sed -n 's/^latency samples *\([0-9]*\).*/\1/p' | head -1)
+  qsent=$(printf '%s' "$out"   | sed -n 's/^quantity sent *\([0-9]*\).*/\1/p' | head -1)
+  drift=$(printf '%s' "$out"   | sed -n 's/^drift p99 first\/last .*(x\([0-9.na\/]*\)).*/\1/p' | head -1)
   probe="n/a"
   if [ "$PROBE_RATE" -gt 0 ]; then
     printf '%s' "$out" | grep -q "RESPONSIVE under load" && probe="RESPONSIVE"
     printf '%s' "$out" | grep -q "DEGRADED" && probe="DEGRADED"
   fi
-  printf '%s %s %s %s %s %s %s %s %s %s' "${claimed:-0}" "$((after - before))" "${evs:-0}" "${p50:-0}" "${p99:-0}" "${dropped:-0}" "$rc" "${failed:-0}" "${samples:-0}" "$probe"
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s' "${claimed:-0}" "$((after - before))" "${evs:-0}" "${p50:-0}" "${p99:-0}" "${dropped:-0}" "$rc" "${failed:-0}" "${samples:-0}" "$probe" "${qsent:-0}" "$((qafter - qbefore))" "${drift:-n/a}"
 }
 
 median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{ if (NR==0) print "n/a"; else if (NR%2==1) print a[(NR+1)/2]; else printf "%.1f\n", (a[NR/2]+a[NR/2+1])/2 }'; }
 minof()  { printf '%s\n' "$@" | sort -n | head -1; }
 maxof()  { printf '%s\n' "$@" | sort -n | tail -1; }
 
-say "protocol: warmup $WARMUP (discarded), $REPEATS repeats x $DURATION per config"
+say "protocol: warmup $WARMUP (discarded), $REPEATS repeats x $DURATION per config, ${COOLDOWN}s cool-down, p99 needs >= $MIN_SAMPLES samples${SUSTAINED:+ [SUSTAINED preset]}"
 info "configs: $CONFIGS"
 info "results: $RESULTS"
 
@@ -165,11 +178,11 @@ for cfg in $CONFIGS; do
   info "warmup ($WARMUP, discarded)"
   one_run "$rate" "$batch" "$WARMUP" "$label-warmup" >/dev/null
 
-  p50s=""; p99s=""; passed=0; failed_runs=0
+  p50s=""; p99s=""; passed=0; failed_runs=0; hard_fail=0
   for r in $(seq 1 "$REPEATS"); do
     state=$(table_state)
     set -- $(one_run "$rate" "$batch" "$DURATION" "$label-run$r")
-    claimed=$1; written=$2; evs=$3; p50=$4; p99=$5; dropped=$6; rc=$7; nfail=$8; samples=$9; probe=${10}
+    claimed=$1; written=$2; evs=$3; p50=$4; p99=$5; dropped=$6; rc=$7; nfail=$8; samples=$9; probe=${10}; qsent=${11}; qwritten=${12}; drift=${13}
 
     # THE GATE. Every clause is a way a bad run used to enter the median.
     reasons=""
@@ -179,14 +192,35 @@ for cfg in $CONFIGS; do
     [ "${claimed:-0}" -gt 0 ]    || reasons="$reasons claimed=0"
     [ "$claimed" = "$written" ]  || reasons="$reasons claimed!=written($claimed/$written)"
     [ "$probe" != "DEGRADED" ]   || reasons="$reasons probe=DEGRADED"
+    # Content, not just count: the sum of quantities the client sent must be
+    # the sum the database gained. Row count alone would pass a server that
+    # wrote every row with quantity 0.
+    [ "$qsent" = "$qwritten" ]   || reasons="$reasons qty!=written($qsent/$qwritten)"
+    # A p99 from too few requests is not a p99. Fail rather than publish it.
+    [ "${samples:-0}" -ge "$MIN_SAMPLES" ] || reasons="$reasons samples=$samples<$MIN_SAMPLES"
+    # A slope is not a plateau: if the last third's p99 is DRIFT_FACTOR x the
+    # first third's, the system was still degrading when the run ended.
+    # Gated ONLY when each third has at least MIN_SAMPLES of its own — a p99
+    # of a third of a 25 s run rests on ~4 tail samples and reads x9 on a busy
+    # laptop. Drift is a property of a sustained run; short runs report it
+    # for information and are not judged on it.
+    if [ "$drift" != "n/a" ] && [ "${samples:-0}" -ge $((MIN_SAMPLES * 3)) ] && awk -v d="$drift" -v f="$DRIFT_FACTOR" 'BEGIN{exit !(d > f)}'; then
+      reasons="$reasons drift=x$drift>$DRIFT_FACTOR"
+    fi
 
     if [ -z "$reasons" ]; then
       verdict="PASS"; passed=$((passed+1)); p50s="$p50s $p50"; p99s="$p99s $p99"
     else
       verdict="FAIL:$reasons"; failed_runs=$((failed_runs+1))
+      # A samples-only failure means the PROTOCOL was too short, not that the
+      # rate was not sustained. Say which, so nobody lowers a rate that held.
+      case "$reasons" in
+        *dropped=*|*failed=*|*claimed*|*qty*|*probe=*|*k6-exit=*|*drift=*) hard_fail=1 ;;
+      esac
     fi
-    printf '   run %s [%s]: %s ev/s  p50 %sms  p99 %sms (n=%s)  dropped %s  failed %s  probe %s | claimed %s / written %s  %s\n' \
-      "$r" "$state" "$evs" "$p50" "$p99" "$samples" "$dropped" "$nfail" "$probe" "$claimed" "$written" "$verdict" | tee -a "$RESULTS/runs.txt"
+    printf '   run %s [%s]: %s ev/s  p50 %sms  p99 %sms (n=%s, drift x%s)  dropped %s  failed %s  probe %s | claimed %s / written %s  %s\n' \
+      "$r" "$state" "$evs" "$p50" "$p99" "$samples" "$drift" "$dropped" "$nfail" "$probe" "$claimed" "$written" "$verdict" | tee -a "$RESULTS/runs.txt"
+    [ "$r" -lt "$REPEATS" ] && sleep "$COOLDOWN"
   done
 
   # Statistics over PASSING repeats only, on the variables that actually vary.
@@ -196,8 +230,10 @@ for cfg in $CONFIGS; do
       "$label" "$rate" "$batch" "$passed" "$REPEATS" \
       "$(median $p50s)" "$(minof $p50s)" "$(maxof $p50s)" \
       "$(median $p99s)" "$(minof $p99s)" "$(maxof $p99s)")
-  else
+  elif [ "$hard_fail" = "1" ]; then
     line=$(printf '%-10s offered %s ev/s batch %s | 0/%s passed — NOT SUSTAINED at this rate' "$label" "$rate" "$batch" "$REPEATS")
+  else
+    line=$(printf '%-10s offered %s ev/s batch %s | 0/%s passed — INSUFFICIENT SAMPLES for a p99 (< %s); lengthen DURATION, the rate itself held' "$label" "$rate" "$batch" "$REPEATS" "$MIN_SAMPLES")
   fi
   echo "$line" | tee -a "$SUMMARY"
   [ "$failed_runs" -eq 0 ] || FAILURES=$((FAILURES + 1))

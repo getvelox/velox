@@ -26,6 +26,8 @@
 #   2. NEGATIVE   server erroring -> failures reported, NOT counted as delivered
 #   3. NEGATIVE   server too slow -> rate reported honestly, drops flagged
 #   4. NEGATIVE   run it TWICE -> no idempotency key is ever replayed
+#   5. POSITIVE   known bimodal tail -> p99 recovers the TAIL truth, p50 the base
+#   6. NEGATIVE   known slope -> the drift line reports last-third >> first-third
 #
 # Usage: ./calibrate.sh          (needs k6 and go; nothing else, no AWS)
 set -uo pipefail
@@ -77,9 +79,10 @@ num() { grep -E "^$1" /tmp/k6calib.txt | grep -oE '[0-9.]+' | head -1; }
 # 53.9ms", so a naive first-number grep returns the 50 out of "p50". It did,
 # and the run correctly reported NOT CALIBRATED rather than passing.
 p50() { sed -n 's/^latency p50\/p99 *\([0-9.]*\)ms.*/\1/p' /tmp/k6calib.txt | head -1; }
+p99() { sed -n 's/^latency p50\/p99 *[0-9.]*ms \/ \([0-9.]*\)ms.*/\1/p' /tmp/k6calib.txt | head -1; }
 
 echo
-echo "=== 1/3 POSITIVE — healthy server, 20ms known service time ==="
+echo "=== 1/6 POSITIVE — healthy server, 20ms known service time ==="
 start_stub DELAY_MS=20
 for spec in "200 1" "500 10"; do
   set -- $spec; rate=$1; batch=$2
@@ -94,7 +97,7 @@ for spec in "200 1" "500 10"; do
 done
 
 echo
-echo "=== 2/3 NEGATIVE — server fails ~10% of requests ==="
+echo "=== 2/6 NEGATIVE — server fails ~10% of requests ==="
 echo "    a failed request must be reported, and must NOT count as throughput"
 start_stub DELAY_MS=20 FAIL_PCT=10
 before_ev=$(truth | field events)
@@ -110,7 +113,7 @@ else
 fi
 
 echo
-echo "=== 3/3 NEGATIVE — server too slow to sustain the offered rate ==="
+echo "=== 3/6 NEGATIVE — server too slow to sustain the offered rate ==="
 echo "    2s/request against 20 VUs is ~10 req/s of capacity vs 200 offered"
 start_stub DELAY_MS=2000
 before_ev=$(truth | field events)
@@ -134,7 +137,7 @@ else
 fi
 
 echo
-echo "=== 4/4 NEGATIVE — no idempotency key may repeat, ACROSS RUNS ==="
+echo "=== 4/6 NEGATIVE — no idempotency key may repeat, ACROSS RUNS ==="
 echo "    a replayed key is deduplicated by a real endpoint, so the run would"
 echo "    measure the dedupe path and report it as ingest throughput"
 start_stub DELAY_MS=1
@@ -149,8 +152,27 @@ else
 fi
 
 echo
+echo "=== 5/6 POSITIVE — a KNOWN tail: 5% of requests take 200ms, the rest 20ms ==="
+echo "    the p99 is the number that gets published, and until now only p50 had a truth"
+start_stub DELAY_MS=20 TAIL_PCT=5 TAIL_MS=200
+run_k6 200 1 15s > /tmp/k6calib.txt
+check "p50 still recovers the 20ms base"  "$(p50)" 20 6
+check "p99 recovers the 200ms tail truth" "$(p99)" 200 25
+echo
+echo "=== 6/6 NEGATIVE — a KNOWN slope: +20us per request served, so latency climbs all run ==="
+echo "    a 90s run can hide the slope a 10-minute run reveals; the drift line must see it"
+start_stub DELAY_MS=5 RAMP_US=20
+run_k6 200 1 15s > /tmp/k6calib.txt
+driftx=$(sed -n 's/^drift p99 first\/last .*(x\([0-9.]*\)).*/\1/p' /tmp/k6calib.txt | head -1)
+if awk -v d="${driftx:-0}" 'BEGIN{exit !(d > 2.0)}'; then
+  printf '    %-38s %-12s OK\n' "drift factor reports the slope (>2x)" "x$driftx"
+else
+  printf '    %-38s %-12s ** WRONG ** (a steady slope went unreported)\n' "drift factor reports the slope (>2x)" "x${driftx:-0}"
+  FAILURES=$((FAILURES+1))
+fi
+echo
 if [ "$FAILURES" -eq 0 ]; then
-  echo "CALIBRATED — the load generator reported the truth in all four cases."
+  echo "CALIBRATED — the load generator reported the truth in all six cases."
 else
   echo "NOT CALIBRATED — $FAILURES check(s) wrong. Benchmark numbers from this"
   echo "generator cannot be trusted until these pass."

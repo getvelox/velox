@@ -162,6 +162,13 @@ the lever, and batching is what did it.
 - **Single-node Postgres**, no replica, no pooler, Single-AZ.
 - **10-minute soak, not 60.** Long enough for autovacuum and checkpoints to
   appear; not long enough for multi-hour effects.
+- **No time-series sink.** k6 can stream to Prometheus/InfluxDB and Grafana has
+  a stock k6 dashboard; the rig deliberately does not depend on one, because a
+  dashboard is for a human watching and cannot fail a run. What a dashboard
+  would show — latency drifting during the run — is instead measured by
+  tagging each request with the third of the run it fell in and comparing the
+  thirds' p99, which IS a gate. Point Grafana at `--out` if you want to watch a
+  soak; it is not part of the protocol.
 
 ## Reproducing
 
@@ -198,10 +205,17 @@ DATABASE_URL=... VELOX_EVS=<measured> ./db-ceiling.sh
                                # measured ev/s as a fraction of each. Run AFTER
                                # measure.sh, on the same table state.
 
-./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats,
-                               # latency medians with spread over PASSING runs,
-                               # every run gated on: k6 exit 0, no drops, no
-                               # failures, claimed > 0, claimed == rows written.
+./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats with
+                               # a cool-down between, latency medians with spread
+                               # over PASSING runs. Every run gated on: k6 exit 0,
+                               # no drops, no failures, claimed > 0, claimed ==
+                               # rows written, SUM(quantity) sent == gained,
+                               # >= 1000 latency samples, and last-third p99
+                               # within 2x of first-third (drift; gated only
+                               # when each third has >= 1000 samples).
+SUSTAINED=1 ./measure.sh       # the preset for anything published as
+                               # "sustained": 5 repeats x 10 min, 30 s cool-down.
+                               # 90 s finds a rate; it does not sustain one.
 
 ./teardown.sh                  # and verify it prints CLEAN
 ```
