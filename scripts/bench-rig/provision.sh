@@ -115,34 +115,93 @@ echo "  velox-bench-db creating (password in $DBPASS_FILE)"
 # NOTE the published figure still excludes nginx. deploy/compose puts nginx in
 # front of velox, which is one more hop; this measures the app container
 # directly and the writeup says so.
-USERDATA=$(cat <<UD
+# THE HEREDOC IS QUOTED (<<'UD'). Nothing below expands here — it is a script
+# for the instance, not for this shell. That distinction is load-bearing and was
+# learned the expensive way: while unquoted, `$(uname -m)` evaluated on the
+# OPERATOR'S MAC, which answers "arm64" where the instance answers "aarch64", so
+# the k6 architecture was decided on the wrong machine and the wrong binary was
+# baked in. Quoting makes the safe behaviour the default, so a future edit that
+# adds a `$(...)` cannot silently reintroduce it.
+#
+# The branch is the one value that genuinely comes from here, so it is
+# substituted explicitly after the heredoc, where the exception is visible.
+USERDATA=$(cat <<'UD'
 #!/bin/bash
 set -x
-dnf install -y git golang postgresql16 docker >/tmp/install.log 2>&1
-systemctl enable --now docker >>/tmp/install.log 2>&1
-cd /opt && git clone --depth 1 --branch $BRANCH https://github.com/getvelox/velox.git >/tmp/clone.log 2>&1
-cd /opt/velox
+# HOME first, before ANY command that needs it. cloud-init runs user-data with
+# no HOME at all: Go then fails with "module cache not found: neither GOMODCACHE
+# nor GOPATH is set", and `git config --global` cannot find ~/.gitconfig either.
+# docs/benchmarks/sustained-throughput.md has prescribed this since the first
+# rig run; provision.sh set only half of it, and set it too late.
+# A container test cannot catch this — Docker supplies HOME=/root for you.
+export HOME=/root GOPATH=/root/go
+export GOTOOLCHAIN=auto GOSUMDB=sum.golang.org
+FAIL=0
+# Every step is checked. The previous version redirected each failure into its
+# own log and then touched READY unconditionally, so an instance whose builds
+# had all failed still advertised itself as provisioned.
+run() { local log=$1; shift; "$@" >"$log" 2>&1 || { echo "FAILED: $* (see $log)" >>/tmp/failures.log; FAIL=1; }; }
+
+run /tmp/install.log dnf install -y git golang postgresql16 docker tar gzip
+run /tmp/docker.log systemctl enable --now docker
+cd /opt || exit 1
+run /tmp/clone.log git clone --depth 1 --branch __BRANCH__ https://github.com/getvelox/velox.git
+cd /opt/velox || { echo "FAILED: clone produced no /opt/velox" >>/tmp/failures.log; touch /tmp/NOT_READY; exit 1; }
 git config --global --add safe.directory /opt/velox
 # Amazon Linux ships Go with GOTOOLCHAIN=local, so go build REFUSES when go.mod
 # requires a newer patch release than the packaged one — and GOSUMDB=off then
 # blocks downloading the right toolchain. Both must be overridden or every
 # binary silently fails to build while user-data still reports success.
 # The container image is unaffected: the Dockerfile pins its own toolchain.
-export GOTOOLCHAIN=auto GOSUMDB=sum.golang.org
-go build -o /usr/local/bin/velox ./cmd/velox >/tmp/build-velox.log 2>&1
-go build -o /usr/local/bin/velox-bench-seed ./cmd/velox-bench-seed >/tmp/build-seed.log 2>&1
-go build -o /usr/local/bin/velox-bootstrap ./cmd/velox-bootstrap >/tmp/build-boot.log 2>&1
-docker build -t velox:bench . >/tmp/build-image.log 2>&1
+#
+# HOME and GOPATH are equally required and are the half that was missing here:
+# cloud-init runs user-data with NO HOME, and Go then refuses with
+# "module cache not found: neither GOMODCACHE nor GOPATH is set", failing all
+# three builds. docs/benchmarks/sustained-throughput.md has documented this
+# since the first rig run; provision.sh simply never applied it. It is invisible
+# to a container test, because Docker sets HOME=/root for you.
+run /tmp/build-velox.log go build -o /usr/local/bin/velox ./cmd/velox
+run /tmp/build-seed.log  go build -o /usr/local/bin/velox-bench-seed ./cmd/velox-bench-seed
+run /tmp/build-boot.log  go build -o /usr/local/bin/velox-bootstrap ./cmd/velox-bootstrap
+run /tmp/build-image.log docker build -t velox:bench .
 
-# k6 generates the load; velox-bench-seed only creates fixtures and mints a
-# key. Installed on both instances because the loadgen is the one that needs
-# it and the app node is where you end up debugging.
-dnf install -y https://dl.k6.io/rpm/x86_64/k6-v0.49.0-1.x86_64.rpm >/tmp/install-k6.log 2>&1 ||
-  { curl -fsSL https://github.com/grafana/k6/releases/download/v0.49.0/k6-v0.49.0-linux-$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 ).tar.gz |
-      tar xz -C /tmp && mv /tmp/k6-v0.49.0-linux-*/k6 /usr/local/bin/k6; }
-touch /tmp/READY
+# k6 generates the load; velox-bench-seed only creates fixtures and mints a key.
+# Installed on both instances because the loadgen is the one that needs it and
+# the app node is where you end up debugging.
+#
+# The TARBALL is the only option on Graviton: k6 publishes no arm64 rpm or deb
+# for any release, only linux-arm64.tar.gz. (The previous rpm URL was a 404 on
+# every architecture.) The version is pinned to the one
+# scripts/bench-rig/calibrate/ was proven against — running a k6 other than the
+# calibrated one would invalidate that proof.
+# if/elif rather than the more natural `case`, deliberately: macOS ships bash
+# 3.2, whose parser loses track of `$( ... )` when the heredoc inside it
+# contains an unbalanced `)` — which every `case` branch label has. The operator
+# runs this script from a Mac, so a `case` here makes provision.sh fail to parse
+# before it ever reaches AWS.
+K6_VERSION=v2.2.0
+K6_ARCH=unknown
+if [ "$(uname -m)" = aarch64 ]; then
+  K6_ARCH=arm64
+elif [ "$(uname -m)" = x86_64 ]; then
+  K6_ARCH=amd64
+else
+  echo "FAILED: unsupported arch $(uname -m)" >>/tmp/failures.log
+  FAIL=1
+fi
+run /tmp/k6-dl.log curl -fsSL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-${K6_ARCH}.tar.gz" -o /tmp/k6.tgz
+run /tmp/k6-tar.log tar xzf /tmp/k6.tgz -C /tmp
+run /tmp/k6-inst.log install -m 0755 "/tmp/k6-${K6_VERSION}-linux-${K6_ARCH}/k6" /usr/local/bin/k6
+# Prove it EXECUTES on this architecture rather than merely landing on disk —
+# an amd64 binary on aarch64 installs fine and then fails with "No such file or
+# directory", which is what the old fallback produced.
+run /tmp/k6-ver.log /usr/local/bin/k6 version
+
+if [ "$FAIL" = "0" ]; then touch /tmp/READY; else touch /tmp/NOT_READY; fi
 UD
 )
+# The single intentional local substitution — see the note above the heredoc.
+USERDATA=${USERDATA//__BRANCH__/$BRANCH}
 
 launch() {
   local name="$1" type="$2"

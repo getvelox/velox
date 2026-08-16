@@ -116,6 +116,11 @@ export const options = {
 
 const eventsIngested = new Counter('events_ingested')
 
+// Distinguishes this run's idempotency keys from every previous run's. Set
+// RUN_ID explicitly to make a run reproducible; otherwise it is derived per VU,
+// which is enough because __VU is part of the key too.
+const RUN_ID = __ENV.RUN_ID || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+
 const params = {
   headers: {
     'Content-Type': 'application/json',
@@ -137,9 +142,13 @@ function event(seq) {
     external_customer_id: CUSTOMER,
     event_name: EVENT,
     quantity: 1 + Math.floor(Math.random() * 1000),
-    // Unique per event across VUs and iterations. A repeated key is silently
-    // deduplicated, which would look like throughput while writing nothing.
-    idempotency_key: `k6-${__VU}-${__ITER}-${seq}`,
+    // Unique per event across VUs, iterations AND RUNS. RUN_ID is the part
+    // that was missing: `k6-<VU>-<ITER>-<seq>` is fully deterministic, so every
+    // run after the first replays the same keys, the server correctly
+    // deduplicates them, and the run measures the DEDUPE path while reporting
+    // it as ingest throughput. Measured before the fix: a repeat run claimed
+    // 1,000 events ingested and wrote ZERO rows.
+    idempotency_key: `k6-${RUN_ID}-${__VU}-${__ITER}-${seq}`,
     dimensions: {
       model: pick(MODELS),
       operation: pick(OPERATIONS),

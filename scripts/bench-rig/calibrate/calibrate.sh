@@ -25,6 +25,7 @@
 #   1. POSITIVE   healthy server -> exact event count, exact rate, p50 == truth
 #   2. NEGATIVE   server erroring -> failures reported, NOT counted as delivered
 #   3. NEGATIVE   server too slow -> rate reported honestly, drops flagged
+#   4. NEGATIVE   run it TWICE -> no idempotency key is ever replayed
 #
 # Usage: ./calibrate.sh          (needs k6 and go; nothing else, no AWS)
 set -uo pipefail
@@ -133,8 +134,23 @@ else
 fi
 
 echo
+echo "=== 4/4 NEGATIVE — no idempotency key may repeat, ACROSS RUNS ==="
+echo "    a replayed key is deduplicated by a real endpoint, so the run would"
+echo "    measure the dedupe path and report it as ingest throughput"
+start_stub DELAY_MS=1
+run_k6 200 1 10s > /tmp/k6calib.txt
+run_k6 200 10 10s > /tmp/k6calib.txt
+dups=$(truth | field duplicates)
+if [ "${dups:-0}" -eq 0 ]; then
+  printf '    %-38s %-12s OK\n' "duplicate idempotency keys" "0"
+else
+  printf '    %-38s %-12s ** WRONG ** (runs replay keys; throughput is fiction)\n' "duplicate idempotency keys" "$dups"
+  FAILURES=$((FAILURES+1))
+fi
+
+echo
 if [ "$FAILURES" -eq 0 ]; then
-  echo "CALIBRATED — the load generator reported the truth in all three cases."
+  echo "CALIBRATED — the load generator reported the truth in all four cases."
 else
   echo "NOT CALIBRATED — $FAILURES check(s) wrong. Benchmark numbers from this"
   echo "generator cannot be trusted until these pass."

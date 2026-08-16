@@ -9,53 +9,110 @@
 #
 #   ./teardown.sh          # delete everything tagged Project=velox-bench
 #   ./teardown.sh --check  # report what exists, delete nothing
+#
+# Exit codes are load-bearing — the watchdog and any automation branch on them:
+#   0  CLEAN    nothing exists (and every query genuinely succeeded)
+#   1  NOT CLEAN something still exists and is billing
+#   2  UNKNOWN  at least one inventory query FAILED, so nothing can be concluded
 set -uo pipefail
 
 REGION="${AWS_REGION:-ap-south-1}"
 TAG_KEY="Project"
 TAG_VAL="velox-bench"
 CHECK_ONLY=0
-[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+case "${1:-}" in
+  "") CHECK_ONLY=0 ;;
+  --check) CHECK_ONLY=1 ;;
+  *) printf 'usage: %s [--check]\n' "$0" >&2; exit 64 ;;
+esac
 
 say() { printf '%s\n' "$*"; }
 aws_() { aws --region "$REGION" "$@"; }
 
 # ---- inventory ------------------------------------------------------------
-instances=$(aws_ ec2 describe-instances \
+# EVERY query's exit status is checked. Previously each ended in `2>/dev/null`
+# with no status check, so a failure — expired credentials, wrong region, a
+# denied permission, throttling, no network — produced an EMPTY result that was
+# then reported as "CLEAN — nothing is running, nothing is billing".
+#
+# That is the most dangerous sentence this script can print, because it is most
+# likely to be wrong exactly when the operator cannot see the account, and
+# watchdog.sh stands down permanently on reading it.
+#
+# Failures are recorded in a FILE, not a variable: every call below runs inside
+# `$( )`, which is a subshell, so an incremented counter would be discarded on
+# return and the script would conclude "clean" from queries it knows failed.
+# The first version of this fix did exactly that, and also wrote its error text
+# to stdout — where it was captured INTO the inventory variable, making an
+# unreadable account look like a populated one.
+FAILFILE=$(mktemp)
+trap 'rm -f "$FAILFILE"' EXIT
+q() {
+  local desc=$1; shift
+  local out err rc
+  err=$(mktemp)
+  out=$(aws_ "$@" 2>"$err"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s: %s\n' "$desc" "$(tail -1 "$err")" >>"$FAILFILE"
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
+  printf '%s' "$out" | tr '\t' ' '
+}
+
+instances=$(q instances ec2 describe-instances \
   --filters "Name=tag:$TAG_KEY,Values=$TAG_VAL" \
             "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-  --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' ' ')
+  --query 'Reservations[].Instances[].InstanceId' --output text)
 
-dbs=$(aws_ rds describe-db-instances \
+dbs=$(q rds rds describe-db-instances \
   --query "DBInstances[?starts_with(DBInstanceIdentifier, 'velox-bench')].DBInstanceIdentifier" \
-  --output text 2>/dev/null | tr '\t' ' ')
+  --output text)
 
-sgs=$(aws_ ec2 describe-security-groups \
+sgs=$(q security-groups ec2 describe-security-groups \
   --filters "Name=tag:$TAG_KEY,Values=$TAG_VAL" \
-  --query 'SecurityGroups[].GroupId' --output text 2>/dev/null | tr '\t' ' ')
+  --query 'SecurityGroups[].GroupId' --output text)
 
-keys=$(aws_ ec2 describe-key-pairs \
+keys=$(q key-pairs ec2 describe-key-pairs \
   --filters "Name=tag:$TAG_KEY,Values=$TAG_VAL" \
-  --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' ' ')
+  --query 'KeyPairs[].KeyName' --output text)
 
-subnetgroups=$(aws_ rds describe-db-subnet-groups \
+subnetgroups=$(q db-subnet-groups rds describe-db-subnet-groups \
   --query "DBSubnetGroups[?starts_with(DBSubnetGroupName, 'velox-bench')].DBSubnetGroupName" \
-  --output text 2>/dev/null | tr '\t' ' ')
+  --output text)
 
 say "inventory in $REGION:"
 say "  instances:      ${instances:-<none>}"
 say "  rds:            ${dbs:-<none>}"
-say "  security groups:${sgs:+ $sgs}${sgs:-<none>}"
+say "  security groups: ${sgs:-<none>}"
 say "  key pairs:      ${keys:-<none>}"
 say "  db subnet grps: ${subnetgroups:-<none>}"
+
+# A failed query is never "clean". Report UNKNOWN and refuse to conclude.
+# wc, not grep -c: grep exits 1 on zero matches, so `|| echo 0` appended a
+# SECOND zero and the comparison died on "0\n0: integer expression expected"
+# — falling straight through to CLEAN, which is the outcome this whole block
+# exists to prevent.
+FAILED_QUERIES=$(wc -l < "$FAILFILE" | tr -d " ")
+if [ "$FAILED_QUERIES" -gt 0 ]; then
+  say ""
+  say "these inventory queries FAILED:"
+  sed 's/^/  /' "$FAILFILE"
+  say ""
+  say "UNKNOWN — $FAILED_QUERIES inventory query/queries FAILED (see above)."
+  say "This is NOT 'clean'. The account may be billing; this script could not look."
+  say "Check credentials and region ($REGION), then re-run."
+  exit 2
+fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
   if [ -z "${instances}${dbs}${sgs}${keys}${subnetgroups}" ]; then
     say "CLEAN — nothing is running, nothing is billing"
-  else
-    say "NOT CLEAN — run ./teardown.sh to remove the above"
+    exit 0
   fi
-  exit 0
+  say "NOT CLEAN — run ./teardown.sh to remove the above"
+  exit 1
 fi
 
 # ---- delete, most-expensive first ----------------------------------------
