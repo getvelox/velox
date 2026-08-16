@@ -10,12 +10,35 @@
 # the table and its indexes fit comfortably in cache.
 #
 #   DATABASE_URL=... ./seed-history.sh 20000000
+#   TARGET=aws ./seed-history.sh 20000000     # on the rig: runs itself on the app node
 #
 # Rows are spread across every seeded customer and meter, with timestamps
 # scattered over the trailing 30 days, so the btrees are not all appending to
 # one hot right-hand edge — which is what a single-customer seed would do and
 # is the easiest case for Postgres.
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# TARGET=aws: RDS is --no-publicly-accessible, so this script cannot reach the
+# database from a laptop. Resolve the rig and re-run THIS script on the app
+# node over ssh (piped over stdin — nothing to copy first), with the same
+# environment. The app node has psql and pgbench (postgresql16-contrib).
+# ---------------------------------------------------------------------------
+if [ "${TARGET:-local}" = "aws" ]; then
+  REGION="${AWS_REGION:-ap-south-1}"; OUT="${OUT:-$HOME/.velox-bench-rig}"
+  KEYFILE="$OUT/velox-bench-key.pem"; [ -s "$KEYFILE" ] || { echo "FATAL: no key at $KEYFILE"; exit 1; }
+  aws_() { aws --region "$REGION" "$@"; }
+  APP_PUB=$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=velox-bench-app" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[0].PublicIpAddress' --output text)
+  [ -n "$APP_PUB" ] && [ "$APP_PUB" != "None" ] || { echo "FATAL: app instance not running"; exit 1; }
+  DBHOST=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].Endpoint.Address' --output text)
+  DBPASS=$(cat "$OUT/db-password")
+  REMOTE_DSN="postgres://velox:$DBPASS@$DBHOST:5432/${DBNAME:-velox}?sslmode=require"
+  echo "== running on the app node ($APP_PUB) against $DBHOST"
+  # Forward every knob this script honours; TARGET is dropped so it runs locally there.
+  exec ssh -o StrictHostKeyChecking=no -i "$KEYFILE" "ec2-user@$APP_PUB" \
+    "TARGET=local DATABASE_URL='$REMOTE_DSN' CHUNK='${CHUNK:-2000000}' bash -s -- $*" < "$0"
+fi
 
 ROWS="${1:-20000000}"
 : "${DATABASE_URL:?set DATABASE_URL}"

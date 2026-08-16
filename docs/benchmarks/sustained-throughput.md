@@ -181,49 +181,31 @@ the lever, and batching is what did it.
 ```bash
 cd scripts/bench-rig
 
-./calibrate/calibrate.sh       # prove the MEASURING TOOL is honest first;
-                               # needs only go + k6, costs nothing, and must
-                               # print CALIBRATED before any number means anything
+# 0. prove the instrument and the account, at no cost
+./calibrate/calibrate.sh          # must print CALIBRATED (six cases)
+./teardown.sh --check             # exit 0 = clean; 2 = COULD NOT LOOK (never "clean")
 
-./teardown.sh --check          # confirm the account is clean first.
-                               # exit 0 = clean, 1 = not clean, 2 = COULD NOT LOOK
-                               # (a failed query is never "clean")
+# 1. hardware — billing starts here
+./provision.sh --yes              # small rig; APP_TYPE/GEN_TYPE/DB_CLASS for the larger one
+( nohup ./watchdog.sh 240 >/tmp/velox-rig-watchdog.log 2>&1 & )   # force teardown at 4h
 
-./provision.sh --yes           # ~$0.41/hr from this moment; override
-                               # APP_TYPE / GEN_TYPE / DB_CLASS for the larger rig
-( nohup ./watchdog.sh 240 & )  # force teardown after 4h if the driver dies
+# 2. hardware -> a running, seeded, verified velox (live mode, 200 customers)
+./bringup.sh                      # waits for RDS + build; refuses cross-AZ, dirty schema,
+                                  # admin-pool fallback, or a 201 that wrote no row
 
-./bringup.sh                   # hardware -> a RUNNING, SEEDED, VERIFIED velox
-                               # (LIVE-mode fixtures, 200 customers by default;
-                               # BENCH_LIVEMODE=false / BENCH_CUSTOMERS=n to change)
+# 3. a table with history (optional but recommended; runs itself on the app node)
+TARGET=aws ./seed-history.sh 20000000
 
-DATABASE_URL=... ./seed-history.sh 20000000
-                               # OPTIONAL but recommended: a table with history,
-                               # spread across the seeded customers. Without it
-                               # the runs measure an EMPTY table — the optimistic
-                               # case. measure.sh records the table size before
-                               # every run either way, so a reader can tell.
+# 4. THE PROTOCOL — every repeat gated; latency medians over passing runs;
+#    evidence files per run. SUSTAINED=1 is what "sustained" means on this page.
+TARGET=aws SUSTAINED=1 CONFIGS="single:200:1 batched:1000:10" PROBE_RATE=5 ./measure.sh
+TARGET=aws K6_MODE=max VUS=16 CONFIGS="ceiling:0:500" DURATION=90s ./measure.sh   # closed-loop ceiling
 
-DATABASE_URL=... VELOX_EVS=<measured> ./db-ceiling.sh
-                               # the DENOMINATOR: pgbench on the same database
-                               # and row shape. Leg A = raw commit floor, leg B =
-                               # Velox's per-tx RLS protocol; prints Velox's
-                               # measured ev/s as a fraction of each. Run AFTER
-                               # measure.sh, on the same table state.
+# 5. the denominator (runs itself on the app node); use the ev/s measure.sh reported
+TARGET=aws BATCH=10 VELOX_EVS=<measured> ./db-ceiling.sh
 
-./measure.sh                   # the PROTOCOL: warmup (discarded), N repeats with
-                               # a cool-down between, latency medians with spread
-                               # over PASSING runs. Every run gated on: k6 exit 0,
-                               # no drops, no failures, claimed > 0, claimed ==
-                               # rows written, SUM(quantity) sent == gained,
-                               # >= 1000 latency samples, and last-third p99
-                               # within 2x of first-third (drift; gated only
-                               # when each third has >= 1000 samples).
-SUSTAINED=1 ./measure.sh       # the preset for anything published as
-                               # "sustained": 5 repeats x 10 min, 30 s cool-down.
-                               # 90 s finds a rate; it does not sustain one.
-
-./teardown.sh                  # and verify it prints CLEAN
+# 6. done — and verify it says CLEAN
+./teardown.sh
 ```
 
 `db-ceiling.sh` is the control every Velox throughput figure had been missing:
