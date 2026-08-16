@@ -26,7 +26,11 @@
 // Environment:
 //   BASE        base URL of the running velox server (required)
 //   API_KEY     Bearer key from `velox-bench-seed` (required)
-//   CUSTOMER    external_customer_id from velox-bench-seed (default bench-customer)
+//   CUSTOMERS   number of bench customers velox-bench-seed created (default 200).
+//               Each REQUEST picks one at random; a batch stays single-customer,
+//               matching the batch handler's own design assumption. The probe
+//               reads a random customer too.
+//   CUSTOMER_PREFIX / CUSTOMER_ID_PREFIX  id prefixes from velox-bench-seed
 //   EVENT       event_name from velox-bench-seed (default bench_tokens)
 //   BATCH       events per request; 1 uses the single-event endpoint (default 1)
 //   RATE        offered events/sec in rate mode (default 200)
@@ -44,8 +48,18 @@ import { Counter } from 'k6/metrics'
 
 const BASE = __ENV.BASE
 const API_KEY = __ENV.API_KEY
-const CUSTOMER = __ENV.CUSTOMER || 'bench-customer'
+const CUSTOMERS = parseInt(__ENV.CUSTOMERS || '200', 10)
+const CUSTOMER_PREFIX = __ENV.CUSTOMER_PREFIX || 'bench-customer-'
+const CUSTOMER_ID_PREFIX = __ENV.CUSTOMER_ID_PREFIX || 'vlx_cus_bench_'
 const EVENT = __ENV.EVENT || 'bench_tokens'
+
+// Numbered ids, zero-padded to 3, matching velox-bench-seed. Picking a customer
+// per request rather than using one for the whole run is what makes this a
+// benchmark and not a pathological case: one customer means the resolve cache
+// never misses, the btrees append to a single hot edge, and the probe's
+// usage-summary aggregates the entire table for that one customer.
+function pad3(n) { return String(n).padStart(3, '0') }
+function pickCustomer() { return Math.floor(Math.random() * CUSTOMERS) }
 const BATCH = parseInt(__ENV.BATCH || '1', 10)
 const RATE = parseInt(__ENV.RATE || '200', 10)
 const DURATION = __ENV.DURATION || '60s'
@@ -60,7 +74,9 @@ const MODE = __ENV.MODE || 'rate'
 // throughput number with no concurrent SLO on the read path is the number that
 // flatters the vendor, which is why it is the one vendors publish.
 const PROBE_RATE = parseInt(__ENV.PROBE_RATE || '0', 10)
-const PROBE_P99_MS = parseInt(__ENV.PROBE_P99_MS || '1000', 10)
+const PROBE_P99_MS = parseInt(__ENV.PROBE_P99_MS || '500', 10)
+// CUSTOMER_ID pins the probe to one customer; unset, the probe picks at random
+// from the same pool ingest writes to, which is what a dashboard user does.
 const CUSTOMER_ID = __ENV.CUSTOMER_ID || ''
 
 if (!BASE || !API_KEY) {
@@ -90,6 +106,8 @@ const REQ_RATE = Math.max(1, Math.ceil(RATE / BATCH))
 // worker adds offered load. It does not transfer to this executor. In `max`
 // mode below it does, which is why VUS is the load there and must be chosen.
 const VUS = parseInt(__ENV.VUS || String(Math.min(512, Math.max(16, Math.ceil(REQ_RATE * 0.5)))), 10)
+
+const INGEST_SCENARIO = MODE === 'max' ? 'ceiling' : 'offered'
 
 // Built as a plain object rather than inline in `options`, because a spread
 // placed after the scenarios ternary lands at the TOP level of options — k6
@@ -133,12 +151,19 @@ export const options = {
   // k6 computes p(90) and p(95) by default and NOTHING else — asking for
   // values.['p(99)'] without this line silently yields undefined, which prints
   // as a confident 0.0ms. The first run of this script did exactly that.
-  summaryTrendStats: ['min', 'med', 'avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
+  summaryTrendStats: ['count', 'min', 'med', 'avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
   scenarios,
   thresholds: {
     // A run with errors is not a slower run, it is a different run. Fail it.
     http_req_failed: ['rate==0'],
-    ...(P99_MS > 0 ? { http_req_duration: [`p(99)<${P99_MS}`] } : {}),
+    // Declaring a threshold on a tagged metric is what makes k6 CREATE that
+    // sub-metric, so these two exist even with an always-true expression. The
+    // ingest scenario's latency and drops are then readable in isolation —
+    // without this, `latency p50/p99` was the GLOBAL http_req_duration, and
+    // with PROBE_RATE>0 the probe's read latency was pooled into the published
+    // ingest tail (13% of samples at batch=10, ~43% at batch=500).
+    [`http_req_duration{scenario:${INGEST_SCENARIO}}`]: P99_MS > 0 ? [`p(99)<${P99_MS}`] : ['p(99)>=0'],
+    [`dropped_iterations{scenario:${INGEST_SCENARIO}}`]: ['count>=0'],
     // Scoped to the probe scenario by k6's built-in `scenario` tag. Declaring
     // the threshold is also what CREATES the sub-metric the summary reads.
     // This is what makes the responsiveness claim falsifiable: if reads degrade
@@ -173,9 +198,9 @@ const OPERATIONS = ['input', 'output', 'embedding', 'moderation']
 
 function pick(a) { return a[Math.floor(Math.random() * a.length)] }
 
-function event(seq) {
+function event(seq, customer) {
   return {
-    external_customer_id: CUSTOMER,
+    external_customer_id: CUSTOMER_PREFIX + pad3(customer),
     event_name: EVENT,
     quantity: 1 + Math.floor(Math.random() * 1000),
     // Unique per event across VUs, iterations AND RUNS. RUN_ID is the part
@@ -195,11 +220,12 @@ function event(seq) {
 
 export default function () {
   let res
+  const customer = pickCustomer()
   if (BATCH === 1) {
-    res = http.post(`${BASE}/v1/usage-events`, JSON.stringify(event(0)), params)
+    res = http.post(`${BASE}/v1/usage-events`, JSON.stringify(event(0, customer)), params)
   } else {
     const events = new Array(BATCH)
-    for (let i = 0; i < BATCH; i++) events[i] = event(i)
+    for (let i = 0; i < BATCH; i++) events[i] = event(i, customer)
     res = http.post(`${BASE}/v1/usage-events/batch`, JSON.stringify(events), params)
   }
 
@@ -215,19 +241,43 @@ export function probe() {
   const from = new Date(now.getTime() - 30 * 24 * 3600 * 1000).toISOString()
   const to = now.toISOString()
 
-  if (CUSTOMER_ID) {
-    http.get(`${BASE}/v1/usage-summary/${CUSTOMER_ID}?from=${from}&to=${to}`, params)
+  const cid = CUSTOMER_ID || CUSTOMER_ID_PREFIX + pad3(pickCustomer())
+  const r1 = http.get(`${BASE}/v1/usage-summary/${cid}?from=${from}&to=${to}`, params)
+  const r2 = http.get(`${BASE}/v1/invoices?limit=20`, params)
+  const r3 = http.get(`${BASE}/v1/customers?limit=20`, params)
+  // A read that errors is a failed probe, not a fast one. http_req_failed
+  // already covers 4xx/5xx globally; the check makes it visible per endpoint.
+  check(r1, { 'usage-summary 200': (r) => r.status === 200 })
+  check(r2, { 'invoices 200': (r) => r.status === 200 })
+  check(r3, { 'customers 200': (r) => r.status === 200 })
+}
+
+// '90s' | '10m' | '1h' | '1h30m' -> seconds
+function parseDuration(d) {
+  let total = 0
+  const re = /(\d+)([hms])/g
+  let mm
+  while ((mm = re.exec(d)) !== null) {
+    const n = parseInt(mm[1], 10)
+    total += mm[2] === 'h' ? n * 3600 : mm[2] === 'm' ? n * 60 : n
   }
-  http.get(`${BASE}/v1/invoices?limit=20`, params)
-  http.get(`${BASE}/v1/customers?limit=20`, params)
+  return total
 }
 
 export function handleSummary(data) {
   const m = data.metrics
-  const dropped = m.dropped_iterations ? m.dropped_iterations.values.count : 0
+  const scoped = (name) => (m[`${name}{scenario:${INGEST_SCENARIO}}`] || m[name] || {}).values || {}
+  const dropped = scoped('dropped_iterations').count || 0
   const ingested = m.events_ingested ? m.events_ingested.values.count : 0
-  const secs = m.http_req_duration ? data.state.testRunDurationMs / 1000 : 0
-  const d = m.http_req_duration ? m.http_req_duration.values : {}
+  // Denominator is the OFFERED window in rate mode, not testRunDurationMs:
+  // that figure includes k6's gracefulStop tail (up to 30s waiting for
+  // in-flight iterations), so under a slow server 200 events over a 10s window
+  // printed as 17 ev/s instead of 20. Wrong in the safe direction, but wrong.
+  // In max mode there is no schedule, so wall-clock is the honest denominator.
+  const durSecs = parseDuration(DURATION)
+  const secs = MODE === 'rate' && durSecs > 0 ? durSecs : (m.http_req_duration ? data.state.testRunDurationMs / 1000 : 0)
+  // INGEST-scenario latency only — never pooled with the probe.
+  const d = scoped('http_req_duration')
 
   const lines = [
     '',
@@ -236,6 +286,7 @@ export function handleSummary(data) {
     `events ingested   ${ingested}`,
     `events/sec        ${secs > 0 ? (ingested / secs).toFixed(0) : 'n/a'}`,
     `requests failed   ${m.http_req_failed ? (m.http_req_failed.values.passes || 0) : 0}`,
+    `latency samples   ${d.count || 0}${(d.count || 0) < 1000 ? '  <-- FEWER THAN 1000: p99 is not trustworthy' : ''}`,
     `latency p50/p99   ${(d['p(50)'] || 0).toFixed(1)}ms / ${(d['p(99)'] || 0).toFixed(1)}ms`,
   ]
   // Only meaningful in rate mode, and the single most important line there:

@@ -14,8 +14,19 @@
 //
 // Prints a JSON object to stdout:
 //
-//	{"api_key":"vlx_…","external_customer_id":"bench-customer",
-//	 "event_name":"bench_tokens","customer_id":"vlx_cus_bench"}
+//	{"api_key":"vlx_…","event_name":"bench_tokens",
+//	 "customer_count":"200","customer_id_prefix":"vlx_cus_bench_",
+//	 "external_customer_id_prefix":"bench-customer-",
+//	 "external_customer_id":"bench-customer-000","customer_id":"vlx_cus_bench_000"}
+//
+// BENCH_CUSTOMERS (default 200) customers are created, not one. That number is
+// the difference between a benchmark and a pathological case: with a single
+// customer every event lands on one customer_id, so the resolve cache never
+// misses, the btrees append to one hot edge, and — worst — the responsiveness
+// probe's usage-summary aggregates EVERY row in the table for its one customer,
+// which at 1.1M rows already costs ~180ms on a warm laptop and would report the
+// product as DEGRADED on the AWS rig for a reason no real tenant would hit.
+// Customers are numbered NNN so the load generator can pick one arithmetically.
 //
 // Idempotent — safe to re-run. The fixtures are test-mode (livemode=false),
 // so a key minted here authenticates into the same partition the fixtures
@@ -25,9 +36,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -39,12 +52,34 @@ import (
 )
 
 const (
-	benchTenant             = "vlx_ten_bench"
-	benchCustomer           = "vlx_cus_bench"
-	benchMeter              = "vlx_mtr_bench"
-	benchCustomerExternalID = "bench-customer"
-	benchMeterKey           = "bench_tokens"
+	benchTenant                 = "vlx_ten_bench"
+	benchMeter                  = "vlx_mtr_bench"
+	benchMeterKey               = "bench_tokens"
+	benchCustomerIDPrefix       = "vlx_cus_bench_"
+	benchCustomerExternalPrefix = "bench-customer-"
+	defaultBenchCustomers       = 200
 )
+
+func benchLivemode() bool {
+	switch os.Getenv("BENCH_LIVEMODE") {
+	case "", "true", "1", "live":
+		return true
+	case "false", "0", "test":
+		return false
+	}
+	log.Fatalf("BENCH_LIVEMODE must be true|false, got %q", os.Getenv("BENCH_LIVEMODE"))
+	return true
+}
+
+func benchCustomerCount() int {
+	if v := os.Getenv("BENCH_CUSTOMERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		log.Fatalf("BENCH_CUSTOMERS must be a positive integer, got %q", v)
+	}
+	return defaultBenchCustomers
+}
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
@@ -61,21 +96,32 @@ func main() {
 
 	db := postgres.NewDB(pool, 30*time.Second)
 
-	// WithLivemode is required by the key-minting path below (auth opens a
-	// TxTenant, which reads it). It does NOT reach the fixture INSERTs — see
-	// the note in bootstrapFixtures.
-	ctx := postgres.WithLivemode(context.Background(), false)
+	// BENCH_LIVEMODE selects WHICH ingest path the benchmark measures, and the
+	// default is the production one. Test mode is not merely a label: the
+	// service does an extra per-event test-clock lookup in test mode that live
+	// mode skips by design ("the high-volume production ingest path stays at
+	// zero extra queries" — internal/usage/service.go simNow), so every number
+	// measured in test mode includes a query production never makes. The bench
+	// database is throwaway, so nothing about live mode here touches money.
+	live := benchLivemode()
+	// WithLivemode is read by the key-minting path (auth opens a TxTenant). It
+	// does NOT reach the fixture INSERTs — see the note in bootstrapFixtures.
+	ctx := postgres.WithLivemode(context.Background(), live)
 
-	bootstrapFixtures(ctx, db)
+	n := benchCustomerCount()
+	bootstrapFixtures(ctx, db, n, live)
 
 	out := map[string]string{
-		"api_key":              mintBenchAPIKey(ctx, db),
-		"external_customer_id": benchCustomerExternalID,
-		"event_name":           benchMeterKey,
-		// The INTERNAL id, which /v1/usage-summary/{id} is keyed by. The
-		// responsiveness probe reads that endpoint while ingest runs, and it
-		// cannot construct the id from the external one.
-		"customer_id": benchCustomer,
+		"api_key":                     mintBenchAPIKey(ctx, db, live),
+		"livemode":                    strconv.FormatBool(live),
+		"event_name":                  benchMeterKey,
+		"customer_count":              strconv.Itoa(n),
+		"customer_id_prefix":          benchCustomerIDPrefix,
+		"external_customer_id_prefix": benchCustomerExternalPrefix,
+		// The first customer, for callers that only need one (bringup's smoke
+		// test). The INTERNAL id is what /v1/usage-summary/{id} is keyed by.
+		"external_customer_id": fmt.Sprintf("%s%03d", benchCustomerExternalPrefix, 0),
+		"customer_id":          fmt.Sprintf("%s%03d", benchCustomerIDPrefix, 0),
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		log.Fatalf("write credentials: %v", err)
@@ -85,7 +131,7 @@ func main() {
 // bootstrapFixtures ensures the benchmark tenant/customer/meter exist.
 // Idempotent. Uses TxBypass because this is a CLI tool with full DB access;
 // the runtime path sets tenant_id per-request via TxTenant as usual.
-func bootstrapFixtures(ctx context.Context, db *postgres.DB) {
+func bootstrapFixtures(ctx context.Context, db *postgres.DB, customers int, live bool) {
 	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
 		log.Fatalf("begin bootstrap: %v", err)
@@ -108,7 +154,11 @@ func bootstrapFixtures(ctx context.Context, db *postgres.DB) {
 	// means a SECOND run against the same database repairs it and looks fine.
 	// A fresh database is the only one that shows the bug, and a fresh database
 	// is exactly what a benchmark rig provisions.
-	if _, err = tx.ExecContext(ctx, `SELECT set_config('app.livemode', 'off', true)`); err != nil {
+	mode := "off"
+	if live {
+		mode = "on"
+	}
+	if _, err = tx.ExecContext(ctx, `SELECT set_config('app.livemode', $1, true)`, mode); err != nil {
 		log.Fatalf("set livemode on bootstrap tx: %v", err)
 	}
 
@@ -119,19 +169,26 @@ func bootstrapFixtures(ctx context.Context, db *postgres.DB) {
 		log.Fatalf("upsert tenant: %v", err)
 	}
 
+	// One statement for all customers, not a loop of round trips.
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO customers (id, tenant_id, external_id, display_name, email, livemode)
-		VALUES ($1, $2, $3, 'Bench Customer', 'bench@velox.local', false)
-		ON CONFLICT (id) DO UPDATE SET livemode = false
-	`, benchCustomer, benchTenant, benchCustomerExternalID); err != nil {
-		log.Fatalf("upsert customer: %v", err)
+		SELECT $1 || lpad(g::text, 3, '0'),
+		       $2,
+		       $3 || lpad(g::text, 3, '0'),
+		       'Bench Customer ' || g,
+		       'bench-' || g || '@velox.local',
+		       $5
+		FROM generate_series(0, $4 - 1) g
+		ON CONFLICT (id) DO UPDATE SET livemode = $5
+	`, benchCustomerIDPrefix, benchTenant, benchCustomerExternalPrefix, customers, live); err != nil {
+		log.Fatalf("upsert customers: %v", err)
 	}
 
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO meters (id, tenant_id, name, key, unit, aggregation, livemode)
-		VALUES ($1, $2, 'Bench Tokens', $3, 'tokens', $4, false)
-		ON CONFLICT (id) DO UPDATE SET livemode = false
-	`, benchMeter, benchTenant, benchMeterKey, string(domain.AggSum)); err != nil {
+		VALUES ($1, $2, 'Bench Tokens', $3, 'tokens', $4, $5)
+		ON CONFLICT (id) DO UPDATE SET livemode = $5
+	`, benchMeter, benchTenant, benchMeterKey, string(domain.AggSum), live); err != nil {
 		log.Fatalf("upsert meter: %v", err)
 	}
 
@@ -144,11 +201,11 @@ func bootstrapFixtures(ctx context.Context, db *postgres.DB) {
 // and returns the raw value. Uses the real auth service rather than inserting
 // a row by hand: the salt-and-hash format is auth's business, and a
 // hand-rolled copy here would silently stop matching the day that changes.
-func mintBenchAPIKey(ctx context.Context, db *postgres.DB) string {
+func mintBenchAPIKey(ctx context.Context, db *postgres.DB, live bool) string {
 	svc := auth.NewService(auth.NewPostgresStore(db))
-	// Bench events are test-mode; the key must be minted in the same mode or
-	// it authenticates into the live partition and sees no bench fixtures.
-	res, err := svc.CreateKey(auth.WithLivemode(ctx, false), benchTenant, auth.CreateKeyInput{
+	// The key MUST be minted in the same mode as the fixtures, or it
+	// authenticates into the other partition and sees no bench data.
+	res, err := svc.CreateKey(auth.WithLivemode(ctx, live), benchTenant, auth.CreateKeyInput{
 		Name: "velox-bench", KeyType: auth.KeyTypeSecret,
 	})
 	if err != nil {
