@@ -17,6 +17,9 @@
 //	reported and NOT counted as delivered throughput
 //
 // MAX_INFLIGHT  concurrent request ceiling; beyond it the stub answers 503
+// TAIL_PCT/TAIL_MS  a known bimodal tail (TAIL_PCT% of requests take TAIL_MS),
+//
+//	so p99 — the number actually published — has a truth to hit
 //
 // /count also reports "duplicates": how many idempotency keys were seen more
 // than once. A correct load profile must produce zero, across runs as well as
@@ -39,6 +42,18 @@ func main() {
 	delayMs, _ := strconv.Atoi(os.Getenv("DELAY_MS"))
 	delay := time.Duration(delayMs) * time.Millisecond
 	failPct, _ := strconv.Atoi(os.Getenv("FAIL_PCT"))
+	// TAIL_PCT percent of requests take TAIL_MS instead of DELAY_MS — a known
+	// bimodal distribution, so the p99 the benchmark PUBLISHES can be checked
+	// against a truth rather than only the p50. With TAIL_PCT=5 the true p99
+	// is TAIL_MS; with TAIL_PCT=0.5 it is DELAY_MS. Chosen deterministically
+	// by request counter, not random, so the proportion is exact.
+	// RAMP_US adds this many microseconds per request served, so latency
+	// climbs steadily through the run — a known SLOPE, to prove the drift
+	// check sees one.
+	rampUs, _ := strconv.Atoi(os.Getenv("RAMP_US"))
+	tailPct, _ := strconv.Atoi(os.Getenv("TAIL_PCT"))
+	tailMs, _ := strconv.Atoi(os.Getenv("TAIL_MS"))
+	tail := time.Duration(tailMs) * time.Millisecond
 	maxInflight, _ := strconv.Atoi(os.Getenv("MAX_INFLIGHT"))
 	if maxInflight <= 0 {
 		maxInflight = 1 << 20
@@ -99,7 +114,13 @@ func main() {
 				w.WriteHeader(503)
 				return
 			}
-			time.Sleep(delay) // the known truth
+			// the known truth: every TAIL_PCT-th percent of requests is slow
+			seq := atomic.AddInt64(&requests, 0)
+			if tailPct > 0 && int(seq)%100 < tailPct {
+				time.Sleep(tail)
+			} else {
+				time.Sleep(delay + time.Duration(seq*int64(rampUs))*time.Microsecond)
+			}
 			if failPct > 0 && int(atomic.LoadInt64(&requests))%100 < failPct {
 				atomic.AddInt64(&requests, 1)
 				atomic.AddInt64(&rejected, 1)

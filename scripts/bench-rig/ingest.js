@@ -45,6 +45,7 @@
 import http from 'k6/http'
 import { check } from 'k6'
 import { Counter } from 'k6/metrics'
+import exec from 'k6/execution'
 
 const BASE = __ENV.BASE
 const API_KEY = __ENV.API_KEY
@@ -164,6 +165,13 @@ export const options = {
     // ingest tail (13% of samples at batch=10, ~43% at batch=500).
     [`http_req_duration{scenario:${INGEST_SCENARIO}}`]: P99_MS > 0 ? [`p(99)<${P99_MS}`] : ['p(99)>=0'],
     [`dropped_iterations{scenario:${INGEST_SCENARIO}}`]: ['count>=0'],
+    // Drift: the same metric split into thirds of the run by scenario
+    // progress. A run whose last third is much slower than its first is not
+    // "sustained" whatever its overall p99 says — it is a slope, and 90 s
+    // hides the slope that 10 min reveals. Compared in handleSummary and
+    // gated by measure.sh (DRIFT_FACTOR).
+    [`http_req_duration{scenario:${INGEST_SCENARIO},phase:first}`]: ['p(99)>=0'],
+    [`http_req_duration{scenario:${INGEST_SCENARIO},phase:last}`]: ['p(99)>=0'],
     // Scoped to the probe scenario by k6's built-in `scenario` tag. Declaring
     // the threshold is also what CREATES the sub-metric the summary reads.
     // This is what makes the responsiveness claim falsifiable: if reads degrade
@@ -176,6 +184,10 @@ export const options = {
 }
 
 const eventsIngested = new Counter('events_ingested')
+// Sum of the quantities the client SENT and the server ACKNOWLEDGED. Row-count
+// reconciliation proves N rows exist; this proves they carry the money-bearing
+// content that was sent (quantities are integers 1..1000, so the sum is exact).
+const quantitySent = new Counter('quantity_sent')
 
 // Distinguishes this run's idempotency keys from every previous run's. Set
 // RUN_ID explicitly to make a run reproducible; otherwise it is derived per VU,
@@ -198,11 +210,11 @@ const OPERATIONS = ['input', 'output', 'embedding', 'moderation']
 
 function pick(a) { return a[Math.floor(Math.random() * a.length)] }
 
-function event(seq, customer) {
+function event(seq, customer, qty) {
   return {
     external_customer_id: CUSTOMER_PREFIX + pad3(customer),
     event_name: EVENT,
-    quantity: 1 + Math.floor(Math.random() * 1000),
+    quantity: qty,
     // Unique per event across VUs, iterations AND RUNS. RUN_ID is the part
     // that was missing: `k6-<VU>-<ITER>-<seq>` is fully deterministic, so every
     // run after the first replays the same keys, the server correctly
@@ -221,16 +233,24 @@ function event(seq, customer) {
 export default function () {
   let res
   const customer = pickCustomer()
+  let qtyTotal = 0
+  // Which third of the run this request belongs to, from the scenario's own
+  // progress (0..1). Tagged so drift can be measured without a time-series
+  // sink: k6 splits the metric by tag when a threshold names the tag.
+  const prog = exec.scenario.progress
+  const phase = prog < 1 / 3 ? 'first' : prog < 2 / 3 ? 'mid' : 'last'
+  const p = Object.assign({}, params, { tags: { phase } })
   if (BATCH === 1) {
-    res = http.post(`${BASE}/v1/usage-events`, JSON.stringify(event(0, customer)), params)
+    const q = 1 + Math.floor(Math.random() * 1000); qtyTotal = q
+    res = http.post(`${BASE}/v1/usage-events`, JSON.stringify(event(0, customer, q)), p)
   } else {
     const events = new Array(BATCH)
-    for (let i = 0; i < BATCH; i++) events[i] = event(i, customer)
-    res = http.post(`${BASE}/v1/usage-events/batch`, JSON.stringify(events), params)
+    for (let i = 0; i < BATCH; i++) { const q = 1 + Math.floor(Math.random() * 1000); qtyTotal += q; events[i] = event(i, customer, q) }
+    res = http.post(`${BASE}/v1/usage-events/batch`, JSON.stringify(events), p)
   }
 
   const ok = check(res, { 'ingest accepted': (r) => r.status === 201 || r.status === 200 })
-  if (ok) eventsIngested.add(BATCH)
+  if (ok) { eventsIngested.add(BATCH); quantitySent.add(qtyTotal) }
 }
 
 // The reads a human actually waits on. usage-summary is deliberately first and
@@ -278,15 +298,20 @@ export function handleSummary(data) {
   const secs = MODE === 'rate' && durSecs > 0 ? durSecs : (m.http_req_duration ? data.state.testRunDurationMs / 1000 : 0)
   // INGEST-scenario latency only — never pooled with the probe.
   const d = scoped('http_req_duration')
+  const dFirst = (m[`http_req_duration{scenario:${INGEST_SCENARIO},phase:first}`] || {}).values || {}
+  const dLast = (m[`http_req_duration{scenario:${INGEST_SCENARIO},phase:last}`] || {}).values || {}
+  const driftX = (dFirst['p(99)'] || 0) > 0 ? ((dLast['p(99)'] || 0) / dFirst['p(99)']).toFixed(2) : 'n/a'
 
   const lines = [
     '',
     `mode              ${MODE}${MODE === 'rate' ? ` (offered ${RATE} ev/s = ${REQ_RATE} req/s)` : ''}`,
     `batch             ${BATCH}`,
     `events ingested   ${ingested}`,
+    `quantity sent     ${m.quantity_sent ? m.quantity_sent.values.count : 0}`,
     `events/sec        ${secs > 0 ? (ingested / secs).toFixed(0) : 'n/a'}`,
     `requests failed   ${m.http_req_failed ? (m.http_req_failed.values.passes || 0) : 0}`,
     `latency samples   ${d.count || 0}${(d.count || 0) < 1000 ? '  <-- FEWER THAN 1000: p99 is not trustworthy' : ''}`,
+    `drift p99 first/last  ${(dFirst['p(99)'] || 0).toFixed(1)}ms / ${(dLast['p(99)'] || 0).toFixed(1)}ms  (x${driftX})`,
     `latency p50/p99   ${(d['p(50)'] || 0).toFixed(1)}ms / ${(d['p(99)'] || 0).toFixed(1)}ms`,
   ]
   // Only meaningful in rate mode, and the single most important line there:
