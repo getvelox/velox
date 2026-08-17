@@ -273,7 +273,8 @@ things then take the margin away, both after a quiet spell:
 | A — stock | 192 MB | 6 GB | 3 | 254 ms | 6 | flat 6.44 GB through the idle (nothing removed); stall began 07:34:18, ~300 s after load started, after ~63 segments of WAL — the pool at resume — with the timer checkpoint (started 07:32:23) still writing; +0.47 GB (7 segments created) by the time the 5-min run ended |
 | B — floor only | 6 GB | 6 GB | 5 | 196 ms | 7 | same shape: dry after ~57 segments, +0.80 GB created before the run ended |
 | C — depth only | 192 MB | 16 GB | 3 | 162 ms | 3 | −1.21 GB *during the idle* (18 unlinked, path 1) then a stall at 09:01:30–09:01:56 |
-| D — floor and depth | 16 GB | 16 GB | __D_B5__ | __D_P99__ | __D_CAP__ | __D_WAL__ |
+| D — floor and depth, applied to a shallow pool | 16 GB | 16 GB | 13 | 234 ms | 20 | pg_wal 5.10 → 6.98 GB *during the run*: the setting does not create segments — every new one was built under load, so the whole run stalled every ~5 s (the transition cost of raising the setting; `pg_switch_wal()` to pre-grow is not available to `rds_superuser`) |
+| D2 — the same, after the pool had grown to depth (a 12k series ran in between) | 16 GB | 16 GB | __D2_B5__ | __D2_P99__ | __D2_CAP__ | __D2_WAL__ |
 
 The 50-minute series with `min_wal_size = max_wal_size = 6 GB` (T3, same load
 as the control) had no sustained event (>5× buckets 5 → 0; in-run seconds at

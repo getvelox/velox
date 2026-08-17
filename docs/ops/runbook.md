@@ -341,8 +341,10 @@ WAL-driven checkpoint puts you back on the one-segment margin. Cost is disk:
 `pg_wal` sits near that size permanently. Two cautions: (1) raising the
 setting does not manufacture segments — the pool grows only as segments are
 created, so the first busy cycles after the change can still stall until it has
-deepened; off-peak `SELECT pg_switch_wal()` a few dozen times followed by
-`CHECKPOINT` pre-grows it (untested here, follows from the code); (2) at higher
+deepened; `pg_switch_wal()` is not granted to `rds_superuser`, so there is no cheap
+pre-grow on RDS — a bulk load or ~15 minutes of peak-rate traffic grows it
+(measured: applying 16 GB to a shallow pool made the next 5 minutes *worse*,
+provocation arm D); (2) at higher
 write rates than measured, re-derive the number. Verified: __RUNBOOK_VERDICT__
 
 **How to see it if you suspect it:** `pg_stat_activity` (or the rig sampler)
