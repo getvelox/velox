@@ -14,9 +14,9 @@ zone · **Reproduce:** `scripts/bench-rig/` — `./run.sh`, or step by step belo
 | what a self-hoster can plan on | on `db.m7g.2xlarge` (32 GB) | on `db.m7g.4xlarge` (64 GB), #818 fixed |
 |---|---|---|
 | single events, 200 ev/s | p99 **4.9 ms** | — |
-| batch 10, the recommended client shape | 1,000 ev/s at p99 **8.2 ms** (5/5) — and a wall at ~570 req/s (#818) | **12,000 ev/s** (1,200 req/s) at p99 **22.6 ms** (4/5) |
-| batch 100 | 5,000 ev/s until the table outgrew RAM (~60M rows) | **15,000 ev/s** at p99 **43.8 ms** (4/5); 10,000 at p99 47.3 ms (4/5) on a table growing 61M → 85M rows |
-| what stops it | RAM (index working set falls out of cache) | write IOPS during checkpoints on a 100 GB gp3 volume (3,000 IOPS); the app was never the limit (RDS CPU ≤ 67 %, app node ≥ 75 % idle) |
+| batch 10, the recommended client shape | 1,000 ev/s at p99 **8.2 ms** (5/5) — and a wall at ~570 req/s (#818) | **12,000 ev/s** (1,200 req/s) at p99 **22.6 ms** (4/5) stock; **5/5, worst 10-s p99 52 ms with the WAL pool sized** (third run) |
+| batch 100 | 5,000 ev/s until the table outgrew RAM (~60M rows) | **15,000 ev/s** at p99 **43.8 ms** (4/5) stock; **p99 40.2–42.8 ms, 5/5 with the WAL pool sized** (third run); 10,000 at p99 47.3 ms (4/5) on a table growing 61M → 85M rows |
+| what stops it | RAM (index working set falls out of cache) | at 15–25k, the 100 GB gp3 volume (3,000 IOPS / 125 MiB/s); at any rate after a lull, RDS's default WAL segment pool (third run — one parameter fixes it); the app was never the limit (RDS CPU ≤ 67 %, app node ≥ 75 % idle) |
 | closed-loop maximum, batch 500 (not a service level) | 25,424 ev/s | **41,172 ev/s** (p50 187 / p99 226 ms) |
 | the database's own floor for this row shape (`pgbench`, 16 clients) | 6,840 one-row commits/s | 7,184 one-row commits/s; **52,713 rows/s at batch 500 — and Velox's closed loop is 78 % of that, 101 % of the same with the RLS protocol** |
 | reads under load | list endpoints 2–9 ms at every rate; per-customer usage summary is a linear scan, ~2.7 µs/event (#819) | same |
@@ -341,6 +341,17 @@ With the pool deep, checkpoints are time-driven (so the recycling formula's
 tail window appeared. One series each — but three of the four provocation
 arms stall on demand and this setting is the only one under which the pool
 never got near empty. And the provocation that stalled every other arm (D2 in the table above) did not stall it.
+
+Then the same setting at **15,000 ev/s × batch 100** (T6, 5 × 10 min, fresh
+20M): **5/5, p50 33.6–34.0 ms, p99 40.2–42.8 ms**, 0 drops, no tail bucket,
+worst 10-s p99 88 ms, all 9 checkpoints time-driven, WAL 17.6 MB/s, pool
+minimum 30 pre-made segments (median 82) — thinner than at 12k, as the rule
+predicts when the rate rises. Last night's stock run at this rate was 4/5
+(43.3–44.6 ms) with a 50-second volume-saturation stall. Caveat on repeat 5:
+the operator's laptop slept mid-series; k6 ran to completion on the load
+generator (90,001 iterations, 9,000,100 events, matching the row count) and its
+summary and samples were read afterwards, so its p50/p99/drift/drops come from
+the same files as every other repeat, read by hand. __T7__
 
 
 
