@@ -108,7 +108,7 @@ print(' '.join(sorted({d.datetime.utcfromtimestamp(t).strftime('%Y-%m-%d-%H') fo
           a_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t")
           b_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t2")
           aws_ pi get-resource-metrics --service-type RDS --identifier "$RID" --start-time "$a_iso" --end-time "$b_iso" --period-in-seconds 1 \
-            --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":10}}]' --output json >> "$dest/$tag.pi-waits.json" 2>/dev/null || true
+            --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":25}}]' --output json >> "$dest/$tag.pi-waits.json" 2>/dev/null || true
         done
         for ((t=w_start; t<w_end; t+=3600)); do
           t2=$((t+3600)); [ $t2 -gt $w_end ] && t2=$w_end
