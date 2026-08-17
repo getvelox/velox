@@ -86,12 +86,55 @@ if ! aws_ rds describe-db-subnet-groups --db-subnet-group-name velox-bench-subne
     --db-subnet-group-description "velox bench" --subnet-ids "$SUBNET" "$SUBNET_B" \
     --tags "$TAGS" >/dev/null
 fi
+# Instrumentation lives in a custom parameter group created BEFORE the instance,
+# so static settings (shared_preload_libraries) apply from first boot and no
+# reboot is ever needed mid-run. Everything here is observability, not tuning:
+# the numbers a run publishes are still the stock engine defaults. What each
+# line buys, and why it is worth having on every rig:
+#   log_autovacuum_min_duration=0  every autovacuum/analyze with its timings
+#   log_checkpoints=1              checkpoint start/complete with buffers, sync time
+#   log_lock_waits=1               any lock waited on > deadlock_timeout (set to 200 ms
+#                                  so a sub-second stall on a lock is logged, not hidden)
+#   log_min_duration_statement=250 the individual slow INSERTs, with their timestamps
+#                                  (log_parameter_max_length=0 keeps the batch payload out)
+#   track_io_timing / track_wal_io_timing  blk_read_time / wal_sync_time become real
+#   pg_stat_statements.track=all   per-statement I/O and time, incl. nested
+# In the second AWS run two tail events (p99 up 10-30x for ~2 min, p50 flat,
+# storage/CPU/memory flat) went unexplained for exactly the lack of these.
+# Performance Insights (7-day retention = free tier) is switched on for the
+# same reason: per-second wait events by SQL in the console, no agent needed.
+# RDS_PARAMS="name=value;name=value" appends treatment settings for A/B rigs
+# (e.g. max_wal_size). Dynamic ones apply immediately; static ones at first boot.
+PG_FAMILY="postgres16"
+PARAM_GROUP="velox-bench-pg16"
+say "parameter group $PARAM_GROUP (instrumentation)"
+if ! aws_ rds describe-db-parameter-groups --db-parameter-group-name "$PARAM_GROUP" >/dev/null 2>&1; then
+  aws_ rds create-db-parameter-group --db-parameter-group-name "$PARAM_GROUP" \
+    --db-parameter-group-family "$PG_FAMILY" --description "velox bench: instrumentation" \
+    --tags "$TAGS" >/dev/null
+fi
+params="log_autovacuum_min_duration=0;log_checkpoints=1;log_lock_waits=1;deadlock_timeout=200;log_min_duration_statement=250;log_parameter_max_length=0;log_temp_files=0;track_io_timing=1;track_wal_io_timing=1;pg_stat_statements.track=all;shared_preload_libraries=pg_stat_statements,pg_tle${RDS_PARAMS:+;$RDS_PARAMS}"
+# Semicolon-separated because a VALUE may contain commas (shared_preload_libraries).
+# Built as JSON, not CLI shorthand, for the same reason. pending-reboot for ALL of
+# them is deliberate: on a not-yet-created instance it means "at first boot", and
+# it is the only ApplyMethod a static parameter accepts.
+pjson="["; sep=""
+IFS=';' read -ra kvs <<< "$params"
+for kv in "${kvs[@]}"; do
+  pjson="$pjson$sep{\"ParameterName\":\"${kv%%=*}\",\"ParameterValue\":\"${kv#*=}\",\"ApplyMethod\":\"pending-reboot\"}"; sep=","
+done
+pjson="$pjson]"
+aws_ rds modify-db-parameter-group --db-parameter-group-name "$PARAM_GROUP" --parameters "$pjson" >/dev/null
+echo "  $params"
+
 if ! aws_ rds describe-db-instances --db-instance-identifier velox-bench-db >/dev/null 2>&1; then
   aws_ rds create-db-instance --db-instance-identifier velox-bench-db \
     --db-instance-class "$DB_CLASS" --engine postgres --engine-version 16.14 \
     --master-username velox --master-user-password "$DBPASS" \
     --allocated-storage 100 --storage-type gp3 \
     --db-subnet-group-name velox-bench-subnets --vpc-security-group-ids "$SG" \
+    --db-parameter-group-name "$PARAM_GROUP" \
+    --enable-performance-insights --performance-insights-retention-period 7 \
     --availability-zone "$AZ" --no-multi-az --no-publicly-accessible \
     --backup-retention-period 0 --no-auto-minor-version-upgrade \
     --tags "$TAGS" >/dev/null
