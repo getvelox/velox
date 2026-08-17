@@ -28,11 +28,16 @@ def census(d, tag):
     t0, t1 = keys[0], keys[-1] + 10
     # only INSIDE the repeats: the gaps between them (k6 stopped, count(*) and
     # table-size queries running, cool-down) are not the thing being measured
-    inrun = set()
+    # The first bucket of a repeat carries k6 start-up latency (first-use bias) and
+    # the last is partial and followed by count(*)/size queries: neither is the
+    # mechanism under study. In-run = second full bucket .. last full bucket.
+    inrun = set(); runbk = {}
     for r in runs:
         rb = at.load_k6(r); rk = sorted(k for k, v in rb.items() if v["n"] >= 50)
-        if rk:
-            for sec in range(rk[0], rk[-1] + 10): inrun.add(sec)
+        if len(rk) >= 3:
+            for sec in range(rk[1], rk[-1]): inrun.add(sec)
+            runbk[r] = (rk[1], rk[-1])
+    keys = [k for k in keys if any(a <= k < b for a, b in runbk.values())]
     p99s = [bk[k]["p99"] for k in keys]; med = statistics.median(p99s)
     out = {"window": (t0, t1), "buckets": len(keys), "median_p99": round(med, 1),
            "buckets>3x": sum(1 for k in keys if bk[k]["p99"] > 3 * med), "buckets>5x": sum(1 for k in keys if bk[k]["p99"] > 5 * med),
@@ -52,6 +57,8 @@ def census(d, tag):
     if em:
         w = [x[3] / 1024 for x in em if x[3] is not None]; q = [x[2] for x in em if x[2] is not None]
         out["em_seconds"] = len(em); out["em_write>=110MBps"] = sum(1 for v in w if v >= 110); out["em_queue>=30"] = sum(1 for v in q if v >= 30)
+        # the zero-fill signature: at/near the cap AND small requests (~8-16 KB per IO)
+        out["em_cap_smallIO"] = sum(1 for x in em if x[3] and x[3] / 1024 >= 100 and x[5] and (x[3] / x[5]) <= 16)
         out["em_write_med/max"] = (round(statistics.median(w), 1), round(max(w), 1)); out["em_queue_med/max"] = (round(statistics.median(q), 1), round(max(q), 1))
     ticks = []
     for f in glob.glob(os.path.join(d, f"{tag}.dbsample.jsonl")): ticks += at.load_ticks(f)
@@ -60,11 +67,17 @@ def census(d, tag):
         out["db_ticks"] = len(ticks)
         out["db_walinit_ticks"] = sum(1 for t in ticks for a in t.get("act", []) if a.get("we") in ("WALInitSync", "WALInitWrite"))
         out["db_walwrite>=8_ticks"] = sum(1 for t in ticks for a in t.get("act", []) if a.get("we") == "WALWrite" and a.get("n", 0) >= 8)
-        d0, d1 = ticks[0], ticks[-1]
-        out["wal_buffers_full"] = d1["wal"]["wbf"] - d0["wal"]["wbf"]
-        out["ckpt_timed/req"] = (d1["bgw"]["ct"] - d0["bgw"]["ct"], d1["bgw"]["cr"] - d0["bgw"]["cr"])
-        out["wal_MBps"] = round((at.lsn_bytes(d1["lsn"]) - at.lsn_bytes(d0["lsn"])) / max(1, d1["ts"] - d0["ts"]) / 1e6, 1)
-        out["ckpt_sync_ms_total"] = d1["bgw"]["cst"] - d0["bgw"]["cst"]
+        # deltas per run, summed — never across the gaps between repeats
+        wbf = ct = cr = cst = 0; walb = 0; span = 0
+        for a_, b_ in runbk.values():
+            rt = [t for t in ticks if a_ <= t["ts"] < b_]
+            if len(rt) < 2: continue
+            d0, d1 = rt[0], rt[-1]
+            wbf += d1["wal"]["wbf"] - d0["wal"]["wbf"]; ct += d1["bgw"]["ct"] - d0["bgw"]["ct"]; cr += d1["bgw"]["cr"] - d0["bgw"]["cr"]
+            cst += d1["bgw"]["cst"] - d0["bgw"]["cst"]; walb += at.lsn_bytes(d1["lsn"]) - at.lsn_bytes(d0["lsn"]); span += d1["ts"] - d0["ts"]
+        out["wal_buffers_full"] = wbf; out["ckpt_timed/req"] = (ct, cr); out["wal_MBps"] = round(walb / max(1, span) / 1e6, 1); out["ckpt_sync_ms_total"] = cst
+        pools = [t["walpool"]["future"] for t in ticks if t.get("walpool")]
+        if pools: out["walpool_future_min/med"] = (min(pools), statistics.median(pools))
     logs = []
     for lf in glob.glob(os.path.join(d, f"{tag}.postgres.log")):
         for line in open(lf, errors="replace"):
@@ -77,7 +90,10 @@ def census(d, tag):
         added = sum(int(m.group(1)) for l in ck for m in [re.search(r"(\d+) WAL file\(s\) added", l)] if m)
         recycled = [int(m.group(1)) for l in ck for m in [re.search(r"(\d+) recycled", l)] if m]
         syncs = [float(m.group(1)) for l in ck for m in [re.search(r"sync=([\d.]+) s", l)] if m]
-        out["log_checkpoints"] = len(ck); out["log_wal_added"] = added; out["log_recycled_med"] = statistics.median(recycled) if recycled else None
+        # NB "N WAL file(s) added" counts only the checkpointer's preallocation; backend-created
+        # segments (the mechanism under study) never appear in it, so it is not reported.
+        removed = [int(m.group(1)) for l in ck for m in [re.search(r"(\d+) removed", l)] if m]
+        out["log_checkpoints"] = len(ck); out["log_removed_total"] = sum(removed); out["log_recycled_med"] = statistics.median(recycled) if recycled else None
         out["log_ckpt_sync_max_s"] = max(syncs) if syncs else None
         out["log_autovacuum"] = sum(1 for l in logs if "automatic vacuum of table" in l and "usage_events" in l)
         out["log_slow_stmts"] = sum(1 for l in logs if "duration:" in l)

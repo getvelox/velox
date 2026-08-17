@@ -6,11 +6,15 @@
 #     e.g.  TARGET=aws ./provoke-walinit.sh provoke-stock 192
 #           TARGET=aws ./provoke-walinit.sh provoke-6g   6144
 #
-# The recipe (why it works): after a quiet period the checkpointer's distance
-# estimate decays, the next (small, timed) checkpoint REMOVES "surplus"
-# recycled WAL segments down to min_wal_size, and when load resumes every new
-# segment must be zero-filled by a committing backend under WALWriteLock — the
-# tail event. So: apply the setting, sit idle for longer than
+# What it provokes: after a quiet period the WAL segments RDS retains behind
+# the end of WAL (wal_keep_size, 2 GB = 32 segments) sit inside the max_wal_size
+# window, so the pool of pre-made future segments on resume is smaller than in
+# steady state; the first checkpoint after resume fires on the timer and refills
+# only when it completes ~270 s later — so if the pool lasts less than that,
+# committing backends must create segments (zero-fill + fsync under WALWriteLock)
+# — the tail event. A long idle also decays the checkpointer's distance
+# estimate, so the checkpoints during the idle recycle fewer old segments (the
+# rest are unlinked) — the same shortage from the other side. So: apply the setting, sit idle for longer than
 # checkpoint_timeout (300 s on RDS) so at least one small checkpoint runs, then
 # drive the ingest rate for a few minutes with the sampler on and read back
 # pg_wal size (CloudWatch TransactionLogsDiskUsage), the 1-second device writes
@@ -56,7 +60,7 @@ python3 - "$RES/$LABEL.pgwal.json" <<'PY'
 import json,sys,datetime as dt
 pts=sorted(json.load(open(sys.argv[1]))['Datapoints'],key=lambda p:p['Timestamp']); prev=None
 for p in pts:
-    v=p['Average']/1e9; t=dt.datetime.fromisoformat(p['Timestamp'].replace('Z','+00:00')).strftime('%H:%M')
+    v=p['Average']/1e9; t=dt.datetime.fromisoformat(p['Timestamp'].replace('Z','+00:00')).astimezone(dt.timezone.utc).strftime('%H:%M')
     if prev is None or abs(v-prev)>0.05: print(f"   {t}Z pg_wal {v:.2f} GB" + ("" if prev is None else f" ({v-prev:+.2f})"))
     prev=v
 PY

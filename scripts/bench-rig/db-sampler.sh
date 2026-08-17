@@ -130,9 +130,10 @@ for m in msgs:
     try: d=json.loads(m)
     except Exception: continue
     disk=[x for x in d.get('diskIO',[]) if x.get('device','').startswith('rdsdev')] or d.get('diskIO',[])
+    disk=disk+[dict(x, device='phys:'+str(x.get('device'))) for x in d.get('physicalDeviceIO',[])]
     out.write(json.dumps({'ts':d.get('timestamp'),'cpu':d.get('cpuUtilization',{}).get('total'),'wait':d.get('cpuUtilization',{}).get('wait'),
         'mem_dirty':d.get('memory',{}).get('dirty'),'mem_writeback':d.get('memory',{}).get('writeback'),'load1':d.get('loadAverageMinute',{}).get('one'),
-        'disk':[{'dev':x.get('device'),'await':x.get('await'),'util':x.get('util'),'q':x.get('avgQueueLen'),'wkb':x.get('writeKbPS'),'rkb':x.get('readKbPS'),'tps':x.get('tps'),'reqsz':x.get('avgReqSz')} for x in disk]})+'\n'); n+=1
+        'disk':[{'dev':x.get('device'),'await':x.get('await'),'util':x.get('util'),'q':x.get('avgQueueLen'),'wkb':x.get('writeKbPS'),'rkb':x.get('readKbPS'),'tps':x.get('tps'),'reqsz_sectors':x.get('avgReqSz'),'kb_per_io':(round((x.get('writeKbPS') or 0)/x['tps'],1) if x.get('tps') else None)} for x in disk]})+'\n'); n+=1
 print(f'  enhanced monitoring: {n} one-second samples -> $dest/$tag.em.jsonl')
 " || true
         [ -s "$dest/$tag.em.jsonl" ] || rm -f "$dest/$tag.em.jsonl"
@@ -169,10 +170,10 @@ SELECT json_build_object(
   'tbl', (SELECT row_to_json(t) FROM (SELECT s.n_tup_ins ins, s.n_live_tup live, s.n_dead_tup dead, s.n_ins_since_vacuum isv, s.n_mod_since_analyze msa,
                  extract(epoch from s.last_autovacuum)::bigint lav, extract(epoch from s.last_autoanalyze)::bigint laa, s.autovacuum_count avc, s.autoanalyze_count aac,
                  i.heap_blks_read hbr, i.heap_blks_hit hbh, i.idx_blks_read ibr, i.idx_blks_hit ibh, i.toast_blks_read tbr
-          FROM pg_stat_user_tables s JOIN pg_statio_user_tables i USING (relid) WHERE s.relname='usage_events') t),
-  'idx', (SELECT coalesce(json_agg(json_build_object('n',indexrelname,'r',idx_blks_read,'h',idx_blks_hit)),'[]') FROM pg_statio_user_indexes WHERE relname='usage_events'),
-  'gin', (SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname='pgstattuple') AND EXISTS (SELECT 1 FROM pg_class WHERE relname='idx_usage_events_properties_gin')
-                 THEN (SELECT row_to_json(g) FROM (SELECT pending_pages pp, pending_tuples pt FROM pgstatginindex('idx_usage_events_properties_gin')) g) END),
+          FROM pg_stat_user_tables s JOIN pg_statio_user_tables i USING (relid) WHERE s.relid='public.usage_events'::regclass) t),
+  'idx', (SELECT coalesce(json_agg(json_build_object('n',indexrelname,'r',idx_blks_read,'h',idx_blks_hit)),'[]') FROM pg_statio_user_indexes WHERE relid='public.usage_events'::regclass),
+  'gin', __GIN__,
+  'walpool', (SELECT json_build_object('future', count(*) FILTER (WHERE name > pg_walfile_name(pg_current_wal_lsn())), 'total', count(*)) FROM pg_ls_waldir()),
   'locks', (SELECT coalesce(json_agg(json_build_object('lt',locktype,'m',mode,'g',granted,'rel',relation::regclass::text,'pg',page,'n',n)),'[]') FROM (SELECT locktype, mode, granted, relation, page, count(*) n FROM pg_locks WHERE locktype IN ('page','extend') OR NOT granted GROUP BY 1,2,3,4,5) l),
   'slow', (SELECT coalesce(json_agg(json_build_object('bt',backend_type,'wt',wait_event_type,'we',wait_event,'age',round(extract(epoch from clock_timestamp()-query_start)::numeric,3),'q',left(regexp_replace(query,'\s+',' ','g'),60))),'[]')
            FROM (SELECT * FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND state='active' AND backend_type='client backend' AND clock_timestamp()-query_start > interval '100 ms' ORDER BY query_start LIMIT 12) x),
@@ -181,12 +182,12 @@ SELECT json_build_object(
 SQL
 )
 PGSS_SQL="SELECT calls, total_exec_time, mean_exec_time, rows, shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, blk_read_time, blk_write_time, wal_records, wal_fpi, wal_bytes, left(regexp_replace(query,'\\s+',' ','g'),120) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 40"
-SIZE_SQL="SELECT json_build_object('ts', extract(epoch from clock_timestamp())::bigint, 'kind','size', 'rows_est', (SELECT reltuples::bigint FROM pg_class WHERE relname='usage_events'), 'heap', pg_table_size('usage_events'), 'idx', (SELECT json_object_agg(indexrelname, pg_relation_size(indexrelid)) FROM pg_stat_user_indexes WHERE relname='usage_events'), 'frozen_age', (SELECT age(relfrozenxid) FROM pg_class WHERE relname='usage_events'), 'toast_ins', (SELECT n_tup_ins FROM pg_stat_all_tables WHERE relid=(SELECT reltoastrelid FROM pg_class WHERE relname='usage_events')), 'wal_lsn', pg_current_wal_lsn()::text)::text;"
+SIZE_SQL="SELECT json_build_object('ts', extract(epoch from clock_timestamp())::bigint, 'kind','size', 'rows_est', (SELECT reltuples::bigint FROM pg_class WHERE oid='public.usage_events'::regclass), 'heap', pg_table_size('public.usage_events'), 'idx', (SELECT json_object_agg(indexrelname, pg_relation_size(indexrelid)) FROM pg_stat_user_indexes WHERE relid='public.usage_events'::regclass), 'frozen_age', (SELECT age(relfrozenxid) FROM pg_class WHERE oid='public.usage_events'::regclass), 'toast_ins', (SELECT n_tup_ins FROM pg_stat_all_tables WHERE relid=(SELECT reltoastrelid FROM pg_class WHERE oid='public.usage_events'::regclass)), 'wal_lsn', pg_current_wal_lsn()::text)::text;"
 
 case "$cmd" in
   settings)
     psql "$DATABASE_URL" -qtA -c "SELECT json_build_object('indexes', (SELECT json_object_agg(c.relname, coalesce(array_to_string(c.reloptions,','),'')) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='usage_events'::regclass), 'table_reloptions', (SELECT coalesce(array_to_string(reloptions,','),'') FROM pg_class WHERE relname='usage_events'))"
-    psql "$DATABASE_URL" -qtA -c "SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN ('wal_segment_size','data_checksums','deadlock_timeout','log_min_duration_statement','wal_writer_delay','wal_writer_flush_after','checkpoint_flush_after','bgwriter_flush_after','backend_flush_after','shared_buffers','effective_cache_size','max_wal_size','min_wal_size','checkpoint_timeout','checkpoint_completion_target','wal_buffers','wal_compression','full_page_writes','synchronous_commit','bgwriter_delay','bgwriter_lru_maxpages','autovacuum_naptime','autovacuum_vacuum_insert_threshold','autovacuum_vacuum_insert_scale_factor','autovacuum_vacuum_scale_factor','autovacuum_analyze_scale_factor','autovacuum_vacuum_cost_delay','autovacuum_vacuum_cost_limit','autovacuum_max_workers','autovacuum_work_mem','maintenance_work_mem','vacuum_cost_page_hit','vacuum_cost_page_miss','vacuum_cost_page_dirty','gin_pending_list_limit','log_autovacuum_min_duration','log_checkpoints','log_lock_waits','track_io_timing','track_wal_io_timing','shared_preload_libraries','rds.adaptive_autovacuum','server_version','huge_pages','io_combine_limit','random_page_cost','effective_io_concurrency','max_connections')" ;;
+    psql "$DATABASE_URL" -qtA -c "SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN ('wal_keep_size','archive_timeout','archive_mode','wal_init_zero','wal_recycle','max_slot_wal_keep_size','checkpoint_warning','wal_segment_size','data_checksums','deadlock_timeout','log_min_duration_statement','wal_writer_delay','wal_writer_flush_after','checkpoint_flush_after','bgwriter_flush_after','backend_flush_after','shared_buffers','effective_cache_size','max_wal_size','min_wal_size','checkpoint_timeout','checkpoint_completion_target','wal_buffers','wal_compression','full_page_writes','synchronous_commit','bgwriter_delay','bgwriter_lru_maxpages','autovacuum_naptime','autovacuum_vacuum_insert_threshold','autovacuum_vacuum_insert_scale_factor','autovacuum_vacuum_scale_factor','autovacuum_analyze_scale_factor','autovacuum_vacuum_cost_delay','autovacuum_vacuum_cost_limit','autovacuum_max_workers','autovacuum_work_mem','maintenance_work_mem','vacuum_cost_page_hit','vacuum_cost_page_miss','vacuum_cost_page_dirty','gin_pending_list_limit','log_autovacuum_min_duration','log_checkpoints','log_lock_waits','track_io_timing','track_wal_io_timing','shared_preload_libraries','rds.adaptive_autovacuum','server_version','huge_pages','io_combine_limit','random_page_cost','effective_io_concurrency','max_connections')" ;;
   start)
     psql "$DATABASE_URL" -qtA -c "CREATE EXTENSION IF NOT EXISTS pgstattuple" >/dev/null 2>&1 || true
     psql "$DATABASE_URL" -qtA -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null 2>&1 || true
@@ -195,11 +196,16 @@ case "$cmd" in
     # pgstatginindex needs superuser or pg_stat_scan_tables; probe once and drop
     # the field if RDS does not grant it, so one denied function cannot void
     # every tick.
+    # pgstatginindex is resolved at parse time, so it cannot be guarded inside the
+    # statement: the sub-select is either present as a whole or replaced by NULL.
     if psql "$DATABASE_URL" -qtA -c "SELECT pending_pages FROM pgstatginindex('idx_usage_events_properties_gin')" >/dev/null 2>&1; then
-      printf '%s\n' "$TICK_SQL" > "/tmp/dbsample-$tag.sql"
+      # the replacement goes through a variable: bash 5.2 strips quotes written
+      # literally inside ${var/pat/repl} (bash 3.2 on macOS does not — tested both)
+      GINSQL="(SELECT row_to_json(g) FROM (SELECT pending_pages pp, pending_tuples pt FROM pgstatginindex('idx_usage_events_properties_gin')) g)"
+      printf '%s\n' "${TICK_SQL/__GIN__/$GINSQL}" > "/tmp/dbsample-$tag.sql"
     else
       echo "  (pgstatginindex not permitted or index absent — no GIN pending-list samples)"
-      printf '%s\n' "$TICK_SQL" | sed "s/'gin', (SELECT CASE WHEN EXISTS/'gin', (SELECT NULL WHERE false AND EXISTS/" > "/tmp/dbsample-$tag.sql"
+      printf '%s\n' "${TICK_SQL/__GIN__/NULL}" > "/tmp/dbsample-$tag.sql"
     fi
     printf '%s\n' "$SIZE_SQL" > "/tmp/dbsample-$tag.size.sql"
     date -u +%s > "/tmp/dbsample-$tag.window"

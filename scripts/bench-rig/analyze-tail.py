@@ -199,7 +199,7 @@ def tick_deltas(t0, t1):
     return d
 
 def summarize_range(ticks, a, b):
-    """aggregate deltas over ticks in [a,b): sum of per-tick deltas / span; plus wait-event census."""
+    """deltas between the first and last tick in [a,b) (rates per second for cumulative counters, raw counts for event counters); plus wait-event census."""
     sel = [t for t in ticks if a <= t["ts"] < b]
     if len(sel) < 2: return None, {}, [], [], [], []
     tot = tick_deltas(sel[0], sel[-1])
@@ -279,11 +279,14 @@ def main():
             if not base[0] or not win[0]: print("      (db samples do not cover this window)"); continue
             bt, wt = base[0], win[0]
             print("      counter                       baseline(5m before)   window       ratio")
+            LUMPY = {"ckpt_timed", "ckpt_req", "ckpt_sync_ms", "ckpt_write_ms", "backend_fsync", "autovac_count", "autoanalyze_count"}
             for k in sorted(set(bt) | set(wt)):
                 b, w = bt.get(k, 0), wt.get(k, 0)
                 if (abs(b) < 1e-9 and abs(w) < 1e-9): continue
                 ratio = (w / b) if b else float("inf")
-                flag = "  <<<" if (b and (ratio > 3 or ratio < 0.33)) or (not b and w) else ""
+                # event counters (a checkpoint's sync time lands in one lump at completion) are
+                # printed as counts over unequal spans and never flagged
+                flag = "" if k in LUMPY else ("  <<<" if (b and (ratio > 3 or ratio < 0.33)) or (not b and w) else "")
                 print(f"      {k:30s} {fmt(b):>18s}   {fmt(w):>10s}   {('inf' if ratio==float('inf') else f'{ratio:.1f}'):>6s}{flag}")
             print("      client waits (tick-samples) baseline -> window:")
             for k in sorted(set(base[1]) | set(win[1]), key=lambda k: -(win[1].get(k, 0))):
