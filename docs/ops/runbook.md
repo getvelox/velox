@@ -335,7 +335,7 @@ knob alone was not enough (provocation arms A–C in
 **Do:** in the instance's parameter group set **`min_wal_size = max_wal_size ≥
 wal_keep_size + (1 + checkpoint_completion_target) × peak WAL rate ×
 checkpoint_timeout, with margin`** — at 12–15k events/s (14–20 MB/s of WAL) that
-is 2 + 8–11 GB, so **16 GB**; both are dynamic (no reboot). Check the log at
+is 2 + 8–11 GB, so **16 GB**; at 25,000 events/s WAL ran at 29.6 MB/s and the pool at 16 GB still hit zero twice in 35 minutes — size **24–32 GB** there, or shorten `checkpoint_timeout`. Both are dynamic (no reboot). Check the log at
 peak: checkpoints should read `checkpoint starting: time`, not `wal` — a
 WAL-driven checkpoint puts you back on the one-segment margin. Cost is disk:
 `pg_wal` sits near that size permanently. Two cautions: (1) raising the
