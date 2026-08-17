@@ -63,7 +63,7 @@ if [ "${TARGET:-local}" = "aws" ]; then
   cmd="${1:-}"; tag="${2:-}"
   case "$cmd" in
     start|stop|settings)
-      exec ssh_ "TARGET=local DATABASE_URL='$REMOTE_DSN' INTERVAL='${INTERVAL:-5}' bash -s -- $*" < "$0" ;;
+      ssh_ "TARGET=local DATABASE_URL='$REMOTE_DSN' INTERVAL='${INTERVAL:-5}' bash -s -- $*" < "$0"; exit $? ;;
     fetch)
       dest="${3:?fetch <tag> <dir>}"; mkdir -p "$dest"
       ssh_ "cat /tmp/dbsample-$tag.jsonl" > "$dest/$tag.dbsample.jsonl" 2>/dev/null || true

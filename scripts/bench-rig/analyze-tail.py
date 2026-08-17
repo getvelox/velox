@@ -177,7 +177,10 @@ def main():
     for lf in glob.glob(os.path.join(d, f"{a['series'] or '*'}.postgres.log")):
         for line in open(lf, errors="replace"):
             m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC", line)
-            if not m: continue
+            if not m:
+                # continuation line (autovacuum reports span ~10 tab-indented lines): fold into the previous entry
+                if logs and line.startswith(("\t", " ")): logs[-1] = (logs[-1][0], logs[-1][1] + " | " + line.strip())
+                continue
             import datetime as dt
             ts = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
             logs.append((ts, line.rstrip()))
@@ -236,7 +239,7 @@ def main():
             if rel:
                 print(f"      postgres log {hms(w0-180)}–{hms(w1+60)} ({len(rel)} lines; checkpoint/vacuum/lock/etc):")
                 for ts, l in rel[:60]:
-                    print("         " + l[:230])
+                    print("         " + l[:600])
             elif logs: print("      postgres log: no lines in range")
     # series-wide log census
     if logs:
@@ -245,7 +248,7 @@ def main():
         lw = [l for _, l in logs if "still waiting for" in l or "acquired" in l]
         print(f"\nlog census: {len(ck)} checkpoints complete, {len(av)} autovacuum/analyze, {len(lw)} lock-wait lines")
         for l in ck[-3:]: print("   " + l[:230])
-        for l in av[-6:]: print("   " + l[:300])
+        for l in av[-6:]: print("   " + l[:700])
 
 if __name__ == "__main__":
     main()
