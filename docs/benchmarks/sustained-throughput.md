@@ -4,9 +4,22 @@ Measured on AWS, on named hardware, with the configuration and the cost stated,
 under a protocol that refuses to publish a run it cannot reconcile — and with
 the two product bottlenecks it found stated as plainly as the numbers.
 
-**Date:** 2026-08-16 (supersedes the 2026-08-15 figures, which are kept at the
-end for the record) · **Region:** `ap-south-1`, everything in one availability
+**Dates:** 2026-08-16 (`db.m7g.2xlarge`) and 2026-08-16/17 (`db.m7g.4xlarge`,
+with the #818 fix); both supersede the 2026-08-15 figures, which are kept at the
+end for the record · **Region:** `ap-south-1`, everything in one availability
 zone · **Reproduce:** `scripts/bench-rig/` — `./run.sh`, or step by step below.
+
+**At a glance** (open-loop, 5 × 10 min per row, every event reconciled; full tables and the evidence for each below):
+
+| what a self-hoster can plan on | on `db.m7g.2xlarge` (32 GB) | on `db.m7g.4xlarge` (64 GB), #818 fixed |
+|---|---|---|
+| single events, 200 ev/s | p99 **4.9 ms** | — |
+| batch 10, the recommended client shape | 1,000 ev/s at p99 **8.2 ms** (5/5) — and a wall at ~570 req/s (#818) | **12,000 ev/s** (1,200 req/s) at p99 **22.6 ms** (4/5) |
+| batch 100 | 5,000 ev/s until the table outgrew RAM (~60M rows) | **15,000 ev/s** at p99 **43.8 ms** (4/5); 10,000 at p99 47.3 ms (4/5) on a table growing 61M → 85M rows |
+| what stops it | RAM (index working set falls out of cache) | write IOPS during checkpoints on a 100 GB gp3 volume (3,000 IOPS); the app was never the limit (RDS CPU ≤ 67 %, app node ≥ 75 % idle) |
+| closed-loop maximum, batch 500 (not a service level) | 25,424 ev/s | **41,172 ev/s** (p50 187 / p99 226 ms) |
+| the database's own floor for this row shape (`pgbench`, 16 clients) | 6,840 one-row commits/s | 7,184 one-row commits/s; **52,713 rows/s at batch 500 — and Velox's closed loop is 78 % of that, 101 % of the same with the RLS protocol** |
+| reads under load | list endpoints 2–9 ms at every rate; per-customer usage summary is a linear scan, ~2.7 µs/event (#819) | same |
 
 ---
 
@@ -84,6 +97,97 @@ customers and an honest generator: **2.5×**.
 | **100** | — | — | held (p99 42–44 ms) | — | — | **held (p99 64–66 ms)** | held (p99 262–315 ms, drift ×1.4) |
 
 ² one of two repeats hit the same post-bulk-write stall as ¹; the other passed.
+
+## Second run, 2026-08-16/17: `db.m7g.4xlarge`, with the hot-row fix
+
+Same app node and load generator; the database doubled to **`db.m7g.4xlarge`
+(16 vCPU, 64 GB RAM, 100 GB gp3 — same 3,000 IOPS baseline)**; **~$2.21/hr**
+on-demand for the three nodes (`ap-south-1` list prices: 1.916 + 0.196 +
+0.098), which is **~$0.041 per million events at 15,000 ev/s**; Velox at
+`db7f86b0`, which carries the fix for #818. Fresh 20M-row seed, 10-minute
+settle, then both ladders (2 × 90 s per rung), then sustained attempts. The
+first sustained attempt (10k) ran straight after the ladders on the table they
+left (61M rows); **every later attempt started from a fresh 20M-row table**
+(TRUNCATE, reseed, 10-minute settle), so a run is judged on its rate, not on
+the previous run's leftovers. Table size at the start of each repeat is in the
+row.
+
+### The ladders — every rung, zero drops, every event reconciled
+
+| batch 10 | p99 | held? | | batch 100 | p99 | held? |
+|---:|---:|---|---|---:|---:|---|
+| 4,000 | 8.8 ms | yes | | 5,000 | 39.9 ms | yes |
+| **6,000** | **18.5 ms** | **yes — was the #818 wall** | | 10,000 | 42.7 ms | yes |
+| 8,000 | 21.4 ms | yes | | 15,000 | 44.2 ms | yes |
+| 12,000 | 24.4 ms | yes | | 20,000 | 62 ms | yes (variance) |
+| 16,000 | 36–155 ms | yes (variance) | | 25,000 | 54.7 ms | yes |
+| 20,000 | — | **no** (delivered ~18.3k, p50 0.9 s) | | 30,000 | 67.7 ms | yes |
+| | | | | 40,000 | — | **no** (delivered 30–36k, p50 1.7–2.3 s) |
+
+**#818, verified on the rig**: 6,000 ev/s at batch 10 went from "not held,
+~5.5k delivered, p50 1.5 s, thousands of drops" to **p50 7.2 / p99 18.5 ms,
+zero drops**, and the batch-10 knee moved from ~570 requests/s to between
+1,600 and 2,000. The 25,000 ev/s that was yesterday's *closed-loop ceiling* is
+held **open-loop** at p99 55 ms.
+
+### The sustained attempts (5 × 10 min each)
+
+| offered | batch | passed | p50 | p99 (passing repeats) | what stopped it |
+|---:|---:|---|---:|---:|---|
+| 10,000 | 100 | **4/5** | 35.8 ms | 41.6–49.3 ms | ran on the ladders' table, 61M → 85M rows; repeats 1, 3, 5 flat (p99 41–49 ms), repeat 2 had a checkpoint bump early (queue depth 24, p99 100 ms, but no drift), repeat 4 failed on drift — its tail rose 42 → 67 ms through the run and 137–190 ms in the last 90 s with **no** write-IOPS, read-IOPS, CPU or memory signature during it and a 1,200-IOPS read burst the minute after; consistent with an insert-triggered autovacuum pass, unconfirmed. Repeat 5, at 85M rows, was clean; memory (FreeableMemory) never moved from 46.7 GB in the whole series |
+| 25,000 | 100 | **2/5** | 39.0 ms | 52.6–65 ms | fresh 20M table; repeats 1–2 clean, then from repeat 3 on (51M rows +) **checkpoint write bursts of 2,400–3,500 IOPS** against the volume's 3,000 baseline — disk queue depth 37–65 in the stall minutes, ReadIOPS ~0, RDS CPU 58–67 % — storage, not CPU or memory |
+| **12,000** | **10** | **4/5** | **8.1 ms** | **22.4–22.8 ms** | fresh 20M table; four repeats within 0.4 ms of each other. Repeat 5 (49M rows) was clean for eight minutes, then its last two minutes ran p99 713 / 515 ms with 463 drops and **p50 unchanged at 8.1 ms**; the only concurrent signal is the run's highest write IOPS (1,300 → 1,609, queue depth 1.5 → 3.2) — a checkpoint, but nowhere near saturation. **1,200 requests/s sustained on the recommended client shape** — the hot row capped this at ~570 |
+| **15,000** | **100** | **4/5** | **36.5 ms** | **43.3–44.6 ms** | fresh 20M table; four repeats within 1.3 ms of each other, drift ×0.88–1.01, ReadIOPS ~0 throughout (the cache never missed — FreeableMemory flat at 46.7 GB); repeat 5, at 56M rows, hit **one 50-second stall** (23:52:00–23:52:50Z: disk queue depth 59, write IOPS 2,802 against the 3,000 baseline; 455 drops, p50 up to 1.9 s for that window). 49 of 50 minutes clean |
+
+Two of the four failed repeats have a clear signature (25k and 15k: the volume
+saturated, queue depth 59–65). Two do not (10k repeat 4, 12k repeat 5): a tail
+event late in a long series, p50 untouched, storage well below its ceiling, CPU
+and memory flat. Insert-triggered autovacuum and checkpoint completion are the
+candidates; neither is confirmed, because Performance Insights was not enabled
+on the rig and `pg_stat_activity` was only sampled during the ladders. That is
+the one instrumentation gap this run leaves, and it is noted in the reproducer.
+
+Reading it as capacity: on this rig, steady batch-100 ingest above ~10k rows/s
+becomes bound by **write IOPS during checkpoints** — five indexes on
+`usage_events` and a 3,000-IOPS volume — before it is bound by CPU (≤67 %) or
+memory. At 15k one burst in fifty minutes crossed the line; at 25k they crossed
+every few minutes. The levers are provisioned IOPS / `io2`, `max_wal_size` and
+checkpoint spreading, or fewer indexes; none of them is Velox code, and none was
+pulled for this run — the numbers above are the stock RDS defaults on a 100 GB
+volume.
+
+### Ceiling and denominator on the 4xlarge (fresh 20M-row table, 10-minute settle)
+
+| | reached | p50 | p99 |
+|---|---:|---:|---:|
+| closed loop, 16 workers, batch 500, 90 s | **41,172 ev/s** (3,713,000 events, all reconciled) | 187 ms | 226 ms |
+
+`pgbench` on the same database and row shape, **batch 500, 16 clients, two
+interleaved A/B rounds** (`db-ceiling.sh`), right after the ceiling run:
+
+| leg | round 1 | round 2 | median |
+|---|---:|---:|---:|
+| A — plain batched INSERT, one transaction per 500 rows (the commit floor) | 58,444 rows/s | 46,982 | **52,713 rows/s** |
+| B — the same with Velox's per-transaction RLS protocol (`BEGIN`, three `set_config`, INSERT, `COMMIT`) | 45,195 | 36,154 | **40,674 rows/s** |
+
+Velox's closed loop, **41,172 ev/s, is 78 % of the raw commit floor and 101 %
+of leg B** — at batch 500 the HTTP layer, auth, customer/meter resolve and the
+Go service add nothing measurable; the ceiling is the database's own batched
+insert path with the RLS protocol on it (which costs 23 % of the floor here,
+13–19 % on the 2xlarge at batch 1). Two things to keep in view: the rounds
+were 60 s each and each leg added ~3M rows, and **both legs lost ~20 % from
+round 1 to round 2** as the table grew — the same growth sensitivity the
+sustained runs show, in a 4-minute window. So "101 %" is "within the
+round-to-round variance", not a claim that Velox is free.
+
+And the like-for-like cell for the run-1 comparison — **batch 1**, 16 clients,
+two interleaved rounds: A **7,184** rows/s (6,890 / 7,478), B **7,106** (6,943 /
+7,269). At 16 clients a one-row commit is round-trip-bound (~2.2 ms per
+transaction, 16 in flight), so the RLS protocol costs ~1 % here against 13 % on
+the 2xlarge — the cost shows when the DB is CPU-bound, not when it is waiting
+on the client. (`db-ceiling.sh` also prints Velox-as-a-fraction lines; they are
+only meaningful when `VELOX_EVS` came from a closed-loop run at the same
+`BATCH` — the batch-1 legs above are not compared to the batch-500 ceiling.)
 
 ## What the ladder found: the wall is a hot row, not the hardware
 
