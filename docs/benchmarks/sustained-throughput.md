@@ -301,7 +301,8 @@ __ARMS_VERDICT__
   growth per event: customer_meter 121 B, idempotency 117 B, pkey 88 B,
   tenant_time 37 B, GIN 9 B, heap 247 B. Multi-row inserts per batch and a
   cheaper strategy for hot parent rows are the levers; they cut the WAL rate
-  every number in this section scales with. Filed as issues, not built here.
+  every number in this section scales with. Filed as
+  [#823](https://github.com/getvelox/velox/issues/823), not built here.
 
 ## What the ladder found: the wall is a hot row, not the hardware
 
