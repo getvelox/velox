@@ -228,40 +228,48 @@ is waiting, it zero-fills 64 MB in 8 KB writes and fsyncs it *while holding
 `WALWriteLock`* — every other commit waits. At 14 MB/s of WAL that is one
 segment every ~4.6 s, each a ~0.5 s stall at the volume's throughput cap: 10 %
 of requests in every 10-second bucket, which is exactly a p99 that jumps while
-p50 does not move. Recycled segments are minted only at checkpoint completion
-and only up to the checkpointer's *estimate* of one checkpoint's distance,
-because RDS's `min_wal_size` (192 MB) puts no floor under the pool — so the
-pool runs dry in the last stretch before a checkpoint completes whenever that
-checkpoint runs a little long, and the previous checkpoint had just *shrunk*
-it. Sporadic by construction (1 of 6 checkpoint ends in the control), and
-worse on bigger tables (longer checkpoints, more variance) — which is E1, E2,
-and, with more WAL per second, the 15k and 25k stalls that saturated the
-volume outright.
+p50 does not move.
 
-### The treatment: give the pool a floor
+### Why the pool runs dry — from the source, and then provoked on demand
 
-`min_wal_size` 192 MB → 6,144 MB (= `max_wal_size` on this class), one
-dynamic parameter, applied without a reboot; identical series from a fresh
-20M-row table.
+Postgres recycles old segments into pre-made future ones at each checkpoint
+completion, keeping segments up to `1.1 × (1 + checkpoint_completion_target) ×
+distance_estimate` beyond the redo point, clamped between `min_wal_size` and
+`max_wal_size` (`XLOGfileslop`, `xlog.c`); a WAL-driven checkpoint fires at
+`max_wal_size / (1 + target)` (`CalculateCheckpointSegments`). At this write
+rate on RDS's class-scaled `max_wal_size` (6 GB), checkpoints are WAL-driven,
+so the pool left at each completion is roughly what the next cycle consumes —
+about 10 % of margin, and two things eat it:
 
-| | control (stock) | `min_wal_size = 6 GB` |
-|---|---:|---:|
-| repeats passed | 5/5 (p99 21.8–24.5 ms) | 5/5 (p99 22.1–23.7 ms) |
-| 10 s buckets with p99 > 3× series median | 6 (5 of them > 5×; worst 177 ms) | 3 (none > 5×; worst 105 ms) |
-| seconds with a `LWLock:WALWrite` convoy ≥ 8 (PI, 1 s) | 9 | 9 — but every one a single isolated second with the disk quiet, in both arms; the control's 45-s event was the only *sustained* convoy |
-| seconds at ≥ 110 MB/s device writes (EM, 1 s) | 17 | 0 while a repeat was running (3 in the last second of a repeat as k6 stops — the control has those too) |
-| sampler ticks with a backend in `WALInit*` | 1 | 0 |
-| checkpoints (timed / requested), WAL MB/s | 4 / 10, 13.3 | 3 / 10, 13.0 (identical load) |
+1. **A small checkpoint after a lull decays the distance estimate, and the
+   pool is trimmed to it.** RDS's `min_wal_size` (192 MB) puts no floor under
+   that. The control's event: the checkpoint at 04:48:53 (the first after the
+   warm-up) *removed 10 segments* — pg_wal fell 6.44 → 5.77 GB — and the next
+   cycle came up exactly that short: pg_wal grew back to 6.44 GB during the
+   stall (+0.67 GB = the ~650 MB of excess 8 KB writes). Across the other 12
+   checkpoint completions of the control, pg_wal never moved and there was no
+   event.
+2. **After an idle, the first checkpoint fires on the timer and refills late.**
+   Provocation arm A (stock, idle 15 min, then 12k ev/s): pg_wal flat through
+   the idle (nothing removed), the checkpoint after resume started on the
+   5-minute timer at 07:32:23 and, spread over 270 s, would complete at
+   07:36:53 — 501 s after resume — while the 6.44 GB pool lasted 467 s at
+   13.8 MB/s. Result: **+0.47 GB of new segments (= 34 s × 13.8 MB/s, to the
+   megabyte), a backend seen in `IO:WALInitSync`, 6 seconds at the throughput
+   cap, worst 10-s p99 254 ms**, in a 5-minute run.
 
-Same load, same checkpoints, same WAL — and the sustained stall did not
-recur: no >5× bucket, no second at the throughput cap inside a repeat, no
-backend seen creating a segment, and `TransactionLogsDiskUsage` flat at
-6.44 GB for the whole series where the control's dropped 0.67 GB at the
-checkpoint before its event and regrew exactly that during it. Three
-10-second buckets still sat between 3× and 5× (worst 105 ms), each a single
-1-second `WALWrite` pile-up with a modest disk pulse (63 MB/s, queue 44) —
-short of the cap and short of the mechanism's signature; one series each is
-thin evidence for the residue, so it is reported, not explained.
+| provocation arm (idle 15 min → resume 12k ev/s, 5 min) | `min_wal_size` | `max_wal_size` | 10-s buckets > 5× | worst 10-s p99 | seconds at cap | new segments (pg_wal growth) |
+|---|---:|---:|---:|---:|---:|---:|
+| A — stock | 192 MB | 6 GB | 3 | 254 ms | 6 | +0.47 GB |
+| B — floor only | 6 GB | 6 GB | 5 | 196 ms | 7 | +0.80 GB |
+| C — depth only | 192 MB | 16 GB | __C_B5__ | __C_P99__ | __C_CAP__ | __C_WAL__ |
+| D — floor and depth | 16 GB | 16 GB | __D_B5__ | __D_P99__ | __D_CAP__ | __D_WAL__ |
+
+The 50-minute series with `min_wal_size = max_wal_size = 6 GB` (T3, same load
+as the control) had no sustained event — >5× buckets 5 → 0, in-run seconds at
+the cap 14 → 0, `WALInit*` sightings 1 → 0, pg_wal flat — which is consistent
+with the floor blocking path 1; but it is one series, and path 2 does not need
+a removal, so it is not the whole fix. __ARMS_VERDICT__
 
 ## What the ladder found: the wall is a hot row, not the hardware
 

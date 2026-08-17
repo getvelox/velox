@@ -309,30 +309,30 @@ schedule large backfills off-peak. Watch `ReadIOPS` too — a tail that rises
 with CPU flat is the index working set falling out of cache; see
 `docs/benchmarks/sustained-throughput.md` for the numbers on `db.m7g.2xlarge`.
 
-## On RDS, set `min_wal_size` — the default stalls commits after every quiet spell
+## On RDS, size the WAL segment pool — the defaults stall commits after a lull
 
 Measured on the benchmark rig (2026-08-17, `db.m7g.4xlarge`, 100 GB gp3, PG
 16.14, 12,000 events/s): the tail events that had gone unexplained across two
 runs are **WAL segment creation under `WALWriteLock`.** RDS uses 64 MB WAL
-segments and keeps a pool of pre-made ones, recycled at each checkpoint only up
-to the checkpointer's estimate of one checkpoint's distance; RDS's default
-`min_wal_size` (192 MB) puts no floor under that pool. After any lull the
-estimate decays, the next checkpoint *removes* "surplus" segments, and when
-traffic is busy again the committing backend that needs the next segment has
-to zero-fill 64 MB and fsync it while every other commit waits — at the
-volume's throughput cap that is ~0.5 s of frozen commits every ~5 s until the
-next checkpoint refills the pool. p99 jumps 5–30×; p50 does not move; CPU,
-memory and CloudWatch's 60-second I/O averages look normal.
+segments and keeps a pool of pre-made ones, refilled at each checkpoint
+completion to about one checkpoint's worth. When the pool runs dry the
+committing backend that needs the next segment zero-fills 64 MB and fsyncs it
+while every other commit waits — at a 100 GB gp3's 125 MiB/s that is ~0.5 s of
+frozen commits every ~5 s until the next checkpoint refills the pool. p99 jumps
+5–30×; p50 does not move; CPU, memory and CloudWatch's 60-second I/O averages
+look normal. Two things drain the pool, both after a quiet spell: a small
+checkpoint decays the checkpointer's distance estimate and it *deletes* pool
+segments (`min_wal_size` is the floor — RDS default 192 MB), or the first
+checkpoint after resuming fires on the timer and refills later than the pool
+lasts (`max_wal_size` bounds the depth). Both were reproduced on demand.
 
-**Do:** in the instance's parameter group set `min_wal_size` to at least one
-checkpoint's worth of WAL and preferably equal to `max_wal_size` (dynamic,
-applies without a reboot; on `db.m7g.4xlarge` `max_wal_size` is 6144 MB). Cost
-is disk: `pg_wal` sits at that size permanently. Verified: same load with
-`min_wal_size = 6144` — no stall in 5 × 10 min, `TransactionLogsDiskUsage` flat
-where the stock run's dropped and regrew 0.67 GB around its stall.
+**Do:** in the instance's parameter group set **`min_wal_size = max_wal_size ≈
+2 × (peak WAL rate × checkpoint_timeout)`** — at 12–15k events/s that is
+~8 GB, so 16 GB is comfortable; both are dynamic (no reboot). Cost is disk:
+`pg_wal` sits at that size permanently. Verified: __RUNBOOK_VERDICT__
 
 **How to see it if you suspect it:** `TransactionLogsDiskUsage` dropping at a
-checkpoint and growing back under load; Performance Insights showing a
+checkpoint or growing under load; Performance Insights showing a
 `LWLock:WALWrite` pile-up with one session in `IO:WALInitSync`; Enhanced
 Monitoring (1 s) showing device writes at the volume's throughput cap in ~8 KB
 IOs while `pg_stat_io` writers are steady. Numbers and the full attribution:
