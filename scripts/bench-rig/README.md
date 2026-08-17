@@ -15,7 +15,7 @@ cd scripts/bench-rig
 | need | why | check |
 |---|---|---|
 | **AWS account + CLI** configured for `ap-south-1` | the rig is 2 EC2 (Graviton) + 1 RDS in one AZ | `aws sts get-caller-identity` answers |
-| **permissions**: EC2 (run/terminate instances, key pairs, security groups, describe), RDS (create/delete instance + subnet group, describe), SSM `GetParameter` (AMI lookup), CloudWatch `GetMetricStatistics` (evidence capture, optional), Service Quotas read (optional) | that is everything the scripts call. **No IAM permissions are needed or used** | `./teardown.sh --check` exits `0` (clean) — exit `2` means the CLI cannot see the account |
+| **permissions**: EC2 (run/terminate instances, key pairs, security groups, describe), RDS (create/delete instance + subnet/parameter group, describe, log download), SSM `GetParameter` (AMI lookup), CloudWatch `GetMetricStatistics` + Logs `FilterLogEvents` (evidence capture, optional), Service Quotas read (optional); **optional, for the 1-second view**: `pi:GetResourceMetrics`/`pi:Describe*` (Performance Insights via API) and an IAM role named `velox-bench-rds-monitoring` with `AmazonRDSEnhancedMonitoringRole` attached (Enhanced Monitoring; the name matters — the benchmark policy may only pass `velox-bench-*` roles) | that is everything the scripts call. **No IAM writes are needed or used**; the role and the PI grant are one-time account-owner actions, and everything works without them, just without 1 s OS/wait-event data | `./teardown.sh --check` exits `0` (clean) — exit `2` means the CLI cannot see the account |
 | **quota**: ≥ 12 on-demand Standard vCPUs in the region (`L-1216C47A`) for the large rig, ≥ 6 for the small | `c7g.2xlarge` (8) + `c7g.xlarge` (4) | `aws service-quotas get-service-quota --service-code ec2 --quota-code L-1216C47A` |
 | **a default VPC** in the region with subnets in `ap-south-1a` and `ap-south-1b` | RDS subnet groups need two AZs even for Single-AZ | `aws ec2 describe-vpcs --filters Name=isDefault,Values=true` |
 | **locally**: `go`, `k6`, `psql`, `ssh`, `curl`, `python3` (any), `aws` | `calibrate.sh` needs go + k6; the rest is glue | `k6 version` — pin **v2.2.0**, the version the calibration was proven against |
@@ -78,11 +78,43 @@ you want a picture; the verdict never depends on it.
 
 What that evidence can and cannot attribute: a storage stall shows up plainly
 (write IOPS at the volume's ceiling, disk queue depth in the tens); a tail event
-with storage, CPU and memory all flat does not — two such repeats in the second
-AWS run stayed unexplained. If you want to attribute those, enable RDS
-Performance Insights on the instance (`provision.sh` does not) or sample
-`pg_stat_activity` on the app node during the sustained runs, the way the
-ladders were.
+with storage, CPU and memory all flat at 60-second resolution does not — two
+such repeats in the second AWS run stayed unexplained until the third run's
+1-second tooling (next section) caught the mechanism.
+
+## Attributing a tail event (the third run's tooling)
+
+A gate can only say a repeat failed; these say *why*, at 1–5 second resolution:
+
+- `provision.sh` attaches a parameter group that turns on the logging that
+  attribution needs (`log_autovacuum_min_duration=0`, `log_checkpoints`,
+  `log_lock_waits` with `deadlock_timeout=200`, `log_min_duration_statement=250`
+  without parameters, `pg_stat_statements.track=all`), Performance Insights, and
+  Enhanced Monitoring at 1 s when the role exists. Numbers a run publishes are
+  still the engine's stock behaviour — none of this is tuning.
+- `db-sampler.sh start|stop|fetch|settings <tag>` — one SQL statement every 5 s
+  on the app node, one JSON line per tick: wait events of every backend,
+  `pg_stat_io`, `pg_stat_wal`, `pg_stat_bgwriter`, vacuum/analyze progress, the
+  GIN pending list, page/extension locks, active statements > 100 ms. `fetch`
+  also pulls the RDS postgres log for the window, PI 1 s wait-event load, and
+  EM 1 s disk/memory samples.
+- `tail-series.sh <label> <rate> <batch> [repeats]` — one series, control or
+  treatment, run identically: reseed, settle (sampler already on), measure,
+  fetch, `analyze-tail.py`, pgBadger. `SKIP_SEED=1` resumes at measure.
+- `analyze-tail.py <dir>` — finds tail windows in the k6 samples (10 s buckets
+  with p99 > 3× the run's median) and lays every source side by side for each:
+  DB counter deltas vs the five minutes before, wait-event census, EM seconds,
+  PI seconds, log lines. `tail-census.py <dir> --series A --series B` — the
+  series-wide numbers a treatment is judged on.
+- `provoke-walinit.sh <label> <min_wal_size>` — reproduces the mechanism the
+  third run found on demand: apply the setting, idle past a `checkpoint_timeout`
+  so a small checkpoint trims the WAL segment pool, resume the rate, read
+  `TransactionLogsDiskUsage` growth and the 1 s device writes.
+
+What the third run found with these, in one line: the tail events were WAL
+segment creation under `WALWriteLock` when the recycled-segment pool ran dry
+(RDS default `min_wal_size` = 192 MB) — `docs/benchmarks/sustained-throughput.md`
+§ third run, and the runbook entry "On RDS, set `min_wal_size`".
 
 ## Why the calibration comes first
 

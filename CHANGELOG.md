@@ -13,6 +13,7 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Added
 
+- **The benchmark rig can now say *why* a repeat's tail spiked** — a parameter group with the attribution logging on, Performance Insights and 1-second Enhanced Monitoring, a 5-second single-statement DB sampler, an analyzer that lays k6 tail windows beside every DB/OS/log source, a control-vs-treatment census, and a script that provokes the mechanism on demand (`scripts/bench-rig/README.md` § attributing a tail event).
 - **A reproducible AWS benchmark rig** — `scripts/bench-rig/` (`./run.sh` provisions, brings up, seeds, measures, tears down; k6 load calibrated against a known-truth stub; a gated measurement protocol that reconciles every run against the database; per-run evidence capture; a pgbench denominator). Replaces the hand-rolled `cmd/velox-bench`, which is deleted. Prerequisites, what stops a run, how to read results, and every trap that bit: `scripts/bench-rig/README.md`.
 - **Property tests for the arithmetic that decides money** — proration, credit waterfall, pricing tiers, billing date math, tax apportionment — mutation-verified against the project's own historical bugs.
 - **Correctness-under-failure benchmark** — leader SIGKILL at swept kill points, concurrent leaders, a severed-link partition drill, and the negative control (drop the idempotency index → 2.6× overbill with every leader reporting success): `docs/benchmarks/failure-correctness.md`.
@@ -20,6 +21,7 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 ### Changed
 
 - **Throughput benchmark measured under the protocol** on `db.m7g.2xlarge` and `db.m7g.4xlarge`; every earlier figure superseded and kept in the doc's appendix. Results, the two product findings it produced (#818, #819), and the capacity limits with their numbers: `docs/benchmarks/sustained-throughput.md`.
+- **The benchmark's tail events are attributed, and the ops runbook says what to set.** A third instrumented run caught them live: WAL segment creation under `WALWriteLock` when the recycled-segment pool runs dry — RDS's default `min_wal_size` (192 MB) puts no floor under it, so after any lull the next checkpoint trims the pool and the next busy stretch zero-fills 64 MB segments at the volume's throughput cap, ~0.5 s of frozen commits every ~5 s. `min_wal_size = max_wal_size` (dynamic, no reboot) removed it in the identical series. Evidence and the residual: `docs/benchmarks/sustained-throughput.md` § third run; the recommendation: `docs/ops/runbook.md`.
 
 ### Fixed
 
