@@ -236,7 +236,11 @@ one_run() {
     usum=$(printf '%s' "$out" | sed -n 's/^  usage-summary *p50 [0-9.]*ms *p99 \([0-9.]*\)ms.*/\1/p' | head -1)
     printf '%s' "$out" | grep -q "RESPONSIVE under load" && probe="RESPONSIVE"
     printf '%s' "$out" | grep -q "DEGRADED" && probe="DEGRADED"
-    [ -n "$usum" ] && probe="$probe(usage-summary p99 ${usum}ms)"
+    # NO SPACES in this token: one_run's result is consumed with `set --`, which
+    # word-splits. A space here shifted every following field — the first ladder
+    # rung on the 4xlarge rig failed on "qty!=written(p99/310.9ms)" with a
+    # drift of x180523269 while ingest was in fact clean.
+    [ -n "$usum" ] && probe="$probe(usage-summary_p99=${usum}ms)"
   fi
   printf '%s %s %s %s %s %s %s %s %s %s %s %s %s' "${claimed:-0}" "$((after - before))" "${evs:-0}" "${p50:-0}" "${p99:-0}" "${dropped:-0}" "$rc" "${failed:-0}" "${samples:-0}" "$probe" "${qsent:-0}" "$((qafter - qbefore))" "${drift:-n/a}"
 }

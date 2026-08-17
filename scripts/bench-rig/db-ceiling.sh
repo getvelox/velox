@@ -168,6 +168,7 @@ if [ -n "$VELOX_EVS" ] && [ -n "$b" ]; then
   awk -v v="$VELOX_EVS" -v a="$a" -v b="$b" 'BEGIN{
     printf "   Velox at %s ev/s is %.0f%% of the DB commit floor and %.0f%% of the same protocol without HTTP/app\n", v, v/a*100, v/b*100
     printf "   -> HTTP + auth + resolve + service overhead: %.0f%% of B\n", (1-v/b)*100 }'
+  info "(only meaningful if VELOX_EVS came from a closed-loop run at BATCH=$BATCH — a mismatched batch makes these fractions nonsense)"
 else
   info "pass VELOX_EVS=<measured ev/s at this batch> to see Velox as a fraction of the ceiling"
 fi

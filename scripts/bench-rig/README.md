@@ -76,6 +76,14 @@ Every run also leaves its evidence: `<tag>.txt` (k6 summary), `<tag>.k6.json`,
 app node), `<tag>.rds.*.json` (RDS CloudWatch, 60 s). Load them into Grafana if
 you want a picture; the verdict never depends on it.
 
+What that evidence can and cannot attribute: a storage stall shows up plainly
+(write IOPS at the volume's ceiling, disk queue depth in the tens); a tail event
+with storage, CPU and memory all flat does not — two such repeats in the second
+AWS run stayed unexplained. If you want to attribute those, enable RDS
+Performance Insights on the instance (`provision.sh` does not) or sample
+`pg_stat_activity` on the app node during the sustained runs, the way the
+ladders were.
+
 ## Why the calibration comes first
 
 `ingest.js` reports numbers about Velox, and nothing about Velox tells you
