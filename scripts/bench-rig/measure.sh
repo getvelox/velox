@@ -121,8 +121,8 @@ if [ "$TARGET" = "aws" ]; then
   GEN_PUB=$(ip_of velox-bench-loadgen PublicIpAddress)
   APP_PUB=$(ip_of velox-bench-app PublicIpAddress)
   [ -n "$GEN_PUB" ] && [ "$GEN_PUB" != "None" ] || die "loadgen instance is not running"
-  app_sh() { ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
-  gen_sh() { ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "$KEYFILE" "ec2-user@$GEN_PUB" "$@"; }
+  app_sh() { ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
+  gen_sh() { ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$GEN_PUB" "$@"; }
   BASE="http://$APP_PRIV:8080"
   SCRIPT_PATH="${SCRIPT_PATH:-/opt/velox/scripts/bench-rig/ingest.js}"
   DBPASS=$(cat "$OUT/db-password")

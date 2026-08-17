@@ -59,7 +59,7 @@ if [ "${TARGET:-local}" = "aws" ]; then
   DBHOST=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].Endpoint.Address' --output text)
   DBPASS=$(cat "$OUT/db-password")
   REMOTE_DSN="postgres://velox:$DBPASS@$DBHOST:5432/${DBNAME:-velox}?sslmode=require"
-  ssh_() { ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
+  ssh_() { ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
   cmd="${1:-}"; tag="${2:-}"
   case "$cmd" in
     start|stop|settings)
@@ -88,6 +88,46 @@ print(' '.join(sorted({d.datetime.utcfromtimestamp(t).strftime('%Y-%m-%d-%H') fo
             || echo "  (could not download $f)"
         done
         echo "  postgres log: $(wc -l < "$dest/$tag.postgres.log" | tr -d ' ') lines -> $dest/$tag.postgres.log"
+      fi
+      # Performance Insights (1 s wait-event load by wait event, and by SQL) and
+      # Enhanced Monitoring (1 s OS disk await/util/queue) for the same window,
+      # when the account grants them (pi:Get* inline policy; velox-bench-rds-monitoring
+      # role). Both are best-effort; the sampler stands on its own without them.
+      if [ -s "$dest/$tag.window" ]; then
+        read -r w_start w_end < "$dest/$tag.window"; : "${w_end:=$(date -u +%s)}"
+        RID=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].DbiResourceId' --output text)
+        s_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$w_start")
+        e_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$w_end")
+        # PI allows at most 4h per call at 1 s; page in 1 h chunks
+        : > "$dest/$tag.pi-waits.json"; : > "$dest/$tag.pi-sql.json"
+        for ((t=w_start; t<w_end; t+=3600)); do
+          t2=$((t+3600)); [ $t2 -gt $w_end ] && t2=$w_end
+          a_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t")
+          b_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t2")
+          aws_ pi get-resource-metrics --service-type RDS --identifier "$RID" --start-time "$a_iso" --end-time "$b_iso" --period-in-seconds 1 \
+            --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":10}}]' --output json >> "$dest/$tag.pi-waits.json" 2>/dev/null || true
+          aws_ pi get-resource-metrics --service-type RDS --identifier "$RID" --start-time "$a_iso" --end-time "$b_iso" --period-in-seconds 60 \
+            --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.sql_tokenized","Limit":10}}]' --output json >> "$dest/$tag.pi-sql.json" 2>/dev/null || true
+        done
+        [ -s "$dest/$tag.pi-waits.json" ] && echo "  performance insights: $dest/$tag.pi-waits.json (1 s waits), $tag.pi-sql.json (60 s by SQL)" || rm -f "$dest/$tag.pi-waits.json" "$dest/$tag.pi-sql.json"
+        # Enhanced Monitoring lands in CloudWatch Logs group RDSOSMetrics, one JSON doc per second
+        aws_ logs filter-log-events --log-group-name RDSOSMetrics --log-stream-names "$RID" \
+          --start-time $((w_start*1000)) --end-time $((w_end*1000)) --output json --query 'events[].message' 2>/dev/null \
+          | python3 -c "
+import sys,json
+try: msgs=json.load(sys.stdin)
+except Exception: msgs=[]
+out=open('$dest/$tag.em.jsonl','w'); n=0
+for m in msgs:
+    try: d=json.loads(m)
+    except Exception: continue
+    disk=[x for x in d.get('diskIO',[]) if x.get('device','').startswith('rdsdev')] or d.get('diskIO',[])
+    out.write(json.dumps({'ts':d.get('timestamp'),'cpu':d.get('cpuUtilization',{}).get('total'),'wait':d.get('cpuUtilization',{}).get('wait'),
+        'mem_dirty':d.get('memory',{}).get('dirty'),'mem_writeback':d.get('memory',{}).get('writeback'),'load1':d.get('loadAverageMinute',{}).get('one'),
+        'disk':[{'dev':x.get('device'),'await':x.get('await'),'util':x.get('util'),'q':x.get('avgQueueLen'),'wkb':x.get('writeKbPS'),'rkb':x.get('readKbPS'),'tps':x.get('tps'),'reqsz':x.get('avgReqSz')} for x in disk]})+'\n'); n+=1
+print(f'  enhanced monitoring: {n} one-second samples -> $dest/$tag.em.jsonl')
+" || true
+        [ -s "$dest/$tag.em.jsonl" ] || rm -f "$dest/$tag.em.jsonl"
       fi
       echo "  samples: $(wc -l < "$dest/$tag.dbsample.jsonl" | tr -d ' ') ticks -> $dest/$tag.dbsample.jsonl"
       exit 0 ;;
@@ -125,13 +165,15 @@ SELECT json_build_object(
   'idx', (SELECT coalesce(json_agg(json_build_object('n',indexrelname,'r',idx_blks_read,'h',idx_blks_hit)),'[]') FROM pg_statio_user_indexes WHERE relname='usage_events'),
   'gin', (SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname='pgstattuple') AND EXISTS (SELECT 1 FROM pg_class WHERE relname='idx_usage_events_properties_gin')
                  THEN (SELECT row_to_json(g) FROM (SELECT pending_pages pp, pending_tuples pt FROM pgstatginindex('idx_usage_events_properties_gin')) g) END),
-  'locks', (SELECT coalesce(json_agg(json_build_object('lt',locktype,'m',mode,'n',n)),'[]') FROM (SELECT locktype, mode, count(*) n FROM pg_locks WHERE NOT granted GROUP BY 1,2) l),
+  'locks', (SELECT coalesce(json_agg(json_build_object('lt',locktype,'m',mode,'g',granted,'rel',relation::regclass::text,'pg',page,'n',n)),'[]') FROM (SELECT locktype, mode, granted, relation, page, count(*) n FROM pg_locks WHERE locktype IN ('page','extend') OR NOT granted GROUP BY 1,2,3,4,5) l),
+  'slow', (SELECT coalesce(json_agg(json_build_object('bt',backend_type,'wt',wait_event_type,'we',wait_event,'age',round(extract(epoch from clock_timestamp()-query_start)::numeric,3),'q',left(regexp_replace(query,'\s+',' ','g'),60))),'[]')
+           FROM (SELECT * FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND state='active' AND backend_type='client backend' AND clock_timestamp()-query_start > interval '100 ms' ORDER BY query_start LIMIT 12) x),
   'db', (SELECT row_to_json(d) FROM (SELECT xact_commit xc, blks_read br, blks_hit bh, blk_read_time brt, blk_write_time bwt, temp_files tf, temp_bytes tb, deadlocks dl FROM pg_stat_database WHERE datname=current_database()) d)
 )::text;
 SQL
 )
 PGSS_SQL="SELECT calls, total_exec_time, mean_exec_time, rows, shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, blk_read_time, blk_write_time, wal_records, wal_fpi, wal_bytes, left(regexp_replace(query,'\\s+',' ','g'),120) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 40"
-SIZE_SQL="SELECT json_build_object('ts', extract(epoch from clock_timestamp())::bigint, 'kind','size', 'rows_est', (SELECT reltuples::bigint FROM pg_class WHERE relname='usage_events'), 'heap', pg_table_size('usage_events'), 'idx', (SELECT json_object_agg(indexrelname, pg_relation_size(indexrelid)) FROM pg_stat_user_indexes WHERE relname='usage_events'), 'frozen_age', (SELECT age(relfrozenxid) FROM pg_class WHERE relname='usage_events'), 'wal_lsn', pg_current_wal_lsn()::text)::text;"
+SIZE_SQL="SELECT json_build_object('ts', extract(epoch from clock_timestamp())::bigint, 'kind','size', 'rows_est', (SELECT reltuples::bigint FROM pg_class WHERE relname='usage_events'), 'heap', pg_table_size('usage_events'), 'idx', (SELECT json_object_agg(indexrelname, pg_relation_size(indexrelid)) FROM pg_stat_user_indexes WHERE relname='usage_events'), 'frozen_age', (SELECT age(relfrozenxid) FROM pg_class WHERE relname='usage_events'), 'toast_ins', (SELECT n_tup_ins FROM pg_stat_all_tables WHERE relid=(SELECT reltoastrelid FROM pg_class WHERE relname='usage_events')), 'wal_lsn', pg_current_wal_lsn()::text)::text;"
 
 case "$cmd" in
   settings)

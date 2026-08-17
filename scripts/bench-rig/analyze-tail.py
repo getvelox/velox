@@ -96,6 +96,62 @@ def load_ticks(path):
         if "lsn" in o: ticks.append(o)
     return ticks
 
+def load_em(path):
+    """Enhanced Monitoring 1 s samples -> list of (epoch, await_ms, queue, write_kBps, read_kBps, tps, cpu, wait)."""
+    out = []
+    import calendar, time as _t
+    for line in open(path):
+        try: o = json.loads(line)
+        except Exception: continue
+        try: ts = calendar.timegm(_t.strptime(o["ts"][:19], "%Y-%m-%dT%H:%M:%S"))
+        except Exception: continue
+        d = (o.get("disk") or [{}])[0]
+        out.append((ts, d.get("await"), d.get("q"), d.get("wkb"), d.get("rkb"), d.get("tps"), o.get("cpu"), o.get("wait")))
+    return sorted(out)
+
+def load_pi(path):
+    """PI 1 s db.load.avg by wait event -> dict epoch -> {wait_event: load}. File may hold several concatenated JSON docs."""
+    import calendar, time as _t, datetime as dt
+    txt = open(path).read()
+    docs = []; dec = json.JSONDecoder(); i = 0
+    while i < len(txt):
+        while i < len(txt) and txt[i].isspace(): i += 1
+        if i >= len(txt): break
+        try: o, j = dec.raw_decode(txt, i)
+        except Exception: break
+        docs.append(o); i = j
+    series = defaultdict(dict)
+    for d in docs:
+        for m in d.get("MetricList", []):
+            dims = m["Key"].get("Dimensions")
+            name = dims["db.wait_event.name"] if dims else "TOTAL"
+            for p in m.get("DataPoints", []):
+                v = p.get("Value")
+                if v is None: continue
+                try:
+                    t = dt.datetime.fromisoformat(p["Timestamp"]).timestamp()
+                except Exception: continue
+                series[int(t)][name] = v
+    return series
+
+def em_summary(em, a, b):
+    sel = [x for x in em if a <= x[0] < b]
+    if not sel: return None
+    def col(i):
+        v = sorted(x[i] for x in sel if x[i] is not None)
+        return (v[len(v)//2], v[-1]) if v else (None, None)
+    return {"n": len(sel), "await_ms(med/max)": col(1), "queue(med/max)": col(2), "write_MBps(med/max)": tuple(round(x/1024,1) if x else x for x in col(3)), "read_MBps(med/max)": tuple(round(x/1024,1) if x else x for x in col(4)), "tps(med/max)": col(5), "cpu%(med/max)": col(6), "iowait%(med/max)": col(7)}
+
+def pi_summary(pi, a, b):
+    tot = defaultdict(float); n = 0
+    for t in range(int(a), int(b)):
+        row = pi.get(t)
+        if not row: continue
+        n += 1
+        for k, v in row.items(): tot[k] += v
+    if not n: return None
+    return {k: round(v/n, 2) for k, v in sorted(tot.items(), key=lambda kv: -kv[1]) if k != "TOTAL"}, round(tot.get("TOTAL", 0)/n, 2), n
+
 def lsn_bytes(s):
     hi, lo = s.split("/"); return (int(hi, 16) << 32) + int(lo, 16)
 
@@ -185,7 +241,11 @@ def main():
             ts = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
             logs.append((ts, line.rstrip()))
     logs.sort()
-    print(f"series: {len(runs)} runs, {len(ticks)} db ticks, {len(logs)} postgres log lines")
+    em = []; pi = {}
+    for f in glob.glob(os.path.join(d, f"{a['series'] or '*'}.em.jsonl")): em += load_em(f)
+    em.sort()
+    for f in glob.glob(os.path.join(d, f"{a['series'] or '*'}.pi-waits.json")): pi.update(load_pi(f))
+    print(f"series: {len(runs)} runs, {len(ticks)} db ticks, {len(logs)} postgres log lines, {len(em)} EM seconds, {len(pi)} PI seconds")
     if ticks:
         print(f"db ticks span {ticks[0]['ts']} .. {ticks[-1]['ts']} ({(ticks[-1]['ts']-ticks[0]['ts'])/60:.0f} min)")
     import datetime as dt
@@ -235,6 +295,21 @@ def main():
                 bpp = [g[1] for g in base[4] if g[1] is not None]
                 print(f"      GIN pending pages: baseline min/max {min(bpp) if bpp else '-'}/{max(bpp) if bpp else '-'}  window min/max {min(pp) if pp else '-'}/{max(pp) if pp else '-'}")
             if win[5]: print(f"      ungranted locks in window: {win[5]}")
+            if em:
+                eb, ew = em_summary(em, w0 - 300, w0 - 30), em_summary(em, w0 - 5, w1 + 5)
+                if eb and ew:
+                    print("      enhanced monitoring (1 s disk): baseline -> window")
+                    for k in ("await_ms(med/max)", "queue(med/max)", "write_MBps(med/max)", "read_MBps(med/max)", "tps(med/max)", "cpu%(med/max)", "iowait%(med/max)"):
+                        print(f"         {k:22s} {str(eb[k]):>18s} -> {str(ew[k])}")
+                    # the seconds inside the window with the worst await
+                    worst = sorted([x for x in em if w0 - 5 <= x[0] < w1 + 5 and x[1] is not None], key=lambda x: -x[1])[:5]
+                    print("         worst seconds (await ms, queue, write MB/s, tps): " + ", ".join(f"{hms(x[0])}:{x[1]}/{x[2]}/{round((x[3] or 0)/1024,1)}/{x[5]}" for x in worst))
+            if pi:
+                pb, pw = pi_summary(pi, w0 - 300, w0 - 30), pi_summary(pi, w0 - 5, w1 + 5)
+                if pb and pw:
+                    print(f"      performance insights (avg active sessions): baseline total {pb[1]} -> window total {pw[1]}")
+                    keys = list(pw[0].keys())[:8]
+                    for k in keys: print(f"         {k:34s} {pb[0].get(k,0):6.2f} -> {pw[0].get(k,0):6.2f}")
             rel = [(ts, l) for ts, l in logs if w0 - 180 <= ts <= w1 + 60]
             if rel:
                 print(f"      postgres log {hms(w0-180)}–{hms(w1+60)} ({len(rel)} lines; checkpoint/vacuum/lock/etc):")

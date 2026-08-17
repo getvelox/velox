@@ -102,9 +102,18 @@ fi
 # In the second AWS run two tail events (p99 up 10-30x for ~2 min, p50 flat,
 # storage/CPU/memory flat) went unexplained for exactly the lack of these.
 # Performance Insights (7-day retention = free tier) is switched on for the
-# same reason: per-second wait events by SQL in the console, no agent needed.
+# same reason: per-second wait events by SQL, readable with `pi:Get*` (an
+# inline policy the account owner added to the benchmark key on 2026-08-17).
+# Enhanced Monitoring (1 s OS-level disk await/util/queue — what CloudWatch's
+# 60 s averages hide) needs an IAM role that RDS can assume; the policy only
+# lets this key pass roles named velox-bench-*, so the role is
+# velox-bench-rds-monitoring (created once by the account owner). If it exists
+# it is attached; if not, the rig still works, just without 1 s OS metrics.
 # RDS_PARAMS="name=value;name=value" appends treatment settings for A/B rigs
 # (e.g. max_wal_size). Dynamic ones apply immediately; static ones at first boot.
+EM_ROLE=$(aws iam get-role --role-name velox-bench-rds-monitoring --query 'Role.Arn' --output text 2>/dev/null || true)
+[ "$EM_ROLE" = "None" ] && EM_ROLE=""
+echo "  enhanced monitoring role: ${EM_ROLE:-<none — 1 s OS metrics off>}"
 PG_FAMILY="postgres16"
 PARAM_GROUP="velox-bench-pg16"
 say "parameter group $PARAM_GROUP (instrumentation)"
@@ -135,6 +144,7 @@ if ! aws_ rds describe-db-instances --db-instance-identifier velox-bench-db >/de
     --db-subnet-group-name velox-bench-subnets --vpc-security-group-ids "$SG" \
     --db-parameter-group-name "$PARAM_GROUP" \
     --enable-performance-insights --performance-insights-retention-period 7 \
+    ${EM_ROLE:+--monitoring-interval 1 --monitoring-role-arn "$EM_ROLE"} \
     --availability-zone "$AZ" --no-multi-az --no-publicly-accessible \
     --backup-retention-period 0 --no-auto-minor-version-upgrade \
     --tags "$TAGS" >/dev/null
