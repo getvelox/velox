@@ -70,7 +70,7 @@ const MODE = __ENV.MODE || 'rate'
 // concurrently with the ingest load, with its own latency threshold.
 //
 // This is the half of the benchmark that a buyer actually experiences. Nobody
-// experiences "10,203 events/sec"; a finance team experiences whether the
+// experiences "N events/sec"; a finance team experiences whether the
 // invoice page loads on the 1st of the month while ingest is at peak. A
 // throughput number with no concurrent SLO on the read path is the number that
 // flatters the vendor, which is why it is the one vendors publish.

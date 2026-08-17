@@ -14,9 +14,9 @@ zone · **Reproduce:** `scripts/bench-rig/` — `./run.sh`, or step by step belo
 | what a self-hoster can plan on | on `db.m7g.2xlarge` (32 GB) | on `db.m7g.4xlarge` (64 GB), #818 fixed |
 |---|---|---|
 | single events, 200 ev/s | p99 **4.9 ms** | — |
-| batch 10, the recommended client shape | 1,000 ev/s at p99 **8.2 ms** (5/5) — and a wall at ~570 req/s (#818) | **12,000 ev/s** (1,200 req/s) at p99 **22.6 ms** (4/5) |
-| batch 100 | 5,000 ev/s until the table outgrew RAM (~60M rows) | **15,000 ev/s** at p99 **43.8 ms** (4/5); 10,000 at p99 47.3 ms (4/5) on a table growing 61M → 85M rows |
-| what stops it | RAM (index working set falls out of cache) | write IOPS during checkpoints on a 100 GB gp3 volume (3,000 IOPS); the app was never the limit (RDS CPU ≤ 67 %, app node ≥ 75 % idle) |
+| batch 10, the recommended client shape | 1,000 ev/s at p99 **8.2 ms** (5/5) — and a wall at ~570 req/s (#818) | **12,000 ev/s** (1,200 req/s) at p99 **22.6 ms** (4/5) stock; **5/5, worst 10-s p99 52 ms with the WAL pool sized** (third run) |
+| batch 100 | 5,000 ev/s until the table outgrew RAM (~60M rows) | **15,000 ev/s** at p99 **43.8 ms** (4/5) stock; **p99 40.2–42.8 ms, 5/5 with the WAL pool sized** (third run); 25,000 ev/s 2/5 stock with drops → **4/5, p50 36 ms, p99 49–120 ms, 0 drops** with a 16 GB pool that the sampler shows is still one size too small at that rate; 10,000 at p99 47.3 ms (4/5) on a table growing 61M → 85M rows |
+| what stops it | RAM (index working set falls out of cache) | at 15–25k, the 100 GB gp3 volume (3,000 IOPS / 125 MiB/s); at any rate after a lull, RDS's default WAL segment pool (third run — one parameter fixes it); the app was never the limit (RDS CPU ≤ 67 %, app node ≥ 75 % idle) |
 | closed-loop maximum, batch 500 (not a service level) | 25,424 ev/s | **41,172 ev/s** (p50 187 / p99 226 ms) |
 | the database's own floor for this row shape (`pgbench`, 16 clients) | 6,840 one-row commits/s | 7,184 one-row commits/s; **52,713 rows/s at batch 500 — and Velox's closed loop is 78 % of that, 101 % of the same with the RLS protocol** |
 | reads under load | list endpoints 2–9 ms at every rate; per-customer usage summary is a linear scan, ~2.7 µs/event (#819) | same |
@@ -139,13 +139,16 @@ held **open-loop** at p99 55 ms.
 | **12,000** | **10** | **4/5** | **8.1 ms** | **22.4–22.8 ms** | fresh 20M table; four repeats within 0.4 ms of each other. Repeat 5 (49M rows) was clean for eight minutes, then its last two minutes ran p99 713 / 515 ms with 463 drops and **p50 unchanged at 8.1 ms**; the only concurrent signal is the run's highest write IOPS (1,300 → 1,609, queue depth 1.5 → 3.2) — a checkpoint, but nowhere near saturation. **1,200 requests/s sustained on the recommended client shape** — the hot row capped this at ~570 |
 | **15,000** | **100** | **4/5** | **36.5 ms** | **43.3–44.6 ms** | fresh 20M table; four repeats within 1.3 ms of each other, drift ×0.88–1.01, ReadIOPS ~0 throughout (the cache never missed — FreeableMemory flat at 46.7 GB); repeat 5, at 56M rows, hit **one 50-second stall** (23:52:00–23:52:50Z: disk queue depth 59, write IOPS 2,802 against the 3,000 baseline; 455 drops, p50 up to 1.9 s for that window). 49 of 50 minutes clean |
 
-Two of the four failed repeats have a clear signature (25k and 15k: the volume
-saturated, queue depth 59–65). Two do not (10k repeat 4, 12k repeat 5): a tail
-event late in a long series, p50 untouched, storage well below its ceiling, CPU
-and memory flat. Insert-triggered autovacuum and checkpoint completion are the
-candidates; neither is confirmed, because Performance Insights was not enabled
-on the rig and `pg_stat_activity` was only sampled during the ladders. That is
-the one instrumentation gap this run leaves, and it is noted in the reproducer.
+Two of the four failed repeats have a clear storage signature over the whole
+minute — 25k and 15k: write IOPS at the volume's 3,000 baseline, disk queue
+depth 59–65, p50 up to 1.9 s and hundreds of drops — checkpoint-era write
+bursts on a volume with no headroom. The other two (10k repeat 4, 12k repeat 5)
+are **not attributed**: re-reading CloudWatch for 10k repeat 4 without cutting
+the window at the run's end shows its final minute at queue depth 28 and write
+latency 17–25 ms (a datapoint the first write-up missed), so it is not
+signature-free, but this rig had no 1-second instrumentation and pg_wal did
+not grow in either window, so the third run's mechanism (below) is a candidate
+for them, not a finding.
 
 Reading it as capacity: on this rig, steady batch-100 ingest above ~10k rows/s
 becomes bound by **write IOPS during checkpoints** — five indexes on
@@ -188,6 +191,212 @@ the 2xlarge — the cost shows when the DB is CPU-bound, not when it is waiting
 on the client. (`db-ceiling.sh` also prints Velox-as-a-fraction lines; they are
 only meaningful when `VELOX_EVS` came from a closed-loop run at the same
 `BATCH` — the batch-1 legs above are not compared to the batch-500 ceiling.)
+
+## Third run, 2026-08-17: what a tail event is, caught live
+
+Same shape (`c7g.2xlarge` app, `c7g.xlarge` generator, `db.m7g.4xlarge`,
+100 GB gp3), Velox `97ef608b`, this time instrumented for attribution: a
+parameter group with the logging on (`log_autovacuum_min_duration=0`,
+`log_lock_waits` with `deadlock_timeout=200ms`, `log_min_duration_statement=250`),
+Performance Insights, **Enhanced Monitoring at 1 second**, and a 5-second
+sampler on the app node reading `pg_stat_io`, `pg_stat_wal`, `pg_stat_bgwriter`,
+vacuum/analyze progress, the GIN pending list, page/extension locks and every
+backend's wait event as one JSON line (`scripts/bench-rig/db-sampler.sh`;
+analysis: `analyze-tail.py`, `tail-census.py`; the Postgres log through
+pgBadger). Control = stock RDS parameters, 12,000 ev/s at batch 10, 5 × 10 min
+from a fresh 20M-row table. Postgres 16.14; RDS defaults that matter here:
+`wal_segment_size` 64 MB, `max_wal_size` 6144 MB on this class, `min_wal_size`
+192 MB, `wal_keep_size` 2048 MB, `checkpoint_timeout` 300 s,
+`checkpoint_completion_target` 0.9, `archive_timeout` 300 s, `wal_init_zero` on.
+
+### The mechanism from first principles (read this if the rest is Greek)
+
+1. **Every commit is written to the write-ahead log (WAL) first**, and the
+   commit is not acknowledged until that write is on disk. That is what makes
+   a billing event durable.
+2. **The WAL is a sequence of fixed-size files** ("segments"; 64 MB on RDS).
+   Filling one and moving to the next happens ~every 4–5 s at 12,000 events/s.
+3. **Postgres keeps a small stock of ready-made, already-formatted segments**
+   ahead of the current one, so switching is instant. The stock is refilled by
+   *recycling* at each checkpoint (~every 5 min): old segments that are no
+   longer needed for crash recovery are renamed into future ones.
+4. **If the stock is empty when the next segment is needed**, the transaction
+   that needs it must create the file — write 64 MB of zeros and flush it —
+   while holding the lock every other commit needs. Everyone freezes for the
+   ~0.2–0.3 s that takes. Until the next checkpoint refills the stock, this
+   repeats at every segment boundary: a freeze every ~5 s. Typical writes
+   (p50) are unaffected; the slowest 1 % (p99) jump 5–10×.
+5. **The stock is sized to about one checkpoint's worth with almost no
+   slack**, by Postgres's recycling rule at these settings. Two ordinary events
+   remove the slack: a quiet period makes checkpoints small, which makes the
+   next one recycle fewer files (RDS's `min_wal_size` = 192 MB is the floor
+   that would prevent it), and after an idle RDS's 2 GB of retained log sits
+   inside the window, so the stock on resume is shallower than usual and the
+   first timer-driven checkpoint refills it too late (`max_wal_size` bounds
+   the depth). Both were reproduced on demand.
+6. **The fix is a deeper stock:** `min_wal_size = max_wal_size` big enough for
+   the worst refill gap at your write rate (`wal_keep_size + 1.9 × WAL rate ×
+   checkpoint_timeout`; 16 GB here). The stock is a revolving buffer — used and
+   refilled every cycle, never "consumed" — so it costs disk space and nothing
+   else. It grows only as segments get created, so set it at provisioning (a
+   bulk load grows it for free); raised on a live instance it fills over
+   ~15 minutes of peak traffic, stalling in the meantime, then stops.
+7. **What it does not fix:** if the volume cannot absorb the write rate
+   (15–25k events/s on a 100 GB gp3), that is capacity, and only a bigger
+   volume or less WAL per event helps.
+
+### The control caught one
+
+Repeat 1 held (p99 24.5 ms, 0 drops) but carried a 45-second event at
+04:52:06–04:52:49Z: 10-second p99 120–177 ms against a 22 ms baseline (1-second
+p99 up to 230, worst request 279 ms), p50 untouched. Inside it, from the raw k6
+samples: **exactly ten stall-seconds, 4–5 s apart, each 0.17–0.28 s long**
+(14–24 % of the requests in that second slowed, 3.5 % over the whole window).
+What every source said about those seconds:
+
+| source | what it showed |
+|---|---|
+| Enhanced Monitoring, 1 s | the `rdsdev` device at **10,395 write IOs/s of ~13 KB = 133 MB/s**, util 95 %, device-mapper queue depth 40–96 — the volume at its throughput ceiling — while the NVMe beneath took them merged (~1,600 IOs/s of ~80 KB, queue 5, await 3 ms; read live from the EM stream, now retained by the fetch step). Roughly 100 MB of writes above baseline in each stall second, ~1 GB over the window |
+| the same minute in CloudWatch | 1,039 IOPS, 42 MB/s, queue depth 1.3 — a 60-second average |
+| Postgres's own writers (`pg_stat_io`, 5 s) | **unchanged**: checkpointer a perfectly even ~1,290 buffers/s (10 MB/s) through the whole checkpoint, client backends 0 writes / 0 evictions (only relation extends, ~930/s), WAL 14 MB/s, `wal_buffers_full` = 0 |
+| sampler tick 04:52:11 | one client backend in **`IO:WALInitSync`**, **19 in `LWLock:WALWrite`** |
+| Performance Insights, 1 s | `LWLock:WALWrite` = 18 sessions at 04:52:15 (PI's 1-second samples otherwise mostly miss ~0.2 s stalls) |
+| Postgres log | the checkpoint before the event (04:48:53, the first after warm-up) *recycled 29 and unlinked 10* old segments; the one completing at 04:52:48 recycled 50 |
+| CloudWatch `TransactionLogsDiskUsage` | pg_wal 6.44 → 5.77 GB at 04:49 (10 fewer files), back to 6.44 GB during the event |
+| not implicated | autovacuum (its passes fell outside the window; autoanalyze 0.5 s each), the GIN pending list (5–486 pages, its normal sawtooth), buffer eviction (0), lock waits (0 lines) |
+
+**A committing backend creating a WAL segment.** When the next 64 MB segment
+is needed and no pre-made one is waiting, the backend writes 64 MB of zeros
+(256 KB `pwritev` calls) and fsyncs the file, holding `WALWriteLock` throughout
+— every other commit waits (`IO:WALInitWrite`/`WALInitSync`, `xlog.c`
+`XLogFileInitInternal`, reached from `XLogFlush`). At 14 MB/s of WAL that is
+one segment every ~4.7 s, each ~0.2–0.28 s here; segment size sets the stall's
+grain, the flush rate its length. **Ten stalls = the ten segments the 04:48:53
+checkpoint had not recycled.**
+
+### Why the pool runs dry — from the source
+
+Pre-made segments come from recycling at checkpoint completion:
+`XLOGfileslop` keeps segments up to `1.1 × (1 + checkpoint_completion_target) ×
+distance_estimate` beyond the redo point, clamped to `[min_wal_size,
+max_wal_size]`; a WAL-driven checkpoint fires at `max_wal_size / (1 + target)`
+(`CalculateCheckpointSegments`). At this write rate the estimate converges to
+that distance, `1.1 × 1.9 × D` exceeds `max_wal_size` and the clamp binds — so
+the future pool at each completion is `max_wal_size − 0.9·D ≈ 50 segments`,
+and the next completion lands 49.4–50 segments later. **The margin is under
+one segment**, not the formula's 10 % (that slop only exists once
+`1.1 × 1.9 × D < max_wal_size`, i.e. when checkpoints are time-driven). Two
+things then take the margin away, both after a quiet spell:
+
+1. **Fewer segments recycled.** Small checkpoints decay the distance estimate
+   (10 % each: 50.0 → 48.5 → 43.9 → 40.2 segments across the three that
+   bracketed the control's warm-up); once `1.1 × 1.9 × estimate` falls under
+   the clamp the recycle target drops and old segments are unlinked instead of
+   recycled ("10 removed"). `min_wal_size` is the floor that would stop that —
+   RDS's 192 MB never binds. The next cycle is those segments short.
+2. **Retained segments inside the window.** RDS keeps 32 segments (2 GB,
+   `wal_keep_size`) behind the end of WAL. In steady state those sit before the
+   redo point and cost nothing; after an idle (redo ≈ end of WAL) they sit
+   *inside* the `max_wal_size` window, so the pool on resume is ~63 segments,
+   not ~95 — and the first checkpoint after resume fires on the 5-minute timer
+   and only refills when it completes ~270 s later. Neither `min_wal_size` nor
+   `max_wal_size` alone changes that arithmetic.
+
+### Provoked on demand: idle 15 min, then 12k ev/s for 5 min
+
+| arm | `min_wal_size` | `max_wal_size` | 10-s buckets > 5× | worst 10-s p99 | seconds at cap | what pg_wal / the pool did |
+|---|---:|---:|---:|---:|---:|---|
+| A — stock | 192 MB | 6 GB | 3 | 254 ms | 6 | flat 6.44 GB through the idle (nothing removed); stall began 07:34:18, ~300 s after load started, after ~63 segments of WAL — the pool at resume — with the timer checkpoint (started 07:32:23) still writing; +0.47 GB (7 segments created) by the time the 5-min run ended |
+| B — floor only | 6 GB | 6 GB | 5 | 196 ms | 7 | same shape: dry after ~57 segments, +0.80 GB created before the run ended |
+| C — depth only | 192 MB | 16 GB | 3 | 162 ms | 3 | −1.21 GB *during the idle* (18 unlinked, path 1) then a stall at 09:01:30–09:01:56 |
+| D — floor and depth, applied to a shallow pool | 16 GB | 16 GB | 13 | 234 ms | 20 | pg_wal 5.10 → 6.98 GB *during the run*: the setting does not create segments — every new one was built under load, so the whole run stalled every ~5 s (the transition cost of raising the setting; `pg_switch_wal()` to pre-grow is not available to `rds_superuser`) |
+| D2 — the same, after the pool had grown to depth (a 12k series ran in between) | 16 GB | 16 GB | **0** | **24.7 ms** | **0** | flat at 12.15 GB through idle and resume; no `WALInit*`, no pile-up — the same recipe that stalled A–D |
+
+The 50-minute series with `min_wal_size = max_wal_size = 6 GB` (T3, same load
+as the control) had no sustained event (>5× buckets 5 → 0; in-run seconds at
+the cap with small IOs 12 → 0; `WALInit*` sightings 1 → 0; pg_wal flat) — but
+it is a **null test** of the floor: its distance estimate never decayed below
+the point where the floor would bind, so the treatment was never exercised;
+the clean result is checkpoint phase, one series. Arm B is the honest verdict
+on that setting.
+
+### The setting under the full series (T5): 12,000 ev/s × batch 10, 5 × 10 min
+
+Same load and protocol as the control, `min_wal_size = max_wal_size = 16 GB`,
+pool at 147 pre-made segments when the series began (the reseed had grown it):
+
+| | control (stock) | `min_wal_size` = `max_wal_size` = 6 GB (T3, null test) | **`min_wal_size` = `max_wal_size` = 16 GB (T5)** |
+|---|---:|---:|---:|
+| repeats passed, p99 range | 5/5, 21.8–24.5 ms | 5/5, 22.1–23.7 ms | **5/5, 22.4–23.3 ms** |
+| 10-s buckets > 3× / > 5× the series median | 5 / 5 | 2 / 0 | **0 / 0** |
+| worst 10-s p99 | 177 ms | 75 ms | **52 ms** |
+| seconds at the throughput ceiling with small IOs, inside repeats | 12 | 0 | 1 |
+| sampler ticks with a backend in `WALInit*` | 1 | 0 | 0 |
+| checkpoints timed / WAL-driven | 3 / 10 | 2 / 9 | **10 / 0** |
+| pre-made segments, min / median (`pg_ls_waldir`) | not sampled | not sampled | 45 / 99 |
+| segments unlinked at checkpoints | 10 | 0 | 0 |
+
+With the pool deep, checkpoints are time-driven (so the recycling formula's
+10 % slop is back in play), the pool never fell below 45 segments, and no
+tail window appeared. One series each — but three of the four provocation
+arms stall on demand and this setting is the only one under which the pool
+never got near empty. And the provocation that stalled every other arm (D2 in the table above) did not stall it.
+
+Then the same setting at **15,000 ev/s × batch 100** (T6, 5 × 10 min, fresh
+20M): **5/5, p50 33.6–34.0 ms, p99 40.2–42.8 ms**, 0 drops, no tail bucket,
+worst 10-s p99 88 ms, all 9 checkpoints time-driven, WAL 17.6 MB/s, pool
+minimum 30 pre-made segments (median 82) — thinner than at 12k, as the rule
+predicts when the rate rises. Last night's stock run at this rate was 4/5
+(43.3–44.6 ms) with a 50-second volume-saturation stall. Caveat on repeat 5:
+the operator's laptop slept mid-series; k6 ran to completion on the load
+generator (90,001 iterations, 9,000,100 events, matching the row count) and its
+summary and samples were read afterwards, so its p50/p99/drift/drops come from
+the same files as every other repeat, read by hand. 
+
+And at **25,000 ev/s × batch 100** (T7, same protocol): **4/5, p50 35.6–36.1 ms,
+p99 49–120 ms, 0 drops, every event reconciled** — the one failure a drift
+gate (repeat 2's last third ×2.9 its first, p99 67 ms), not a stall. Compare
+stock last night: 2/5, p50 up to 1.9 s, hundreds of drops, disk queue depth
+37–65. Here the pool is *not* deep enough and the evidence says so: WAL runs at
+29.6 MB/s, so the rule asks for ~19 GB and 16 GB is short — the sampler shows
+the pre-made pool at **0 segments at 17:10 and 17:25**, two checkpoints
+turned WAL-driven (`starting: wal`), 471 seconds at the throughput ceiling
+with small IOs, two `WALInit*` sightings, 18 buckets between 3× and 5× (none
+above; worst 10-s p99 208 ms), and total WAL files growing 181 → 244 through
+the series — the created segments deepening the pool, which is why repeats
+3–5 (p99 49–64 ms) are cleaner than 1–2. **So the boundary is measured: 16 GB
+covers 12–15k on this rig; at 25k size to ~24–32 GB (or shorten
+`checkpoint_timeout`).**
+
+The same reading offers a candidate for last night's stock 25k/15k stalls that
+this write-up still classifies as storage-bound: at 29.6 MB/s a stock pool of
+~50 segments is consumed in ~108 s — dry at *every* cycle end — and the
+segments created are unlinked at the next checkpoint, so `TransactionLogsDiskUsage`
+stays flat while the churn's 8 KB writes consume the volume's 3,000 IOPS. It
+fits the 2,400–3,500 IOPS / queue 59–65 signature and the fact that the same
+load with the pool sized showed no saturation and no drops; it is not provable
+from that rig's data, so it stays a candidate.
+
+
+
+### What this leaves
+
+- **Not attributed:** last night's 12k repeat 5 and 10k repeat 4 (this
+  mechanism is a candidate; pg_wal did not grow in their windows, and that
+  rig had no 1-second view). The 15k/25k failures are storage-bound bursts as
+  originally written.
+- **Product side, quantified from the same evidence:** Velox writes ~1.2 KB of
+  WAL and 7.7 WAL records per 200-byte event; full-page images are *not* the
+  driver (0.05 per event with `wal_compression=zstd`). The event insert runs
+  as **one statement per event** (36.1M calls for 36.1M events at batch 10 —
+  a `WITH rate AS (SELECT … provider_cost_rates …) INSERT …`), plus three
+  foreign-key `FOR KEY SHARE` lookups per event (customers, meters, and the
+  *same* tenants row 12,000×/s — visible as `LWLock:MultiXactGen`); index
+  growth per event: customer_meter 121 B, idempotency 117 B, pkey 88 B,
+  tenant_time 37 B, GIN 9 B, heap 247 B. Multi-row inserts per batch and a
+  cheaper strategy for hot parent rows are the levers; they cut the WAL rate
+  every number in this section scales with. Filed as
+  [#823](https://github.com/getvelox/velox/issues/823), not built here.
 
 ## What the ladder found: the wall is a hot row, not the hardware
 
@@ -292,19 +501,29 @@ bugs be attributed to either.
   first benchmark, not a "real traffic" claim.
 - **"Sustained" means 5 × 10 minutes** with a cool-down between, not an hour
   unbroken. Long enough for autovacuum and checkpoints to appear (they did — see
-  footnote ¹); not long enough for multi-hour effects.
+  footnote ¹, and the third run); not long enough for multi-hour effects.
 - **The read probe is one budget over three endpoints**, reported per endpoint;
   its `usage-summary` result scales with events-per-customer, so the budget it
   meets depends on how big your customers are.
 - **No nginx** in front (deploy/compose puts one there); **Single-AZ**, no pooler,
   no replica; on-demand pricing; storage and the load generator excluded from
   the $/hr.
-- **The 15,000 ev/s rung is 2 × 90 s**, not sustained; it held with drift ×1.4,
-  which is a knee approaching, and it is reported as such.
+- **On the `db.m7g.2xlarge`, 15,000 ev/s was only a 2 × 90 s ladder rung**
+  (drift ×1.4 — a knee approaching), not a sustained result. The sustained
+  15,000 ev/s figure on this page is the 4xlarge: 4 of 5 ten-minute repeats,
+  drift ×0.88–1.01; repeat 5 hit one 50-second write-IOPS stall at 56M rows
+  (455 drops). Reported as 4/5, not rounded up.
+- **The tail attribution (third run) rests on one control event and four
+  provocation arms** on one instance shape; the two run-2 events it does not
+  explain are named as unexplained. Two settings tested (`min_wal_size` alone,
+  `max_wal_size` alone) did not hold up under provocation; the combined
+  setting is verified only in the arms and series shown.
 - **No dashboard in the loop, but the evidence is captured**: every run leaves
   the raw k6 sample stream, a 5-second `vmstat` from the app node, and the RDS
-  CloudWatch series over its window (`~/.velox-bench-rig/results-*/`). Every
-  claim in the sections above was read from those files, not from a console.
+  CloudWatch series over its window (`~/.velox-bench-rig/results-*/`); the
+  third run adds the 5-second DB sampler, 1-second Enhanced Monitoring and
+  Performance Insights pulls and the Postgres log per series. Every claim in
+  the sections above was read from those files, not from a console.
 
 ---
 

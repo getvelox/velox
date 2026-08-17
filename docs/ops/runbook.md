@@ -309,6 +309,54 @@ schedule large backfills off-peak. Watch `ReadIOPS` too — a tail that rises
 with CPU flat is the index working set falling out of cache; see
 `docs/benchmarks/sustained-throughput.md` for the numbers on `db.m7g.2xlarge`.
 
+## On RDS, size the WAL segment pool — the defaults let commits stall after a quiet spell
+
+Measured on the benchmark rig (2026-08-17, `db.m7g.4xlarge`, 100 GB gp3, PG
+16.14, 12,000 events/s, 1-second instrumentation): the tail events the third
+run caught are **WAL segment creation under `WALWriteLock`.** RDS uses 64 MB
+WAL segments and keeps a pool of pre-made ones, refilled by recycling at each
+checkpoint completion to about one checkpoint's worth — with less than one
+segment of margin at this write rate, by the recycling arithmetic in
+`xlog.c`. When the pool runs dry, the committing backend that needs the next
+segment writes 64 MB of zeros and fsyncs it while every other commit waits:
+~0.2–0.3 s of frozen commits every ~5 s until the next checkpoint refills the
+pool. p99 jumps 5–10×; p50 does not move; CPU, memory and CloudWatch's
+60-second I/O averages look normal (the stall minute read 1,039 IOPS, 42 MB/s,
+queue depth 1.3). Two things drain the pool, both after a quiet spell: small
+checkpoints decay the checkpointer's distance estimate so fewer old segments
+are recycled (`min_wal_size`, RDS default 192 MB, is the floor that would stop
+it), and RDS's retained segments (`wal_keep_size` 2 GB) sit inside the
+`max_wal_size` window after an idle, so the pool on resume is shallower than
+in steady state and the first timer-driven checkpoint refills too late
+(`max_wal_size` bounds the depth). Both were reproduced on demand; either
+knob alone was not enough (provocation arms A–C in
+`docs/benchmarks/sustained-throughput.md` § third run).
+
+**Do:** in the instance's parameter group set **`min_wal_size = max_wal_size ≥
+wal_keep_size + (1 + checkpoint_completion_target) × peak WAL rate ×
+checkpoint_timeout, with margin`** — at 12–15k events/s (14–20 MB/s of WAL) that
+is 2 + 8–11 GB, so **16 GB**; at 25,000 events/s WAL ran at 29.6 MB/s and the pool at 16 GB still hit zero twice in 35 minutes — size **24–32 GB** there, or shorten `checkpoint_timeout`. Both are dynamic (no reboot). Check the log at
+peak: checkpoints should read `checkpoint starting: time`, not `wal` — a
+WAL-driven checkpoint puts you back on the one-segment margin. Cost is disk:
+`pg_wal` sits near that size permanently. Two cautions: (1) raising the
+setting does not manufacture segments — the pool grows only as segments are
+created, so the first busy cycles after the change can still stall until it has
+deepened; `pg_switch_wal()` is not granted to `rds_superuser`, so there is no cheap
+pre-grow on RDS — a bulk load or ~15 minutes of peak-rate traffic grows it
+(measured: applying 16 GB to a shallow pool made the next 5 minutes *worse*,
+provocation arm D); (2) at higher
+write rates than measured, re-derive the number. Verified: with the pool at depth, the idle-then-resume recipe that stalled stock, floor-only, depth-only and freshly-raised settings did not stall (worst 10-s p99 24.7 ms vs 162–254 ms), and a 5 × 10 min series at 12,000 ev/s ran with all checkpoints time-driven, no tail window, and the pool never below 45 segments — one series each, on `db.m7g.4xlarge` + 100 GB gp3.
+
+**How to see it if you suspect it:** `pg_stat_activity` (or the rig sampler)
+showing a client backend in `IO:WALInitWrite`/`WALInitSync` with a pile-up on
+`LWLock:WALWrite`; `TransactionLogsDiskUsage` growing under load right after it
+fell at a checkpoint; Enhanced Monitoring (1 s) showing device writes near the
+volume's throughput ceiling with the average request size falling toward
+~13 KB while `pg_stat_io` writers are steady. Performance Insights at 1 s
+usually misses the ~0.2 s stalls, and a `WALWrite` pile-up alone is not
+specific. Numbers and the full attribution: `docs/benchmarks/sustained-throughput.md`
+§ third run.
+
 ## Scheduler interval tuning
 
 The tick interval and batch size are compiled-in, not env-configurable:

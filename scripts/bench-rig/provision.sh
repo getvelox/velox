@@ -32,6 +32,15 @@ AZ="${AZ:-ap-south-1a}"
 APP_TYPE="${APP_TYPE:-c7g.large}"
 GEN_TYPE="${GEN_TYPE:-c7g.xlarge}"
 DB_CLASS="${DB_CLASS:-db.m7g.large}"
+# Storage is a throughput decision, not a space decision: gp3 under 400 GB is
+# fixed at 3,000 IOPS / 125 MiB/s, and the third AWS run showed the end of every
+# large checkpoint pinning that 125 MiB/s (device-mapper queue 40-96 while the
+# NVMe beneath idled) — the tail events. At >= 400 GB the baseline is 12,000 IOPS
+# / 500 MiB/s and both become provisionable (--iops up to 16,000, --storage-throughput
+# up to 1,000). Cost is per GB-month, ~$0.13/GB in ap-south-1.
+DB_STORAGE_GB="${DB_STORAGE_GB:-100}"
+DB_IOPS="${DB_IOPS:-}"             # only valid at >= 400 GB
+DB_THROUGHPUT="${DB_THROUGHPUT:-}" # MiB/s, only valid at >= 400 GB
 TAGS="Key=Project,Value=velox-bench"
 OUT="${OUT:-$HOME/.velox-bench-rig}"
 BRANCH="${BRANCH:-main}"
@@ -51,7 +60,7 @@ AMI=$(aws_ ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-
   --query 'Parameter.Value' --output text)
 MYIP="$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')/32"
 say "vpc=$VPC subnet=$SUBNET ($AZ) ami=$AMI ssh-from=$MYIP"
-say "shape: app=$APP_TYPE loadgen=$GEN_TYPE db=$DB_CLASS"
+say "shape: app=$APP_TYPE loadgen=$GEN_TYPE db=$DB_CLASS storage=${DB_STORAGE_GB}GB gp3${DB_IOPS:+ ${DB_IOPS} IOPS}${DB_THROUGHPUT:+ ${DB_THROUGHPUT} MiB/s}"
 
 say "key pair"
 if ! aws_ ec2 describe-key-pairs --key-names velox-bench-key >/dev/null 2>&1; then
@@ -86,12 +95,65 @@ if ! aws_ rds describe-db-subnet-groups --db-subnet-group-name velox-bench-subne
     --db-subnet-group-description "velox bench" --subnet-ids "$SUBNET" "$SUBNET_B" \
     --tags "$TAGS" >/dev/null
 fi
+# Instrumentation lives in a custom parameter group created BEFORE the instance,
+# so static settings (shared_preload_libraries) apply from first boot and no
+# reboot is ever needed mid-run. Everything here is observability, not tuning:
+# the numbers a run publishes are still the stock engine defaults. What each
+# line buys, and why it is worth having on every rig:
+#   log_autovacuum_min_duration=0  every autovacuum/analyze with its timings
+#   log_checkpoints=1              checkpoint start/complete with buffers, sync time
+#   log_lock_waits=1               any lock waited on > deadlock_timeout (set to 200 ms
+#                                  so a sub-second stall on a lock is logged, not hidden)
+#   log_min_duration_statement=250 the individual slow INSERTs, with their timestamps
+#                                  (log_parameter_max_length=0 keeps the batch payload out)
+#   track_io_timing / track_wal_io_timing  blk_read_time / wal_sync_time become real
+#   pg_stat_statements.track=all   per-statement I/O and time, incl. nested
+# In the second AWS run two tail events (p99 up 10-30x for ~2 min, p50 flat,
+# storage/CPU/memory flat) went unexplained for exactly the lack of these.
+# Performance Insights (7-day retention = free tier) is switched on for the
+# same reason: per-second wait events by SQL, readable with `pi:Get*` (an
+# inline policy the account owner added to the benchmark key on 2026-08-17).
+# Enhanced Monitoring (1 s OS-level disk await/util/queue — what CloudWatch's
+# 60 s averages hide) needs an IAM role that RDS can assume; the policy only
+# lets this key pass roles named velox-bench-*, so the role is
+# velox-bench-rds-monitoring (created once by the account owner). If it exists
+# it is attached; if not, the rig still works, just without 1 s OS metrics.
+# RDS_PARAMS="name=value;name=value" appends treatment settings for A/B rigs
+# (e.g. max_wal_size). Dynamic ones apply immediately; static ones at first boot.
+EM_ROLE=$(aws iam get-role --role-name velox-bench-rds-monitoring --query 'Role.Arn' --output text 2>/dev/null || true)
+[ "$EM_ROLE" = "None" ] && EM_ROLE=""
+echo "  enhanced monitoring role: ${EM_ROLE:-<none — 1 s OS metrics off>}"
+PG_FAMILY="postgres16"
+PARAM_GROUP="velox-bench-pg16"
+say "parameter group $PARAM_GROUP (instrumentation)"
+if ! aws_ rds describe-db-parameter-groups --db-parameter-group-name "$PARAM_GROUP" >/dev/null 2>&1; then
+  aws_ rds create-db-parameter-group --db-parameter-group-name "$PARAM_GROUP" \
+    --db-parameter-group-family "$PG_FAMILY" --description "velox bench: instrumentation" \
+    --tags "$TAGS" >/dev/null
+fi
+params="log_autovacuum_min_duration=0;log_checkpoints=1;log_lock_waits=1;deadlock_timeout=200;log_min_duration_statement=250;log_parameter_max_length=0;log_temp_files=0;track_io_timing=1;track_wal_io_timing=1;pg_stat_statements.track=all;shared_preload_libraries=pg_stat_statements,pg_tle${RDS_PARAMS:+;$RDS_PARAMS}"
+# Semicolon-separated because a VALUE may contain commas (shared_preload_libraries).
+# Built as JSON, not CLI shorthand, for the same reason. pending-reboot for ALL of
+# them is deliberate: on a not-yet-created instance it means "at first boot", and
+# it is the only ApplyMethod a static parameter accepts.
+pjson="["; sep=""
+IFS=';' read -ra kvs <<< "$params"
+for kv in "${kvs[@]}"; do
+  pjson="$pjson$sep{\"ParameterName\":\"${kv%%=*}\",\"ParameterValue\":\"${kv#*=}\",\"ApplyMethod\":\"pending-reboot\"}"; sep=","
+done
+pjson="$pjson]"
+aws_ rds modify-db-parameter-group --db-parameter-group-name "$PARAM_GROUP" --parameters "$pjson" >/dev/null
+echo "  $params"
+
 if ! aws_ rds describe-db-instances --db-instance-identifier velox-bench-db >/dev/null 2>&1; then
   aws_ rds create-db-instance --db-instance-identifier velox-bench-db \
     --db-instance-class "$DB_CLASS" --engine postgres --engine-version 16.14 \
     --master-username velox --master-user-password "$DBPASS" \
-    --allocated-storage 100 --storage-type gp3 \
+    --allocated-storage "$DB_STORAGE_GB" --storage-type gp3 ${DB_IOPS:+--iops "$DB_IOPS"} ${DB_THROUGHPUT:+--storage-throughput "$DB_THROUGHPUT"} \
     --db-subnet-group-name velox-bench-subnets --vpc-security-group-ids "$SG" \
+    --db-parameter-group-name "$PARAM_GROUP" \
+    --enable-performance-insights --performance-insights-retention-period 7 \
+    ${EM_ROLE:+--monitoring-interval 1 --monitoring-role-arn "$EM_ROLE"} \
     --availability-zone "$AZ" --no-multi-az --no-publicly-accessible \
     --backup-retention-period 0 --no-auto-minor-version-upgrade \
     --tags "$TAGS" >/dev/null
@@ -208,9 +270,11 @@ USERDATA=${USERDATA//__BRANCH__/$BRANCH}
 # ~$0.003/hr per instance; the on-box vmstat sampler is still the primary source.
 launch() {
   local name="$1" type="$2"
-  if [ -n "$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
-        "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[].InstanceId' --output text)" ]; then
-    echo "  $name already running"; return
+  local existing
+  existing=$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
+        "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[0].InstanceId' --output text)
+  if [ -n "$existing" ] && [ "$existing" != "None" ]; then
+    echo "  $name already running ($existing)" >&2; echo "$existing"; return
   fi
   aws_ ec2 run-instances --image-id "$AMI" --instance-type "$type" --count 1 \
     --key-name velox-bench-key --security-group-ids "$SG" --subnet-id "$SUBNET" \

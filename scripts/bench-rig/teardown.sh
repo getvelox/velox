@@ -82,12 +82,20 @@ subnetgroups=$(q db-subnet-groups rds describe-db-subnet-groups \
   --query "DBSubnetGroups[?starts_with(DBSubnetGroupName, 'velox-bench')].DBSubnetGroupName" \
   --output text)
 
+# The custom parameter group (provision.sh creates it so the instance boots with
+# the instrumentation settings). Not billable, but it is residue, and a stale
+# one with different settings would silently shape the NEXT rig's numbers.
+paramgroups=$(q db-parameter-groups rds describe-db-parameter-groups \
+  --query "DBParameterGroups[?starts_with(DBParameterGroupName, 'velox-bench')].DBParameterGroupName" \
+  --output text)
+
 say "inventory in $REGION:"
 say "  instances:      ${instances:-<none>}"
 say "  rds:            ${dbs:-<none>}"
 say "  security groups: ${sgs:-<none>}"
 say "  key pairs:      ${keys:-<none>}"
 say "  db subnet grps: ${subnetgroups:-<none>}"
+say "  db param grps:  ${paramgroups:-<none>}"
 
 # A failed query is never "clean". Report UNKNOWN and refuse to conclude.
 # wc, not grep -c: grep exits 1 on zero matches, so `|| echo 0` appended a
@@ -107,7 +115,7 @@ if [ "$FAILED_QUERIES" -gt 0 ]; then
 fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
-  if [ -z "${instances}${dbs}${sgs}${keys}${subnetgroups}" ]; then
+  if [ -z "${instances}${dbs}${sgs}${keys}${subnetgroups}${paramgroups}" ]; then
     say "CLEAN — nothing is running, nothing is billing"
     exit 0
   fi
@@ -142,6 +150,11 @@ done
 for g in $subnetgroups; do
   say "deleting db subnet group $g"
   aws_ rds delete-db-subnet-group --db-subnet-group-name "$g" >/dev/null 2>&1 || say "  (retry later)"
+done
+
+for g in $paramgroups; do
+  say "deleting db parameter group $g"
+  aws_ rds delete-db-parameter-group --db-parameter-group-name "$g" >/dev/null 2>&1 || say "  (still attached; re-run after the instance is gone)"
 done
 
 for sg in $sgs; do

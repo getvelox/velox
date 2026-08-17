@@ -36,7 +36,7 @@ if [ "${TARGET:-local}" = "aws" ]; then
   REMOTE_DSN="postgres://velox:$DBPASS@$DBHOST:5432/${DBNAME:-velox}?sslmode=require"
   echo "== running on the app node ($APP_PUB) against $DBHOST"
   # Forward every knob this script honours; TARGET is dropped so it runs locally there.
-  exec ssh -o StrictHostKeyChecking=no -i "$KEYFILE" "ec2-user@$APP_PUB" \
+  exec ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" \
     "TARGET=local DATABASE_URL='$REMOTE_DSN' CHUNK='${CHUNK:-2000000}' bash -s -- $*" < "$0"
 fi
 
