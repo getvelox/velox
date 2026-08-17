@@ -46,6 +46,7 @@ def load_k6(path):
     """-> dict bucket_epoch10 -> {'n','p50','p99','max','drops'} for scenario=offered."""
     buckets = defaultdict(list); drops = defaultdict(float)
     with gzip.open(path, "rt") as f:
+      try:
         for line in f:
             # cheap prefilter: 700k+ lines per 10-minute run, json.loads dominates
             if '"http_req_duration"' not in line and '"dropped_iterations"' not in line: continue
@@ -65,6 +66,8 @@ def load_k6(path):
             if m != "http_req_duration": continue
             if d.get("tags", {}).get("scenario") != "offered": continue
             buckets[b].append(d["value"])
+      except EOFError:
+        pass  # a run still being copied: use what is there
     out = {}
     for b in sorted(set(buckets) | set(drops)):
         v = buckets.get(b, [])

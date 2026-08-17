@@ -26,6 +26,13 @@ def census(d, tag):
     for r in runs: bk.update(at.load_k6(r))
     keys = sorted(k for k, v in bk.items() if v["n"] >= 50)
     t0, t1 = keys[0], keys[-1] + 10
+    # only INSIDE the repeats: the gaps between them (k6 stopped, count(*) and
+    # table-size queries running, cool-down) are not the thing being measured
+    inrun = set()
+    for r in runs:
+        rb = at.load_k6(r); rk = sorted(k for k, v in rb.items() if v["n"] >= 50)
+        if rk:
+            for sec in range(rk[0], rk[-1] + 10): inrun.add(sec)
     p99s = [bk[k]["p99"] for k in keys]; med = statistics.median(p99s)
     out = {"window": (t0, t1), "buckets": len(keys), "median_p99": round(med, 1),
            "buckets>3x": sum(1 for k in keys if bk[k]["p99"] > 3 * med), "buckets>5x": sum(1 for k in keys if bk[k]["p99"] > 5 * med),
@@ -33,7 +40,7 @@ def census(d, tag):
     pi = {}
     for f in glob.glob(os.path.join(d, f"{tag}.pi-waits.json")): pi.update(at.load_pi(f))
     if pi:
-        secs = [pi[t] for t in range(t0, t1) if t in pi]
+        secs = [pi[t] for t in range(t0, t1) if t in pi and t in inrun]
         out["pi_seconds"] = len(secs)
         out["pi_walwrite>=8"] = sum(1 for r in secs if r.get("LWLock:WALWrite", 0) >= 8)
         out["pi_walinit_secs"] = sum(1 for r in secs if r.get("IO:WALInitSync", 0) > 0 or r.get("IO:WALInitWrite", 0) > 0)
@@ -41,14 +48,14 @@ def census(d, tag):
         out["pi_aas_med/max"] = (round(statistics.median(tot), 1), round(max(tot), 1)) if tot else None
     em = []
     for f in glob.glob(os.path.join(d, f"{tag}.em.jsonl")): em += at.load_em(f)
-    em = [x for x in em if t0 <= x[0] < t1]
+    em = [x for x in em if t0 <= x[0] < t1 and x[0] in inrun]
     if em:
         w = [x[3] / 1024 for x in em if x[3] is not None]; q = [x[2] for x in em if x[2] is not None]
         out["em_seconds"] = len(em); out["em_write>=110MBps"] = sum(1 for v in w if v >= 110); out["em_queue>=30"] = sum(1 for v in q if v >= 30)
         out["em_write_med/max"] = (round(statistics.median(w), 1), round(max(w), 1)); out["em_queue_med/max"] = (round(statistics.median(q), 1), round(max(q), 1))
     ticks = []
     for f in glob.glob(os.path.join(d, f"{tag}.dbsample.jsonl")): ticks += at.load_ticks(f)
-    ticks = [t for t in ticks if t0 <= t["ts"] < t1]
+    ticks = [t for t in ticks if t0 <= t["ts"] < t1 and t["ts"] in inrun]
     if len(ticks) > 2:
         out["db_ticks"] = len(ticks)
         out["db_walinit_ticks"] = sum(1 for t in ticks for a in t.get("act", []) if a.get("we") in ("WALInitSync", "WALInitWrite"))
