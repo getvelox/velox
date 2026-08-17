@@ -284,7 +284,29 @@ the point where the floor would bind, so the treatment was never exercised;
 the clean result is checkpoint phase, one series. Arm B is the honest verdict
 on that setting.
 
-__ARMS_VERDICT__
+### The setting under the full series (T5): 12,000 ev/s × batch 10, 5 × 10 min
+
+Same load and protocol as the control, `min_wal_size = max_wal_size = 16 GB`,
+pool at 147 pre-made segments when the series began (the reseed had grown it):
+
+| | control (stock) | `min_wal_size` = `max_wal_size` = 6 GB (T3, null test) | **`min_wal_size` = `max_wal_size` = 16 GB (T5)** |
+|---|---:|---:|---:|
+| repeats passed, p99 range | 5/5, 21.8–24.5 ms | 5/5, 22.1–23.7 ms | **5/5, 22.4–23.3 ms** |
+| 10-s buckets > 3× / > 5× the series median | 5 / 5 | 2 / 0 | **0 / 0** |
+| worst 10-s p99 | 177 ms | 75 ms | **52 ms** |
+| seconds at the throughput ceiling with small IOs, inside repeats | 12 | 0 | 1 |
+| sampler ticks with a backend in `WALInit*` | 1 | 0 | 0 |
+| checkpoints timed / WAL-driven | 3 / 10 | 2 / 9 | **10 / 0** |
+| pre-made segments, min / median (`pg_ls_waldir`) | not sampled | not sampled | 45 / 99 |
+| segments unlinked at checkpoints | 10 | 0 | 0 |
+
+With the pool deep, checkpoints are time-driven (so the recycling formula's
+10 % slop is back in play), the pool never fell below 45 segments, and no
+tail window appeared. One series each — but three of the four provocation
+arms stall on demand and this setting is the only one under which the pool
+never got near empty. __D2_VERDICT__
+
+
 
 ### What this leaves
 
