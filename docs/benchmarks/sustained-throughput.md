@@ -274,7 +274,7 @@ things then take the margin away, both after a quiet spell:
 | B — floor only | 6 GB | 6 GB | 5 | 196 ms | 7 | same shape: dry after ~57 segments, +0.80 GB created before the run ended |
 | C — depth only | 192 MB | 16 GB | 3 | 162 ms | 3 | −1.21 GB *during the idle* (18 unlinked, path 1) then a stall at 09:01:30–09:01:56 |
 | D — floor and depth, applied to a shallow pool | 16 GB | 16 GB | 13 | 234 ms | 20 | pg_wal 5.10 → 6.98 GB *during the run*: the setting does not create segments — every new one was built under load, so the whole run stalled every ~5 s (the transition cost of raising the setting; `pg_switch_wal()` to pre-grow is not available to `rds_superuser`) |
-| D2 — the same, after the pool had grown to depth (a 12k series ran in between) | 16 GB | 16 GB | __D2_B5__ | __D2_P99__ | __D2_CAP__ | __D2_WAL__ |
+| D2 — the same, after the pool had grown to depth (a 12k series ran in between) | 16 GB | 16 GB | **0** | **24.7 ms** | **0** | flat at 12.15 GB through idle and resume; no `WALInit*`, no pile-up — the same recipe that stalled A–D |
 
 The 50-minute series with `min_wal_size = max_wal_size = 6 GB` (T3, same load
 as the control) had no sustained event (>5× buckets 5 → 0; in-run seconds at
@@ -304,7 +304,7 @@ With the pool deep, checkpoints are time-driven (so the recycling formula's
 10 % slop is back in play), the pool never fell below 45 segments, and no
 tail window appeared. One series each — but three of the four provocation
 arms stall on demand and this setting is the only one under which the pool
-never got near empty. __D2_VERDICT__
+never got near empty. And the provocation that stalled every other arm (D2 in the table above) did not stall it.
 
 
 

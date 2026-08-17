@@ -345,7 +345,7 @@ deepened; `pg_switch_wal()` is not granted to `rds_superuser`, so there is no ch
 pre-grow on RDS — a bulk load or ~15 minutes of peak-rate traffic grows it
 (measured: applying 16 GB to a shallow pool made the next 5 minutes *worse*,
 provocation arm D); (2) at higher
-write rates than measured, re-derive the number. Verified: __RUNBOOK_VERDICT__
+write rates than measured, re-derive the number. Verified: with the pool at depth, the idle-then-resume recipe that stalled stock, floor-only, depth-only and freshly-raised settings did not stall (worst 10-s p99 24.7 ms vs 162–254 ms), and a 5 × 10 min series at 12,000 ev/s ran with all checkpoints time-driven, no tail window, and the pool never below 45 segments — one series each, on `db.m7g.4xlarge` + 100 GB gp3.
 
 **How to see it if you suspect it:** `pg_stat_activity` (or the rig sampler)
 showing a client backend in `IO:WALInitWrite`/`WALInitSync` with a pile-up on
