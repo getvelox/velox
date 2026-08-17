@@ -98,14 +98,22 @@ print(' '.join(sorted({d.datetime.utcfromtimestamp(t).strftime('%Y-%m-%d-%H') fo
         RID=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].DbiResourceId' --output text)
         s_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$w_start")
         e_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$w_end")
-        # PI allows at most 4h per call at 1 s; page in 1 h chunks
+        # PI returns at most 600 data points per call, i.e. 10 minutes at 1 s
+        # (a 1 h request silently comes back as its first 10 minutes — the
+        # first control-series pull lost 90 % of the window that way). Page in
+        # 600 s chunks for the 1 s waits; the 60 s by-SQL series can go hourly.
         : > "$dest/$tag.pi-waits.json"; : > "$dest/$tag.pi-sql.json"
-        for ((t=w_start; t<w_end; t+=3600)); do
-          t2=$((t+3600)); [ $t2 -gt $w_end ] && t2=$w_end
+        for ((t=w_start; t<w_end; t+=600)); do
+          t2=$((t+600)); [ $t2 -gt $w_end ] && t2=$w_end
           a_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t")
           b_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t2")
           aws_ pi get-resource-metrics --service-type RDS --identifier "$RID" --start-time "$a_iso" --end-time "$b_iso" --period-in-seconds 1 \
             --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":10}}]' --output json >> "$dest/$tag.pi-waits.json" 2>/dev/null || true
+        done
+        for ((t=w_start; t<w_end; t+=3600)); do
+          t2=$((t+3600)); [ $t2 -gt $w_end ] && t2=$w_end
+          a_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t")
+          b_iso=$(python3 -c "import datetime as d,sys; print(d.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$t2")
           aws_ pi get-resource-metrics --service-type RDS --identifier "$RID" --start-time "$a_iso" --end-time "$b_iso" --period-in-seconds 60 \
             --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.sql_tokenized","Limit":10}}]' --output json >> "$dest/$tag.pi-sql.json" 2>/dev/null || true
         done
