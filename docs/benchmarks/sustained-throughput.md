@@ -407,19 +407,29 @@ bugs be attributed to either.
   first benchmark, not a "real traffic" claim.
 - **"Sustained" means 5 × 10 minutes** with a cool-down between, not an hour
   unbroken. Long enough for autovacuum and checkpoints to appear (they did — see
-  footnote ¹); not long enough for multi-hour effects.
+  footnote ¹, and the third run); not long enough for multi-hour effects.
 - **The read probe is one budget over three endpoints**, reported per endpoint;
   its `usage-summary` result scales with events-per-customer, so the budget it
   meets depends on how big your customers are.
 - **No nginx** in front (deploy/compose puts one there); **Single-AZ**, no pooler,
   no replica; on-demand pricing; storage and the load generator excluded from
   the $/hr.
-- **The 15,000 ev/s rung is 2 × 90 s**, not sustained; it held with drift ×1.4,
-  which is a knee approaching, and it is reported as such.
+- **On the `db.m7g.2xlarge`, 15,000 ev/s was only a 2 × 90 s ladder rung**
+  (drift ×1.4 — a knee approaching), not a sustained result. The sustained
+  15,000 ev/s figure on this page is the 4xlarge: 4 of 5 ten-minute repeats,
+  drift ×0.88–1.01; repeat 5 hit one 50-second write-IOPS stall at 56M rows
+  (455 drops). Reported as 4/5, not rounded up.
+- **The tail attribution (third run) rests on one control event and four
+  provocation arms** on one instance shape; the two run-2 events it does not
+  explain are named as unexplained. Two settings tested (`min_wal_size` alone,
+  `max_wal_size` alone) did not hold up under provocation; the combined
+  setting is verified only in the arms and series shown.
 - **No dashboard in the loop, but the evidence is captured**: every run leaves
   the raw k6 sample stream, a 5-second `vmstat` from the app node, and the RDS
-  CloudWatch series over its window (`~/.velox-bench-rig/results-*/`). Every
-  claim in the sections above was read from those files, not from a console.
+  CloudWatch series over its window (`~/.velox-bench-rig/results-*/`); the
+  third run adds the 5-second DB sampler, 1-second Enhanced Monitoring and
+  Performance Insights pulls and the Postgres log per series. Every claim in
+  the sections above was read from those files, not from a console.
 
 ---
 

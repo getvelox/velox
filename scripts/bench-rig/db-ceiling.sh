@@ -2,7 +2,7 @@
 # The database's OWN ceiling for Velox's row shape — the denominator every
 # Velox throughput figure has been missing.
 #
-# "10,203 events/sec" means nothing on its own: is that 30% of what the
+# "N events/sec" means nothing on its own: is that 30% of what the
 # database can commit, or 95%? pgbench is the Postgres community's standard
 # instrument for exactly this question, and running it on the SAME database,
 # with the SAME row shape, decomposes Velox's number into three parts a buyer

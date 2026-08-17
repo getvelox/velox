@@ -1,6 +1,7 @@
-> **Companion:** [sustained-throughput.md](sustained-throughput.md) — 10,203
-> events/sec measured on AWS at $0.032 per million, and why the same code on a
-> laptop looked 9× faster than it is.
+> **Companion:** [sustained-throughput.md](sustained-throughput.md) — what
+> the ingest API sustains on named AWS hardware under a gated, reconciled
+> protocol (12,000 ev/s at p99 22 ms on `db.m7g.4xlarge`, batch 10; 15,000 at
+> batch 100), what stops it, and the two product findings it produced.
 
 # Correctness under failure
 
