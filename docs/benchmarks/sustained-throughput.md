@@ -209,6 +209,42 @@ from a fresh 20M-row table. Postgres 16.14; RDS defaults that matter here:
 192 MB, `wal_keep_size` 2048 MB, `checkpoint_timeout` 300 s,
 `checkpoint_completion_target` 0.9, `archive_timeout` 300 s, `wal_init_zero` on.
 
+### The mechanism from first principles (read this if the rest is Greek)
+
+1. **Every commit is written to the write-ahead log (WAL) first**, and the
+   commit is not acknowledged until that write is on disk. That is what makes
+   a billing event durable.
+2. **The WAL is a sequence of fixed-size files** ("segments"; 64 MB on RDS).
+   Filling one and moving to the next happens ~every 4–5 s at 12,000 events/s.
+3. **Postgres keeps a small stock of ready-made, already-formatted segments**
+   ahead of the current one, so switching is instant. The stock is refilled by
+   *recycling* at each checkpoint (~every 5 min): old segments that are no
+   longer needed for crash recovery are renamed into future ones.
+4. **If the stock is empty when the next segment is needed**, the transaction
+   that needs it must create the file — write 64 MB of zeros and flush it —
+   while holding the lock every other commit needs. Everyone freezes for the
+   ~0.2–0.3 s that takes. Until the next checkpoint refills the stock, this
+   repeats at every segment boundary: a freeze every ~5 s. Typical writes
+   (p50) are unaffected; the slowest 1 % (p99) jump 5–10×.
+5. **The stock is sized to about one checkpoint's worth with almost no
+   slack**, by Postgres's recycling rule at these settings. Two ordinary events
+   remove the slack: a quiet period makes checkpoints small, which makes the
+   next one recycle fewer files (RDS's `min_wal_size` = 192 MB is the floor
+   that would prevent it), and after an idle RDS's 2 GB of retained log sits
+   inside the window, so the stock on resume is shallower than usual and the
+   first timer-driven checkpoint refills it too late (`max_wal_size` bounds
+   the depth). Both were reproduced on demand.
+6. **The fix is a deeper stock:** `min_wal_size = max_wal_size` big enough for
+   the worst refill gap at your write rate (`wal_keep_size + 1.9 × WAL rate ×
+   checkpoint_timeout`; 16 GB here). The stock is a revolving buffer — used and
+   refilled every cycle, never "consumed" — so it costs disk space and nothing
+   else. It grows only as segments get created, so set it at provisioning (a
+   bulk load grows it for free); raised on a live instance it fills over
+   ~15 minutes of peak traffic, stalling in the meantime, then stops.
+7. **What it does not fix:** if the volume cannot absorb the write rate
+   (15–25k events/s on a 100 GB gp3), that is capacity, and only a bigger
+   volume or less WAL per event helps.
+
 ### The control caught one
 
 Repeat 1 held (p99 24.5 ms, 0 drops) but carried a 45-second event at
