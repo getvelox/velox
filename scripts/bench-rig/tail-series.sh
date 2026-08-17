@@ -60,7 +60,7 @@ fi
 ensure_my_ip
 
 say "measure: $RATE ev/s batch $BATCH, $REPEATS x 10 min"
-( cd "$HERE" && TARGET=aws SUSTAINED=1 REPEATS="$REPEATS" PROBE_GATE=0 CONFIGS="$LABEL:$RATE:$BATCH" ./measure.sh ) 2>&1 | grep -vE "post-quantum|store now|openssh" | tee "$RES/measure.log" | grep -E "run [0-9]|passed|FAIL|results:" || true
+( cd "$HERE" && TARGET=aws SUSTAINED=1 REPEATS="$REPEATS" PROBE_GATE=0 CONFIGS="$LABEL:$RATE:$BATCH" ./measure.sh ) 2>&1 | grep --line-buffered -vE "post-quantum|store now|openssh" | tee "$RES/measure.log" | grep --line-buffered -E "run [0-9]|passed|FAIL|results:" || true
 MDIR=$(sed -n 's/^ *results: *//p' "$RES/measure.log" | head -1)
 
 say "sampler off, fetch evidence"

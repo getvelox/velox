@@ -32,6 +32,15 @@ AZ="${AZ:-ap-south-1a}"
 APP_TYPE="${APP_TYPE:-c7g.large}"
 GEN_TYPE="${GEN_TYPE:-c7g.xlarge}"
 DB_CLASS="${DB_CLASS:-db.m7g.large}"
+# Storage is a throughput decision, not a space decision: gp3 under 400 GB is
+# fixed at 3,000 IOPS / 125 MiB/s, and the third AWS run showed the end of every
+# large checkpoint pinning that 125 MiB/s (device-mapper queue 40-96 while the
+# NVMe beneath idled) — the tail events. At >= 400 GB the baseline is 12,000 IOPS
+# / 500 MiB/s and both become provisionable (--iops up to 16,000, --storage-throughput
+# up to 1,000). Cost is per GB-month, ~$0.13/GB in ap-south-1.
+DB_STORAGE_GB="${DB_STORAGE_GB:-100}"
+DB_IOPS="${DB_IOPS:-}"             # only valid at >= 400 GB
+DB_THROUGHPUT="${DB_THROUGHPUT:-}" # MiB/s, only valid at >= 400 GB
 TAGS="Key=Project,Value=velox-bench"
 OUT="${OUT:-$HOME/.velox-bench-rig}"
 BRANCH="${BRANCH:-main}"
@@ -51,7 +60,7 @@ AMI=$(aws_ ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-
   --query 'Parameter.Value' --output text)
 MYIP="$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')/32"
 say "vpc=$VPC subnet=$SUBNET ($AZ) ami=$AMI ssh-from=$MYIP"
-say "shape: app=$APP_TYPE loadgen=$GEN_TYPE db=$DB_CLASS"
+say "shape: app=$APP_TYPE loadgen=$GEN_TYPE db=$DB_CLASS storage=${DB_STORAGE_GB}GB gp3${DB_IOPS:+ ${DB_IOPS} IOPS}${DB_THROUGHPUT:+ ${DB_THROUGHPUT} MiB/s}"
 
 say "key pair"
 if ! aws_ ec2 describe-key-pairs --key-names velox-bench-key >/dev/null 2>&1; then
@@ -140,7 +149,7 @@ if ! aws_ rds describe-db-instances --db-instance-identifier velox-bench-db >/de
   aws_ rds create-db-instance --db-instance-identifier velox-bench-db \
     --db-instance-class "$DB_CLASS" --engine postgres --engine-version 16.14 \
     --master-username velox --master-user-password "$DBPASS" \
-    --allocated-storage 100 --storage-type gp3 \
+    --allocated-storage "$DB_STORAGE_GB" --storage-type gp3 ${DB_IOPS:+--iops "$DB_IOPS"} ${DB_THROUGHPUT:+--storage-throughput "$DB_THROUGHPUT"} \
     --db-subnet-group-name velox-bench-subnets --vpc-security-group-ids "$SG" \
     --db-parameter-group-name "$PARAM_GROUP" \
     --enable-performance-insights --performance-insights-retention-period 7 \
@@ -261,9 +270,11 @@ USERDATA=${USERDATA//__BRANCH__/$BRANCH}
 # ~$0.003/hr per instance; the on-box vmstat sampler is still the primary source.
 launch() {
   local name="$1" type="$2"
-  if [ -n "$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
-        "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[].InstanceId' --output text)" ]; then
-    echo "  $name already running"; return
+  local existing
+  existing=$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
+        "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[0].InstanceId' --output text)
+  if [ -n "$existing" ] && [ "$existing" != "None" ]; then
+    echo "  $name already running ($existing)" >&2; echo "$existing"; return
   fi
   aws_ ec2 run-instances --image-id "$AMI" --instance-type "$type" --count 1 \
     --key-name velox-bench-key --security-group-ids "$SG" --subnet-id "$SUBNET" \
