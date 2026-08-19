@@ -381,10 +381,24 @@ from that rig's data, so it stays a candidate.
 
 ### What this leaves
 
-- **Not attributed:** last night's 12k repeat 5 and 10k repeat 4 (this
-  mechanism is a candidate; pg_wal did not grow in their windows, and that
-  rig had no 1-second view). The 15k/25k failures are storage-bound bursts as
-  originally written.
+- **Run 2's two unattributed events, re-read at 1 second from their raw k6
+  samples (2026-08-19):** they have *different* fingerprints. **10k repeat 4
+  (79M rows)**: in its last 30 s, whole seconds in which every request took
+  +50–100 ms (p50 70–140 ms), recurring every 5–9 s, each ~0.15–0.25 s — the
+  segment-creation rhythm, visible in p50 only because a batch-100 request
+  takes ~36 ms; with the pool at its cap the created files are unlinked at the
+  next checkpoint, which is why pg_wal read flat at 1-minute resolution. Most
+  likely this mechanism; not proven (no 1-second DB view that night). **12k
+  repeat 5 (49–56M rows)**: something else — **1–3 s global freezes** (p50
+  750 ms, 100 % of requests slow, all 463 drops in the first one) recurring
+  every ~30 s for two minutes (22:31:40, 22:32:12, 22:32:43, 22:32:49). Not
+  the 5-second rhythm; candidates with a 30-second period and no DB-counter
+  signature are kernel dirty-page writeback expiry flushing a burst that
+  saturates the volume, or a network hiccup between app and DB (TCP
+  retransmit timeouts run 200 ms–1.6 s). It did not recur in ~150 minutes at
+  the same load in the third run. Open, with its fingerprint recorded here.
+  The 15k/25k failures are storage-bound bursts as originally written (with
+  the pool-churn candidate above).
 - **Product side, quantified from the same evidence:** Velox writes ~1.2 KB of
   WAL and 7.7 WAL records per 200-byte event; full-page images are *not* the
   driver (0.05 per event with `wal_compression=zstd`). The event insert runs
