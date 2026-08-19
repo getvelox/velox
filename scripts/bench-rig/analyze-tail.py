@@ -42,6 +42,41 @@ def pct(v, p):
 
 _epoch_cache = {}
 
+def freeze_seconds(path, max_ms=150.0, share_over_50=0.10):
+    """Per-second 'freeze' detector, independent of the 10 s buckets: a second counts
+    when its worst request exceeded max_ms AND more than share_over_50 of its requests
+    took >50 ms (a stall that catches a slice of the traffic, p50 untouched). Returns
+    sorted [(epoch, n, p50, max, share)]. Exists because the 10 s / >3x-median bucket
+    rule is blind to one frozen second in five or six depending on how the stalls
+    align to bucket edges — the peer's E2 arm had two identical freeze episodes, one
+    scored '0 tail windows' and one 'a window', by alignment alone."""
+    secs = defaultdict(list)
+    with gzip.open(path, "rt") as f:
+      try:
+        for line in f:
+            if '"http_req_duration"' not in line: continue
+            try: o = json.loads(line)
+            except Exception: continue
+            if o.get("type") != "Point": continue
+            d = o["data"]
+            if d.get("tags", {}).get("scenario") != "offered": continue
+            ts = d["time"][:19]; t = _epoch_cache.get(ts)
+            if t is None:
+                import calendar, time as _t
+                try: t = calendar.timegm(_t.strptime(ts, "%Y-%m-%dT%H:%M:%S"))
+                except Exception: continue
+                _epoch_cache[ts] = t
+            secs[t].append(d["value"])
+      except EOFError:
+        pass
+    out = []
+    for t, v in secs.items():
+        if len(v) < 20: continue
+        mx = max(v); share = sum(1 for x in v if x > 50) / len(v)
+        if mx > max_ms and share > share_over_50:
+            v.sort(); out.append((t, len(v), v[len(v)//2], mx, share))
+    return sorted(out)
+
 def load_k6(path):
     """-> dict bucket_epoch10 -> {'n','p50','p99','max','drops'} for scenario=offered."""
     buckets = defaultdict(list); drops = defaultdict(float)
@@ -260,7 +295,12 @@ def main():
         wins, med = find_windows(bk, a["factor"], a["minb"])
         if not bk: print(f"\n## {tag}: no offered samples"); continue
         keys = sorted(bk); span = (keys[0], keys[-1] + 10)
-        print(f"\n## {tag}  {hms(span[0])}–{hms(span[1])}  median bucket p99 {fmt(med)} ms  tail windows (>{a['factor']}x, >={a['minb']} buckets): {len(wins)}")
+        fz = freeze_seconds(run)
+        gaps = [y[0]-x[0] for x, y in zip(fz, fz[1:])]
+        cadence = (statistics.median(gaps) if gaps else None)
+        print(f"\n## {tag}  {hms(span[0])}–{hms(span[1])}  median bucket p99 {fmt(med)} ms  tail windows (>{a['factor']}x, >={a['minb']} buckets): {len(wins)}  |  freeze-seconds (max>150 ms & >10 % over 50 ms): {len(fz)}" + (f", median gap {cadence:.0f} s, worst max {max(x[3] for x in fz):.0f} ms" if fz else ""))
+        if fz and not wins:
+            print("   NOTE: freeze-seconds present but no 10-s tail window — the bucket rule missed them (alignment); first few: " + ", ".join(f"{hms(x[0])} max {x[3]:.0f} ms {x[4]*100:.0f}%" for x in fz[:6]))
         # whole-run DB summary for context
         if ticks:
             tot, waits, bgw, vac, gin, locks = summarize_range(ticks, span[0], span[1])

@@ -39,7 +39,13 @@ def census(d, tag):
             runbk[r] = (rk[1], rk[-1])
     keys = [k for k in keys if any(a <= k < b for a, b in runbk.values())]
     p99s = [bk[k]["p99"] for k in keys]; med = statistics.median(p99s)
+    fz = []
+    for r in runs:
+        if r in runbk:
+            a_, b_ = runbk[r]; fz += [x for x in at.freeze_seconds(r) if a_ <= x[0] < b_]
+    gaps = [y[0]-x[0] for x, y in zip(fz, fz[1:]) if y[0]-x[0] < 60]
     out = {"window": (t0, t1), "buckets": len(keys), "median_p99": round(med, 1),
+           "freeze_seconds": len(fz), "freeze_gap_med_s": (statistics.median(gaps) if gaps else None), "freeze_worst_max_ms": (round(max(x[3] for x in fz)) if fz else None),
            "buckets>3x": sum(1 for k in keys if bk[k]["p99"] > 3 * med), "buckets>5x": sum(1 for k in keys if bk[k]["p99"] > 5 * med),
            "worst_p99": round(max(p99s), 1), "drops": int(sum(bk[k]["drops"] for k in keys))}
     pi = {}
