@@ -138,6 +138,14 @@ checks corresponds to a bug that actually shipped in this rig once.
 - **`k6` puts your process environment in `__ENV`.** Exporting `PROBE_RATE`,
   `VUS`, `MODE`, … reconfigures the script silently. `calibrate.sh` and
   `measure.sh` scrub these; if you run `k6` by hand, pass everything with `-e`.
+- **A loaded ssh-agent makes the app node look UNREACHABLE.** `ssh -i key` still
+  offers every agent key first; with more than ~5 keys loaded the server hits
+  `MaxAuthTries` and disconnects before the rig key is tried, and `bringup.sh`
+  reports `app node never became READY (last state: UNREACHABLE)` while the
+  instance is fine. Every ssh call in these scripts now passes
+  `-o IdentitiesOnly=yes`; if you ssh by hand, do the same (or `SSH_AUTH_SOCK=`).
+  Also: `./bringup.sh | grep …` reports the pipeline's status, not the script's —
+  bringup exits 1 on FATAL; read `${PIPESTATUS[0]}` or run it unpiped.
 - **RDS is not publicly reachable.** `seed-history.sh` and `db-ceiling.sh` take
   `TARGET=aws` and run themselves on the app node over ssh; `measure.sh` runs k6
   on the loadgen node. Do not point them at the RDS endpoint from a laptop.

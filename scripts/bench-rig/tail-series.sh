@@ -27,7 +27,7 @@ KEYFILE="$OUT/velox-bench-key.pem"
 APP_PUB=$(aws_ ec2 describe-instances --filters "Name=tag:Name,Values=velox-bench-app" "Name=instance-state-name,Values=running" --query 'Reservations[].Instances[0].PublicIpAddress' --output text)
 DBHOST=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].Endpoint.Address' --output text)
 DBPASS=$(cat "$OUT/db-password")
-app_psql() { ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" "PGPASSWORD='$DBPASS' psql -h $DBHOST -U velox -d velox -X -qtA -c \"$1\""; }
+app_psql() { ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o LogLevel=ERROR -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" "PGPASSWORD='$DBPASS' psql -h $DBHOST -U velox -d velox -X -qtA -c \"$1\""; }
 say() { printf '\n== [%s] %s  (%s)\n' "$LABEL" "$*" "$(date -u +%H:%M:%SZ)"; }
 RES="$OUT/tail-$LABEL"; mkdir -p "$RES"
 

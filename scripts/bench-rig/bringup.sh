@@ -67,7 +67,7 @@ if [ "$MODE" = "aws" ]; then
   [ -n "$APP_PUB" ] && [ "$APP_PUB" != "None" ] || die "app instance is not running — run provision.sh first"
   info "app: $APP_PUB (private $APP_PRIV)"
 
-  app_sh() { ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
+  app_sh() { ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
 
   say "waiting for the app node to finish building"
   # READY is only created when EVERY user-data step succeeded; NOT_READY means
