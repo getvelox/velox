@@ -361,6 +361,27 @@ usually misses the ~0.2 s stalls, and a `WALWrite` pile-up alone is not
 specific. Numbers and the full attribution: `docs/benchmarks/sustained-throughput.md`
 § third run.
 
+## Autovacuum on a large insert-only table can stall every commit for seconds
+
+Measured on the benchmark rig (2026-08-19, `db.m7g.4xlarge`, 100 GB gp3,
+25,000 events/s, stock RDS parameters, vacuum log on): the end of an
+insert-triggered autovacuum pass over `usage_events` (PG13+ runs one after
+~20 % growth) rewrites nearly every page added since the previous pass —
+hint bits and opportunistic freezing, which `data_checksums=on` pushes through
+full-page writes: one pass dirtied 540k pages (4.4 GB) and froze 6.6M tuples
+at 107 MB/s. RDS's `autovacuum_vacuum_cost_limit` (1,200 on this class, 2 ms
+delay) lets it write at the volume's full throughput, so for 1–6 s the disk
+queue runs to hundreds with tens of thousands of ~6 KB writes per second and
+every commit's WAL write waits behind it: **p50 lifts for everyone** (36 →
+64 ms, 96–99 % of requests affected), unlike the WAL-pool stall above, which
+leaves p50 alone. Telltale in Enhanced Monitoring: IOs/s ×10–20 while the
+average IO size collapses from ~100 KB to ~6 KB. Levers exist but are
+**untested** here — pace the vacuum (`autovacuum_vacuum_cost_delay` up /
+`cost_limit` down: shallower but longer storms) or vacuum smaller slices more
+often (`autovacuum_vacuum_insert_scale_factor` below 0.2: smaller bursts) —
+so this entry is a diagnosis, not yet a setting. Details and evidence:
+`docs/benchmarks/sustained-throughput.md` § third run, "What this leaves".
+
 ## Scheduler interval tuning
 
 The tick interval and batch size are compiled-in, not env-configurable:

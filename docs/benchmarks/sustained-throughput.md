@@ -395,18 +395,53 @@ from that rig's data, so it stays a candidate.
   zero, files created, and a ~150–180 ms freeze hitting 12–16 % of that
   second's requests at every creation, p50 flat — the same signature at a
   second load shape. **12k
-  repeat 5 (49–56M rows)**: something else — **1–3 s global freezes** (p50
-  750 ms, 100 % of requests slow, all 463 drops in the first one) recurring
-  every ~30 s for two minutes (22:31:40, 22:32:12, 22:32:43, 22:32:49). Not
-  the 5-second rhythm; candidates with a 30-second period and no DB-counter
-  signature are kernel dirty-page writeback expiry flushing a burst that
-  saturates the volume, or a network hiccup between app and DB (TCP
-  retransmit timeouts run 200 ms–1.6 s). It did not recur in ~150 minutes at
-  the same load in the third run. Open, with its fingerprint recorded here.
-  The 15k/25k failures are storage-bound bursts as originally written (with
-  the pool-churn candidate above; the run-2 archive's stock 25k repeat 1
-  carries a 13-second pool-rhythm episode at a cycle end — freezes every 2 s,
-  worst 262 ms — before repeats 3–5 go into continuous saturation).
+  repeat 5 (49–56M rows)** (E1): something else — **1–3 s global freezes**
+  (p50 750 ms, 100 % of requests slow, all 463 drops in the first one)
+  recurring every ~30 s for two minutes (22:31:40, 22:32:12, 22:32:43,
+  22:32:49). Not the 5-second rhythm. **Attributed on 2026-08-19**, from two
+  instrumented instances of the same shape on a stock-settings 25k series
+  (peer-session rig, vacuum log on; verified from the raw files by both
+  sessions): **the end of an insert-triggered autovacuum pass on
+  `usage_events`.** The cleaner instance: sampler ticks show the worker at
+  "scanning heap" 2,554,157 of 2,587,098 pages (19:22:01), then "cleaning up
+  indexes" on `IO:DataFileRead` (19:22:06), and the log's `automatic vacuum of
+  table … usage_events` completing at 19:22:09 — the second the event ends. In
+  those seconds Enhanced Monitoring shows the volume taking **17,700–21,100
+  IOs/s of ~6 KB, disk queue depth 348 and 529, await 20–25 ms** (normal
+  seconds: 700–1,600 IOs/s of ~107 KB, queue 1–3 — the IO-size collapse is
+  the signature that tells a vacuum storm from a checkpoint burst at a
+  glance); Performance Insights shows 5–14 sessions on `LWLock:WALWrite`;
+  p50 lifts 36 → 64 ms with 96–99 % of requests affected for six seconds;
+  the WAL pool stays at 17–20 files (not the segment mechanism). The
+  vacuum's own report says what the writes were: 544,046 pages scanned,
+  **540,288 dirtied, 6.6M tuples frozen**, average write rate 106.7 MB/s —
+  the vacuum rewrites nearly every page added since the previous pass (hint
+  bits and opportunistic freezing, which `data_checksums=on` pushes through
+  full-page writes), and RDS's `autovacuum_vacuum_cost_limit` on this class
+  (1,200, 2 ms delay) lets it write at the volume's full throughput; every
+  committer's WAL write queues behind it. The second instance (19:07:55, one
+  second after its logged completion at 19:07:54; queue depth 143) is
+  consistent-with rather than clean — a one-second alignment the 1-second
+  EM cannot resolve. Last night's E1 fits (global freezes, +300 IOPS in the
+  minute average, pg_wal flat, 49–56M rows = where a ~20 %-growth vacuum
+  lands in a 12k series) and is written as *most likely* this, since that
+  rig kept no vacuum log. **Levers, untested, stated as an open question:**
+  pace the vacuum (`autovacuum_vacuum_cost_delay` up / `cost_limit` down) so
+  it writes under the volume's headroom — shallower but longer storms, which
+  may be worse for a p99 budget — or vacuum smaller slices more often
+  (`autovacuum_vacuum_insert_scale_factor` below the 0.2 default) so each
+  rewrite burst is smaller. One arm decides which.
+  The 15k/25k failures: **the stock-25k collapse did not replicate.** A
+  2026-08-19 stock-settings 25k b100 series (fresh 20M, 5 × 10 min, 20M →
+  81M rows) ran 0 drops throughout with no minute-scale saturation at any
+  size; its run 1 carried a 32-second pool-rhythm episode (29 of 32
+  freeze-seconds with the pool at zero, total files 96 → 102) and the pool
+  never ran dry again — at 25k the stock pool churns as a *start-up
+  transient* and stops once grown to a working depth. So the run-2 archive's
+  repeats 3–5 (64 / 145 / 172 freeze-seconds, p50 in seconds, queue depth
+  37–65) need a separate explanation the archive cannot supply; the
+  pool-churn candidate is weakened for them, and they stay "storage-bound,
+  not replicated".
 - **A detector caveat, found the hard way:** the 10-second-bucket rule
   (≥2 consecutive buckets above 3× the run's median p99) can miss one frozen
   second in five or six depending on how the stalls align to bucket edges —
