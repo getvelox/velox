@@ -102,7 +102,10 @@ A gate can only say a repeat failed; these say *why*, at 1–5 second resolution
   treatment, run identically: reseed, settle (sampler already on), measure,
   fetch, `analyze-tail.py`, pgBadger. `SKIP_SEED=1` resumes at measure.
 - `analyze-tail.py <dir>` — finds tail windows in the k6 samples (10 s buckets
-  with p99 > 3× the run's median) and lays every source side by side for each:
+  with p99 > 3× the run's median) **and per-second freeze-seconds** (worst
+  request >150 ms and >10 % of that second's requests over 50 ms, with their
+  cadence — the bucket rule alone misses one frozen second in six by
+  alignment) and lays every source side by side for each window:
   DB counter deltas vs the five minutes before, wait-event census, EM seconds,
   PI seconds, log lines. `tail-census.py <dir> --series A --series B` — the
   series-wide numbers a treatment is judged on.

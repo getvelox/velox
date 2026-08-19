@@ -388,7 +388,13 @@ from that rig's data, so it stays a candidate.
   segment-creation rhythm, visible in p50 only because a batch-100 request
   takes ~36 ms; with the pool at its cap the created files are unlinked at the
   next checkpoint, which is why pg_wal read flat at 1-minute resolution. Most
-  likely this mechanism; not proven (no 1-second DB view that night). **12k
+  likely this mechanism; not proven (no 1-second DB view that night). A
+  later instrumented 10-repeat series at 10k b100 on stock settings
+  (2026-08-19, 30M → 90M rows, covering E2's band) did not reproduce E2 in
+  its band, but showed the mechanism itself twice at 36M rows: the pool at
+  zero, files created, and a ~150–180 ms freeze hitting 12–16 % of that
+  second's requests at every creation, p50 flat — the same signature at a
+  second load shape. **12k
   repeat 5 (49–56M rows)**: something else — **1–3 s global freezes** (p50
   750 ms, 100 % of requests slow, all 463 drops in the first one) recurring
   every ~30 s for two minutes (22:31:40, 22:32:12, 22:32:43, 22:32:49). Not
@@ -398,7 +404,20 @@ from that rig's data, so it stays a candidate.
   retransmit timeouts run 200 ms–1.6 s). It did not recur in ~150 minutes at
   the same load in the third run. Open, with its fingerprint recorded here.
   The 15k/25k failures are storage-bound bursts as originally written (with
-  the pool-churn candidate above).
+  the pool-churn candidate above; the run-2 archive's stock 25k repeat 1
+  carries a 13-second pool-rhythm episode at a cycle end — freezes every 2 s,
+  worst 262 ms — before repeats 3–5 go into continuous saturation).
+- **A detector caveat, found the hard way:** the 10-second-bucket rule
+  (≥2 consecutive buckets above 3× the run's median p99) can miss one frozen
+  second in five or six depending on how the stalls align to bucket edges —
+  two identical freeze episodes on the 2026-08-19 rig scored "no window" and
+  "a window" by alignment alone. The tooling now also reports per-second
+  **freeze-seconds** (worst request >150 ms and >10 % of that second's
+  requests over 50 ms) with their cadence. Re-scanning every archived series
+  with it: the runs published as clean carry 0–3 freeze-seconds per 10 min
+  (the sized 12k series: 0 in all five; the sized 15k: 1), and the freezes sit
+  exactly where the events were — so the published tails were not hiding a
+  rhythm, and the detector gap changed no published number.
 - **Product side, quantified from the same evidence:** Velox writes ~1.2 KB of
   WAL and 7.7 WAL records per 200-byte event; full-page images are *not* the
   driver (0.05 per event with `wal_compression=zstd`). The event insert runs
