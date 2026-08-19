@@ -89,6 +89,15 @@ paramgroups=$(q db-parameter-groups rds describe-db-parameter-groups \
   --query "DBParameterGroups[?starts_with(DBParameterGroupName, 'velox-bench')].DBParameterGroupName" \
   --output text)
 
+# RDS snapshots of rig instances. provision.sh/teardown.sh never take one
+# (--skip-final-snapshot, backup retention 0), but a manual snapshot or a
+# changed default would outlive the instance and bill ~$0.095/GB-month in
+# silence — "CLEAN" must cover it. Scoped to rig instances; snapshots of
+# anything else in the account are not this script's to touch.
+snapshots=$(q db-snapshots rds describe-db-snapshots \
+  --query "DBSnapshots[?starts_with(DBInstanceIdentifier, 'velox-bench') || starts_with(DBSnapshotIdentifier, 'velox-bench')].DBSnapshotIdentifier" \
+  --output text)
+
 say "inventory in $REGION:"
 say "  instances:      ${instances:-<none>}"
 say "  rds:            ${dbs:-<none>}"
@@ -96,6 +105,7 @@ say "  security groups: ${sgs:-<none>}"
 say "  key pairs:      ${keys:-<none>}"
 say "  db subnet grps: ${subnetgroups:-<none>}"
 say "  db param grps:  ${paramgroups:-<none>}"
+say "  db snapshots:   ${snapshots:-<none>}"
 
 # A failed query is never "clean". Report UNKNOWN and refuse to conclude.
 # wc, not grep -c: grep exits 1 on zero matches, so `|| echo 0` appended a
@@ -115,7 +125,7 @@ if [ "$FAILED_QUERIES" -gt 0 ]; then
 fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
-  if [ -z "${instances}${dbs}${sgs}${keys}${subnetgroups}${paramgroups}" ]; then
+  if [ -z "${instances}${dbs}${sgs}${keys}${subnetgroups}${paramgroups}${snapshots}" ]; then
     say "CLEAN — nothing is running, nothing is billing"
     exit 0
   fi
@@ -155,6 +165,11 @@ done
 for g in $paramgroups; do
   say "deleting db parameter group $g"
   aws_ rds delete-db-parameter-group --db-parameter-group-name "$g" >/dev/null 2>&1 || say "  (still attached; re-run after the instance is gone)"
+done
+
+for snap in $snapshots; do
+  say "deleting db snapshot $snap"
+  aws_ rds delete-db-snapshot --db-snapshot-identifier "$snap" >/dev/null 2>&1 || say "  (automated snapshot or still creating; re-run)"
 done
 
 for sg in $sgs; do
