@@ -340,8 +340,12 @@ peak: checkpoints should read `checkpoint starting: time`, not `wal` — a
 WAL-driven checkpoint puts you back on the one-segment margin. Cost is disk:
 `pg_wal` sits near that size permanently. Two cautions: (1) raising the
 setting does not manufacture segments — the pool grows only as segments are
-created, so the first busy cycles after the change can still stall until it has
-deepened; `pg_switch_wal()` is not granted to `rds_superuser`, so there is no cheap
+created, one ~0.25 s commit pause per 64 MB file, until ~16 GB of WAL has been
+written: about a minute of pauses in total, paid once in the instance's life.
+Invisible if traffic ramps up or an initial data load runs first (the load
+creates the files while nobody waits on commits); a rough ~15 minutes if you
+start at peak on an empty pool. The alternative is the stock behaviour: the
+same pauses after *every* quiet spell, indefinitely; `pg_switch_wal()` is not granted to `rds_superuser`, so there is no cheap
 pre-grow on RDS — a bulk load or ~15 minutes of peak-rate traffic grows it
 (measured: applying 16 GB to a shallow pool made the next 5 minutes *worse*,
 provocation arm D); (2) at higher
