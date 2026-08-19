@@ -59,7 +59,7 @@ if [ "${TARGET:-local}" = "aws" ]; then
   DBHOST=$(aws_ rds describe-db-instances --db-instance-identifier velox-bench-db --query 'DBInstances[0].Endpoint.Address' --output text)
   DBPASS=$(cat "$OUT/db-password")
   REMOTE_DSN="postgres://velox:$DBPASS@$DBHOST:5432/${DBNAME:-velox}?sslmode=require"
-  ssh_() { ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
+  ssh_() { ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o LogLevel=ERROR -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i "$KEYFILE" "ec2-user@$APP_PUB" "$@"; }
   cmd="${1:-}"; tag="${2:-}"
   case "$cmd" in
     start|stop|settings)
