@@ -35,23 +35,39 @@ Three things happened there that most billing stacks can't do:
 - **Prices are decimal per-unit and read the way the industry quotes them** — stored exactly ($3.00 / 1M tokens = $0.000003/token), billed linearly, displayed per-1M on the invoice, the hosted page, and the PDF.
 - **The margin line is in-app** — Velox stamped the provider's cost onto every event at ingest, so "which customers lose us money?" is one API call, not a warehouse project.
 
-**Jump to:** [Why Velox exists](#why-velox-exists) · [The wedge in code](#the-wedge-in-code) · [What's in the box](#whats-in-the-box) · [How it fits](#how-it-fits) · [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) · [What Velox is not](#what-velox-is-not) · [Quick start](#quick-start) · [Architecture](#architecture) · [Engineering](#engineering) · [Roadmap](#roadmap)
+**Jump to:** [Quick start](#quick-start) · [The wedge in code](#the-wedge-in-code) · [What's in the box](#whats-in-the-box) · [Benchmarks](#benchmarks) · [Why Velox exists](#why-velox-exists) · [How it fits](#how-it-fits) · [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) · [What Velox is not](#what-velox-is-not) · [Architecture](#architecture) · [Engineering](#engineering) · [Roadmap](#roadmap)
 
 ---
 
-## Why Velox exists
+## Quick start
 
-Velox owns the billing layer above the card charge: pricing, subscriptions, usage metering, invoicing, credits, and dunning — the automatic retry-and-escalate process that runs when a payment fails. Stripe still executes the card charge underneath (as a plain PaymentIntent), so the 0.5% Stripe Billing fee disappears and your customers' billing data never leaves your infrastructure.
+Prereqs: Docker, Go 1.25+, Node 22+ (dashboard), `jq` (demo script).
 
-It's built around three market truths that Stripe Billing structurally cannot serve — and one that every billing system is judged on:
+```bash
+git clone https://github.com/getvelox/velox.git && cd velox
 
-**1. AI apps price in dimensions, not units.** Real model pricing today is `model × token_type × tier`, where `token_type` alone has five disjoint roles (`input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`). Stripe's Meter API forces one meter per dimension *combination* — a wall of meters and ugly subscription wiring to model a single LLM's pricing. Velox puts dimensions on the event and lets one meter carry them all. If you already run a [LiteLLM](docs/integrations/litellm.md) proxy, its spend callback ingests straight into Velox — no SDK.
+# Backend — Postgres + bootstrap demo tenant + operator user + API keys
+cp .env.example .env # make dev reads it; the defaults work for local dev as-is
+docker compose up -d postgres
+make bootstrap       # prints operator email + password + secret-test, secret-live, publishable-test keys
+make dev             # API on :8080
 
-**2. AI infra sells commit + usage.** "Pay $9k up front, get $10k of usage to draw down" is the default AI-infra contract. Stripe Billing has no commit primitive, and the engines that do (Orb, Metronome) are closed-source SaaS. In Velox a commit is one line on an invoice: when the invoice finalizes, the prepaid balance funds atomically, usage drains it — promotional credits first — and `credit.balance_low / _depleted / _recovered` webhooks drive your top-up nudges.
+# Operator dashboard (separate terminal)
+cd web-v2 && npm install && npm run dev
+# → http://localhost:5173 — sign in with the email + password from bootstrap
+```
 
-**3. Regulated tenants can't ship billing data to Stripe's servers.** GDPR-strict EU, India's RBI data-localization rules, healthcare-adjacent SaaS, government procurement. Stripe's whole model is "send us the data." Velox runs in your VPC, and one deployment cleanly serves many internal tenants behind Postgres Row-Level Security — and the binary makes no outbound calls of its own: no licence check, no usage telemetry, no vendor endpoint. Grep for it.
+Then run the end-to-end demo — the whole wedge in ~30 seconds: an Anthropic-style price matrix via one recipe call, LiteLLM-shaped token ingest, provider cost rates, a test clock that simulates a full billing month, a finalized invoice with per-`(model, token_type)` lines + PDF, and the margin report:
 
-**4. Every bill gets disputed, and the only answer is the raw events.** Ask engineers who have run metered billing what vendors get wrong and this is what comes back — *"you will get a query on a bill by a customer… and you need to be able to dig into the raw data… to validate there was no billing error."* Velox is built for that moment. Raw events are stored, never pre-aggregated away. The rate is **snapshotted onto the invoice line**, so re-pricing tomorrow can't silently rewrite what you billed last month. Every usage line links straight to the events behind it, filtered to that customer, meter and period. And the audit log is append-only, enforced by database triggers rather than convention.
+```bash
+./scripts/demo.sh <vlx_secret_test_... from make bootstrap>
+```
+
+Every call in the script is checked — it fails loudly at the first API mismatch instead of pretending. Rerun it as often as you like; each run creates a fresh demo customer on its own test clock.
+
+Testing **outbound webhooks** locally needs no tunnel: `python3 scripts/dev/webhook-sink.py` runs a receiver on `localhost:9099` that logs every delivery with its `Velox-Signature` header, so you can verify the HMAC offline. Paths under `/fail` return 500 to exercise the retry ladder. (Localhost delivery is allowed in development, refused in production.)
+
+Self-host for real: single-VM Docker Compose — see [`docs/self-host.md`](docs/self-host.md). Helm/Terraform/multi-replica HA land when a design partner names which Kubernetes flavour they actually run; pre-emptively shipping three deployment shapes produced surface nobody was running.
 
 ---
 
@@ -143,6 +159,31 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
 
 ---
 
+## Benchmarks
+
+Two runs are published in full — method, gates, evidence, and what each one does *not* show:
+
+- **[Correctness under failure](docs/benchmarks/failure-correctness.md)** — what happens to your invoices when the billing process dies mid-run. A leader `SIGKILL`ed at five kill points chosen by watching the database rather than by sleeping, four leaders racing the same cycle at once, and a partition drill that severs a real network link to time the takeover: **0 duplicate invoices, 0 lost invoices, 0 cents of drift**, with the money-invariant doctor clean after every scenario. What makes that a measurement rather than a claim is the negative control — drop `idx_invoices_billing_idempotency` and the same run bills **103 invoices for 40 periods, $2,575 against $1,000 of real periods, with every leader reporting success.** Reproduces from a clean checkout with Docker and two `go test` commands.
+- **[Sustained throughput](docs/benchmarks/sustained-throughput.md)** — what the ingest path holds on named AWS hardware, with every event reconciled against Postgres: a run whose sent count does not match the rows stored is discarded rather than reported. The headline figures and the capacity cliffs are in [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) below; the doc adds the method, the `pgbench` control denominator, the closed-loop ceilings, the *What this does not show* section, and the two defects the runs found in Velox itself ([#818](https://github.com/getvelox/velox/issues/818), [#819](https://github.com/getvelox/velox/issues/819)) — stated beside the numbers rather than fixed quietly.
+
+---
+
+## Why Velox exists
+
+Velox owns the billing layer above the card charge: pricing, subscriptions, usage metering, invoicing, credits, and dunning — the automatic retry-and-escalate process that runs when a payment fails. Stripe still executes the card charge underneath (as a plain PaymentIntent), so the 0.5% Stripe Billing fee disappears and your customers' billing data never leaves your infrastructure.
+
+It's built around three market truths that Stripe Billing structurally cannot serve — and one that every billing system is judged on:
+
+**1. AI apps price in dimensions, not units.** Real model pricing today is `model × token_type × tier`, where `token_type` alone has five disjoint roles (`input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`). Stripe's Meter API forces one meter per dimension *combination* — a wall of meters and ugly subscription wiring to model a single LLM's pricing. Velox puts dimensions on the event and lets one meter carry them all. If you already run a [LiteLLM](docs/integrations/litellm.md) proxy, its spend callback ingests straight into Velox — no SDK.
+
+**2. AI infra sells commit + usage.** "Pay $9k up front, get $10k of usage to draw down" is the default AI-infra contract. Stripe Billing has no commit primitive, and the engines that do (Orb, Metronome) are closed-source SaaS. In Velox a commit is one line on an invoice: when the invoice finalizes, the prepaid balance funds atomically, usage drains it — promotional credits first — and `credit.balance_low / _depleted / _recovered` webhooks drive your top-up nudges.
+
+**3. Regulated tenants can't ship billing data to Stripe's servers.** GDPR-strict EU, India's RBI data-localization rules, healthcare-adjacent SaaS, government procurement. Stripe's whole model is "send us the data." Velox runs in your VPC, and one deployment cleanly serves many internal tenants behind Postgres Row-Level Security — and the binary makes no outbound calls of its own: no licence check, no usage telemetry, no vendor endpoint. Grep for it.
+
+**4. Every bill gets disputed, and the only answer is the raw events.** Ask engineers who have run metered billing what vendors get wrong and this is what comes back — *"you will get a query on a bill by a customer… and you need to be able to dig into the raw data… to validate there was no billing error."* Velox is built for that moment. Raw events are stored, never pre-aggregated away. The rate is **snapshotted onto the invoice line**, so re-pricing tomorrow can't silently rewrite what you billed last month. Every usage line links straight to the events behind it, filtered to that customer, meter and period. And the audit log is append-only, enforced by database triggers rather than convention.
+
+---
+
 ## How it fits
 
 |                          | **Velox** | Stripe Billing | Lago        | Orb / Metronome¹  | OpenMeter²        |
@@ -153,14 +194,16 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
 | Stripe-grade primitives  | ✅        | ✅             | ⚠️          | ✅                | ⚠️                |
 | Prepaid commits + drawdown | ✅      | ❌             | ⚠️ wallets  | ✅                | ❌                |
 | Per-customer margin (COGS) | ✅ in-app | ❌           | ❌          | ❌ warehouse join | ❌                |
-| Pricing                  | OSS       | 0.5% of GMV    | OSS / cloud | $30K+/yr          | OSS / cloud       |
+| Pricing                  | OSS       | 0.5% of GMV    | OSS / cloud | sales-gated       | OSS / cloud       |
 | Licence                  | MIT       | proprietary    | AGPL-3.0    | proprietary       | Apache-2.0        |
 | Dunning without paying³  | ✅        | ✅             | ❌          | ✅                | n/a               |
 | Data sovereignty         | ✅        | ❌             | ⚠️          | ❌                | ✅                |
 
 ¹ Metronome was acquired by Stripe (Jan 2026) — still SaaS-only, so your billing data lives on Stripe's servers either way.
-² OpenMeter (acquired by Kong, Sep 2025) is expanding from metering into billing — closing the engine gap, but not the self-host-with-Stripe-grade-depth one.
+² OpenMeter ([acquired by Kong](https://konghq.com/blog/news/kong-acquires-openmeter), Sep 2025) is expanding from metering into billing — closing the engine gap, but not the self-host-with-Stripe-grade-depth one.
 ³ Open-core self-hosting isn't automatically free of gates. Lago's self-hosted edition checks a `LAGO_LICENSE` key against their licence server, and a 30-entry `PREMIUM_INTEGRATIONS` list decides what's enabled — `auto_dunning` is on it, alongside SSO, RBAC, progressive billing and every accounting/CRM integration ([source](https://github.com/getlago/lago-api/blob/main/app/models/organization.rb)). Velox has no licence key and gates nothing; the honest caveat is that some of what Lago gates (SSO, RBAC, revenue recognition) Velox simply doesn't have — see [What Velox is not](#what-velox-is-not).
+
+**Verified as of 2026-08-17.** On the pricing row: neither Orb nor Metronome publishes an annual list price. Orb's three tiers all read "Custom pricing" behind Contact Sales ([pricing](https://www.withorb.com/pricing)); Metronome publishes a Starter rate — 0.8% of billing volume plus $0.04 per 1k ingest events — and gates its Custom tier behind sales ([pricing](https://metronome.com/pricing)). Competitor pricing, licensing and ownership all move; re-check any cell you plan to lean on.
 
 Velox lives in the empty cell: **OSS + self-host + AI-native + full billing engine.**
 
@@ -172,7 +215,7 @@ The decision tree, honestly: pick **Stripe Billing** (or Stripe + Metronome) for
 
 Fair question, and the honest answer has three parts.
 
-**Where the Postgres-only ceiling actually is.** Lago — the closest comparable, and one that *does* ship a Kafka + ClickHouse tier — publishes **10,000 events/sec on a single Postgres instance**, and their own documentation says *"Many production deployments never need Kafka."* Ten thousand a second is roughly 26 billion events a month. For an AI product metering LLM calls at one to three events each, that is billions of API calls a month before the architecture is the constraint.
+**Where the Postgres-only ceiling actually is.** Lago — the closest comparable, and one that *does* ship a Kafka + ClickHouse tier — routes everything under **10,000 events/sec** to its ordinary REST API (batched above ~1,000/s) and only recommends streaming above that, noting that *"Many customers start on REST and switch to Kafka only when they outgrow it."* Their 10,000/sec reference point is one self-hosted deployment they describe but don't name, and to their credit they publish the whole arc rather than the flattering half of it: *"A major global payments company runs Lago self-hosted, processing thousands of transactions per second. They started on Postgres (validated at 10K events/sec) and later migrated to ClickHouse + Kafka for higher throughput …"* ([source](https://docs.getlago.com/guide/events/ingesting-usage), verified 2026-08-17). So 10k/sec is where a Postgres-first billing stack stops being obviously sufficient — not where it stops working. Ten thousand a second is roughly 26 billion events a month. For an AI product metering LLM calls at one to three events each, that is billions of API calls a month before the architecture is the constraint.
 
 **What we have actually measured, and what we haven't.** On AWS, in one AZ, on the live-mode path with 200 customers and every event reconciled against the database: on `db.m7g.2xlarge` (32 GB) the ingest API held **1,000 events/sec at p99 8.2 ms across five 10-minute repeats** and 5,000 ev/s at p99 51 ms until the table's index working set (~60M rows, 30 GB) outgrew the instance — a capacity cliff stated with its numbers; on `db.m7g.4xlarge` (64 GB), after fixing the hot row that run found ([#818](https://github.com/getvelox/velox/issues/818)), it held **12,000 ev/s at batch 10 (1,200 requests/s) at p99 22.6 ms** and **15,000 ev/s at batch 100 at p99 43.8 ms**, each 4 of 5 ten-minute repeats; a third, instrumented run then caught the tail stalls live (WAL segment creation when RDS's recycled-segment pool runs dry) and, with the pool sized as the runbook now says, ran 12,000 ev/s **5 of 5** with a worst 10-second p99 of 52 ms. The runs also found the per-customer usage summary that scans linearly ([#819](https://github.com/getvelox/velox/issues/819)) and state it beside the numbers. Method, gates, evidence files, the closed-loop ceilings and pgbench denominators, and everything the benchmark does *not* show are in [`docs/benchmarks/sustained-throughput.md`](docs/benchmarks/sustained-throughput.md); the whole thing reproduces with one command from `scripts/bench-rig/`.
 
@@ -194,38 +237,6 @@ Stating these loudly so the wrong customers self-select out:
 - **No Revenue Recognition / Sigma** — bring your own warehouse + dbt.
 - **No Quotes or Subscription Schedules** — sales-led contract billing should pick Recurly or Maxio.
 - **No 50+ payment-method types** — cards via Stripe + send-invoice. ACH/SEPA expand from there.
-
----
-
-## Quick start
-
-Prereqs: Docker, Go 1.25+, Node 22+ (dashboard), `jq` (demo script).
-
-```bash
-git clone https://github.com/getvelox/velox.git && cd velox
-
-# Backend — Postgres + bootstrap demo tenant + operator user + API keys
-cp .env.example .env # make dev reads it; the defaults work for local dev as-is
-docker compose up -d postgres
-make bootstrap       # prints operator email + password + secret-test, secret-live, publishable-test keys
-make dev             # API on :8080
-
-# Operator dashboard (separate terminal)
-cd web-v2 && npm install && npm run dev
-# → http://localhost:5173 — sign in with the email + password from bootstrap
-```
-
-Then run the end-to-end demo — the whole wedge in ~30 seconds: an Anthropic-style price matrix via one recipe call, LiteLLM-shaped token ingest, provider cost rates, a test clock that simulates a full billing month, a finalized invoice with per-`(model, token_type)` lines + PDF, and the margin report:
-
-```bash
-./scripts/demo.sh <vlx_secret_test_... from make bootstrap>
-```
-
-Every call in the script is checked — it fails loudly at the first API mismatch instead of pretending. Rerun it as often as you like; each run creates a fresh demo customer on its own test clock.
-
-Testing **outbound webhooks** locally needs no tunnel: `python3 scripts/dev/webhook-sink.py` runs a receiver on `localhost:9099` that logs every delivery with its `Velox-Signature` header, so you can verify the HMAC offline. Paths under `/fail` return 500 to exercise the retry ladder. (Localhost delivery is allowed in development, refused in production.)
-
-Self-host for real: single-VM Docker Compose — see [`docs/self-host.md`](docs/self-host.md). Helm/Terraform/multi-replica HA land when a design partner names which Kubernetes flavour they actually run; pre-emptively shipping three deployment shapes produced surface nobody was running.
 
 ---
 
@@ -278,6 +289,7 @@ Velox moves money, so correctness is the product, not a feature. The disciplines
   - A new cross-domain import fails the architecture test until justified in an allowlist; `time.Now()` on a clock-pinned entity fails a lint.
   - A **money-invariant doctor** (`cmd/velox-doctor`) sweeps the whole database for 28 states no legal writer can produce — it runs in CI after every integration pass, and inside a 13-month billing soak that closes a subscription month thirteen times through the real server and demands a clean sweep after every close.
   - The rule behind all of these: if a mistake can recur, a machine catches the next one.
+- **Failure modes are measured, not asserted.** "Crash-safe" and "idempotent" are the two easiest things in billing to claim and the two hardest to check, so both are published as runs with a negative control rather than as design notes — see [Benchmarks](#benchmarks). Where the money math has more cases than anyone can enumerate by hand, the tests generate them: billing dates ([`internal/domain/billing_dates_property_test.go`](internal/domain/billing_dates_property_test.go)), pricing ([`internal/domain/pricing_property_test.go`](internal/domain/pricing_property_test.go)), proration ([`internal/subscription/proration_property_test.go`](internal/subscription/proration_property_test.go)), tax apportionment ([`internal/tax/apportionment_property_test.go`](internal/tax/apportionment_property_test.go)), and the credit waterfall ([`internal/credit/waterfall_property_integration_test.go`](internal/credit/waterfall_property_integration_test.go)). And the operational paths that only ever fail in production are drilled on purpose: [`scripts/partition-drill.sh`](scripts/partition-drill.sh) severs a real network link and measures how long a dead leader's lock stays stranded, [`scripts/restore-drill.sh`](scripts/restore-drill.sh) runs the whole backup → restore → row-count-validate loop against an ephemeral Postgres, and [`scripts/migration-safety-test.sh`](scripts/migration-safety-test.sh) replays the migration set against a populated database to catch the lock a migration would take at scale.
 - **The database is never mocked.** Every test that touches a database touches real Postgres — ~104k lines of Go test code against ~102k of production Go — so a green suite means migrations, RLS, and the money math work end-to-end, including concurrent-claimer collision tests and mutation-verified assertions (break the logic on purpose; the test must fail).
 - **Decisions are written down — including the reversals.** [110+ ADRs](docs/adr/) record the load-bearing calls and the honest ones: a per-subscription timezone snapshot was built, shipped, then *deleted* once org-level proved the complete abstraction (ADR-074 → 077). When a design keeps spawning guard machinery, the model is treated as wrong — not the guards as missing.
 - **Audited like production, pre-launch.** A [117-finding end-to-end audit](docs/dev/audit-2026-07-02-full-product.md) remediated in gated PRs; an [HA-readiness audit](docs/dev/ha-readiness-2026-07-06.md) that names every single-point-of-failure before the word "production" gets used.
@@ -338,7 +350,7 @@ make bootstrap VELOX_BOOTSTRAP_EMAIL=tenant-b@local \
 
 ### Recently shipped
 
-- **Operational hardening (Aug 2026)** — a 27-check money-invariant sweep now runs in CI and inside a 13-month billing soak; the public cost-dashboard credential is stored as a one-way hash (existing links survived the migration in place); and webhook operations got a truth pass — delivery timelines name receivers instead of internal ids, per-endpoint drill-downs, and one live events surface instead of two
+- **Operational hardening (Aug 2026)** — a 28-check money-invariant sweep now runs in CI and inside a 13-month billing soak; the public cost-dashboard credential is stored as a one-way hash (existing links survived the migration in place); and webhook operations got a truth pass — delivery timelines name receivers instead of internal ids, per-endpoint drill-downs, and one live events surface instead of two
 - **Bad debt, decided rather than inherited (Aug 2026, ADR-110–113)** — writing an invoice off no longer silently reverses its tax (that's a relief claim your business makes, on conditions Velox can't know); a dunning policy sets the subscription's fate and the invoice's fate *separately*; and nothing charges a written-off invoice — recovery runs on normal rails via a fresh invoice
 - **Ambiguous-charge safety (Jul–Aug 2026, ADR-105–108)** — a lost Stripe response can no longer double-charge: unidentifiable outcomes park the invoice instead of guessing, every surface says so honestly, and the reconciler adopts the charge only when Stripe can positively confirm it
 - **Team invites (Jul 2026, ADR-081)** — tokenized email invites and member removal with session revocation; kills the shared-password reality and gives the audit log real per-person actors. No RBAC yet — roles are recorded, not enforced
