@@ -81,33 +81,24 @@ result.
   Velox owns invoices, dunning and the payment lifecycle end-to-end; Stripe
   executes the card charge as a plain PaymentIntent. No Stripe Billing objects.
 - **Coupons cut after shipping** ([ADR-039](adr/039-cut-coupons-pre-launch.md)).
-  A full coupon surface — package, engine hooks, dashboard pages, webhook
-  events, docs — shipped during a Stripe-parity sprint because the peer set
-  ships it, not because anyone asked. All of it deleted. The credit ledger is
-  the discount primitive.
+  A full coupon surface shipped in a Stripe-parity sprint and was deleted once
+  it was clear nobody had asked for it — the credit ledger is the discount
+  primitive.
 - **The timezone decouple, designed and deliberately not built**
-  ([ADR-092](adr/092-split-billing-timezone-from-display.md)). Splitting the
-  billing zone from the display zone is what Stripe, Chargebee and Recurly
-  document; the design was prototyped and adversarially reviewed, then recorded
-  with a named build trigger instead of built. At zero customers it is
-  speculative scaffolding, and the money-correct one-zone handling
-  ([ADR-091](adr/091-org-timezone-change-seam-absorb.md)) closes the only actual
-  defect.
-- **The reversal: [ADR-074](adr/074-subscription-billing-timezone-snapshot.md) →
-  [ADR-077](adr/077-org-level-billing-timezone.md).** A per-subscription
-  billing-timezone snapshot was designed, built, shipped — then deleted. The
-  organization is the unit a timezone attaches to; no requirement, partner or
-  peer platform bills two subscriptions in one tenant on different civil
-  calendars, and the snapshot's divergence from the live tenant zone was the
-  sole source of a render-bug class of about eight. ADR-074 stays in the repo,
-  marked superseded, with what was wrong about it written down.
-- **What the monitoring missed.** `velox-doctor` sweeps 28 money invariants as
-  read-only SQL. One of those checks is new: before it existed, the doctor ran
-  all **27 checks against a database holding 129 duplicate invoices and reported
-  zero violations** — blind to the exact failure the index prevents. Stated in
-  the same breath, the other limit: the sweep runs on an **admin** connection,
-  and under a row-level-security-scoped role these checks return zero rows and
-  report a clean bill of health without having looked at anything.
+  ([ADR-092](adr/092-split-billing-timezone-from-display.md)). Prototyped,
+  adversarially reviewed, then recorded with a named build trigger instead of
+  built; the one-zone handling ([ADR-091](adr/091-org-timezone-change-seam-absorb.md))
+  already closes the only actual defect.
+- **One reversal** ([ADR-074](adr/074-subscription-billing-timezone-snapshot.md) →
+  [ADR-077](adr/077-org-level-billing-timezone.md)): a per-subscription
+  timezone snapshot shipped, then was deleted — the organization is the unit a
+  timezone attaches to, and the snapshot caused a class of about eight display
+  bugs. The superseded ADR records what was wrong with it.
+- **What the monitoring missed.** Before its 28th check existed, `velox-doctor`
+  ran all **27 checks against a database holding 129 duplicate invoices and
+  reported zero violations**. Its other limit: the sweep must run on an admin
+  connection — under a row-level-security-scoped role it sees zero rows and
+  reports clean.
 
 ## 5. The benchmarks found two defects, and both are ours
 
@@ -119,9 +110,9 @@ Filed against Velox, with the evidence, beside the numbers they discredit.
   off at roughly one round trip (~1.75 ms) — **~570 requests/s, on any
   hardware**. Found by sampling `pg_stat_activity` during a rate that would not
   hold: 50–55 of 61 backends waiting on that one `UPDATE`. Fixed and re-measured
-  on the rig — the batch-10 (ten events per request) knee — where the latency curve bends
-  upward — moved from ~570 req/s to between 1,600 and
-  2,000, and 12,000 ev/s now holds at p99 22.6 ms (4 of 5 repeats).
+  on the rig: at batch 10 (ten events per request) the knee — where the latency
+  curve bends upward — moved from ~570 req/s to between 1,600 and 2,000, and
+  12,000 ev/s now holds at p99 22.6 ms (4 of 5 repeats).
 - **[#819](https://github.com/getvelox/velox/issues/819) — a linear scan.** The
   per-customer usage summary is a `COUNT + SUM GROUP BY meter` over the
   customer's rows with no rollup: about **2.7 µs per event**, so above ~180k
