@@ -44,8 +44,9 @@ def census(d, tag):
         if r in runbk:
             a_, b_ = runbk[r]; fz += [x for x in at.freeze_seconds(r) if a_ <= x[0] < b_]
     gaps = [y[0]-x[0] for x, y in zip(fz, fz[1:]) if y[0]-x[0] < 60]
+    nmov = sum(1 for x in fz if len(x) > 5 and x[5] == "p50-moving")
     out = {"window": (t0, t1), "buckets": len(keys), "median_p99": round(med, 1),
-           "freeze_seconds": len(fz), "freeze_gap_med_s": (statistics.median(gaps) if gaps else None), "freeze_worst_max_ms": (round(max(x[3] for x in fz)) if fz else None),
+           "freeze_seconds": len(fz), "freeze_p50flat/moving": (len(fz)-nmov, nmov), "freeze_gap_med_s": (statistics.median(gaps) if gaps else None), "freeze_worst_max_ms": (round(max(x[3] for x in fz)) if fz else None),
            "buckets>3x": sum(1 for k in keys if bk[k]["p99"] > 3 * med), "buckets>5x": sum(1 for k in keys if bk[k]["p99"] > 5 * med),
            "worst_p99": round(max(p99s), 1), "drops": int(sum(bk[k]["drops"] for k in keys))}
     pi = {}
