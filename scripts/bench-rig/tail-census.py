@@ -44,9 +44,36 @@ def census(d, tag):
         if r in runbk:
             a_, b_ = runbk[r]; fz += [x for x in at.freeze_seconds(r) if a_ <= x[0] < b_]
     gaps = [y[0]-x[0] for x, y in zip(fz, fz[1:]) if y[0]-x[0] < 60]
+    # Marker-based classification: p50-movement is a SEVERITY descriptor, not a
+    # mechanism classifier (a 0.2 s pool stall lifts p50 at batch 100 and not at
+    # batch 10 — the ratio of stall to request length decides, not the cause).
+    # Mechanism markers: the WAL pool at zero in a sampler tick within +-6 s ->
+    # pool; a vacuum completion on usage_events with >10k pages dirtied within
+    # +-30 s -> vacuum-storm; both -> both; neither -> other.
+    ticks = []
+    for f in glob.glob(os.path.join(d, f"{tag}.dbsample.jsonl")): ticks += at.load_ticks(f)
+    ticks.sort(key=lambda t: t["ts"])
+    pool_secs = set()
+    for t in ticks:
+        wp = t.get("walpool")
+        if wp and wp.get("future") == 0:
+            for dt_ in range(-6, 7): pool_secs.add(t["ts"] + dt_)
+    vac_comps = []
+    for lf in glob.glob(os.path.join(d, f"{tag}.postgres.log")):
+        txt = open(lf, errors="replace").read()
+        for m in re.finditer(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC.*?automatic vacuum of table \"velox\.public\.usage_events\"", txt):
+            ts = calendar.timegm(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            seg = txt[m.end():m.end()+2000]; dm = re.search(r"([\d]+) dirtied", seg)
+            vac_comps.append((ts, int(dm.group(1)) if dm else 0))
+    def klass(sec):
+        pool = sec in pool_secs
+        vac = any(abs(ct - sec) <= 30 and dd > 10000 for ct, dd in vac_comps)
+        return "both" if (pool and vac) else ("pool" if pool else ("vacuum" if vac else "other"))
+    kl = [klass(x[0]) for x in fz]
     nmov = sum(1 for x in fz if len(x) > 5 and x[5] == "p50-moving")
+    from collections import Counter as _C
     out = {"window": (t0, t1), "buckets": len(keys), "median_p99": round(med, 1),
-           "freeze_seconds": len(fz), "freeze_p50flat/moving": (len(fz)-nmov, nmov), "freeze_gap_med_s": (statistics.median(gaps) if gaps else None), "freeze_worst_max_ms": (round(max(x[3] for x in fz)) if fz else None),
+           "freeze_seconds": len(fz), "freeze_by_marker": dict(_C(kl)), "freeze_p50flat/moving(severity)": (len(fz)-nmov, nmov), "freeze_gap_med_s": (statistics.median(gaps) if gaps else None), "freeze_worst_max_ms": (round(max(x[3] for x in fz)) if fz else None),
            "buckets>3x": sum(1 for k in keys if bk[k]["p99"] > 3 * med), "buckets>5x": sum(1 for k in keys if bk[k]["p99"] > 5 * med),
            "worst_p99": round(max(p99s), 1), "drops": int(sum(bk[k]["drops"] for k in keys))}
     pi = {}
@@ -67,8 +94,6 @@ def census(d, tag):
         # the zero-fill signature: at/near the cap AND small requests (~8-16 KB per IO)
         out["em_cap_smallIO"] = sum(1 for x in em if x[3] and x[3] / 1024 >= 100 and x[5] and (x[3] / x[5]) <= 16)
         out["em_write_med/max"] = (round(statistics.median(w), 1), round(max(w), 1)); out["em_queue_med/max"] = (round(statistics.median(q), 1), round(max(q), 1))
-    ticks = []
-    for f in glob.glob(os.path.join(d, f"{tag}.dbsample.jsonl")): ticks += at.load_ticks(f)
     ticks = [t for t in ticks if t0 <= t["ts"] < t1 and t["ts"] in inrun]
     if len(ticks) > 2:
         out["db_ticks"] = len(ticks)
