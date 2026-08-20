@@ -157,15 +157,20 @@ Stripe is configured per-tenant via the dashboard (`POST /v1/settings/stripe`), 
 
 ## Scaling considerations
 
-Single-replica is fine to ~tens of millions of usage events per month
-on a 4-vCPU VM with 8 GB RAM. Beyond that the bottleneck is usually the
-per-cycle aggregation scan; Postgres tuning (`work_mem`,
-`shared_buffers`, an index review on `usage_events(tenant_id,
-ingested_at)`) gets you another order of magnitude.
+Measured on AWS: **1,000 ev/s sustained** on a `db.m7g.2xlarge`
+(batch 10, five 10-minute repeats, 5 of 5 passed) and **15,000 ev/s**
+on a `db.m7g.4xlarge` (batch 100, 4 of 5 repeats), every event
+reconciled against Postgres. The limit was database RAM first and
+write IOPS after that — never the app process: on the 4xlarge, RDS
+CPU stayed at or below 67 % and the app node 75 %+ idle. Full method
+and every caveat:
+[docs/benchmarks/sustained-throughput.md](benchmarks/sustained-throughput.md).
 
-The ceiling on single-replica is the in-process scheduler — when one API
-process can no longer keep up with the cycle scan plus webhook delivery,
-that's the trigger for the multi-replica work currently paused.
+On one small VM expect far less. The levers, in order: the batch
+endpoint (one commit amortises the write cost across up to 1,000
+events), database RAM, provisioned IOPS, then month-partitioning
+`usage_events` — migration 0130 already ships the
+`(tenant_id, timestamp)` index.
 
 ## Observability
 

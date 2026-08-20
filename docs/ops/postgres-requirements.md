@@ -64,7 +64,7 @@ Velox's defaults (env-overridable):
 |---|---|---|
 | `DB_MAX_OPEN_CONNS` | 20 | Raise if you see connection-pool waits in metrics + Postgres has headroom (`max_connections` typically 100-200) |
 | `DB_MAX_IDLE_CONNS` | 5 | Raise to match `MaxOpenConns` if you have spiky workload |
-| `DB_CONN_MAX_LIFETIME_MIN` | 30 | Lower to 5-10 if running behind PgBouncer in transaction-pooling mode |
+| `DB_CONN_MAX_LIFETIME_MIN` | 30 | Lower to 5-10 if running behind a session-mode pooler with a short `server_lifetime` (transaction mode is refused at boot — see below) |
 | `DB_CONN_MAX_IDLE_TIME_SEC` | 120 | Idle-eviction; lower for tight-pool environments |
 
 **Concurrent-connection profile**: at peak, Velox holds connections for:
@@ -130,9 +130,23 @@ confirm it does not strip keepalives, and keep any idle timeout it enforces
 
 Within a supported topology the rest of the stack is unremarkable:
 session GUCs (`app.tenant_id`, `app.bypass_rls`) are set with
-`set_config(.., true)` (transaction-scoped), no session-lifetime
-prepared statements, and transactions are bounded by the default 5s
-query timeout via `postgres.NewDB`.
+`set_config(.., true)` (transaction-scoped), and there are no
+session-lifetime prepared statements.
+
+**Queries are not bounded by default.** Velox never sets a
+server-side `statement_timeout`, and `BeginTx` inherits whatever
+deadline the caller's context already carries — it adds none.
+`DB_QUERY_TIMEOUT_MS` (default 5s) is carried on the `*postgres.DB`
+handle by `postgres.NewDB`, but only the tenant store and the billing
+TTFI reader apply it as a per-query deadline. The other fifteen
+`internal/*/postgres.go` stores — invoice, usage, credit, subscription
+and webhook among them — set no deadline of their own, so those
+queries run for as long as the caller's context allows. If you need a
+hard ceiling, set it on the role:
+
+```sql
+ALTER ROLE velox_app SET statement_timeout = '30s';
+```
 
 ## Schema sizing
 
@@ -153,8 +167,13 @@ production):
 | `customers`, `customer_billing_profiles` | Per customer. Slow. | Honour GDPR-delete only via tenant-scoped flow (not automated yet). |
 
 **Storage estimation**: at ~10k subscriptions doing ~100 events/day
-each, expect ~30M `usage_events` rows/month, ~10GB/year on disk after
-toast compression. Plan accordingly.
+each, expect ~30M `usage_events` rows/month. Measured on the
+benchmark rig, a `usage_events` row costs **~516 bytes** all-in —
+62M rows occupied 14 GB of heap plus 18 GB across its five indexes
+(see [sustained-throughput.md](../benchmarks/sustained-throughput.md)).
+So plan for **~15 GB/month, ~185 GB/year**, and partition by month or
+set a retention window before year two. TOAST does not help here:
+it engages above ~2 kB and these rows are ~230 bytes of heap.
 
 ## Indexes
 
@@ -204,12 +223,18 @@ Use it for readiness probes.
 
 ## Compatibility matrix
 
-| Postgres flavour | Tested | Notes |
+**Tested** = a test run against it exists. **Exercised** = it has
+carried real load, outside CI. **Expected** = no run, but a reason
+from the code to think it works. **Untested** = no run and no such
+reason; the note says what to expect.
+
+| Postgres flavour | Status | Notes |
 |---|---|---|
-| Vanilla Postgres 14-17 | ✅ | Reference target |
-| AWS RDS for Postgres | ✅ | Set `rds.force_ssl=1`; use `sslmode=require` in DSN |
-| Google Cloud SQL Postgres | ✅ | Same as RDS |
-| Aurora Postgres | ⚠️ | Should work; not specifically tested. Aurora's slightly different I/O model may affect long scheduler ticks. |
-| CockroachDB | ❌ | Not compatible — RLS, `gen_random_bytes`, and some constraint patterns differ. |
-| YugabyteDB | ❌ | Same — not tested, RLS model differs. |
-| TimescaleDB on Postgres | ✅ | Postgres-compatible; `usage_events` benefits from hypertable conversion if you operate at scale (operator-side decision). |
+| Vanilla Postgres 16 | ✅ Tested | CI, every PR (`postgres:16-alpine`) |
+| AWS RDS for Postgres 16 | ✅ Exercised | The AWS benchmark rig. Set `rds.force_ssl=1`; use `sslmode=require` in DSN |
+| Vanilla Postgres 14, 15, 17 | ⚠️ Expected | No PG15+ syntax in any migration; not exercised in CI |
+| Google Cloud SQL Postgres | ⚠️ Expected | Same engine as RDS; not tested |
+| Aurora Postgres | ⚠️ Expected | Aurora's slightly different I/O model may affect long scheduler ticks; not tested |
+| TimescaleDB on Postgres | ⚠️ Untested | Postgres-compatible; hypertable conversion of `usage_events` is untested advice |
+| CockroachDB | ⚠️ Untested | Expect friction on RLS policy semantics, `gen_random_bytes`, and some constraint patterns. Unverified — nobody has run the suite against it |
+| YugabyteDB | ⚠️ Untested | Same — the RLS model differs |
