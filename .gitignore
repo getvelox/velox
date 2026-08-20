@@ -42,6 +42,13 @@ velox-api
 /velox-doctor
 /velox-bench-seed
 /velox-migrate-safety
+#
+# ...and the enumeration failed anyway: a 54MB `velox-api-adr101` sat untracked
+# at the root because the list above names exact binaries and a
+# branch-suffixed build isn't one of them. Glob the prefixes rather than
+# extending the list a third time.
+/velox-api*
+/velox-bench*
 
 # k6 writes its run summary into whatever directory it is invoked from, so a
 # path-anchored ignore keeps missing it — this is the third directory it has
