@@ -378,7 +378,7 @@ leaves p50 alone. Telltale in Enhanced Monitoring: IOs/s ×10–20 while the
 average IO size collapses from ~100 KB to ~6 KB. **Do:** set **`autovacuum_vacuum_insert_scale_factor = 0.02`** (dynamic; or
 per-table reloptions on the events table). Tested control-vs-treatment on the
 same rig at 25,000 events/s: stock's pass at 80M rows froze every commit for
-11 s (3.3 s worst second, dropped requests, failed repeat); at 0.02 the passes
+11 s (worst request 3.3 s, worst 1-s p99 ≈2.9 s, dropped requests, failed repeat); at 0.02 the passes
 are ~10× smaller, worst freeze 0.63 s, five repeats of five passed with zero
 drops, and the median is untouched (55.7 vs 55.9 ms). It bounds each storm to
 the ~2 % growth slice instead of 20 % of an ever-growing table — the burst no
