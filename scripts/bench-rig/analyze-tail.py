@@ -69,12 +69,18 @@ def freeze_seconds(path, max_ms=150.0, share_over_50=0.10):
             secs[t].append(d["value"])
       except EOFError:
         pass
+    # Baseline p50 across the run, to split freezes into two shapes:
+    # p50-FLAT (a slice of requests frozen; the WAL-pool signature) vs
+    # p50-MOVING (>=1.5x baseline: everyone slowed; the vacuum-storm signature).
+    all_meds = sorted(sorted(v)[len(v)//2] for v in secs.values() if len(v) >= 20)
+    base_p50 = all_meds[len(all_meds)//2] if all_meds else 0
     out = []
     for t, v in secs.items():
         if len(v) < 20: continue
         mx = max(v); share = sum(1 for x in v if x > 50) / len(v)
         if mx > max_ms and share > share_over_50:
-            v.sort(); out.append((t, len(v), v[len(v)//2], mx, share))
+            v.sort(); med = v[len(v)//2]
+            out.append((t, len(v), med, mx, share, "p50-moving" if base_p50 and med > 1.5 * base_p50 else "p50-flat"))
     return sorted(out)
 
 def load_k6(path):
@@ -298,7 +304,8 @@ def main():
         fz = freeze_seconds(run)
         gaps = [y[0]-x[0] for x, y in zip(fz, fz[1:])]
         cadence = (statistics.median(gaps) if gaps else None)
-        print(f"\n## {tag}  {hms(span[0])}–{hms(span[1])}  median bucket p99 {fmt(med)} ms  tail windows (>{a['factor']}x, >={a['minb']} buckets): {len(wins)}  |  freeze-seconds (max>150 ms & >10 % over 50 ms): {len(fz)}" + (f", median gap {cadence:.0f} s, worst max {max(x[3] for x in fz):.0f} ms" if fz else ""))
+        nmov = sum(1 for x in fz if x[5] == "p50-moving")
+        print(f"\n## {tag}  {hms(span[0])}–{hms(span[1])}  median bucket p99 {fmt(med)} ms  tail windows (>{a['factor']}x, >={a['minb']} buckets): {len(wins)}  |  freeze-seconds: {len(fz)} ({len(fz)-nmov} p50-flat / {nmov} p50-moving)" + (f", median gap {cadence:.0f} s, worst max {max(x[3] for x in fz):.0f} ms" if fz else ""))
         if fz and not wins:
             print("   NOTE: freeze-seconds present but no 10-s tail window — the bucket rule missed them (alignment); first few: " + ", ".join(f"{hms(x[0])} max {x[3]:.0f} ms {x[4]*100:.0f}%" for x in fz[:6]))
         # whole-run DB summary for context
