@@ -133,8 +133,8 @@ at 25k ev/s batch 100, same rig, control vs treatment, fresh 20M table each):**
 with stock `autovacuum_vacuum_insert_scale_factor` (0.2) each pass rewrites
 everything added since the last — a burst that grows with the table (64k →
 485k pages dirtied across five repeats) — and at 80M rows one completing pass
-froze every commit for **11 consecutive seconds** (worst 1-s p99 3,279 ms,
-132 drops, the repeat failed its gate); 15 marker-classified vacuum
+froze every commit for **11 consecutive seconds** (worst request 3,279 ms,
+worst 1-s p99 ≈2.9 s, 132 drops, the repeat failed its gate); 15 marker-classified vacuum
 freeze-seconds in the series. With **`autovacuum_vacuum_insert_scale_factor
 = 0.02`**, passes are ~10× smaller (≤48k pages, several landing between
 repeats), the worst freeze was 0.63 s, vacuum freeze-seconds 3, and the
