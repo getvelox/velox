@@ -2,37 +2,39 @@
 
 > **Status:** Shipped 2026-04-25 — see [`CHANGELOG.md`](../CHANGELOG.md) for the merged commits.
 > **Last revised:** 2026-04-25
-> **Related:** ADR-002 (per-domain), ADR-003 (RLS), ADR-005 (integer cents)
+> **Related:** Architecture Decision Records ADR-002 (per-domain packages), ADR-003 (RLS — Postgres row-level security), ADR-005 (integer cents)
 >
-> The text below is preserved as the design-time RFC. The implementation is live in `main`; refer to the package-level docs in `internal/usage/` and `internal/billing/` for the current behaviour.
+> The text below is preserved as the design-time RFC (the proposal as it stood when reviewed, before building). The implementation is live in `main`; refer to the package-level docs in `internal/usage/` and `internal/billing/` for the current behaviour.
 
 > **Note (2026-06-01):** ADR-044 replaced the `operation` + boolean `cached` dimensions shown in examples below with a single `token_type` enum (input, output, cache_read, cache_write_5m, cache_write_1h). The mechanism (one meter, N dimension-matched rules, priority+claim) is unchanged; only the example dimension names are dated. See ADR-044 for the canonical shape.
+
+This page is the technical design for multi-dimensional metering: one usage meter that carries many differently-priced slices of usage, distinguished by dimension labels such as model or operation. It is written for engineers building on or evaluating Velox's pricing engine.
 
 ## Motivation
 
 Stripe's Meter API was bolted onto a card-subscription engine. To bill `gpt-4 input cached` vs `gpt-4 input uncached` vs `gpt-4 output` at different rates, you create three Meters with three event names and three pricing rules. For full Anthropic / OpenAI parity (3 models × 4 operations × 2 cache states), you need ~24 Meters. The dimensional structure is encoded in event-name strings instead of data.
 
-Velox's wedge is **AI-native billing for usage-heavy SaaS**. The minimum-viable expression of that is: **one meter** receives events with arbitrary dimension labels, **many pricing rules** pick out subsets to apply rates. Same data, far fewer meters, far simpler subscription wiring.
+Velox's wedge — the product bet it differentiates on — is **AI-native billing for usage-heavy SaaS**. The minimum-viable expression of that is: **one meter** receives events with arbitrary dimension labels, **many pricing rules** pick out subsets to apply rates. Same data, far fewer meters, far simpler subscription wiring.
 
 Without this design, the wedge is just a slide.
 
 ## Goals
 
 - Single meter per usage type (`tokens`, `requests`, `gb_hours`)
-- Events carry arbitrary dimensions (`{model, operation, cached, tier}`) on the existing `properties JSONB` column
+- Events carry arbitrary dimensions (`{model, operation, cached, tier}`) on the existing `properties JSONB` column (JSONB is Postgres's binary JSON column type)
 - Pricing rules match dimension subsets and apply rates
-- Aggregation modes per rule, not per meter — `sum`, `count`, `last_during_period`, `last_ever`, `max` (Stripe Tier 1 gap, hoisted)
-- Decimal quantities — `NUMERIC` instead of `BIGINT` (Stripe Tier 1 gap, hoisted)
-- Forward-compatible with existing `usage_events` / `meters` / `rating_rule_versions` schema (no breaking change for current tenants)
+- Aggregation modes per rule, not per meter — `sum`, `count`, `last_during_period`, `last_ever`, `max` — a top-priority feature gap versus Stripe, pulled forward into this design (Stripe Tier 1 gap, hoisted)
+- Decimal quantities — arbitrary-precision `NUMERIC` instead of integer `BIGINT` (Stripe Tier 1 gap, hoisted)
+- Forward-compatible with existing `usage_events` / `meters` / `rating_rule_versions` (versioned rate configurations) schema (no breaking change for current tenants)
 - Sustained 50k events/sec ingest on a single tenant on commodity Postgres
 
 ## Non-goals (deferred)
 
-- Streaming meter events (Stripe v2 stream API) — Phase 4
+- Streaming meter events (Stripe v2 stream API) — Phase 4 (a later roadmap phase)
 - Bulk S3 ingest — Phase 4
 - Server-sent / push aggregation — Phase 4
 - Cross-meter formulas (`cost = tokens × rate × surcharge`) — separate "computed meters" design
-- Schema enforcement on dimension keys — free-form for v1, revisit after first design partner
+- Schema enforcement on dimension keys — free-form for v1; revisit after the first design partner (an early customer who co-develops the product)
 
 ## Today's schema (in repo at `internal/platform/migrate/sql/0001_schema.up.sql`)
 
@@ -67,7 +69,7 @@ Today: one meter has one rating rule, one aggregation mode. The `properties` col
 
 ## Proposed schema changes — migration `0054_multi_dim_meters`
 
-> **Migration number caveat:** pick at PR-open time from `origin/main`, not local branch (per memory `feedback_migration_numbering`). 0054 is a placeholder.
+> **Migration number caveat:** pick the real number at PR-open time from `origin/main`, not from the local branch — a standing project rule, recorded as `feedback_migration_numbering`. 0054 is a placeholder.
 
 ```sql
 -- 0054_multi_dim_meters.up.sql
@@ -111,7 +113,7 @@ GRANT ALL ON TABLE meter_pricing_rules TO velox_app;
 
 ### Why a new table instead of extending `meters`
 
-`meters.rating_rule_version_id` is 1:1 today. The new model is N:1. New table is the cleanest expression. The existing `meters.rating_rule_version_id` becomes the **default rule** — events not claimed by any pricing rule fall back to it, which preserves backward compatibility for tenants currently in production.
+`meters.rating_rule_version_id` is 1:1 today — one rule per meter. The new model is N:1 — many rules per meter. A new table is the cleanest expression. The existing `meters.rating_rule_version_id` becomes the **default rule** — events not claimed by any pricing rule fall back to it, which preserves backward compatibility for tenants currently in production.
 
 ### Backward compatibility
 
@@ -184,7 +186,7 @@ Authorization: Bearer <secret_key>
 }
 ```
 
-Plus `GET`, `LIST`, `DELETE` for full CRUD.
+Plus `GET`, `LIST`, `DELETE` for full CRUD (create, read, update, delete).
 
 ### `GET /v1/customers/{id}/usage`
 
@@ -192,13 +194,13 @@ Plus `GET`, `LIST`, `DELETE` for full CRUD.
 GET /v1/customers/cust_xyz/usage?event_name=tokens&period_start=2026-04-01&period_end=2026-04-30&group_by=model,operation
 ```
 
-Returns the per-rule aggregated quantity + projected charges, grouped by requested dimensions. Powers the cost-dashboard component (Week 5).
+Returns the per-rule aggregated quantity + projected charges, grouped by requested dimensions. Powers the cost-dashboard component (scheduled as Week 5 of the build plan).
 
 ## Aggregation semantics
 
 When billing finalizes for `(customer, meter, period_start, period_end)`:
 
-1. Load all `meter_pricing_rules` for the meter, ordered by `priority DESC`, then `created_at ASC`, then `id ASC` for deterministic tie-breaking. The `id` final tiebreaker covers the corner case where two same-priority rules share a `created_at` tick (bulk import, same-txn bootstrap, clock-resolution collisions) — without it, Postgres is free to pick an order, which would make billing non-reproducible across replicas.
+1. Load all `meter_pricing_rules` for the meter, ordered by `priority DESC`, then `created_at ASC`, then `id ASC` for deterministic tie-breaking. The `id` final tiebreaker covers the corner case where two same-priority rules share a `created_at` tick (bulk import, same-txn bootstrap, clock-resolution collisions). Without it, Postgres is free to pick an order, which would make billing non-reproducible across replicas.
 2. Iterate rules. For each rule:
    - Find events in the period whose `properties` is a **superset** of `dimension_match` AND that haven't been claimed by a higher-priority rule.
    - Apply the rule's `aggregation_mode`:
@@ -252,7 +254,7 @@ FROM claimed
 GROUP BY rule_id, aggregation_mode, rating_rule_version_id;
 ```
 
-`@>` is the Postgres JSONB superset operator and uses the GIN index. The `DISTINCT ON (e.id) ORDER BY rule_rank` claims each event to its highest-priority matching rule. Aggregation modes are dispatched in the outer aggregation step.
+`@>` is the Postgres JSONB superset operator and uses the GIN index (an inverted index type suited to JSONB containment lookups). The `DISTINCT ON (e.id) ORDER BY rule_rank` claims each event to its highest-priority matching rule. Aggregation modes are dispatched in the outer aggregation step.
 
 For `last_during_period`, `last_ever`, `max` modes the aggregation differs — implementation will fork by mode. Likely cleanest: one query per mode, scoped by rule_id.
 
@@ -263,12 +265,12 @@ For `last_during_period`, `last_ever`, `max` modes the aggregation differs — i
 - `domain.UsageEvent.Quantity` becomes `decimal.Decimal` (kept the `Quantity` name — wire field is `quantity`, no rename to `Value`)
 - Existing internal callers passing `int64` need adapters
 
-Per memory `feedback_prefer_battle_tested_libs`: use `shopspring/decimal`, do not roll our own.
+A standing project rule (recorded as `feedback_prefer_battle_tested_libs`) applies here: use `shopspring/decimal`, do not roll our own.
 
 ## Test strategy
 
 ### Unit (`internal/usage/service_test.go`)
-- Ingest with dimensions → stored correctly, idempotency-keyed
+- Ingest with dimensions → stored correctly, idempotency-keyed (retry-safe: resending the same key cannot create a duplicate)
 - Aggregation correctness across all five modes
 - Subset-match semantics (extra dimensions on event don't disqualify)
 - Priority + claim — overlapping rules don't double-count
@@ -278,9 +280,9 @@ Per memory `feedback_prefer_battle_tested_libs`: use `shopspring/decimal`, do no
 ### Integration (`internal/usage/postgres_test.go`)
 - Real Postgres
 - RLS isolation: tenant A cannot see tenant B's pricing rules or events
-- GIN index actually used (EXPLAIN ANALYZE assertion)
+- GIN index actually used (asserted by inspecting the query plan with EXPLAIN ANALYZE)
 - Concurrent ingest with same idempotency key → single row, deterministic winner
-- Migration up/down round-trip (per memory `feedback_longterm_fixes`)
+- Migration up/down round-trip (a standing project rule, recorded as `feedback_longterm_fixes`)
 
 ### Handler (`internal/usage/handler_test.go`)
 - Decimal in JSON parses correctly (string and number forms)
@@ -292,7 +294,7 @@ Per memory `feedback_prefer_battle_tested_libs`: use `shopspring/decimal`, do no
 
 - **Target:** sustained 50k events/sec ingest on a single tenant
 - **Hardware:** Postgres 16, 8 vCPU, 16GB RAM, NVMe SSD (matches commodity AWS m5/m6)
-- **Workload:** `scripts/bench-rig/ingest.js` (k6) — synthetic event stream with realistic dimension cardinality (~10 model values, 4 operation values, 2 boolean cache states), driving the public ingest endpoint. `cmd/velox-bench-seed` creates the fixtures and mints the key.
+- **Workload:** `scripts/bench-rig/ingest.js` (k6, an open-source load-testing tool) — synthetic event stream with realistic dimension cardinality (~10 model values, 4 operation values, 2 boolean cache states), driving the public ingest endpoint. `cmd/velox-bench-seed` creates the fixtures and mints the key.
 - **Measurement:** total events ingested over 60s, p50/p95/p99 ingest latency, Postgres CPU + IO
 - **Mitigations if we miss target:**
   - Batch INSERTs (already needed for any high-throughput workload)

@@ -2,6 +2,10 @@
 
 Thank you for your interest in contributing to Velox.
 
+This page is for anyone preparing a pull request: how to set up a dev
+environment, how the code is organized, which checks CI runs against your
+change, and the house rules that gate a merge.
+
 ## Development Setup
 
 ```bash
@@ -25,7 +29,8 @@ go test -p 1 ./... -count=1 -short=false  # unit + integration tests
 
 ## Project Structure
 
-Each billing domain is a self-contained package under `internal/`:
+Each billing domain (invoice, credit, customer, and so on) is a
+self-contained package under `internal/`:
 
 ```
 internal/{domain}/
@@ -37,9 +42,9 @@ internal/{domain}/
 ```
 
 **Rules:**
-- No concrete `Service`/`Store` coupling between peer domain packages — cross-domain imports are limited to shared value types, cross-cutting infra, and the billing coordinator's narrow interfaces, enforced by the allowlist in `internal/arch/boundaries_test.go`
+- Peer domain packages never call each other's concrete `Service`/`Store` types. Cross-domain imports are limited to shared value types, cross-cutting infra, and the narrow interfaces of the `billing` coordinator. The allowlist in `internal/arch/boundaries_test.go` enforces this — a new cross-domain import fails the test until it is added there deliberately
 - Every handler uses `respond.JSON()` / `respond.FromError()` for responses
-- Every store method runs inside an RLS-scoped transaction
+- Every store method runs inside a transaction scoped to one tenant by Postgres Row-Level Security (RLS)
 - Tests use `testutil.SetupTestDB()` for integration tests
 
 ## Adding a New Domain
@@ -71,8 +76,8 @@ tolerated — do not "fix" it), and typechecking is `npx tsc -b`, not
 
 ## What CI runs on your PR
 
-Everything below gates every PR — run what's relevant locally before
-pushing, and nothing about a red build will surprise you:
+Every gate below runs on every PR. Run the ones relevant to your change
+locally before pushing, and nothing about a red build will surprise you:
 
 | Gate | Local command | Notes |
 |---|---|---|
@@ -98,12 +103,16 @@ Fork PRs get the identical CI run — no secrets are involved in any gate.
 3. Run the gates above that your change touches (at minimum the two test commands)
 4. **Docs travel with the change, in the same PR:** any user-visible change
    gets a `CHANGELOG.md` entry, and any UI-visible behavior change updates
-   the matching flow in `MANUAL_TEST.md`. This is a hard house rule — the
-   bar is "the doc doesn't lie."
+   the matching flow in `MANUAL_TEST.md` (the repo's hand-run walkthrough
+   scripts). This is a hard house rule — the bar is "the doc doesn't lie."
 5. Submit a PR with a clear description of what and why
 
-**Touching money or a state machine** (invoices, payments, credits, dunning,
-subscriptions, tax)? Follow the [Money-Path Robustness Playbook](docs/dev/money-path-robustness-playbook.md):
-run the implementation checklist (§3) before opening the PR, and include the
-state's site-set enumeration (§2) in the PR description. Concurrency and
-money-invariant guards need an automated collision + mutation-verified test (§5).
+**Touching money or a state machine** (invoices, payments, credits, dunning
+(failed-payment retries), subscriptions, tax)? Follow the
+[Money-Path Robustness Playbook](docs/dev/money-path-robustness-playbook.md).
+Before opening the PR, work through its implementation checklist (§3). In the
+PR description, include the state's site-set enumeration (§2) — the list of
+every code site that can write or react to that state. Guards for concurrency
+and money invariants need an automated test that forces the race and is
+verified to fail once the guard is removed (a collision + mutation-verified
+test, §5).

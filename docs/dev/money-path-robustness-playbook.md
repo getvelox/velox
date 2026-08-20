@@ -1,22 +1,29 @@
 # Money-Path Robustness Playbook
 
 A runbook for building and reviewing any change that touches money or a state
-machine (invoices, payments, credits, dunning, subscriptions, tax). It exists
-because these bugs don't show up in a happy-path read — they live in *sibling*
-call sites, *concurrent* interleavings, and *crash windows*.
+machine (invoices, payments, credits, dunning (automated payment-failure
+follow-up), subscriptions, tax). Written for anyone building or reviewing
+Velox's billing code, prior context or not. It exists because these bugs don't
+show up when you read only the path where everything succeeds (the happy-path
+read) — they live in *sibling* call sites, *concurrent* interleavings, and
+*crash windows* (the gaps between two writes where a process can die with half
+the work done).
 
 **The motivating lesson (PR #325).** A dunning resolve change was reviewed four
 times; each round caught a *different* instance of the *same* root problem, and
 each fix exposed the next. The failure wasn't "review harder" — it was reasoning
 *locally* (about the function in the diff) when the real surface was the whole
-state machine: every writer, every effect-firer, every gated reader, every crash
-point. This playbook makes that enumeration a checklist instead of a four-round
-discovery.
+state machine: every writer of the state, every effect-firer (code that
+triggers an email, a Stripe call, or a webhook off the transition), every gated
+reader (code whose behavior branches on the state), every crash point. This
+playbook makes that enumeration a checklist instead of a four-round discovery.
 
-When the design or review stage runs as a multi-agent panel/workflow, prompt
-the agents per [agent-prompting-standards.md](agent-prompting-standards.md)
-(grounded claims, reason-with-request, effort routing, the optional mid-build
-spec-conformance verifier).
+When the design or review stage runs as a multi-agent panel/workflow (several
+AI agents prompted in parallel), prompt the agents per
+[agent-prompting-standards.md](agent-prompting-standards.md) — it covers
+grounded claims, sending the reasoning along with each request
+(reason-with-request), effort routing, and the optional mid-build
+spec-conformance verifier.
 
 Pre-launch posture: **guard the money invariants, don't gold-plate.** Every rule
 below is anchored to real Velox code — copy the pattern, don't reinvent it.
@@ -28,6 +35,18 @@ below is anchored to real Velox code — copy the pattern, don't reinvent it.
 The complete set of ways a billing engine silently does the wrong thing with
 money. Each class has a *different fix kind* and a *different detection method* —
 that's why they're separate.
+
+Terms the tables lean on, glossed once: an **invariant** is a property that
+must hold at all times; **idempotent** means safe to run twice with the effect
+landing once; a **dedup key** is a stored deduplication key that makes a repeat
+attempt collide instead of double-firing; a **tx** is a database transaction;
+**CAS** is compare-and-swap — an `UPDATE` that applies only while the row is
+still in the expected state; the **outbox** pattern enqueues an external call
+as a DB row inside the same transaction as the state change; **RLS** is
+Postgres Row-Level Security, per-tenant row filtering enforced by the database
+itself; a **PI** is a Stripe PaymentIntent (Stripe's object for a single
+payment); **livemode** is the flag separating real money data from test-mode
+data; **ADR-NNN** is an Architecture Decision Record in `docs/adr/`.
 
 | # | Class | Invariant | Fix kind | Velox example |
 |---|-------|-----------|----------|---------------|
@@ -61,25 +80,29 @@ that's why they're separate.
 ## 2. The meta-practice: complete-site-set enumeration
 
 **Never reason locally about a money/state change. Enumerate its complete
-site-set and prove each element covered before writing a line.** This one
-discipline collapses PR #325's four rounds into a single pass, because the racing
-firer, the clobbering write, and the stale-gated action all live in sibling
-branches and callees a diff-scoped read never opens.
+site-set — every code site that writes, reacts to, or gates on the state — and
+prove each element covered before writing a line.** This one discipline
+collapses PR #325's four rounds into a single pass, because the racing firer,
+the clobbering write, and the stale-gated action all live in sibling branches
+and callees a diff-scoped read never opens.
 
 Make the **state value** (`'resolved'`, `SubscriptionActive`, …) — not your diff
 — the unit of proof. For the state machine you touch, list and discharge:
 
 1. **Every WRITER** of this state (handler, service, engine, scheduler, webhook,
-   operator action, reconciler). Do they ALL route through the one guarded
-   transition chokepoint? *(`ResolveRun` has six resolve paths, all funneled
-   through `resolveRunNow`; a seventh site that writes the state directly is the
+   operator action, reconciler — a background sweep that finds and repairs
+   half-done work). Do they ALL route through the one guarded transition
+   chokepoint (the single function every transition must pass through)?
+   *(`ResolveRun` has six resolve paths, all funneled through `resolveRunNow`;
+   a seventh site that writes the state directly is the
    bug — cf. `subscription.Activate`, the one status-flip that bypasses
    `transitionInTx`.)*
 2. **Every EFFECT-FIRER** hanging off the transition (Stripe call, ledger write,
    email, outbound webhook). Is each idempotent under replay, and either in-tx or
    outbox-enqueued?
-3. **Every CALLER and CALLEE.** Does a `*Tx` variant skip a validation or effect
-   the non-Tx path runs? *(the pre-#333 `UpsertPolicyTx`, which skipped the
+3. **Every CALLER and CALLEE.** Does a `*Tx` variant (the flavor of a store
+   method that runs inside a caller-supplied transaction) skip a validation or
+   effect the non-Tx path runs? *(the pre-#333 `UpsertPolicyTx`, which skipped the
    retry-schedule-length check `UpsertPolicy` enforced — both writers now share
    the `normalizeAndValidatePolicy` chokepoint.)* Does the guard extend into functions the changed
    one *calls*? *(the exhaustRun miss.)*
@@ -107,8 +130,9 @@ then add the caller** — never hand-roll a fresh `UPDATE`+effect.
 Ordered by leverage. A "no" blocks the PR.
 
 1. **Dedup primitive chosen at design time?** Client write → `/v1`
-   Idempotency-Key middleware. Server/engine/scheduler/webhook write → a
-   `source_*` partial-unique dedup index OR a same-tx CAS. **Never rely on the
+   Idempotency-Key middleware (dedup keyed on a client-sent HTTP header).
+   Server/engine/scheduler/webhook write → a `source_*` partial-unique dedup
+   index OR a same-tx CAS. **Never rely on the
    API header for engine paths** — they carry none.
 2. **Stripe idempotency key is provenance-stable, not a fresh UUID?** Derived
    from the durable id you dedup on (`velox_inv_<id>_<charge_attempt_seq>`,
@@ -116,13 +140,13 @@ Ordered by leverage. A "no" blocks the PR.
    vs dunning suffix) nor dedup two genuinely-different charges.
    **The varying part must be the EVENT you mean, never a proxy for it.** The
    key answers "same attempt or new attempt?", so it may move only when an
-   attempt outcome is recorded. This gate used to bless `velox_inv_<id>_<UpdatedAt>`;
-   `updated_at` answers the much broader "did anything touch this row?", so
-   every unrelated writer became a participant in the payment protocol and a
-   tax-commit stamp landing in a crash window minted a second PaymentIntent
-   (ADR-105, #678). When a seed is a proxy, ask what writes it that you didn't
-   intend — and if the honest answer is "a whole table's worth of writers",
-   introduce the explicit counter instead.
+   attempt outcome is recorded. This gate used to bless `velox_inv_<id>_<UpdatedAt>`,
+   but `updated_at` answers the much broader question "did anything touch this
+   row?". That made every unrelated writer a participant in the payment
+   protocol, and a tax-commit stamp landing in a crash window minted a second
+   PaymentIntent (ADR-105, #678). When a seed is a proxy, ask what writes it
+   that you didn't intend — and if the honest answer is "a whole table's worth
+   of writers", introduce the explicit counter instead.
 3. **Coupled effect classified and placed?** Internal DB write → threaded
    `*sql.Tx` in-tx (ADR-056). External call → `OutboxStore.Enqueue(ctx, tx, …)`
    in the commit tx (ADR-040), or a self-clearing marker column + scheduler sweep.
@@ -130,18 +154,22 @@ Ordered by leverage. A "no" blocks the PR.
    already ran (guard the `amount_paid=amount_due` re-zeroing class); CAS is
    `WHERE state<>target` and `RowsAffected`-gated.
 5. **Webhook: the dedup-row write (`IngestEvent`) is the LAST write, after the
-   effect commits?** Only never-processable errors (`ErrNotFound`) ack; everything
-   else returns 5xx to force redelivery. No money-state from a browser redirect.
+   effect commits?** Only never-processable errors (`ErrNotFound`) ack (get
+   acknowledged, which ends redelivery); everything else returns 5xx to force
+   redelivery. No money-state from a browser redirect.
 6. **Irreversible action re-reads its precondition immediately before firing?**
    Cancel/void/pause/uncollectible re-fetch terminal STATUS (not a stale
    pre-read), falling through on a fetch error so a DB blip never burns it.
-7. **Every money-path error is loud?** No `_ =` / `_, _ =` on a store write or
-   `Dispatch`. WARN→ERROR when sustained failure means under-collected money.
-8. **Every background goroutine/worker/advance wrapped in `recover()`** that flips
-   the entity to a *requeryable terminal* state (`MarkFailed` on a `WithoutCancel`
-   ctx), never leaving it in-progress with no operator exit.
+7. **Every money-path error is loud?** No `_ =` / `_, _ =` (Go's
+   discard-the-error assignment) on a store write or `Dispatch`. WARN→ERROR
+   when sustained failure means under-collected money.
+8. **Every background goroutine/worker/advance wrapped in `recover()`** (Go's
+   panic catch) that flips the entity to a *requeryable terminal* state — one an
+   operator can find and act on later (`MarkFailed` on a `WithoutCancel`
+   ctx) — never leaving it in-progress with no operator exit.
 9. **New `tenant_id` table? Same migration adds `ENABLE` + `FORCE` +
-   `tenant_isolation`.** `ENABLE`-without-`FORCE` exempts the owner (the 0111 bug).
+   `tenant_isolation`.** `ENABLE`-without-`FORCE` exempts the table-owner role
+   from RLS (the bug migration 0111 shipped).
    Every new `TxBypass`/`db.Pool` query carries explicit `WHERE tenant_id` (+
    `livemode`).
 10. **Time/money hygiene:** every +1mo/+1yr goes through
@@ -202,7 +230,9 @@ land on the table.
 
 ## 5. Test-lock doctrine
 
-**MUST be an automated test** (per the MANUAL_TEST `[x]` durable rule):
+**MUST be an automated test** (per the MANUAL_TEST `[x]` durable rule: a
+behavior ticked `[x]` in MANUAL_TEST.md is locked by an automated test, while
+`[~]` marks manual-only verification):
 (i) **concurrency** — always; (ii) **money-invariant** — automate unless it's an
 Nth duplicate of a proven pattern; (iii) **partial-failure / crash-between-writes.**
 **Manual `[~]`** only for observable/UI/live-external surfaces (live-Stripe
@@ -238,7 +268,8 @@ Five non-negotiable patterns:
    red run is the *only* proof the guard exists rather than being decorative — and
    it's what a later refactor that re-introduces an unconditional fire or a second
    tx trips over in CI. (PR #325 shipped a 5-mutation check.)
-5. **One advance, many boundaries (class J).** Drive a test clock across ≥2
+5. **One advance, many boundaries (class J).** Drive a test clock (a simulated
+   clock the engine's time-based behavior can be advanced against) across ≥2
    contracted instants in a SINGLE advance (two retry dates; a resume date plus a
    cycle close) and assert each artifact — `resolved_at`, `paid_at`, timeline
    rows, the charge ctx's `Sim.At` — stamps ITS OWN boundary instant, none the
@@ -270,7 +301,8 @@ class J, contracted-instant stamping — see §1).
 
 Classes **A** (exactly-once), **B** (money-event dual-writes), **D** (concurrency
 C1–C4), and **H** (tenant isolation) are locked and test-covered — don't
-re-litigate them. Every MEDIUM finding from the original census has shipped:
+re-litigate them. Every MEDIUM finding from the original census (the full sweep
+of the codebase against the failure-class map above) has shipped:
 
 - ~~`subscription.Activate` lost-update~~ — **fixed #327**: `Update` now carries
   `AND status='draft'` + an `ErrNoRows` re-query → `InvalidState` conflict,

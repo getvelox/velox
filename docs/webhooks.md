@@ -1,6 +1,10 @@
 # Consuming Velox webhooks
 
-Everything a receiver needs: the delivery envelope, signature
+Velox is a usage-based billing engine; a webhook is how it tells your
+service that billing state changed — an invoice paid, a subscription
+canceled, a credit balance depleted. This page is for the engineer
+building or operating a receiving endpoint — no prior Velox knowledge
+assumed — and covers everything a receiver needs: the delivery envelope, signature
 verification (with copy-paste verifiers), the retry ladder, the delivery
 contract, endpoint management, and the full event catalog.
 
@@ -119,7 +123,8 @@ manually (`POST /v1/webhook-endpoints/events/{id}/replay`).
   subscription lifecycle events (`subscription.created` / `.activated` /
   `.canceled` / `.trial_ended`), and the credit balance events
   (`credit.balance_low` / `_depleted` / `_recovered`) are written to the
-  outbox **inside the same database transaction as the state change** —
+  outbox (the pending-deliveries table a background sender drains)
+  **inside the same database transaction as the state change** —
   if the business operation commits, the event exists; a crash cannot
   drop it. Remaining notification events enqueue immediately after their
   transaction commits (best-effort; a crash in that window can drop one).
@@ -136,7 +141,11 @@ manually (`POST /v1/webhook-endpoints/events/{id}/replay`).
 
 The canonical list lives in code at
 `internal/domain/webhook_outbound.go` (`KnownWebhookEventTypes`) and is
-what endpoint validation enforces. Summary:
+what endpoint validation enforces. Two Velox terms used below:
+**dunning** is the automated follow-up on a failed payment (escalating
+reminders and retries until the invoice settles or is written off);
+a **tenant** is one business account in Velox — the vendor doing the
+billing, as distinct from its customers. Summary:
 
 | Event | Fires when |
 |---|---|
@@ -169,7 +178,8 @@ what endpoint validation enforces. Summary:
 | `credit.balance_recovered` | Balance went positive again (transactional) |
 | `credit.commit_retired` | A relief credit note retired commit credits — payload carries `grant_id`, `credit_note_id`, `retired_cents`, `refunded_gross_cents`, `remaining_after_cents` (transactional) |
 
-Typical entitlement receiver for the commit-drawdown wedge: subscribe to
+Typical entitlement receiver for the commit-drawdown wedge (customers
+prepay a credit balance that usage draws down): subscribe to
 `credit.balance_low` (nudge the customer to top up), `credit.balance_depleted`
 (suspend service), `credit.balance_recovered` (restore), and
 `subscription.canceled` (deprovision).

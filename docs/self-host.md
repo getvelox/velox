@@ -1,5 +1,10 @@
 # Velox — Self-host
 
+**What this page is:** the operator's reference for running Velox yourself —
+deployment shape, Postgres requirements, environment variables, scaling, and
+observability. **Who it's for:** an engineer standing up or operating an
+install, whether new to this repo or checking one flag mid-deploy.
+
 Velox runs as a single Go binary against Postgres. The supported deployment
 shape today is Docker Compose on a single VM. A managed-Kubernetes path
 (Helm chart, multi-replica HA, Terraform-as-IaC) is not in v1; it lands
@@ -11,7 +16,9 @@ when a design partner names which Kubernetes flavour they actually run.
 [`deploy/compose/README.md`](../deploy/compose/README.md)** — a
 containerized five-service stack (postgres, redis, velox-api, velox-dashboard, nginx)
 with its own `.env.example`. Five minutes from a fresh VM to a working
-tenant: set four secrets, `docker compose up -d`, then one
+tenant — Velox's unit of isolation: one business account with its own
+data, dashboard users, and API keys; one install can serve several. Set
+four secrets, `docker compose up -d`, then one
 `POST /v1/bootstrap` call returns your dashboard owner login and API
 keys (test + live).
 
@@ -58,12 +65,16 @@ This deployment shape is a **single-VM, single-instance** install:
   comes back up.
 - DB: 1 Postgres instance on the same host (or a managed Postgres if you
   point `DATABASE_URL` elsewhere).
-- Scheduler: in-process goroutine inside `velox-api` (per ADR-006).
+- Scheduler: in-process goroutine inside `velox-api` (per ADR-006 —
+  ADRs, the numbered architecture decision records, live in `docs/adr/`).
   Leader-elected via Postgres advisory locks — a second replica's
-  scheduler and outbox dispatchers stand by rather than double-fire, so
-  an accidental N=2 is correctness-safe on the money paths. A handful
-  of non-money surfaces still assume one process (SSE live tail,
-  per-process throttles) — the full list, with evidence, lives in
+  scheduler and outbox dispatchers (the workers draining the outbox
+  tables, where side effects such as outbound webhook deliveries are
+  enqueued in the same transaction as the state change that caused them)
+  stand by rather than double-fire, so an accidental N=2 is
+  correctness-safe on the money paths. A handful of non-money surfaces
+  still assume one process (SSE live tail, per-process throttles) — the
+  full list, with evidence, lives in
   [docs/dev/ha-readiness-2026-07-06.md](dev/ha-readiness-2026-07-06.md).
 - LB: none.
 
@@ -76,7 +87,7 @@ scheduling, SKIP-LOCKED outbox claims, DB-backed sessions/idempotency);
 the remaining scoped work list is in the HA-readiness doc above. That
 build is paused until a design partner with a specific Kubernetes
 flavour approaches production cutover; pre-emptively shipping three
-independent deployment paths produced surface nobody was running.
+independent deployment paths produced surface area nobody was running.
 
 ## Postgres
 
@@ -90,10 +101,10 @@ For your own VM:
   Postgres, pre-create them per
   [`docs/ops/postgres-requirements.md`](ops/postgres-requirements.md).
 - **A least-privilege runtime role (required for tenant isolation).**
-  Velox enforces multi-tenant isolation with Row-Level Security. Request
-  traffic runs on the connection in `APP_DATABASE_URL` — a role like
-  `velox_app` with its own password, NOT the admin role. The compose
-  stack creates it from `VELOX_APP_DB_PASSWORD`
+  Velox enforces multi-tenant isolation with Row-Level Security (RLS).
+  Request traffic runs on the connection in `APP_DATABASE_URL` — a role
+  like `velox_app` with its own password, NOT the admin role. The
+  compose stack creates it from `VELOX_APP_DB_PASSWORD`
   ([`deploy/compose/postgres-init.sh`](../deploy/compose/postgres-init.sh));
   on your own Postgres:
 
@@ -124,7 +135,8 @@ For your own VM:
 migrations on startup. Migrations are versioned and idempotent
 ([`internal/platform/migrate/sql/`](../internal/platform/migrate/sql/)).
 Down-migrations exist for development reversal but production rollbacks
-are forward-only.
+are forward-only (recover with a new forward migration, not by running
+downs).
 
 ## Environment
 
@@ -157,7 +169,8 @@ Stripe is configured per-tenant via the dashboard (`POST /v1/settings/stripe`), 
 
 ## Scaling considerations
 
-Measured on AWS: **1,000 ev/s sustained** on a `db.m7g.2xlarge`
+Measured on AWS, in usage events ingested per second (ev/s):
+**1,000 ev/s sustained** on a `db.m7g.2xlarge`
 (batch 10, five 10-minute repeats, 5 of 5 passed) and **15,000 ev/s**
 on a `db.m7g.4xlarge` (batch 100, 4 of 5 repeats), every event
 reconciled against Postgres. The limit was database RAM first and
@@ -184,7 +197,7 @@ Key metrics to watch:
 - `velox_billing_cycle_duration_seconds` — cycle scan latency
 - `velox_tax_outcome_total{outcome,reason}` — tax-provider failure modes
 - `velox_audit_write_errors_total` — audit log write failures
-- `velox_audit_uncovered_mutation_total{route}` — a request mutated state and left NO audit row (should be flat zero; see the runbook)
+- `velox_audit_uncovered_mutation_total{route}` — a request mutated state and left NO audit row (should be flat zero; see the runbook, `docs/ops/runbook.md`)
 - `velox_stripe_breaker_state` — Stripe API circuit breaker (0 = closed, 1 = half-open, 2 = open)
 
 ## Related
