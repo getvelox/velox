@@ -195,6 +195,14 @@ jobs:
           go-version: '1.25.13'
 
       - uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
+        with:
+          # Pinned: the action installs the LATEST golangci-lint when unpinned,
+          # so a linter release changes CI results with no change in this repo —
+          # v2.13.0 (2026-08-19) turned three pre-existing stripe-go SA1019
+          # deprecation warnings into errors and broke every open PR while main
+          # stayed green (#834 tracks fixing the deprecations properly).
+          # Bump this deliberately, with the fix for whatever the new version flags.
+          version: v2.12.2
 
       # The Dockerfile's builder image must be at least go.mod's `go` directive.
       # It runs GOTOOLCHAIN=local, so an older builder does not quietly fetch a
