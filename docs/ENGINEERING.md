@@ -1,6 +1,6 @@
 # Engineering
 
-The short version, for engineers: what is guaranteed, what was measured, what
+Velox is an open-source usage-based billing engine (Go + PostgreSQL). This page is the short version of how it is engineered, for engineers who have not seen the repo: what is guaranteed, what was measured, what
 gates a money-path change, what was decided and reversed, and what the
 measurements found wrong with Velox itself. Every claim links to the artifact
 behind it.
@@ -10,7 +10,8 @@ behind it.
 ## 1. The guarantee is a database constraint
 
 Exactly-once billing in Velox is **not** application logic. It is a partial
-unique index (migration 0101):
+unique index — a uniqueness rule the database itself enforces on a subset of
+rows (migration 0101):
 
 ```sql
 CREATE UNIQUE INDEX idx_invoices_billing_idempotency
@@ -18,9 +19,13 @@ CREATE UNIQUE INDEX idx_invoices_billing_idempotency
   WHERE status <> 'voided' AND source_plan_changed_at IS NULL;
 ```
 
-A second live cycle invoice for a period that already has one cannot be
+A second live cycle invoice — a normal billing-period invoice, as opposed to
+the voided and plan-change rows the WHERE clause above excludes — for a period
+that already has one cannot be
 committed. Not "is unlikely to be" — cannot be. The application layer is not a
-second line of defence, and the negative control below is what makes that a
+second line of defence, and the negative control below — the same experiment
+with the safety deliberately removed, proving the measurement can see failure
+— is what makes that a
 measurement rather than a claim. ([failure-correctness.md](benchmarks/failure-correctness.md))
 
 ## 2. What was measured
@@ -31,7 +36,7 @@ measurement rather than a claim. ([failure-correctness.md](benchmarks/failure-co
   both boundaries, with a second process then running the same cycle. 40
   subscriptions, $1,000 of periods: **0 duplicate invoices, 0 lost invoices, 0
   cents of drift** at every kill point. The negative control — the same
-  four-leader run with the index dropped — billed **103 invoices for 40 periods,
+  run, four leader processes racing, with the index dropped — billed **103 invoices for 40 periods,
   $2,575.00 instead of $1,000.00, and every leader reported success** (a second
   run of it: 129 invoices, $3,225.00). Nothing in the application layer noticed.
 - **[Sustained throughput](benchmarks/sustained-throughput.md)** — on a
@@ -42,7 +47,7 @@ measurement rather than a claim. ([failure-correctness.md](benchmarks/failure-co
   reported; `pgbench` on the same row shape is the control denominator. A third,
   instrumented run then caught the tail stalls live and attributed them to
   WAL-segment creation when RDS's recycled-segment pool runs dry: with that pool
-  sized — `min_wal_size = max_wal_size = 16 GB`, one dynamic parameter, no reboot
+  sized — `min_wal_size = max_wal_size = 16 GB` — one sizing rule, two dynamic settings, no reboot
   — both rungs run 5 of 5 (12,000 at a worst 10-second p99 of 52 ms; 15,000 at
   p99 40.2–42.8 ms). The stalls it does **not** explain are named as unexplained
   rather than left out.
@@ -114,7 +119,8 @@ Filed against Velox, with the evidence, beside the numbers they discredit.
   off at roughly one round trip (~1.75 ms) — **~570 requests/s, on any
   hardware**. Found by sampling `pg_stat_activity` during a rate that would not
   hold: 50–55 of 61 backends waiting on that one `UPDATE`. Fixed and re-measured
-  on the rig — the batch-10 knee moved from ~570 req/s to between 1,600 and
+  on the rig — the batch-10 (ten events per request) knee — where the latency curve bends
+  upward — moved from ~570 req/s to between 1,600 and
   2,000, and 12,000 ev/s now holds at p99 22.6 ms (4 of 5 repeats).
 - **[#819](https://github.com/getvelox/velox/issues/819) — a linear scan.** The
   per-customer usage summary is a `COUNT + SUM GROUP BY meter` over the

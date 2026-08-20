@@ -1,7 +1,8 @@
 # Operations Runbook
 
-What pages oncall, what doesn't, and what to do when Velox is in
-trouble. Velox-specific failure modes only — generic Postgres / K8s /
+What pages the on-call engineer, what doesn't, and what to do when
+Velox is in trouble. Written for whoever operates a Velox deployment.
+Velox-specific failure modes only — generic Postgres / Kubernetes (K8s) /
 Stripe troubleshooting is out of scope.
 
 ## Health endpoints
@@ -12,9 +13,10 @@ Stripe troubleshooting is out of scope.
 | `GET /health/ready` | Readiness — DB reachable (ping), scheduler ran recently | Kubernetes readiness probe + LB health check |
 | `GET /metrics` | Prometheus scrape (Bearer `METRICS_TOKEN` when set) | Metrics-collection job |
 
-`/health/ready` returns 503 if the scheduler hasn't ticked in
-2× the configured interval — this catches scheduler stalls without
-requiring liveness restart. See "Scheduler stalled" below.
+`/health/ready` returns 503 if the scheduler (the background loop that
+drives billing) hasn't ticked in 2× the configured interval — a stalled
+scheduler is caught by the readiness probe, without waiting for a
+liveness restart. See "Scheduler stalled" below.
 
 ## Key metrics to alert on
 
@@ -74,9 +76,10 @@ aren't being invoiced; `velox_billing_cycles_total` rate drops to 0.
 
 **Why it happens**:
 - Long-running transaction holding row locks (e.g., a tenant with
-  millions of usage events on a single sub).
+  millions of usage events on a single subscription).
 - DB primary failover; connections lost mid-tick.
-- Scheduler goroutine panic'd (rare; `slog.Error` logs it).
+- Scheduler goroutine — its background worker thread — panic'd (rare;
+  `slog.Error` logs it).
 
 **Diagnose**:
 ```sql
@@ -94,8 +97,9 @@ curl -s http://localhost:8080/health/ready
 1. Check application logs for panics; restart pod if found.
 2. Cancel long queries with `SELECT pg_cancel_backend(<pid>)` if
    appropriate.
-3. Batch size is a fixed literal (50 subs per tick, `cmd/velox/main.go`)
-   and is not env-configurable today; a hot-spotting tenant is drained
+3. Batch size is hard-coded as a fixed literal (50 subs per tick,
+   `cmd/velox/main.go`) and is not env-configurable today. A
+   hot-spotting tenant (one tenant dominating the batch) is drained
    on demand with `POST /v1/billing/run` (per tenant, loops until empty)
    rather than by shrinking the batch.
 
@@ -135,9 +139,10 @@ LIMIT 10;
    UPDATE email_outbox SET next_attempt_at = now()
    WHERE status = 'pending' AND attempts < 15;
    ```
-4. Failed (DLQ'd) rows: investigate root cause, then either fix-and-
+4. Failed rows (dead-lettered — "DLQ'd" — set aside after delivery
+   gave up): investigate root cause, then either fix-and-
    retry (`UPDATE ... SET status='pending', attempts=0`) or accept
-   loss + alert affected customers.
+   the loss and alert affected customers.
 
 ### 3. Webhook outbox backed up
 
@@ -145,7 +150,8 @@ LIMIT 10;
 
 **Why**:
 - Customer's webhook endpoint is down or rejecting.
-- HMAC signature mismatch (customer rotated secret without telling
+- HMAC signature mismatch — the shared-secret signature on each
+  delivery no longer verifies (customer rotated secret without telling
   Velox).
 
 **Diagnose**:
@@ -175,12 +181,14 @@ LIMIT 20;
 ### 4. Dunning circuit breaker open
 
 **Symptom**: `velox_stripe_breaker_state == 2` (open; 1 = half-open
-probing); dunning retries silently skipping (correct behaviour);
+probing); dunning retries — the automated follow-up attempts on failed
+payments — are silently skipping (correct behaviour);
 customers report they expected retries but no email arrived.
 
 **Why**:
-- Stripe API has been failing repeatedly; breaker tripped to protect
-  the retry budget.
+- Stripe API has been failing repeatedly; the circuit breaker (which
+  stops calling a dependency that keeps failing, until it recovers)
+  tripped to protect the retry budget.
 - Tenant's Stripe credentials are invalid (per-tenant breaker).
 
 **Diagnose**:
@@ -209,10 +217,13 @@ SELECT outcome, count(*) FROM (
 
 **Why**:
 - Stripe webhook delivery delayed or lost.
-- Reconciler isn't running (single-instance assumption broken?).
-- The PI is parked at `requires_action` (off-session SCA nobody
-  completes). The reconciler resolves only TERMINAL Stripe outcomes —
-  it deliberately skips in-flight PIs every sweep, so these never
+- The reconciler (the periodic sweep that re-checks payment status
+  against Stripe) isn't running (single-instance assumption broken?).
+- The Stripe PaymentIntent (PI) is parked at `requires_action` — an
+  off-session SCA challenge (Strong Customer Authentication, a bank
+  verification step) that nobody completes. The reconciler resolves
+  only TERMINAL Stripe outcomes — it deliberately skips in-flight PIs
+  every sweep, so these never
   self-heal: cancel the PI in Stripe (the reconciler then settles it
   failed) or get the customer to complete authentication.
 
@@ -240,8 +251,9 @@ LIMIT 20;
 sees Advancing badge stuck.
 
 **Why**:
-- Catchup loop processing many cycles — large jump on a monthly sub
-  can require dozens of billing-engine sweeps.
+- Catchup loop processing many cycles — a test clock simulates time so
+  billing can be exercised without waiting, and a large jump on a
+  monthly sub can require dozens of billing-engine sweeps.
 - Billing-engine error mid-catchup; sub flipped to
   `internal_failure`.
 
@@ -265,7 +277,8 @@ GROUP BY s.id, s.next_billing_at, tc.updated_at;
 2. If `internal_failure`, retry the advance: the dashboard's
    `Retry advance` button (or `POST /v1/test-clocks/<clock_id>/retry-advance`)
    flips the clock back to `advancing` and resumes catchup from where it
-   stopped (ADR-018). Delete only as a last resort — since ADR-086 clock
+   stopped (recorded in ADR-018 — an architecture decision record).
+   Delete only as a last resort — since ADR-086, clock
    deletion is a complete teardown of the clock's simulated data.
 
 ### 7. RLS leakage suspected
@@ -274,7 +287,9 @@ GROUP BY s.id, s.next_billing_at, tc.updated_at;
 support ticket includes data from a different tenant than the
 operator's session.
 
-**This is a SEV-1.** RLS leakage is the worst-case bug.
+**This is a SEV-1** (highest-severity incident). A leak across RLS
+(Row-Level Security — the Postgres mechanism that hides each tenant's
+rows from every other tenant) is the worst-case bug.
 
 **Diagnose**:
 1. Lock down. Velox has NO read-only mode — contain by revoking API
@@ -288,7 +303,7 @@ operator's session.
    ```
    Anything unexpected here = isolation broken.
 3. Check the leaked query: was it run with `app.tenant_id` correctly
-   set? `app.bypass_rls`?
+   set? Was `app.bypass_rls` involved?
 
 **Fix**:
 - Patch the path that bypassed RLS.
@@ -398,8 +413,9 @@ demand via `POST /v1/billing/run` (loops until that tenant is empty)
 rather than by tuning these knobs.
 
 Watch `velox_billing_cycle_duration_seconds` to ensure each tick fits
-inside the interval; if a tick runs long, the leader-held advisory lock
-makes the next tick skip rather than collide, so you'll see skipped
+inside the interval. If a tick runs long, the leader-held advisory lock
+(a Postgres application-level lock that lets only one instance run the
+tick) makes the next tick skip rather than collide, so you'll see skipped
 ticks (not lock waits) and a lengthening backlog.
 
 ## Manual operator interventions
@@ -428,17 +444,18 @@ INSERT INTO invoice_dunning_events (tenant_id, run_id, invoice_id, event_type, s
 VALUES ('<tenant_id>', '<run_id>', '<invoice_id>', 'resolved', 'resolved', 'invoice_voided');
 ```
 
-Do NOT write `manually_resolved` — it is the legacy pre-0170 value that meant
-"voided OR written off", and the CHECK constraint keeps it legal only so rows
-predating the split stay readable.
+Do NOT write `manually_resolved` — it is the legacy value from before
+migration 0170 that meant "voided OR written off", and the CHECK
+constraint keeps it legal only so rows predating the split stay readable.
 
 **This SQL resolves the RUN only — it does not touch the invoice.** The
-endpoint propagates (void / mark-uncollectible / record-payment); this does
-not. Flip the invoice too, or you leave the pair disagreeing — which is
-exactly the one row the 0170 backfill could not map.
+endpoint propagates the matching invoice change (void / mark-uncollectible /
+record-payment); this SQL does not. Flip the invoice too, or you leave the
+pair disagreeing — exactly the shape of the one row the 0170 backfill could
+not map.
 
-Use only when dashboard "Resolve" action is unavailable. Audit log
-this action.
+Use only when the dashboard "Resolve" action is unavailable. Record
+this action in the audit log.
 
 ### Force-mark an invoice paid (offline payment received)
 
@@ -459,7 +476,7 @@ Audit log this action manually if running SQL directly.
 ### A customer has no usable payment method on file
 
 There is no `setup_status` flag to flip — the `customer_payment_setups`
-table was dropped (migration 0097); saved cards live in the
+table was dropped (migration 0097). Saved cards live in the
 `payment_methods` table, written by the Stripe `setup_intent.succeeded` /
 `payment_method.attached` webhooks. If a webhook was missed, the fix is
 to re-drive it (re-send from the Stripe dashboard) or have the customer
@@ -467,7 +484,8 @@ re-add a card via the hosted payment-setup page — not a SQL flag flip.
 
 ## Logs to grep when paged
 
-Velox uses structured logging via `slog`. Useful greps:
+Velox uses structured logging via `slog` (Go's standard structured
+logger). Useful greps:
 
 ```bash
 # Billing cycle errors

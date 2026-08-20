@@ -1,13 +1,20 @@
 # Email Setup
 
+How to wire a Velox deployment's outbound email to an SMTP provider
+and verify it works. Written for the engineer operating the
+deployment — no prior familiarity with this codebase assumed.
+
 Velox sends customer-facing emails (invoices, receipts, credit notes,
-dunning notices, payment-failed notifications, payment-setup links,
+dunning notices — automated overdue-payment reminders — plus
+payment-failed notifications, payment-setup links,
 password resets, team invites) through SMTP. Plug in your existing
-ESP via env vars; no code changes needed to swap providers.
+email service provider (ESP) via env vars; no code changes needed to
+swap providers.
 
 This doc covers production-ready SMTP configuration. Bounce/
 complaint webhooks (per-ESP webhook receivers feeding `email_status`
-back into Velox) are out of scope for v1 — configure suppressions on
+— Velox's per-customer deliverability field — back into Velox) are
+out of scope for v1 — configure suppressions (do-not-send lists) on
 the ESP side instead.
 
 ## Quickstart
@@ -23,7 +30,8 @@ SMTP_FROM=billing@yourdomain.com
 SMTP_TLS=starttls         # starttls (default) | implicit | none
 ```
 
-Plus three URL vars that build the CTAs in customer-facing emails:
+Plus three URL vars that build the call-to-action (CTA) links in
+customer-facing emails:
 
 ```bash
 HOSTED_INVOICE_BASE_URL=https://billing.example.com    # email "View & pay invoice" / "View receipt" CTA target → /invoice/<public_token>
@@ -31,9 +39,11 @@ CUSTOMER_PORTAL_URL=https://billing.example.com        # SPA base for the Stripe
 PAYMENT_UPDATE_URL=https://billing.example.com/update-payment   # payment-update-request emails (no-PM-at-finalize, charge-failure)
 ```
 
-Restart Velox; the next email queued in `email_outbox` dispatches via
-your provider. The server boots with WARN lines for each missing
-env, so misconfiguration is unmissable without preventing startup:
+Restart Velox; the next email queued in `email_outbox` — the Postgres
+table where every outgoing email waits for a background dispatcher to
+send it — goes out via your provider. The server boots with WARN
+lines for each missing env, so misconfiguration is unmissable without
+preventing startup:
 
 | Env var unset | Boot warning | Customer-visible failure |
 |---|---|---|
@@ -42,13 +52,19 @@ env, so misconfiguration is unmissable without preventing startup:
 | `CUSTOMER_PORTAL_URL` | *(no dedicated boot warning)* | Not a customer email variable — it is the SPA base for the Stripe payment-method-setup return URL. Unset → the return URL silently defaults to `http://localhost:5173`. |
 | `PAYMENT_UPDATE_URL` | `PAYMENT_UPDATE_URL NOT SET — …` | Payment-update-request emails (no-PM-at-finalize, charge-failure) skipped at send time. |
 
-For local dev, point at the Mailpit container in `docker-compose.yml`
-(see "Local dev" below).
+("No-PM-at-finalize" above = an invoice reached finalization with no
+payment method on file for the customer.)
+
+For local dev, point at the Mailpit container — a local SMTP catcher
+with a web inbox — bundled in `docker-compose.yml` (see the Mailpit
+section at the end of the provider list below).
 
 ## Sender domain authentication (DP responsibility)
 
-Before going to production, configure your sending domain so emails
-don't land in spam:
+A DP (design partner) is an early customer running their own Velox
+deployment — DNS sits with you, the operator; Velox can't configure
+it for you. Before going to production, configure your sending
+domain so emails don't land in spam:
 
 - **SPF** record: list your ESP's sending IPs in DNS.
 - **DKIM**: most ESPs auto-sign if you add their CNAME records.
@@ -194,11 +210,11 @@ PAYMENT_UPDATE_URL=http://localhost:5173/update-payment
 ```
 
 View captured email at <http://localhost:8025>. Nothing leaves
-your machine. The dev path now exercises the same SMTP code path
-as production — the previous "log to stdout when SMTP_HOST is
+your machine, yet dev exercises the same SMTP code path as
+production — an earlier "log to stdout when SMTP_HOST is
 unset" fallback was removed so dev and prod can't drift.
 
-Emails appear at `http://localhost:8025`. Local-only; no DNS or auth
+The inbox at `http://localhost:8025` is local-only; no DNS or auth
 required. Don't use `SMTP_TLS=none` in production — emails travel
 in plaintext.
 
@@ -270,7 +286,9 @@ underlying transport. SMTP stays as the universal floor.
 
 ## Sending high-volume from one tenant
 
-If a single tenant sends >10k emails/hour:
+A tenant is one company's account on a Velox deployment — the
+business doing the billing, not its end customers. If a single
+tenant sends >10k emails/hour:
 
 - **Lower the email-outbox dispatcher concurrency** — Velox runs one
   dispatcher worker today; high concurrency against rate-limited
