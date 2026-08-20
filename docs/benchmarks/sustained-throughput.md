@@ -127,9 +127,27 @@ lifts** and 96–99 % of requests are affected, unlike the pool freezes, which l
 in the instrumented series (E2's per-second p50 lift — an artifact of ~36 ms
 batch-100 requests against ~0.2 s stalls — is the one most-likely exception). The at-a-glance signature: average IO size collapsing ~107 KB
 → ~6 KB while queue depth jumps into the hundreds at a logged vacuum
-completion. The full attribution evidence and the two untested levers are in
-[What this leaves](#what-this-leaves) below — the levers stay an open question
-until an arm tests them.
+completion. The full attribution evidence is in
+[What this leaves](#what-this-leaves) below. **The lever is tested (2026-08-20,
+at 25k ev/s batch 100, same rig, control vs treatment, fresh 20M table each):**
+with stock `autovacuum_vacuum_insert_scale_factor` (0.2) each pass rewrites
+everything added since the last — a burst that grows with the table (64k →
+485k pages dirtied across five repeats) — and at 80M rows one completing pass
+froze every commit for **11 consecutive seconds** (worst 1-s p99 3,279 ms,
+132 drops, the repeat failed its gate); 15 marker-classified vacuum
+freeze-seconds in the series. With **`autovacuum_vacuum_insert_scale_factor
+= 0.02`**, passes are ~10× smaller (≤48k pages, several landing between
+repeats), the worst freeze was 0.63 s, vacuum freeze-seconds 3, and the
+series ran **5/5 with zero drops**. Medians were identical (p50 55.7 vs
+55.9 ms) — the setting costs nothing on the median; it bounds the storm to
+the growth slice instead of 20 % of an ever-growing table. (A first
+cross-rig comparison suggested a +20 ms median cost; a same-rig control
+refuted it — the two rigs' volumes differ, which is why the control was
+required. Scope: measured at 25k b100; at 12k b10 the debt accrues at half
+the rate and requests are 8 ms, so the residual storms would surface in p99
+only — untested there.) The pacing lever
+(`autovacuum_vacuum_cost_delay`/`cost_limit`) was held in reserve and stays
+untested — not needed at this rate.
 
 ### What the read probe found: the per-customer usage summary is a linear scan
 

@@ -375,11 +375,17 @@ queue runs to hundreds with tens of thousands of ~6 KB writes per second and
 every commit's WAL write waits behind it: **p50 lifts for everyone** (36 →
 64 ms, 96–99 % of requests affected), unlike the WAL-pool stall above, which
 leaves p50 alone. Telltale in Enhanced Monitoring: IOs/s ×10–20 while the
-average IO size collapses from ~100 KB to ~6 KB. Levers exist but are
-**untested** here — pace the vacuum (`autovacuum_vacuum_cost_delay` up /
-`cost_limit` down: shallower but longer storms) or vacuum smaller slices more
-often (`autovacuum_vacuum_insert_scale_factor` below 0.2: smaller bursts) —
-so this entry is a diagnosis, not yet a setting. Details and evidence:
+average IO size collapses from ~100 KB to ~6 KB. **Do:** set **`autovacuum_vacuum_insert_scale_factor = 0.02`** (dynamic; or
+per-table reloptions on the events table). Tested control-vs-treatment on the
+same rig at 25,000 events/s: stock's pass at 80M rows froze every commit for
+11 s (3.3 s worst second, dropped requests, failed repeat); at 0.02 the passes
+are ~10× smaller, worst freeze 0.63 s, five repeats of five passed with zero
+drops, and the median is untouched (55.7 vs 55.9 ms). It bounds each storm to
+the ~2 % growth slice instead of 20 % of an ever-growing table — the burst no
+longer scales with table size. Measured at 25k batch 100; at lower rates the
+residual storms are smaller still. The pacing lever
+(`autovacuum_vacuum_cost_delay`/`cost_limit`) was not needed and stays
+untested. Details and evidence:
 `docs/benchmarks/sustained-throughput.md` § third run, "What this leaves".
 
 ## Scheduler interval tuning
