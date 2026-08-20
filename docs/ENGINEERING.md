@@ -62,10 +62,13 @@ result.
   site-set (every writer, effect-firer, gated reader, caller, crash point)
   before writing a line. Twelve gates; a "no" blocks the PR.
 - **[Manual-test strategy](dev/manual-test-strategy.md) — how to prove.** "I
-  clicked it and nothing broke" is not a test result. Five lenses on every flow,
-  a per-box protocol, and a technique catalogue in which every entry is there
-  because it caught a real defect here — where an entry names a PR, that PR is
-  the bug it found. Nothing in it is aspirational.
+  clicked it and nothing broke" is not a test result here. Every flow is checked
+  from five angles (behavior, money math, honest UI copy, design, and what the
+  screen actually looks like), there are rules for what must happen before a
+  test checkbox may be ticked, and the document's list of testing techniques
+  has one admission rule: a technique is only listed if it once caught a real
+  bug in this codebase — where a technique cites a PR, that PR is the bug it
+  found. The document describes what actually happens, not what we aspire to.
 
 ## 4. Three decisions, one reversal, and one thing the monitoring missed
 
