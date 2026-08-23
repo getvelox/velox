@@ -8,34 +8,34 @@
 
 ## Motivation
 
-Stripe ships **billing thresholds** as Tier 1 — a tenant configures a per-subscription cap (`amount_gte` in cents, or `usage_gte` per item in units), and when the in-cycle running total crosses the threshold the engine **finalizes an invoice early**, optionally **resets the billing cycle** (so the next cycle starts at zero), and emits a webhook event. This shields the tenant's customers from runaway bills mid-cycle, and shields Velox tenants from collection risk on customers whose usage suddenly explodes.
+Stripe ships **billing thresholds** as Tier 1 (top-priority in Velox's Stripe-parity feature ranking) — a tenant configures a per-subscription cap (`amount_gte` in cents, or `usage_gte` per item in units). When the in-cycle running total crosses the threshold, the engine **finalizes an invoice early** (issues it mid-cycle instead of waiting for period end), optionally **resets the billing cycle** (so the next cycle starts at zero), and emits a webhook event. This shields the tenant's customers from runaway bills mid-cycle, and shields Velox tenants from collection risk on customers whose usage suddenly explodes.
 
 Velox already has every primitive to do this:
 
-- The cycle scan (`Engine.RunCycle` → `Engine.billSubscription` → `CreateInvoiceWithLineItems` → `advanceCycleOrCancel`) already builds line items from the partial-cycle window, prices them via `domain.ComputeAmountCents`, finalizes the invoice, and rolls the cycle forward.
-- `usage.AggregateByPricingRules` already computes the running total over an arbitrary window, including for multi-dim meters.
-- The scheduler already runs a billing tick under an advisory lock (`s.billingLockKey`) that gates exactly-one finalize per (subscription, cycle).
+- The cycle scan (the scheduler pass that bills each subscription at period end: `Engine.RunCycle` → `Engine.billSubscription` → `CreateInvoiceWithLineItems` → `advanceCycleOrCancel`) already builds line items from the partial-cycle window, prices them via `domain.ComputeAmountCents`, finalizes the invoice, and rolls the cycle forward.
+- `usage.AggregateByPricingRules` already computes the running total over an arbitrary window, including for multi-dim (multi-dimensional) meters — one meter carrying differently-priced slices of usage, split by dimension labels.
+- The scheduler already runs a billing tick under an advisory lock (a Postgres application-level lock, here `s.billingLockKey`) that gates exactly-one finalize per (subscription, cycle).
 
-The slice is composition: **a mid-cycle scan tick** that, for every subscription with thresholds configured, computes the partial-cycle total via the same aggregation path the cycle scan uses, and when the threshold is crossed, **calls into the existing finalize-cycle code path early** with `billing_reason="threshold"`. We do **not** duplicate the build-line-items or advance-cycle code — same code path, different entry point.
+The slice (the unit of work here) is composition: **a mid-cycle scan tick**. For every subscription with thresholds configured, it computes the partial-cycle total via the same aggregation path the cycle scan uses; when the threshold is crossed, it **calls into the existing finalize-cycle code path early** with `billing_reason="threshold"`. We do **not** duplicate the build-line-items or advance-cycle code — same code path, different entry point.
 
-The Track B unblock: the cost dashboard's projected-bill line gets a new "approaching threshold" indicator (red bar at 80%, lock icon at 100%) reading from a new `subscription.billing_thresholds` field on the existing GET endpoint.
+The unblock for Track B (the dashboard/UI workstream): the cost dashboard's projected-bill line gets a new "approaching threshold" indicator (red bar at 80%, lock icon at 100%) reading from a new `subscription.billing_thresholds` field on the existing GET endpoint.
 
 ## Goals
 
 - **Per-subscription threshold configuration.** Tenants set `billing_thresholds` on a subscription via `PATCH /v1/subscriptions/{id}`. Two threshold types: `amount_gte` (currency-major-unit-cents int64) and `item_thresholds[]` (per-item `usage_gte` decimal). Either alone or both — first to fire wins.
 - **Mid-cycle scan that fires the existing finalize path.** When a threshold crosses, the engine emits the same line set the next cycle scan would have emitted, finalizes with `billing_reason="threshold"`, and (when `reset_billing_cycle=true`) rolls the cycle forward as if the period had ended naturally.
-- **Idempotent under retry.** The scheduler's existing advisory-lock leader gating already prevents two ticks from doing the same work; the threshold scan inherits this. Within a single tick, a subscription whose threshold has already fired in the current cycle is skipped (no second invoice).
-- **Multi-dim parity.** `item_thresholds[]` use `usage.AggregateByPricingRules` so a multi-dim meter's running total respects rule priority + claim semantics, identical to the cycle scan.
-- **Webhook event.** `subscription.threshold_crossed` fires when the threshold causes the early finalize. Standard webhook outbox path; standard signature.
+- **Idempotent under retry.** The scheduler's existing advisory-lock leader gating (only the instance holding the lock runs a tick) already prevents two ticks from doing the same work; the threshold scan inherits this. Within a single tick, a subscription whose threshold has already fired in the current cycle is skipped (no second invoice).
+- **Multi-dim parity.** `item_thresholds[]` use `usage.AggregateByPricingRules` so a multi-dim meter's running total respects rule priority + claim semantics (each event is counted by at most one rule, highest priority first), identical to the cycle scan.
+- **Webhook event.** `subscription.threshold_crossed` fires when the threshold causes the early finalize. Standard webhook outbox path (the event row is written to the database and delivered by a background dispatcher); standard signature.
 - **Wire-contract clean.** Snake-case JSON, decimal-string `usage_gte`, integer-cents `amount_gte`, always-array `item_thresholds`. Same ergonomics as preview/customer-usage.
 
 ## Non-goals (deferred)
 
-- **Plan-level thresholds.** Stripe lets you configure thresholds on a price; Velox v1 attaches them to a subscription only. Per-plan defaults are a tenant-level concern that doesn't have a good home yet, and reproducing the precedence rule (sub overrides plan overrides product) invites the kind of decision tree that has to be unwound when wrong. Real consumer first.
+- **Plan-level thresholds.** Stripe lets you configure thresholds on a price; Velox v1 attaches them to a subscription only. Per-plan defaults are a tenant-level concern that doesn't have a good home yet. Reproducing the precedence rule (sub overrides plan overrides product) invites the kind of decision tree that has to be unwound when wrong. Real consumer first.
 - **Currency conversion for cross-currency thresholds.** A subscription with multiple line currencies cannot have a single `amount_gte`; v1 rejects multi-currency subscriptions with `amount_gte` set (validated at PATCH time). Multi-currency tenants surface as a documented edge in the changelog.
 - **Threshold-driven email/dashboard alerts (the soft-warning path).** That's Week 5d (billing alerts); separate slice, separate sibling worktree, separate event family. The threshold here is the **hard cap that fires an invoice**, not the "you've used 80% of your monthly $X" soft notification.
-- **Resetting the cycle to a partial-period boundary.** When `reset_billing_cycle=true`, the new cycle starts at the moment the threshold fired and runs for one full cycle's duration (calendar-month-equivalent). We do not preserve the original anniversary day — that's a Stripe quirk we can add later if a real consumer asks.
-- **Coupon / credit application to the threshold-fired invoice.** Same boundary as create_preview: v1 finalizes subtotal-only thresholds. Discounts and credits apply at finalize via the existing pipeline if configured on the subscription, but the threshold *check* is computed against subtotal — discount+credit could prevent a true threshold cross from firing, which is the wrong shape (the customer's *raw* spend is what tenants want capped). Documented in changelog.
+- **Resetting the cycle to a partial-period boundary.** When `reset_billing_cycle=true`, the new cycle starts at the moment the threshold fired and runs for one full cycle's duration (calendar-month-equivalent). We do not preserve the original anniversary day (the day-of-month the cycle renewed on before the reset) — that's a Stripe quirk we can add later if a real consumer asks.
+- **Coupon / credit application to the threshold-fired invoice.** Same boundary as create_preview (the upcoming-invoice preview endpoint): v1 finalizes subtotal-only thresholds. Discounts and credits apply at finalize via the existing pipeline if configured on the subscription, but the threshold *check* is computed against subtotal. Checking net of discount+credit could prevent a true threshold cross from firing — the wrong shape, because the customer's *raw* spend is what tenants want capped. Documented in changelog.
 
 ## Today's surface (in repo)
 
@@ -89,7 +89,7 @@ To clear: `{"billing_thresholds": null}`.
 
 `item_thresholds[].usage_gte` is the running cycle quantity for the single meter rated by the item's plan. When the item's running quantity crosses this, same early-finalize fires. Item thresholds are scoped to the item's plan's *meter* — a base-fee-only plan cannot have an item threshold (validated at PATCH time).
 
-`reset_billing_cycle` (default `true`) controls whether the cycle resets after the early finalize. `false` keeps the cycle running on its original schedule; the threshold-fired invoice is one extra invoice within the cycle and the cycle's natural-boundary invoice still fires at period end (whatever residual usage accumulated between the threshold fire and the period end).
+`reset_billing_cycle` (default `true`) controls whether the cycle resets after the early finalize. `false` keeps the cycle running on its original schedule; the threshold-fired invoice is one extra invoice within the cycle, and the cycle's natural-boundary invoice still fires at period end (billing whatever residual usage accumulated between the threshold fire and the period end).
 
 `item_thresholds` is an array; subscriptions with multiple items can configure per-item caps.
 
@@ -114,7 +114,7 @@ Response: the full updated subscription, hydrated with items and thresholds.
 ### Error shapes
 
 - `404 subscription_not_found` — subscription ID does not exist for the tenant.
-- `400 invalid_request` — `amount_gte <= 0`, or `usage_gte` non-positive, or `item_thresholds[].subscription_item_id` not on this subscription, or both `billing_thresholds` set and the subscription has multiple line currencies (multi-currency cap not supported in v1).
+- `400 invalid_request` — `amount_gte <= 0`, or `usage_gte` non-positive, or `item_thresholds[].subscription_item_id` not on this subscription, or `billing_thresholds` set while the subscription has multiple line currencies (multi-currency cap not supported in v1).
 - `409 invalid_state` — subscription is canceled or archived (no point setting a threshold on a terminal subscription).
 
 ### Webhook event
@@ -171,7 +171,7 @@ The advisory-lock claim is the **idempotency seam** — if a previous tick alrea
 
 The naive failure mode: a tick crosses the threshold, `billSubscription` succeeds, but `advanceCycleOrCancel` fails (DB blip). The next tick would re-aggregate the same window, see the threshold still crossed, and try to fire again — producing a duplicate invoice.
 
-The guard: `Engine.fireThreshold` uses the **existing** invoice-source-key dedup column on the `invoices` table. We add a new natural key `(tenant, subscription, cycle_start, billing_reason='threshold')` via a partial unique index — at most one threshold-fired invoice per cycle. The next tick's `INSERT … ON CONFLICT DO NOTHING` returns the existing row, the engine notices "already fired this cycle" and short-circuits before computing line items. Cycle reset is idempotent because it's keyed on `current_billing_period_start <= now` (re-running on an already-advanced row leaves it unchanged).
+The guard: `Engine.fireThreshold` uses the **existing** invoice-source-key dedup column on the `invoices` table. We add a new natural key `(tenant, subscription, cycle_start, billing_reason='threshold')` via a partial unique index — at most one threshold-fired invoice per cycle. The next tick's `INSERT … ON CONFLICT DO NOTHING` returns the existing row; the engine notices "already fired this cycle" and short-circuits before computing line items. Cycle reset is idempotent because it's keyed on `current_billing_period_start <= now` (re-running on an already-advanced row leaves it unchanged).
 
 We don't need a new "threshold_fired_at" column — the existence of a finalized invoice with `billing_reason='threshold'` and the matching `billing_period_start` IS the marker.
 
@@ -306,13 +306,13 @@ The existing `billSubscription` accepts a new `billingReason` parameter; existin
 
 - Per-tick: 1 indexed query for candidate subs (filtered by `billing_threshold_amount_gte IS NOT NULL OR EXISTS (item_thresholds)`), then 1 `AggregateByPricingRules` call per meter per candidate sub. For a tenant with 10K subs and a 100-batch tick, that's at most 100 aggregation calls per minute — well under the cycle scan's existing budget.
 - Tick interval: piggybacks on the existing scheduler tick (`s.tickInterval`, default 30s). No new ticker.
-- The "did the threshold cross since last tick?" check is **not** implemented — we just check "is the threshold currently crossed?". A tick that ran during the cross window will fire it; a tick that runs after `fireThreshold` already advanced the cycle will see the new (post-advance) running total which starts at zero. The unique partial index on `(tenant, subscription, billing_period_start)` is the duplicate-prevention seam, not a "since last tick" check.
+- The "did the threshold cross since last tick?" check is **not** implemented — we just check "is the threshold currently crossed?". A tick that ran during the cross window will fire it; a tick that runs after `fireThreshold` already advanced the cycle will see the new (post-advance) running total, which starts at zero. The unique partial index on `(tenant, subscription, billing_period_start)` is the duplicate-prevention seam, not a "since last tick" check.
 
 ## Decimal & numeric considerations
 
 `usage_gte` is `NUMERIC(38, 12)` in Postgres and `decimal.Decimal` in Go, marshaled as a JSON string per ADR-005. `amount_gte` is `BIGINT` in Postgres and `int64` in Go; integer cents.
 
-The `item_thresholds` array is an aux table because per-item config doesn't compose cleanly into a single row's columns and JSONB on a hot-path-aggregation row is a footgun (no per-item indexes, query plans surprise people). One row per item is the same shape as `subscription_items` itself.
+The `item_thresholds` array is stored as an aux (auxiliary) table because per-item config doesn't compose cleanly into a single row's columns, and JSONB on a hot-path-aggregation row is a footgun (no per-item indexes; query plans surprise people). One row per item is the same shape as `subscription_items` itself.
 
 ## Open questions
 

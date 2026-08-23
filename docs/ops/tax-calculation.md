@@ -1,10 +1,11 @@
 # Velox — Tax Calculation
 
-Velox ships three tax providers. Each tenant picks one via
-`tenant_settings.tax_provider`; the billing engine resolves the provider
-at invoice build time and reuses it through finalize and credit-note
-issuance. Velox does not pick a tax model — the tenant's Stripe account
-holds the legal registration (OIDAR, domestic GST/VAT, US sales tax, …)
+Velox ships three tax providers — pluggable backends that compute the tax
+on an invoice. Each tenant picks one via `tenant_settings.tax_provider`.
+The billing engine resolves the provider at invoice build time and reuses
+it through finalize and credit-note issuance. Velox does not pick a tax
+model — the tenant's Stripe account holds the legal registration (OIDAR — cross-border
+digital services — domestic GST/VAT, US sales tax, …)
 and Velox supports whatever shape that registration produces.
 
 ## Providers
@@ -12,10 +13,11 @@ and Velox supports whatever shape that registration produces.
 ### `none`
 
 Zero-tax backend. `Calculate` returns zero per line; `Commit` and
-`Reverse` are no-ops. Pick this when the tenant doesn't collect tax
+`Reverse` are no-ops (the three provider methods — see *Provider
+interface* below). Pick this when the tenant doesn't collect tax
 (early-stage B2B, unregulated jurisdictions). An empty `tax_provider`
-falls through to `none`; an unrecognised value is a loud error that
-aborts invoice creation for that tenant — a corrupted settings row
+falls through to `none`. An unrecognised value is a loud error that
+aborts invoice creation for that tenant: a corrupted settings row
 stalls billing rather than silently taxing at zero.
 
 ### `manual`
@@ -24,9 +26,11 @@ Flat percent rate applied uniformly across every line item.
 Configured per tenant via `tenant_settings.tax_rate` (a percent —
 `7.25` = 7.25%) and
 `tenant_settings.tax_name` (the label that renders on the invoice —
-"VAT", "Sales Tax", "GST", …). Honours tax-inclusive vs exclusive via
+"VAT", "Sales Tax", "GST", …). Honours tax-inclusive vs exclusive pricing (tax contained in the
+listed price vs added on top of it) via
 `Request.TaxInclusive`, exempt customers (`StatusExempt`), and
-reverse-charge customers (`StatusReverseCharge`). `Commit` and `Reverse`
+reverse-charge customers (`StatusReverseCharge` — the buyer accounts for
+the tax instead of the seller). `Commit` and `Reverse`
 are no-ops (no upstream state to record).
 
 Pick this when:
@@ -44,9 +48,9 @@ handling* below.)
 Calls Stripe's Tax Calculations API at invoice build, creates a
 `tax_transaction` at invoice finalize via `Commit`, and reverses against
 that transaction at credit-note issue via `Reverse`. Multi-tenant: the
-Stripe client is resolved per ctx (`tenant_id` + `livemode`) via the
-`StripeClientResolver` interface, so each tenant's calls hit their own
-Stripe account in the correct mode.
+Stripe client is resolved per ctx (per request context: `tenant_id` +
+`livemode`) via the `StripeClientResolver` interface, so each tenant's
+calls hit their own Stripe account in the correct mode.
 
 Pick this when:
 
@@ -68,7 +72,8 @@ All three implement the same `Provider` shape:
 | `Commit`    | invoice finalize  | yes (`stripe_tax`)   |
 | `Reverse`   | credit-note issue | yes (`stripe_tax`)   |
 
-`Commit` is what makes a tax decision durable upstream. Stripe Tax
+`Commit` is what makes a tax decision durable upstream (recorded on
+Stripe's side, not just Velox's). Stripe Tax
 *calculations* expire after 24 hours, but `tax_transaction`s are
 permanent and surface in Stripe's tax reporting. The transaction ID is
 persisted on `invoices.tax_transaction_id`. `Commit` uses the invoice ID
@@ -94,8 +99,8 @@ ignore the outcome without branching on provider name.
 On failure there is one behavior (post ADR-041 — the legacy
 `fallback_manual` policy was removed 2026-05-30; `block` is now the only
 `OnFailure` value): the error propagates, the engine defers the invoice
-to `tax_status=pending`, and a scheduled retry re-runs `Calculate`. No
-invoice is ever issued at a guessed rate.
+to `tax_status=pending` (parked, not issued), and a scheduled retry
+re-runs `Calculate`. No invoice is ever issued at a guessed rate.
 
 The outcome is counted on `velox_tax_outcome_total{outcome, reason}`:
 
@@ -171,8 +176,8 @@ audit table — the invoice is the durable record:
 | `invoice_line_items.tax_name`       | label rendered on the invoice                           |
 
 The line-level fields are what the customer sees on the PDF. The
-invoice-level fields are the upstream linkage that lets `Reverse` find
-the original `tax_transaction` when a credit note is issued, and let
+invoice-level fields are the upstream linkage: they let `Reverse` find
+the original `tax_transaction` when a credit note is issued, and they let
 operators reconcile a Velox invoice against Stripe Tax reports without
 joining log lines.
 
@@ -180,8 +185,9 @@ joining log lines.
 
 `internal/tax/taxid.go` validates customer tax IDs (VAT numbers, GST
 numbers, etc.) and surfaces the validated ID on the invoice so the PDF
-renders the correct legal text. Format validation is local; existence
-validation against tax authorities is out of scope.
+renders the correct legal text. Format validation is local (the ID's
+shape only); checking that the ID actually exists with a tax authority is
+out of scope.
 
 ## Related
 

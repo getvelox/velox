@@ -22,9 +22,9 @@
 
 ## Motivation
 
-Stripe Billing's onboarding for an AI-native product is a multi-day chore: you create N Meters by hand (one per `model × operation × cached` combination), wire each into a Plan, attach a webhook, configure dunning retry logic, then mock the whole thing for QA. The first invoice is a week away. Buyers leave.
+Stripe Billing's onboarding for an AI-native product is a multi-day chore: you create N Meters by hand (one per `model × operation × cached` combination), wire each into a Plan, attach a webhook, configure dunning retry logic (the automated retries after a payment fails), then mock the whole thing for QA. The first invoice is a week away. Buyers leave.
 
-Velox's AI-native wedge includes **pricing recipes**: a single API call, ~30 seconds, walks away with a working `anthropic_style` setup — plans, meters, multi-dim pricing rules, dunning, webhook endpoint, sample data. The picker UI in the dashboard means a non-technical CS rep can do the same thing.
+Velox's AI-native wedge — its differentiating, AI-first pitch — includes **pricing recipes**: a single API call, ~30 seconds, walks away with a working `anthropic_style` setup — plans, meters, multi-dim (multi-dimensional) pricing rules, dunning, webhook endpoint, sample data. The picker UI in the dashboard means a non-technical CS rep can do the same thing.
 
 This is the developer-experience flagship that turns the AI-native pillar from a slide into a 5-minute quickstart. Without it, the multi-dim meter machinery is invisible: no prospect builds a 12-rule `anthropic_style` setup by hand to evaluate it. With recipes, evaluation collapses to one POST.
 
@@ -35,19 +35,19 @@ This design depends on multi-dim meters being merged.
 - **One-call instantiation.** `POST /v1/recipes/instantiate` atomically creates the full surface area for a given recipe key (plans, meters, multi-dim pricing rules, dunning policy, webhook endpoint placeholder, optional sample data). All-or-nothing transaction.
 - **Five built-ins shipping in v1:** `anthropic_style`, `openai_style`, `replicate_style`, `b2b_saas_pro`, `marketplace_gmv`. Each represents a real-world pricing pattern Velox-class buyers actually use.
 - **Preview before commit.** `POST /v1/recipes/{key}/preview` returns the full graph of objects that *would* be created, with no DB writes. Powers the "review and instantiate" dialog in the dashboard.
-- **Embedded YAML, no DB recipe table.** Recipes are versioned with the binary (`internal/recipe/recipes/*.yaml`, `embed.FS`). Tenants don't author them in v1; built-ins only.
+- **Embedded YAML, no DB recipe table.** Recipes are versioned with the binary (`internal/recipe/recipes/*.yaml`, compiled in via Go's `embed.FS`, the standard library's file-embedding mechanism). Tenants don't author them in v1; built-ins only.
 - **Per-instantiation overrides.** Currency, customer-facing names, base prices accept overrides at instantiate time. Changes must round-trip through preview.
 - **Idempotency at the recipe-instance level.** Re-running a recipe by `(tenant_id, recipe_key)` returns the existing instance, no duplicates. Forced re-instantiation is a separate `force=true` flag for ops use.
-- **Dashboard UI: pick → preview → instantiate.** Track B owns the React surface; this design IS the API contract Track B mocks against.
+- **Dashboard UI: pick → preview → instantiate.** Track B (the frontend workstream) owns the React surface; this design IS the API contract Track B mocks against.
 - **Documented at `/docs/recipes` with copy-pasteable curl.** Each recipe gets a one-pager describing the resulting object graph in plain English.
 
 ## Non-goals (deferred)
 
-- **Tenant-authored recipes.** Defer until a paying tenant asks. The maintenance cost of a tenant-recipe registry, validation, version migration, and security review (a recipe is arbitrary infra-as-code) is steep and unwarranted before product/market fit.
+- **Tenant-authored recipes.** Defer until a paying tenant asks. The maintenance cost — a tenant-recipe registry, validation, version migration, and a security review (a recipe is arbitrary infra-as-code) — is steep and unwarranted before product/market fit.
 - **Recipe upgrades / migrations across versions.** A recipe is instantiated once. If Velox ships `anthropic_style` v2, instantiating it on an existing tenant either no-ops (idempotency match by key) or overwrites (force flag). No "upgrade my v1 instance to v2" path. Defer until the API stabilizes.
 - **Marketplace / shared recipes from third parties.** Phase 4+. Security model alone (signing, sandboxing) is its own design.
-- **Cross-tenant recipe templates.** Each tenant gets its own copy. No shared plan catalog across tenants by design — RLS isolation is the whole point.
-- **Recipes that span Stripe configuration** (tax codes per region, payment method preferences). Defer; the tenant's own `tenantstripe` settings already cover this.
+- **Cross-tenant recipe templates.** Each tenant gets its own copy. No shared plan catalog across tenants by design — RLS (Row-Level Security: Postgres itself filters every tenant-scoped query down to the current tenant's rows) isolation is the whole point.
+- **Recipes that span Stripe configuration** (tax codes per region, payment method preferences). Defer; the tenant's own `tenantstripe` (per-tenant Stripe configuration) settings already cover this.
 
 ## Today's surface (in repo)
 
@@ -93,7 +93,7 @@ CREATE POLICY recipe_instances_tenant_isolation ON recipe_instances
 GRANT ALL ON TABLE recipe_instances TO velox_app;
 ```
 
-Storing only the index and the `created_object_ids` map keeps the design boring: the canonical entities are in their own tables and obey their own constraints. If a tenant deletes a meter that came from a recipe, the recipe instance is unaffected — this is intentional. Cascading recipe deletion is a `force=true` operator flow, not a default.
+Storing only the index and the `created_object_ids` map keeps the design boring. The canonical entities live in their own tables and obey their own constraints. If a tenant deletes a meter that came from a recipe, the recipe instance is unaffected — this is intentional. Cascading recipe deletion is a `force=true` operator flow, not a default.
 
 ## API surface
 
@@ -243,7 +243,7 @@ Response `409` if the recipe is already instantiated and `force=false`:
 
 `seed_sample_data=true` additionally creates one demo customer + one trialing subscription against the new plan, so the tenant immediately sees usage flow. Default false; the dashboard's onboarding wizard sets it true on first-time install.
 
-`force=true` deletes the prior `recipe_instances` row plus all entities listed in its `created_object_ids` map (cascade-style cleanup), then runs the recipe fresh. Behind a separate operator-only API key scope (`platform`); secret keys cannot force.
+`force=true` deletes the prior `recipe_instances` row plus all entities listed in its `created_object_ids` map (cascade-style cleanup), then runs the recipe fresh. Gated behind a separate operator-only API key scope (`platform`); secret keys cannot force.
 
 ### `DELETE /v1/recipes/instances/{id}` — uninstall
 
@@ -366,7 +366,7 @@ sample_data:
 
 ### Package layout
 
-New per-domain package: `internal/recipe/` with the canonical store/service/handler trio.
+New per-domain package: `internal/recipe/` with the canonical store/service/handler trio (data access, business logic, HTTP routes — the repo's standard per-domain layering).
 
 ```
 internal/recipe/
@@ -392,11 +392,11 @@ internal/recipe/
 - `usage.Service` for `MeterPricingRule` upsert
 - `customer.Service` + `subscription.Service` for `seed_sample_data`
 
-The dependencies inject as narrow interfaces so the recipe package owns no cross-domain state. Same pattern as `internal/billing/engine`.
+The dependencies inject as narrow interfaces — each declared by the recipe package itself, naming only the methods it calls — so the recipe package owns no cross-domain state. Same pattern as `internal/billing/engine`.
 
 ### Atomicity
 
-`Instantiate` runs in a single `BeginTx(ctx, postgres.TxTenant, tenantID)`. All `Service.Create*` calls accept a `*sql.Tx` (already the convention via `ExecContext` on a transaction). Failure at any step rolls back the whole graph — no half-instantiated tenants.
+`Instantiate` runs in a single `BeginTx(ctx, postgres.TxTenant, tenantID)` — one tenant-scoped database transaction (`TxTenant` sets the RLS tenant variable for the transaction's duration). All `Service.Create*` calls accept a `*sql.Tx` (already the convention via `ExecContext` on a transaction). Failure at any step rolls back the whole graph — no half-instantiated tenants.
 
 ```go
 // service.go (sketch)
@@ -539,7 +539,7 @@ The picker UI shape Track B should aim at:
 - "Preview" button → preview modal showing the object graph (collapsible per type)
 - "Instantiate" button → confirmation → success state with deep-links into the created plan / meter / webhook detail pages
 
-Track B can ship the UI against a mocked API (e.g. MSW handlers) before Track A finishes the backend, then swap to the real API at integration time. This is the design-first / RFC parallel-work pattern.
+Track B can ship the UI against a mocked API (e.g. MSW — Mock Service Worker — handlers) before Track A finishes the backend, then swap to the real API at integration time. This is the design-first / RFC parallel-work pattern.
 
 ## Review status
 

@@ -38,9 +38,9 @@ Nothing here needs a NAT gateway or an IAM instance profile.
 | 5 | `db-ceiling.sh` | pgbench on the same DB and row shape — the denominator |
 | 6 | `teardown.sh` | does not reach `CLEAN` |
 
-Set `KEEP=1` to leave the rig up afterwards (it keeps billing). `TARGET=local
-ADMIN_DSN=postgres://…` runs the identical sequence against a local Postgres,
-which is how the sequence is tested without spending anything.
+Set `KEEP=1` to leave the rig up afterwards (AWS keeps charging for it).
+`TARGET=local ADMIN_DSN=postgres://…` runs the identical sequence against a
+local Postgres, which is how the sequence is tested without spending anything.
 
 ## Reading the result
 
@@ -56,20 +56,26 @@ ceiling   CLOSED-LOOP 16 VUs batch 500 | 1/1 passed | ceiling median 9870 ev/s |
   iterations (the rate was actually offered), 0 failed requests, events
   claimed > 0, events claimed == rows written, Σ quantity sent == Σ gained,
   ≥ 1000 latency samples, last-third p99 ≤ 2× first-third (drift).
-- **The number is latency, not ev/s.** In rate mode ev/s equals what you
-  offered whenever nothing dropped; the medians and ranges of p50/p99 across
-  repeats are the measurement.
+- **The number is latency, not ev/s.** In rate mode (open loop: the load
+  generator offers a fixed arrival rate no matter how fast responses come
+  back) ev/s equals what you offered whenever nothing dropped; the medians
+  and ranges of p50/p99 across repeats are the measurement.
 - **`[FAIL: dropped=…]`** — not sustained at that rate; lower it.
   **`[FAIL: samples=…<1000]`** — the run was too short for a p99; lengthen it
   (the summary says INSUFFICIENT SAMPLES, not NOT SUSTAINED).
   **`[FAIL: probe=DEGRADED]`** — the read path missed its p99 budget while
   ingest ran. That is a finding about the product, not the rig.
-- **`ceiling`** is closed-loop: a maximum, never a service level. Its p50 is
-  queue depth. It is there so a buyer can compare with vendors who only publish
-  that kind of number.
-- **`db-ceiling`** prints the DB's own commit floor for this row shape (leg A),
-  the same with Velox's per-transaction RLS protocol (leg B), and the closed-loop
-  ceiling as a fraction of each.
+- **`ceiling`** is closed-loop (a fixed set of workers — the "VUs" in the sample
+  output above — each sending its next request as soon as the previous
+  response returns): a maximum, never a service
+  level. Its p50 is queue depth, not service time. It is there so a buyer can
+  compare with vendors who only publish that kind of number.
+- **`db-ceiling`** prints the DB's own commit floor for this row shape (leg A:
+  a bare `BEGIN; INSERT; COMMIT` per transaction under pgbench — the
+  batch's rows in one multi-row INSERT), the same with Velox's
+  per-transaction RLS protocol (leg B: the same insert plus the `set_config`
+  round trips Velox issues per transaction), and the closed-loop ceiling as a
+  fraction of each.
 
 Every run also leaves its evidence: `<tag>.txt` (k6 summary), `<tag>.k6.json`,
 `<tag>.samples.jsonl.gz` (raw k6 samples), `<tag>.app.vmstat.log` (5 s CPU on the
@@ -77,7 +83,7 @@ app node), `<tag>.rds.*.json` (RDS CloudWatch, 60 s). Load them into Grafana if
 you want a picture; the verdict never depends on it.
 
 What that evidence can and cannot attribute: a storage stall shows up plainly
-(write IOPS at the volume's ceiling, disk queue depth in the tens); a tail event
+(write IOPS at the volume's ceiling, disk queue depth in the tens). A tail event
 with storage, CPU and memory all flat at 60-second resolution does not — two
 such repeats in the second AWS run stayed unexplained until the third run's
 1-second tooling (next section) caught the mechanism.
@@ -89,9 +95,9 @@ A gate can only say a repeat failed; these say *why*, at 1–5 second resolution
 - `provision.sh` attaches a parameter group that turns on the logging that
   attribution needs (`log_autovacuum_min_duration=0`, `log_checkpoints`,
   `log_lock_waits` with `deadlock_timeout=200`, `log_min_duration_statement=250`
-  without parameters, `pg_stat_statements.track=all`), Performance Insights, and
-  Enhanced Monitoring at 1 s when the role exists. Numbers a run publishes are
-  still the engine's stock behaviour — none of this is tuning.
+  without parameters, `pg_stat_statements.track=all`), Performance Insights
+  (PI), and Enhanced Monitoring (EM) at 1 s when the role exists. Numbers a run
+  publishes are still the engine's stock behaviour — none of this is tuning.
 - `db-sampler.sh start|stop|fetch|settings <tag>` — one SQL statement every 5 s
   on the app node, one JSON line per tick: wait events of every backend,
   `pg_stat_io`, `pg_stat_wal`, `pg_stat_bgwriter`, vacuum/analyze progress, the
@@ -105,7 +111,7 @@ A gate can only say a repeat failed; these say *why*, at 1–5 second resolution
   with p99 > 3× the run's median) **and per-second freeze-seconds** (worst
   request >150 ms and >10 % of that second's requests over 50 ms, with their
   cadence — the bucket rule alone misses one frozen second in six by
-  alignment) and lays every source side by side for each window:
+  alignment). It then lays every source side by side for each window:
   DB counter deltas vs the five minutes before, wait-event census, EM seconds,
   PI seconds, log lines. `tail-census.py <dir> --series A --series B` — the
   series-wide numbers a treatment is judged on.
@@ -115,7 +121,9 @@ A gate can only say a repeat failed; these say *why*, at 1–5 second resolution
   `TransactionLogsDiskUsage` growth and the 1 s device writes.
 
 What the third run found with these, in one line: the tail events were WAL
-segment creation under `WALWriteLock` when the recycled-segment pool ran dry
+segment creation under `WALWriteLock` when the recycled-segment pool (the
+ready-made WAL files Postgres keeps for reuse — old segments recycled
+at checkpoint instead of deleted) ran dry
 (RDS default `min_wal_size` = 192 MB) — `docs/benchmarks/sustained-throughput.md`
 § third run, and the runbook entry "On RDS, set `min_wal_size`".
 
@@ -134,10 +142,10 @@ checks corresponds to a bug that actually shipped in this rig once.
 ## Things that will bite you (each one did)
 
 - **The bench is live-mode by default** (`BENCH_LIVEMODE=false` for test mode).
-  Test-mode ingest does a per-event test-clock lookup production skips, so
-  numbers measured in test mode understate production. Fixtures, key, seeded
-  history and pgbench rows must all be in the same partition; the scripts refuse
-  otherwise.
+  Live mode is Velox's real (non-simulated) data mode. Test-mode ingest does a
+  per-event test-clock lookup production skips, so numbers measured in test mode
+  understate production. Fixtures, key, seeded history and pgbench rows must all
+  be in the same livemode partition; the scripts refuse otherwise.
 - **`k6` puts your process environment in `__ENV`.** Exporting `PROBE_RATE`,
   `VUS`, `MODE`, … reconfigures the script silently. `calibrate.sh` and
   `measure.sh` scrub these; if you run `k6` by hand, pass everything with `-e`.
@@ -163,8 +171,9 @@ checks corresponds to a bug that actually shipped in this rig once.
 - **Two gates, reported separately.** "Ingest sustained?" and "reads within
   budget?" are different questions; `PROBE_GATE=0` reports the read probe
   without failing ingest on it, and the probe is broken down per endpoint.
-  On the real rig `usage-summary` cost ~2.7 µs per event the customer holds
-  (#819) — the budget it meets depends on customer size, not write rate.
+  On the real rig `usage-summary` cost ~2.7 µs for each event the queried
+  customer already holds (#819) — so the budget it meets depends on customer
+  size, not write rate.
 - **Watch the read side of the database.** A tail that rises within a run
   with CPU and write IOPS flat is the index working set falling out of cache:
   ReadIOPS, ReadLatency and DiskQueueDepth are captured for that reason.

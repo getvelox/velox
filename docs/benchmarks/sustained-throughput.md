@@ -5,10 +5,10 @@ under a protocol that refuses to publish a run it cannot reconcile — and with
 the two product bottlenecks it found stated as plainly as the numbers.
 
 **Dates:** 2026-08-16 (`db.m7g.2xlarge`) and 2026-08-16/17 (`db.m7g.4xlarge`,
-with the #818 fix); both supersede the 2026-08-15 figures, which are kept in Appendix B for the record · **Region:** `ap-south-1`, everything in one availability
+with the #818 hot-row fix); both supersede the 2026-08-15 figures, which are kept in Appendix B for the record · **Region:** `ap-south-1`, everything in one availability
 zone · **Reproduce:** `scripts/bench-rig/` — `./run.sh`, or step by step below.
 
-**At a glance** (open-loop, 5 × 10 min per row, every event reconciled; full tables and the evidence for each below):
+**At a glance** (open-loop — requests sent at a fixed rate whether or not the server keeps up — 5 × 10 min per row, every event reconciled; full tables and the evidence for each below):
 
 | what a self-hoster can plan on | on `db.m7g.2xlarge` (32 GB) | on `db.m7g.4xlarge` (64 GB), #818 fixed |
 |---|---|---|
@@ -33,12 +33,14 @@ it. The run chapters in
   the server does; drops are counted and reported. Closed-loop figures (workers
   that wait for each reply) appear only as *ceilings*, never as service levels —
   a closed loop slows down with the server and hides queueing delay.
-- **Every sustained repeat is gated.** k6 thresholds held; 0 dropped, 0 failed;
-  rows written == events claimed; Σ quantity == Σ gained; ≥1,000 samples;
-  no drift (last-third p99 vs first-third). A run whose sent count does not
-  match the rows stored is not published. Ladder rungs (2 × 90 s) pass on the
-  ingest gate alone — delivered rate, drops, reconciliation — which is why a
-  rung can read "held" with drift noted beside it.
+- **Every sustained repeat is gated.** k6 (the load generator) thresholds held; 0 dropped, 0 failed;
+  rows written == events claimed; Σ quantity == Σ gained (the quantities the client sent sum to exactly
+  what the database gained — content, not just row count); ≥1,000 samples;
+  no drift (last-third p99 — ninety-ninth-percentile latency — vs first-third). A run whose sent count does not
+  match the rows stored is not published. Ladder rungs (2 × 90 s) — the short
+  steps of the rate ladder, a quick sweep up through offered rates — pass on
+  the ingest gate alone (delivered rate, drops, reconciliation), which is why
+  a rung can read "held" with drift noted beside it.
 - **"Sustained" means 5 × 10 minutes** with a cool-down between repeats, and a
   configuration is reported at the repeat count that passed (4/5 is written
   4/5, not rounded up).
@@ -46,30 +48,34 @@ it. The run chapters in
   database and row shape (`db-ceiling.sh`) gives the database's own commit
   floor, so "Velox does N" is always beside "the database alone does M".
 - **Tail detection is two-grained.** 10-second buckets for windows, plus a
-  per-second *freeze-seconds* metric — the bucket rule alone can miss a single
+  per-second *freeze-seconds* metric (a count of individual stalled seconds) —
+  the bucket rule alone can miss a single
   frozen second in five or six, depending on how stalls align to bucket edges (the caveat with the evidence is in
   [What this leaves](#what-this-leaves)).
 - **Instrumentation grew per run.** Runs 1–2 had only 60-second CloudWatch
   on the database side (plus the raw k6 sample stream and a 5-second `vmstat`
   on the nodes); run 3
-  added 1-second Enhanced Monitoring, Performance Insights, a 5-second DB
-  sampler and the Postgres log — which is why run-2 events could only be
-  candidates that night; later instrumented series (2026-08-19) attributed one
-  (E1, the vacuum storm) and left the other (E2) most-likely-but-unproven,
-  while run-3 events were attributed live. Every claim is read from the retained
+  added 1-second Enhanced Monitoring (RDS's OS-level metric stream),
+  Performance Insights (RDS's wait-event view), a 5-second DB sampler and the
+  Postgres log. That is why run-2 events could only be candidates that night;
+  later instrumented series (2026-08-19) attributed one (E1, the vacuum
+  storm) and left the other (E2) most-likely-but-unproven, while run-3 events
+  were attributed live. Every claim is read from the retained
   evidence files, not from a console.
 
 ## What stops it — the five walls
 
-Five walls: the hot row (#818, found and fixed), RAM at
-~60M rows on a 32 GB instance, write IOPS and the WAL segment pool, the
+Five walls: the hot row (#818 — every request updated its API key's last-used
+row, so one busy key is one contended row — found and fixed), RAM at ~60M rows on a 32 GB instance, write IOPS and the WAL
+segment pool (Postgres's stock of ready-made WAL files), the
 vacuum rewrite storm, and the linear-scan read path (#819, open). Nothing in
 this section is new information — it is the same findings, gathered from the
 runs that hit them, each linking to its evidence.
 
 ### What the ladder found: the wall is a hot row, not the hardware
 
-At batch 10 the open-loop knee sits between 4,000 and 6,000 ev/s — about
+At batch 10 the open-loop knee (the rate where the latency curve turns
+upward) sits between 4,000 and 6,000 ev/s (events per second) — about
 **570 requests per second**, at any batch size. That is not the machine:
 
 | candidate | test | result |
@@ -102,13 +108,13 @@ small. Full evidence: [run 1](#the-headline-2026-08-16-measured-under-the-protoc
 Two related walls on the same volume. **Capacity:** at 15–25k ev/s batch 100
 on stock settings, checkpoint-era write bursts saturated the 100 GB gp3
 volume on the 2026-08-16/17 runs (3,000 IOPS; disk queue depth 37–65 in the
-stall minutes) — though the 25k collapse did not replicate on a 2026-08-19
+stall minutes). The 25k collapse, though, did not replicate on a 2026-08-19
 stock series and stays "storage-bound, not replicated". Where the volume
 truly cannot absorb the rate, only a bigger volume or less WAL per event
 helps. **The pool:** after any quiet spell, RDS's
 stock recycled-segment pool runs shallow, and a commit that needs a new 64 MB
-segment creates it while every other commit waits — a ~0.2–0.3 s freeze every
-~5 s until a checkpoint refills the pool. p50 is untouched; p99 jumps 5–10×.
+segment creates it while every other commit waits. The result: a ~0.2–0.3 s
+freeze every ~5 s until a checkpoint — Postgres's periodic flush of dirty pages, which also recycles WAL segments — refills the pool. p50 (median latency) is untouched; p99 jumps 5–10×.
 The sizing rule, verified under provocation and full series:
 `min_wal_size = max_wal_size ≥ wal_keep_size + 1.9 × WAL rate ×
 checkpoint_timeout` — **16 GB covers 12–15k ev/s on this rig; at 25k size to
@@ -122,20 +128,21 @@ is a *start-up transient*: it stops once the pool grows to working depth
 
 The insert-triggered autovacuum's completing pass rewrites nearly every page
 added since the previous pass and, at RDS's stock cost limits, writes at the
-volume's full throughput — a multi-second global slowdown in which **p50
-lifts** and 96–99 % of requests are affected, unlike the pool freezes, which leave p50 flat
-in the instrumented series (E2's per-second p50 lift — an artifact of ~36 ms
-batch-100 requests against ~0.2 s stalls — is the one most-likely exception). The at-a-glance signature: average IO size collapsing ~107 KB
+volume's full throughput. The result is a multi-second global slowdown in
+which **p50 lifts** and 96–99 % of requests are affected — unlike the pool
+freezes, which leave p50 flat in the instrumented series. (E2's per-second
+p50 lift — an artifact of ~36 ms batch-100 requests against ~0.2 s stalls —
+is the one most-likely exception.) The at-a-glance signature: average IO size collapsing ~107 KB
 → ~6 KB while queue depth jumps into the hundreds at a logged vacuum
 completion. The full attribution evidence is in
 [What this leaves](#what-this-leaves) below. **The lever is tested (2026-08-20,
 at 25k ev/s batch 100, same rig, control vs treatment, fresh 20M table each):**
 with stock `autovacuum_vacuum_insert_scale_factor` (0.2) each pass rewrites
 everything added since the last — a burst that grows with the table (64k →
-485k pages dirtied across five repeats) — and at 80M rows one completing pass
+485k pages dirtied across five repeats). At 80M rows one completing pass
 froze every commit for **11 consecutive seconds** (worst request 3,279 ms,
-worst 1-s p99 ≈2.9 s, 132 drops, the repeat failed its gate); 15 marker-classified vacuum
-freeze-seconds in the series. With **`autovacuum_vacuum_insert_scale_factor
+worst 1-s p99 ≈2.9 s, 132 drops, the repeat failed its gate); the series
+carried 15 marker-classified vacuum freeze-seconds. With **`autovacuum_vacuum_insert_scale_factor
 = 0.02`**, passes are ~10× smaller (≤48k pages, several landing between
 repeats), the worst freeze was 0.63 s, vacuum freeze-seconds 3, and the
 series ran **5/5 with zero drops**. Medians were identical (p50 55.7 vs
@@ -143,8 +150,8 @@ series ran **5/5 with zero drops**. Medians were identical (p50 55.7 vs
 the growth slice instead of 20 % of an ever-growing table. (A first
 cross-rig comparison suggested a +20 ms median cost; a same-rig control
 refuted it — the two rigs' volumes differ, which is why the control was
-required. Scope: measured at 25k b100; at 12k b10 the debt accrues at half
-the rate and requests are 8 ms, so the residual storms would surface in p99
+required. Scope: measured at 25k b100 (b = batch size); at 12k b10 the debt accrues
+at half the rate and requests are 8 ms, so the residual storms would surface in p99
 only — untested there.) The pacing lever
 (`autovacuum_vacuum_cost_delay`/`cost_limit`) was held in reserve and stays
 untested — not needed at this rate.
@@ -164,7 +171,7 @@ write rate either; it cared about **how many events the customer had**:
 | 39M | 195k | 523 ms | 554 ms |
 
 About 2.7 µs per event, linear: a `COUNT + SUM GROUP BY meter` over the
-customer's rows with no rollup. Above ~180k events per customer per month it
+customer's rows with no rollup (no precomputed aggregate to read instead). Above ~180k events per customer per month it
 misses a 500 ms budget regardless of load. Also a product finding, with a
 number on it, and the classic fix (a per-customer daily rollup) is well
 understood — filed as [#819](https://github.com/getvelox/velox/issues/819). The read gate is reported separately from the ingest gate for
@@ -304,10 +311,11 @@ chapter stands alone if linked directly.
 
 **Rig:** `c7g.2xlarge` app (8 vCPU Graviton, Velox in its own container) +
 `c7g.xlarge` load generator + `db.m7g.2xlarge` RDS PostgreSQL 16, all in
-`ap-south-1a`. **~$1.26/hr.** Live-mode ingest path, 200 customers, one meter,
+`ap-south-1a`. **~$1.26/hr.** Live-mode ingest path (rows with livemode=true — Velox's live data,
+as opposed to test mode), 200 customers, one meter,
 each request a random customer. Table seeded to **22M rows** before the first
 measurement and **47M** by the last; **10 GB+ of indexes**. Every figure below
-is **open-loop** (requests offered on a fixed schedule; drops reported), every
+is **open-loop**, every
 repeat is gated (k6 thresholds held, 0 dropped, 0 failed, rows written ==
 events claimed, Σ quantity == Σ gained, ≥1000 samples, no drift), and every
 event was reconciled against the database.
@@ -329,7 +337,7 @@ clean and the protocol now settles after seeding. Reported, not hidden.
 **5,000 ev/s is where this instance's memory runs out.** Repeat 1 held flat
 (p50 35 ms, p99 51 ms, first third 52 → last third 50). Repeat 2, thirty
 minutes and 6M rows later at **62M rows / 14 GB heap + 18 GB indexes on a 32 GB
-instance**, rose from 50 ms to 308 ms in its last third — and the evidence says
+instance**, rose from 50 ms to 308 ms in its last third. The evidence says
 exactly why: RDS CPU flat at 61–63 %, write IOPS flat, but **read IOPS climbing
 108 → 2,486/s** through the run (the gp3 volume's baseline is 3,000), read
 latency 0.6 → 2.6 ms and disk queue depth 0.5 → 10.7 in the final minute. The
@@ -369,9 +377,9 @@ this is what a 10-minute repeat is for.
 ### Second run, 2026-08-16/17: `db.m7g.4xlarge`, with the hot-row fix
 
 Same app node and load generator; the database doubled to **`db.m7g.4xlarge`
-(16 vCPU, 64 GB RAM, 100 GB gp3 — same 3,000 IOPS baseline)**; **~$2.21/hr**
-on-demand for the three nodes (`ap-south-1` list prices: 1.916 + 0.196 +
-0.098), which is **~$0.041 per million events at 15,000 ev/s**; Velox at
+(16 vCPU, 64 GB RAM, 100 GB gp3 — same 3,000 IOPS baseline)**. The three
+nodes cost **~$2.21/hr** on-demand (`ap-south-1` list prices: 1.916 + 0.196 +
+0.098), which is **~$0.041 per million events at 15,000 ev/s**. Velox ran at
 `db7f86b0`, which carries the fix for #818. Fresh 20M-row seed, 10-minute
 settle, then both ladders (2 × 90 s per rung), then sustained attempts. The
 first sustained attempt (10k) ran straight after the ladders on the table they
@@ -414,7 +422,7 @@ bursts on a volume with no headroom. The other two (10k repeat 4, 12k repeat 5)
 are **not attributed**: re-reading CloudWatch for 10k repeat 4 without cutting
 the window at the run's end shows its final minute at queue depth 28 and write
 latency 17–25 ms (a datapoint the first write-up missed), so it is not
-signature-free, but this rig had no 1-second instrumentation and pg_wal did
+signature-free. But this rig had no 1-second instrumentation and pg_wal did
 not grow in either window, so the third run's mechanism (below) is a candidate
 for them, not a finding.
 
@@ -442,9 +450,9 @@ interleaved A/B rounds** (`db-ceiling.sh`), right after the ceiling run:
 | B — the same with Velox's per-transaction RLS protocol (`BEGIN`, three `set_config`, INSERT, `COMMIT`) | 45,195 | 36,154 | **40,674 rows/s** |
 
 Velox's closed loop, **41,172 ev/s, is 78 % of the raw commit floor and 101 %
-of leg B** — at batch 500 the HTTP layer, auth, customer/meter resolve and the
+of leg B**. At batch 500 the HTTP layer, auth, customer/meter resolve and the
 Go service add nothing measurable; the ceiling is the database's own batched
-insert path with the RLS protocol on it (which costs 23 % of the floor here,
+insert path with the RLS (row-level security) protocol on it (which costs 23 % of the floor here,
 13–19 % on the 2xlarge at batch 1). Two things to keep in view: the rounds
 were 60 s each and each leg added ~3M rows, and **both legs lost ~20 % from
 round 1 to round 2** as the table grew — the same growth sensitivity the
@@ -471,7 +479,7 @@ sampler on the app node reading `pg_stat_io`, `pg_stat_wal`, `pg_stat_bgwriter`,
 vacuum/analyze progress, the GIN pending list, page/extension locks and every
 backend's wait event as one JSON line (`scripts/bench-rig/db-sampler.sh`;
 analysis: `analyze-tail.py`, `tail-census.py`; the Postgres log through
-pgBadger). Control = stock RDS parameters, 12,000 ev/s at batch 10, 5 × 10 min
+pgBadger, a Postgres log analyzer). Control = stock RDS parameters, 12,000 ev/s at batch 10, 5 × 10 min
 from a fresh 20M-row table. Postgres 16.14; RDS defaults that matter here:
 `wal_segment_size` 64 MB, `max_wal_size` 6144 MB on this class, `min_wal_size`
 192 MB, `wal_keep_size` 2048 MB, `checkpoint_timeout` 300 s,
@@ -520,10 +528,10 @@ checkpoint had not recycled.**
 
 The 50-minute series with `min_wal_size = max_wal_size = 6 GB` (T3, same load
 as the control) had no sustained event (>5× buckets 5 → 0; in-run seconds at
-the cap with small IOs 12 → 0; `WALInit*` sightings 1 → 0; pg_wal flat) — but
+the cap with small IOs 12 → 0; `WALInit*` sightings 1 → 0; pg_wal flat). But
 it is a **null test** of the floor: its distance estimate never decayed below
-the point where the floor would bind, so the treatment was never exercised;
-the clean result is checkpoint phase, one series. Arm B is the honest verdict
+the point where the floor would bind, so the treatment was never exercised.
+The clean result is down to checkpoint phase, and it is one series. Arm B is the honest verdict
 on that setting.
 
 #### The setting under the full series (T5): 12,000 ev/s × batch 10, 5 × 10 min
@@ -556,15 +564,15 @@ predicts when the rate rises. Last night's stock run at this rate was 4/5
 (43.3–44.6 ms) with a 50-second volume-saturation stall. Caveat on repeat 5:
 the operator's laptop slept mid-series; k6 ran to completion on the load
 generator (90,001 iterations, 9,000,100 events, matching the row count) and its
-summary and samples were read afterwards, so its p50/p99/drift/drops come from
-the same files as every other repeat, read by hand. 
+summary and samples were read afterwards. Its p50/p99/drift/drops therefore
+come from the same files as every other repeat, read by hand. 
 
 And at **25,000 ev/s × batch 100** (T7, same protocol): **4/5, p50 35.6–36.1 ms,
 p99 49–120 ms, 0 drops, every event reconciled** — the one failure a drift
 gate (repeat 2's last third ×2.9 its first, p99 67 ms), not a stall. Compare
 stock last night: 2/5, p50 up to 1.9 s, hundreds of drops, disk queue depth
 37–65. Here the pool is *not* deep enough and the evidence says so: WAL runs at
-29.6 MB/s, so the rule asks for ~19 GB and 16 GB is short — the sampler shows
+29.6 MB/s, so the rule asks for ~19 GB and 16 GB is short. The sampler shows
 the pre-made pool at **0 segments at 17:10 and 17:25**, two checkpoints
 turned WAL-driven (`starting: wal`), 471 seconds at the throughput ceiling
 with small IOs, two `WALInit*` sightings, 18 buckets between 3× and 5× (none
@@ -599,8 +607,9 @@ This benchmark existed on a laptop first, and an earlier version of this page
 called the laptop **9× optimistic** because it reported 1,800 ev/s at p99 ≤ 50 ms
 where the first AWS run held 200. That verdict was wrong, and it is worth
 saying why: the first AWS run's latencies came from a load generator with a
-lockstep-burst bug (since deleted), on the test-mode path, against a
-one-customer fixture. Under the current protocol the same class of hardware
+lockstep-burst bug (its workers fired in step, bunching requests into
+bursts; since deleted), on the test-mode path, against a one-customer
+fixture. Under the current protocol the same class of hardware
 holds **10,000 ev/s at p99 66 ms** through the full HTTP path — the laptop's
 in-process figure was, if anything, **pessimistic** by ~5×.
 
@@ -804,7 +813,7 @@ cleanly and then returns 500 on ingest across 11 tables.
 
 **`usage_events.livemode` is set by a trigger, not by your INSERT.** The
 `set_livemode` trigger overwrites the column from the `app.livemode` session
-GUC — and so do `customers`, `meters` and `api_keys`. Fixtures, key, seeded
+GUC (a Postgres runtime configuration parameter) — and so do `customers`, `meters` and `api_keys`. Fixtures, key, seeded
 history and pgbench rows must all be in the same partition; every script here
 detects the fixtures' mode and refuses a mismatch, because an earlier run
 silently benchmarked a table it did not think it was measuring.

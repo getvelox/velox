@@ -1,8 +1,9 @@
 # Agent Prompting Standards (Claude Fable 5)
 
 Reusable prompt fragments and rules for every multi-agent workflow this repo
-runs — adversarial design panels, audit finders, verifiers, migration sweeps.
-Distilled from Anthropic's Fable 5 prompting guide (2026) plus what our own
+runs — adversarial design panels, audit finders (read-only defect-hunting
+agents), verifiers, migration sweeps. Distilled from Anthropic's Fable 5
+prompting guide (2026) plus what our own
 panels proved works. Copy the fragments; don't re-derive them per workflow.
 
 Scope: this is a **tooling** discipline. Money-path methodology stays in
@@ -20,8 +21,9 @@ Append to every finder/audit agent prompt:
 > not check.
 
 Why: Anthropic measured this line nearly eliminating fabricated reports.
-For us it cuts false findings *before* the adversarial-verify stage instead
-of paying 3 verifier votes to kill them there.
+For us it cuts false findings *before* the adversarial-verify stage (where
+separate verifier agents re-check each finding) instead of paying 3 verifier
+votes to kill them there.
 
 **Coverage, not self-filtering, at the find stage.** Grounding (above) kills
 false *positives*; this kills false *negatives*. Both Fable 5 and Opus 4.8
@@ -47,7 +49,8 @@ Every agent prompt opens with intent, not just task:
 
 Why: Fable 5 connects the task to relevant context instead of inferring
 intent. Our panels already do this — every panel that materially amended a
-design (P1b denominator, P2b claim protocol) carried the full why. This makes
+design (the P1b denominator and P2b claim-protocol amendments — panel
+names from the audit-remediation plan) carried the full why. This makes
 it a standard, not a habit.
 
 ## 3. Evidence, never reasoning transcripts
@@ -60,9 +63,10 @@ phrasing can trigger fallbacks mid-workflow.
 
 ## 4. Route effort per stage
 
-Workflow `agent()` calls accept `effort`. Default (inherited xhigh under
-ultracode) is right for panels, verifiers, and money-path finders — and
-wasteful for mechanical stages. Route:
+Workflow `agent()` calls — the orchestration scripts' subagent spawns —
+accept an `effort` (reasoning-effort) level. The default (inherited xhigh under ultracode) is right for panels,
+verifiers, and money-path finders — and wasteful for mechanical
+stages. Route:
 
 | Stage | Effort |
 |---|---|
@@ -73,8 +77,8 @@ wasteful for mechanical stages. Route:
 ## 5. Mid-build spec-conformance verifier (optional gate, L-sized builds)
 
 Panels verify the design *before* code; mutation tests verify behavior
-*after*. For builds spanning 4+ commits, add one fresh-context verifier
-between implementation and the test matrix:
+*after*. For builds spanning 4+ commits — the "L-sized" case — add one
+fresh-context verifier between implementation and the test matrix:
 
 > Read [the amended design/spec section] and the diff of [branch] against
 > [base]. For each numbered protocol item, state whether the implementation

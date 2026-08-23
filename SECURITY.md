@@ -22,7 +22,7 @@ We commit to:
 - The migration runner and schema in `internal/platform/migrate/`
 - The web-v2 dashboard (`web-v2/`)
 - Docker Compose deployment config under `deploy/compose/`
-- Outbound webhook signing, inbound Stripe webhook verification, API key handling, session/cookie auth, RLS policy enforcement, AES-GCM encryption-at-rest, HMAC blind index for email
+- Outbound webhook signing, inbound Stripe webhook verification, API key handling, session/cookie auth, RLS (row-level security) policy enforcement, AES-GCM encryption-at-rest, HMAC blind index for email (a keyed hash that allows equality lookup without storing the plaintext address)
 
 ## Out of scope
 
@@ -35,15 +35,15 @@ We commit to:
 
 ## Hardening status
 
-Velox is **pre-launch** and pre-audit. Encryption-at-rest, RLS, audit log immutability, HMAC webhook signing, bcrypt (cost 12) passwords, SHA-256 session/API-key/token hashing, security headers, GCRA rate limiting, and TLS-only intent are all implemented. (A SOC 2 control mapping is deferred until a design partner requires it — see the deferred list in the README.)
+Velox is **pre-launch** and pre-audit. Encryption-at-rest, RLS, audit log immutability, HMAC webhook signing, bcrypt (cost 12) passwords, SHA-256 session/API-key/token hashing, security headers, GCRA rate limiting (a leaky-bucket-style algorithm), and TLS-only intent (secure cookies + HSTS; TLS termination itself is left to the operator's proxy) are all implemented. (A SOC 2 control mapping is deferred until a design partner requires it — see the deferred list in the README.)
 
 Known gaps, documented openly:
 
-- No built-in mechanism to rotate `VELOX_ENCRYPTION_KEY` or `VELOX_EMAIL_BIDX_KEY` (envelope encryption rebuild planned)
+- No built-in mechanism to rotate `VELOX_ENCRYPTION_KEY` or `VELOX_EMAIL_BIDX_KEY` (a rebuild on envelope encryption — data keys wrapped under a rotatable master key — is planned)
 - No MFA on dashboard login (no MFA in v1; SSO direction is embedded OIDC/SAML per ADR-014 — Velox will not depend on a SaaS auth vendor)
-- No SAST in CI (Semgrep / CodeQL planned)
+- No SAST (static application security testing) in CI (Semgrep / CodeQL planned)
 - Dashboard image not signed — CI keyless-signs the server image with cosign (Sigstore), but the `-dashboard` image is published unsigned
-- No threat model document (STRIDE / LINDDUN planned)
+- No threat model document (STRIDE / LINDDUN, two threat-modeling frameworks, planned)
 - No external penetration test on record yet
 
 If you can help close any of these, contributions are welcome via the normal PR process.

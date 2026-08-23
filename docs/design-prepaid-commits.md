@@ -9,13 +9,22 @@ Decision record: ADR-078.
 
 ## Why (wedge fit)
 
-Commits + drawdown is a core wedge pillar ([[project_positioning_wedge]]
-item 6). The first DP profile — AI infra, Series A–B — sells **commit +
-usage**. Velox already has the metering and an Orb-style credit-block
-ledger (`consumed_cents` per block, FIFO drain, structural idempotency,
-ADR-071 atomic expiry); the commit primitive is the missing headline.
-Peer-verified: gross purchase invoicing is unanimous; exhaust→overage,
-expiry, and $0 fully-covered invoices are already correct in Velox.
+A prepaid commit is an up-front purchase of usage credits: the customer
+commits to a spend amount, is invoiced for it, and then draws the
+resulting credit balance down (drawdown) as usage consumes it. Commits +
+drawdown is a core pillar of the product's wedge, its market-entry
+differentiator ([[project_positioning_wedge]] item 6). The first DP
+(design partner — an early customer who co-develops the product)
+profile — AI infra, Series A–B — sells **commit + usage**. Velox
+already has the metering and an Orb-style credit-block ledger (Orb: a
+commercial usage-billing platform peer): `consumed_cents` per block,
+FIFO drain, structural idempotency — dedup enforced by the schema
+itself, not by application checks — and ADR-071 atomic expiry; the
+commit primitive is the missing headline.
+Peer-verified: gross purchase invoicing (the commit purchase is billed
+on a real invoice) is unanimous; exhaust→overage (usage past an
+exhausted balance bills as overage rather than being blocked), expiry,
+and $0 fully-covered invoices are already correct in Velox.
 
 ## Phase 1 (build target) — locked decisions
 
@@ -24,7 +33,8 @@ expiry, and $0 fully-covered invoices are already correct in Velox.
 `entry_type='grant'` + new nullable `grant_kind`
 (`'commit' | 'promotional' | NULL`) + new `source_invoice_id` column
 (the existing `invoice_id` is non-unique/multi-row — NOT reusable) with
-partial-unique index:
+a partial-unique index (unique only over the rows matching its WHERE
+clause):
 
 ```sql
 CREATE UNIQUE INDEX idx_credit_ledger_commit_fund_dedup
@@ -33,29 +43,38 @@ CREATE UNIQUE INDEX idx_credit_ledger_commit_fund_dedup
 ```
 
 Legacy grants stay `NULL` and drain in the **paid class** (they are
-money-derived liabilities). `promotional` is only ever explicit operator
+money-derived liabilities, drained after promotional credits — the
+drawdown order below). `promotional` is only ever explicit operator
 input. Zero behavior change until a tenant creates a promotional grant
 or commit.
 
 ### D2. Funding: grant-on-issue ONLY (payment gate → phase 2)
 
-The commit grant lands **in the Finalize coordinator tx** — the
+Grant-on-issue: the credits become drawable the moment the funding
+invoice is finalized — payment is not awaited. The commit grant lands
+**in the Finalize coordinator tx** — the
 `UpdateStatusWithReversal` shape (status flip + caller-supplied ledger fn,
 both-or-neither), via a narrow service-level granter interface mirroring
 `s.creditReverser` in Void (`invoice/service.go:807`). Grant carries
 `grant_kind='commit'`, `source_invoice_id`, optional `expires_at`.
 
-- Industry-verified default (Metronome/Orb): negotiated Net-N B2B commits
-  are drawable at issue; payment follows terms.
-- A granter error fails Finalize **by design** (operator-synchronous,
-  loud, retryable — CAS makes the retry clean). Never weaken to
-  post-commit.
+- Industry-verified default (Metronome/Orb): negotiated Net-N (pay
+  within N days) B2B commits are drawable at issue; payment follows
+  terms.
+- A granter error fails Finalize **by design**: operator-synchronous
+  (the finalizing operator sees the failure immediately), loud, and
+  retryable — the finalize CAS (compare-and-swap: the status flip fires
+  only if the row is still in the expected state) makes the retry
+  clean. Never weaken to firing the grant after the transaction
+  commits (post-commit).
 - The fund-once index is a pure structural **backstop**: the finalize CAS
   (D5) already guarantees the granter runs at most once, so an index
   violation = broken invariant = loud tx abort. The 0093/0106
-  catch-ErrAlreadyExists pattern is own-tx-only and FORBIDDEN inside a
-  shared coordinator tx (poisoned-tx; see `GrantForCreditNoteTx`'s
-  documented contract).
+  catch-ErrAlreadyExists pattern is safe only in its own transaction
+  (own-tx-only) and FORBIDDEN inside a shared coordinator tx
+  (poisoned-tx: after any error Postgres aborts the surrounding
+  transaction, so every later statement in it fails; see
+  `GrantForCreditNoteTx`'s documented contract).
 - **Deferred to phase 2** (trigger: first DP asks pending-until-paid, or
   the self-serve/auto-top-up build, which hard-defaults to gated): the
   per-commit payment gate, the `markPaidReportingTransition` funder hook,
@@ -69,11 +88,13 @@ both-or-neither), via a narrow service-level granter interface mirroring
 
 ### D3. Unwind: retire on VOID only
 
-`Void` of an invoice carrying a commit line retires the funded grant's
-**remaining** balance in the same `UpdateStatusWithReversal` tx.
+`Void` of an invoice carrying a commit line retires (permanently zeroes
+out) the funded grant's **remaining** balance in the same
+`UpdateStatusWithReversal` tx.
 
 - Mechanism: `RetireGrantRemainingTx` — ADR-071 `ExpireGrantAtomic`'s
-  locked shape executed on the caller's tx: customer advisory lock →
+  locked shape executed on the caller's tx: customer advisory lock (a
+  Postgres application-defined lock, keyed here on the customer) →
   grant row re-read under `FOR UPDATE` → `consumed_cents = amount_cents`
   flip gated on `consumed_cents < amount_cents` (the exactly-once CAS;
   0 rows = clean no-op) → append the negative entry sized from the
@@ -86,12 +107,14 @@ both-or-neither), via a narrow service-level granter interface mirroring
   TotalExpired).
 - **Uncollectible, dunning pause, and cancel_subscription do NOT retire**
   — the block stays live as a collections decision, consistent across
-  all three non-void dunning terminals (dunning final actions are
-  pause/cancel_subscription/mark_uncollectible; void is operator
+  all three non-void terminals of dunning, the automated
+  payment-failure retry-and-escalation process (dunning final actions
+  are pause/cancel_subscription/mark_uncollectible; void is operator
   manual-resolve only). This also makes uncollectible→paid recovery
-  correct for free: the grant was never retired, nothing to restore,
-  and voided→paid is rejected so a retired grant can never be paid-for.
-  Operator forcing function: void the invoice to kill the credits.
+  correct for free: the grant was never retired, so there is nothing to
+  restore, and voided→paid is rejected so a retired grant can never be
+  paid-for. Operator forcing function: void the invoice to kill the
+  credits.
 - Consumed stays consumed, always.
 
 ### D4. Commit invoices are cash instruments
@@ -103,12 +126,13 @@ both-or-neither), via a narrow service-level granter interface mirroring
   `adapters.go:340`, engine cycle paths). Otherwise a card-less
   customer's just-granted commit credits drain into their own funding
   invoice ("credits buy credits": $0 cash, revenue booked). Stored-PM
-  auto-charge on a commit invoice stays allowed (real cash).
+  (saved payment method) auto-charge on a commit invoice stays allowed
+  (real cash).
 - **Credit notes are BLOCKED on invoices carrying a commit line** —
-  typed error at CN create, both pre-pay (concession would decouple cash
-  from grant size) and post-pay (refund would return cash while the
-  block stays drawable — Void is blocked on paid invoices, so CN is the
-  only paid-relief channel and it double-gives). Unwind paths: unpaid →
+  typed error at credit-note (CN) create, both pre-pay (a concession
+  would decouple cash from grant size) and post-pay (refund would
+  return cash while the block stays drawable — Void is blocked on paid
+  invoices, so CN is the only paid-relief channel and it double-gives). Unwind paths: unpaid →
   void (retires); paid → phase 2 CN-retire leg (trigger: first DP commit
   refund ask; design sketch: retire min(remaining, CN gross) in the CN
   coordinator tx, refund capped by price×remaining/granted).
@@ -116,8 +140,9 @@ both-or-neither), via a narrow service-level granter interface mirroring
 ### D5. CAS prerequisites on hook-carrying flips (prod fix, in scope)
 
 All three status writers the hooks ride are check-then-act today
-(service-layer guards on stale pre-reads; UPDATEs have no status
-predicate). Before money hangs off them:
+(check-then-act: read the guard state, then write without re-checking,
+letting two racers both pass — service-layer guards on stale pre-reads;
+UPDATEs have no status predicate). Before money hangs off them:
 
 - `FinalizeWithDates`: `... SET status='finalized' ... WHERE id=$X AND
   status='draft'`; 0 rows → re-read → `errs.InvalidState`. Granter runs
@@ -131,9 +156,11 @@ predicate). Before money hangs off them:
 
 ### D6. One global lock order: invoice-row → advisory → ledger-rows
 
-Corrected census: `ApplyToInvoiceAtomic` runs its OWN tx (not the
+Corrected census (the panel's site-by-site inventory of writers and
+lock orders): `ApplyToInvoiceAtomic` runs its OWN tx (not the
 billing tx), takes NO advisory lock, and orders ledger-rows→invoice-row
-— the reverse edge of the new hook paths (invoice→advisory). With
+— the reverse of the lock order the new hook paths take
+(invoice→advisory). With
 expiry's advisory→ledger-rows this is a reachable 3-way deadlock cycle
 on the feature's hottest flow. Fix, in scope:
 
@@ -162,7 +189,8 @@ ORDER BY (grant_kind IS NOT DISTINCT FROM 'promotional') DESC,
 against live Postgres — draining legacy money-derived credits before
 free promo: the exact inversion this feature exists to prevent.)
 Applies to BOTH `drainPositiveBlocks` callers — drawdown
-(ApplyToInvoiceAtomic) and clawback attribution (AdjustAtomic) —
+(ApplyToInvoiceAtomic) and clawback attribution
+(AdjustAtomic; clawback: revocation of already-granted credits) —
 promotional-first is intended for both. Mixed-kind regression test
 required. No operator priority field (Metronome/Lago/Stripe numeric
 priority = named phase-2 escape hatch).
@@ -192,14 +220,18 @@ priority = named phase-2 escape hatch).
   sites (`appendEntryInTx`, `AdjustAtomic`, `ApplyToInvoiceAtomic` —
   expiry converges into appendEntryInTx). Well-ordered per customer
   because of D6. Known, documented lag: an expired-but-unswept block
-  keeps SUM > 0 until the sweep retires it — the sweep's expiry entry
+  keeps SUM > 0 until the sweep (the background expiry job) retires it
+  — the sweep's expiry entry
   produces the crossing (minutes-scale lag, matches the existing expiry
   discipline). Do NOT refactor apply/adjust to funnel through
   appendEntryInTx — their drift-capping logic is deliberately different.
 - Wiring: credit store gets an outbox enqueuer injection mirroring
   invoice's `SetOutboxEnqueuer` (`invoice/postgres.go:40`) — the credit
   store has ZERO outbox wiring today. Enqueued in the same tx = ADR-040
-  transactional outbox. No sweep, no LockKey needed.
+  transactional outbox (the event row commits atomically with the state
+  change; a dispatcher delivers it afterwards). No sweep, no LockKey (a
+  registered advisory-lock key that leader-gates a background worker)
+  needed.
 - Threshold: `tenant_settings.credit_balance_low_threshold_cents`
   (nullable; NULL = no low alerts; depleted/recovered always on).
 - Cleanup ride-along: delete the phantom `VELOX_BILLING_ALERTS_INTERVAL`
@@ -207,8 +239,8 @@ priority = named phase-2 escape hatch).
 
 ### D9. Commit line schema + validation
 
-Migration 0136 (verified free across main + all branches; next LockKey
-76540008 NOT needed — no sweep):
+Migration 0136 (number verified unclaimed — free — across main + all
+branches; the next LockKey 76540008 is NOT needed — no sweep):
 
 - `invoice_line_items`: `commit_granted_cents BIGINT NULL`,
   `commit_expires_at TIMESTAMPTZ NULL`, CHECK
@@ -224,7 +256,8 @@ Migration 0136 (verified free across main + all branches; next LockKey
 - `tenant_settings`: threshold column (D8).
 - Validation lives in **`buildLineItem`** — the shared funnel for BOTH
   line-creation entry points (`service.Create` create-with-lines — the
-  composer's path — AND `service.AddLineItem`; "enforced at AddLineItem"
+  path of the composer, the dashboard's one-off invoice builder — AND
+  `service.AddLineItem`; "enforced at AddLineItem"
   alone would miss the composer). Rules: commit fields ⇒
   `line_type='add_on'`, `billing_reason='manual'`, `granted_cents > 0`,
   `expires_at` in the future if set, **at most one commit line per
@@ -234,8 +267,10 @@ Migration 0136 (verified free across main + all branches; next LockKey
   "term-aligned default" is incoherent for manual invoices (no term
   object to align to; a silent invented term is the banned
   silent-fallback class). Term-aligned becomes the default in phase 2
-  when recipe-carried commits attach to subscriptions. Never stays
-  first-class (Lago/Stripe/Together default).
+  when recipe-carried commits (commits bundled in a pricing recipe — a
+  reusable plan-provisioning template) attach to subscriptions. "Never"
+  — no expiry at all — stays a first-class option (Lago/Stripe/Together
+  default).
 - The existing $1M per-grant cap stays for commit grants (operator
   splits larger commits; raise-on-first-DP-ask, documented).
 
@@ -263,9 +298,10 @@ under concurrent grant+drain (post-D6).
   never-expiring block (no per-block attribution exists). Phase 1
   inherits: reversal grants stay NULL-kind (paid class — correct-ish);
   a commit's drawn slice escapes its expiry on drawdown-invoice void,
-  and the void-retired escape co-occurrence is accepted at zero
-  customers. Phase-2 trigger: first DP with expiring commits → design
-  per-block drain attribution on usage entries.
+  and the co-occurrence with void-retire — a retired commit's
+  already-drawn slice can resurface through such a re-grant — is
+  accepted at zero customers. Phase-2 trigger: first DP with expiring
+  commits → design per-block drain attribution on usage entries.
 - **Uncollectible/pause/cancel leave commit blocks live** (D3) —
   collections stance. The fast-follow named here (surfacing unpaid-funded
   grants in the attention dashboard) **shipped 2026-08-04**: a
@@ -274,8 +310,9 @@ under concurrent grant+drain (post-D6).
   block still stays live — that part is unchanged and deliberate; it is no
   longer invisible. See the ADR-078 amendment of the same date.
 - **Reporting stays face-value-aggregate** (dashboard credit balance =
-  raw SUM across kinds; a discounted commit's cash≠face gap is not
-  surfaced). Phase-2: kind-split in GetBalance/overview when a DP asks.
+  raw SUM across kinds; a discounted commit's cash≠face gap — cash
+  collected vs face value granted — is not surfaced). Phase-2:
+  kind-split in GetBalance/overview when a DP asks.
 - **Alert lag on expired-unswept blocks** (D8).
 
 ## Phase 2 (deferred, triggers named)
