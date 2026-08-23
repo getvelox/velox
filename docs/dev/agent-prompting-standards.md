@@ -86,8 +86,9 @@ fresh-context verifier between implementation and the test matrix:
 > review spec conformance only.
 
 Why: fresh-context verification outperforms self-critique (Anthropic), and
-spec drift across a long build is exactly the class the P1b panel caught at
-design time — this catches it again at build time, cheaply.
+spec drift across a long build is exactly the class the P1b build-time
+panel caught before implementation — this catches it again after the
+build, cheaply.
 
 ## 6. Anti-patterns
 
