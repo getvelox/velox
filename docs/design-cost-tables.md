@@ -1,13 +1,15 @@
 # Design — Provider cost tables + margin (LOCKED)
 
 **Status:** LOCKED for build (2026-07-05) after a 4-platform quote-verified
-sweep (wf_2edadfc3: 37/40 claims) and a 5-lens adversarial panel
-(wf_977f5dc5: ingest-perf, money-semantics, schema-lifecycle, scope,
-siteset — all folds applied below). Decision record: ADR-079.
+sweep (workflow run wf_2edadfc3: 37/40 claims) and a 5-lens adversarial panel
+(workflow run wf_977f5dc5: ingest-perf, money-semantics, schema-lifecycle, scope,
+siteset — all folds, i.e. panel amendments, applied below). Decision record: ADR-079.
 
 ## Why
 
-Wedge margin story: billed revenue vs provider COGS per customer.
+Wedge margin story (the differentiation Velox bets on): billed revenue
+vs provider COGS (cost of goods sold — what the upstream provider
+charges for the usage) per customer.
 **Verified differentiation:** no billing engine (Orb/Metronome/OpenMeter)
 has a first-class provider-cost table or in-app margin report — Metronome
 pushes COGS joins to the operator's warehouse. LLM tooling (LiteLLM/
@@ -16,15 +18,15 @@ the billing engines lack, in the LLM-tooling shape, joined in-app.
 
 ## Corrected census (panel-verified; the pre-panel RFC was wrong)
 
-- LiteLLM observed cost is **never persisted**: mapper stamps
+- LiteLLM observed cost (the cost LiteLLM itself reports) is **never persisted**: mapper stamps
   `velox.litellm_*_usd` onto ExternalIngest.Metadata (mapper.go:269) but
   litellm/handler.go persist() drops it — IngestInput, domain.UsageEvent,
   and the INSERT have no metadata carrier; usage_events has NO metadata
   column. payload.go:80-84's "metadata column" comment is doc-code drift —
   fix it in this build.
-- usage_events.quantity is NUMERIC(38,12) (0054 ALTERed in place).
-- There is NO batch write path: BatchIngest loops per event, each its own
-  tx; every writer (live POST, batch, backfill, LiteLLM — plus
+- usage_events.quantity is NUMERIC(38,12) (migration 0054 ALTERed it in place).
+- There is NO batch write path: BatchIngest loops per event, each in its
+  own tx. Every writer (live POST, batch, backfill, LiteLLM — plus
   the k6 bench profile, which drives the public endpoint like any other
   client) funnels through Service.ingest → store.Ingest. **Stamping
   lives in that single funnel; every path is covered by construction.**
@@ -33,7 +35,8 @@ the billing engines lack, in the LLM-tooling shape, joined in-app.
   always holds the verbatim string. Cache-WRITE tokens never become
   events (ADR-044 deferral).
 - Rated revenue per (meter, rule) exists via CustomerUsageService.rateMeter;
-  per-model revenue exists ONLY when the rule's dimension_match pins model.
+  per-model revenue exists ONLY when the rule's dimension_match pins
+  model (matches on one specific model value).
 - Cost dashboard (cost_dashboard.go) is CUSTOMER-facing — COGS must never
   render there (allowlist projection verified leak-proof).
 
@@ -43,10 +46,11 @@ the billing engines lack, in the LLM-tooling shape, joined in-app.
 model, token_type, cost_per_token NUMERIC (decimal string at API — rates
 hit 1.5e-06/token; never float), currency (default USD), created_at,
 updated_at. `UNIQUE(tenant_id, livemode, provider, model, token_type)`,
-edit-in-place. **No effective_from** (no peer effective-dates cost rates;
+edit-in-place. **No effective_from** (no peer platform effective-dates its cost rates;
 the ingest stamp IS the snapshot; trigger to add: first pre-staged
-price-change ask). Migration must EXPLICITLY add: livemode column,
-set_livemode trigger (hard-coded per-table list, 0021 pattern),
+price-change ask). Migration must EXPLICITLY add: livemode column (the test-mode vs
+live-mode data flag), set_livemode trigger (hard-coded per-table list,
+the migration 0021 pattern),
 ENABLE + FORCE ROW LEVEL SECURITY + tenant policy.
 
 **D2. Stamp at ingest, single source.** Rate-table inference in phase 1;
@@ -60,7 +64,7 @@ intended. (An earlier draft of this line omitted `'observed'` and was
 stale against the migration from the day it shipped.)
 Implementation: SQL scalar subquery inside the existing store.Ingest
 INSERT — resolve `(provider, model_raw→model fallback, token_type)` from
-the event's dims against provider_cost_rates; zero extra round trips, no
+the event's dims against provider_cost_rates. Zero extra round trips, no
 cache, always fresh, empty table ≈ free. Events with no resolvable dims
 (non-token meters) stamp source='not_applicable'; token events with no
 matching rate stay NULL ('unresolved'). A resolution error must not fail
@@ -69,13 +73,14 @@ ingestion beyond the tx it rides (it's one INSERT — atomic by shape).
 **D3. Resolution key order:** `model_raw` exact → `model` (family) →
 NULL. Non-retroactive forever: events ingested before a rate existed stay
 NULL; NO recompute/backfill tooling (universal verified snapshot
-semantics + house no-speculative-backfill).
+semantics + the house no-speculative-backfill rule).
 
 **D4. Observed cost — SHIPPED 2026-08-05** (was: named fast-follow, not phase 1). Rule pinned now:
-per-half CostBreakdown only (input_cost→input event, output_cost→output
-event); cache_read halves and ResponseCost-only payloads fall to table
-inference; whole-call ResponseCost is NEVER stamped on a per-half event
-(3× COGS). Plumbing now exists: typed `ObservedCostMicros *int64` on
+per-half CostBreakdown only — a call's input and output are separate
+events, each stamped with its own cost half (input_cost→input event,
+output_cost→output event). cache_read halves and ResponseCost-only
+payloads fall to table inference. Whole-call ResponseCost is NEVER
+stamped on a per-half event (3× COGS). Plumbing now exists: typed `ObservedCostMicros *int64` on
 `litellm.ExternalIngest` → `usage.IngestInput` → `domain.UsageEvent` →
 the `ingestOneTx` INSERT, where a non-NULL value wins over the rate
 table and stamps `provider_cost_source='observed'`. The per-half rule is
@@ -83,7 +88,7 @@ enforced in `litellm.observedCostMicros`, which is the only place that
 reads `CostBreakdown`. Float guard: reject
 negative/NaN, document dollars-float→micros rounding.
 
-**D5. No import in phase 1** (trigger: first operator with >10 models).
+**D5. No rate-table import in phase 1** (trigger: first operator with >10 models).
 When it lands: file upload only (never live-URL fetch), unit
 normalization explicit, keys translated through canonicalModel with
 unmapped ids surfaced, preview-diff, operator rows always win.
@@ -94,7 +99,7 @@ revenue vs total stamped cost, same window); per-model rows show cost
 always, revenue + margin % ONLY for rules whose dimension_match pins
 model; remaining revenue in an explicit "not model-attributed" row.
 Rendered as a card on CustomerDetail (operator side). NEVER on the
-customer-facing cost dashboard. Currency: no FX — if cost currency ≠
+customer-facing cost dashboard. Currency: no FX (no currency conversion) — if cost currency ≠
 tenant billing currency, show cost separately, no margin %, loud note.
 
 **D7. Uncosted honesty, scoped.** The card counts 'unresolved' token
@@ -128,5 +133,6 @@ negotiated cost rates · margin analytics page/trends.
 ## Research provenance
 
 Peer sweep wf_2edadfc3 (2026-07-05): Orb 4/5, Metronome 11/11, OpenMeter
-8/9, LiteLLM/Langfuse/Helicone 14/15 — adversarially quote-verified.
+8/9, LiteLLM/Langfuse/Helicone 14/15 — adversarially quote-verified
+(each ratio = claims verified / claims checked).
 Panel wf_977f5dc5 (2026-07-05): 5 lenses, all amend, folds above.

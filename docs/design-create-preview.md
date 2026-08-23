@@ -1,29 +1,29 @@
 # Create-Preview Endpoint — Technical Design
 
 > **Status:** Shipped (2026-04-26) — `POST /v1/invoices/create_preview`
-> **Owner:** Track A
+> **Owner:** Track A (the backend workstream)
 > **Last revised:** 2026-04-26
 > **Related:** `docs/design-customer-usage.md` (sibling read surface, same composition pattern), `docs/design-multi-dim-meters.md` (multi-dim dependency — `usage.AggregateByPricingRules` is the engine)
 
 ## Motivation
 
-Stripe ships `Invoice.create_preview` (formerly `Invoice.upcoming`) as a Tier 1 surface — every customer asks "what is my bill going to be?" before the cycle closes. Velox already has the in-memory plumbing in `Engine.Preview` (the dashboard `GET /v1/billing/preview/{subscription_id}` route), but it's wired against the **old** aggregation path `usage.AggregateForBillingPeriod`, which is not multi-dim aware. Week 2 shipped `usage.AggregateByPricingRules` (LATERAL JOIN with priority+claim across 5 aggregation modes); the cycle scan and the customer-usage endpoint already use it. The preview is the only consumer left on the old path — every multi-dim tenant is silently looking at wrong projected-bill numbers today.
+Stripe ships `Invoice.create_preview` (formerly `Invoice.upcoming`) as a Tier 1 surface — every customer asks "what is my bill going to be?" before the cycle closes. Velox already has the in-memory plumbing in `Engine.Preview` (the dashboard `GET /v1/billing/preview/{subscription_id}` route). But it's wired against the **old** aggregation path `usage.AggregateForBillingPeriod`, which is not multi-dim aware (multi-dimensional metering: one meter carrying differently-priced slices of usage, split by dimension labels such as model or token type). Week 2 shipped `usage.AggregateByPricingRules` (a LATERAL JOIN using priority+claim resolution — higher-priority rules claim events first, each event counted by at most one rule per billing window — across 5 aggregation modes); the cycle scan (the billing engine's scheduled pass that turns closed cycles into invoices) and the customer-usage endpoint already use it. The preview is the only consumer left on the old path — every multi-dim tenant is silently looking at wrong projected-bill numbers today.
 
 This slice has three deliverables:
 
-1. **Switch `Engine.Preview` to use `AggregateByPricingRules`.** Same code path as the cycle scan → preview math == invoice math. Drift between dashboard projected-bill and the actual finalized invoice is the worst possible UX for a billing engine, and as multi-dim tenants ramp this gap widens silently.
+1. **Switch `Engine.Preview` to use `AggregateByPricingRules`.** Same code path as the cycle scan → preview math == invoice math. Drift between dashboard projected-bill and the actual finalized invoice is the worst possible UX for a billing engine. As multi-dim tenants ramp, this gap widens silently.
 2. **Expose the result over a stable wire contract** at `POST /v1/invoices/create_preview`. Stripe-equivalent path, request body the dashboard can reuse for plan-change confirmation dialogs (Week 5c) and the operator plan-migration preview (Week 6).
 3. **Match the response shape pattern of `customer-usage`** so a single TS type set in the dashboard handles both surfaces — cost dashboard renders the projected-bill line by reading the same `totals[]` shape it already reads for current-period spend.
 
-The dashboard's "projected bill" line in `web-v2/src/components/CostDashboard.tsx` is the immediate Track B unblock. Plan-change confirmation dialog (Week 5c) and the bulk plan-migration preview (Week 7) are the next two consumers.
+The dashboard's "projected bill" line in `web-v2/src/components/CostDashboard.tsx` is the immediate unblock for Track B (the dashboard/UI workstream). Plan-change confirmation dialog (Week 5c) and the bulk plan-migration preview (Week 7) are the next two consumers.
 
 ## Goals
 
 - **Read-only preview of the customer's next invoice.** Caller passes a `customer_id` (and optionally a `subscription_id`); response is the line set the cycle scan would emit if billing fired right now. Zero DB writes — assertable in tests.
-- **Multi-dim parity with the cycle scan.** Each `(meter, rule)` pair surfaces as a distinct preview line with `dimension_match` echoed from the meter pricing rule. Single-rule meters keep the existing one-line-per-meter shape. Same priority+claim resolution the cycle scan uses; same `domain.ComputeAmountCents` per rule bucket.
+- **Multi-dim parity with the cycle scan.** Each `(meter, rule)` pair surfaces as a distinct preview line with `dimension_match` (the rule's dimension-matching expression) echoed from the meter pricing rule. Single-rule meters keep the existing one-line-per-meter shape. Same priority+claim resolution the cycle scan uses; same `domain.ComputeAmountCents` per rule bucket.
 - **Cost-dashboard ergonomic.** Response shape mirrors `customer-usage`: per-line `quantity` as a precise decimal string, integer cents on `amount_cents`, `totals[]` always-array (one entry per distinct currency, even when there's only one). Cost dashboard's existing `formatCents(totals[0].amount_cents)` chain works on both.
 - **Stripe-shaped path.** `POST /v1/invoices/create_preview`, body `{customer_id, subscription_id?, period?}`. Stripe's surface accepts an inline `subscription` payload to model "what would happen if I changed this customer's plan to X"; we defer that to v2 (see open question 1) — v1 is read-only against the existing subscription.
-- **RLS-safe.** Standard `BeginTx(ctx, postgres.TxTenant, tenantID)` through every collaborator. Cross-tenant customer IDs surface as 404 at the customer lookup, by construction.
+- **RLS-safe.** RLS (Postgres Row-Level Security) makes the database itself filter every tenant-scoped query to that tenant's rows. Standard `BeginTx(ctx, postgres.TxTenant, tenantID)` through every collaborator. Cross-tenant customer IDs surface as 404 at the customer lookup, by construction.
 - **Documented contract Track B can call today.** Cost dashboard swaps the projected-bill line from "elapsed-vs-total cycle ratio extrapolation" to a real backend call as soon as this ships.
 
 ## Non-goals (deferred)
@@ -217,7 +217,7 @@ A standout property of this endpoint vs. the existing `/v1/invoices/{id}/finaliz
 - `resolvePeriod` table-driven: default to sub's current cycle, explicit window, partial bounds → 400, `from >= to` → 400, default with no current cycle → coded error.
 - `rateMeter`: single-rule meter emits one line, multi-rule meter emits one line per rule with `dimension_match` echoed, mismatched-rule-currency surfaces a warning, missing-rating-rule line is skipped + warning.
 - `assembleResult`: per-currency `totals[]` rolls up correctly, empty meter slice still emits `lines: []` not null.
-- **`TestWireShape_SnakeCase` (the merge gate):** marshal a real `PreviewResult`, assert every required snake_case key is present (`customer_id`, `subscription_id`, `lines`, `totals`, `warnings`, `billing_period_start`, etc.), assert no PascalCase leaks, assert empty fields marshal as `[]` not `null`. Same regression test pattern recipes uses.
+- **`TestWireShape_SnakeCase` (the merge gate):** marshal a real `PreviewResult`, assert every required snake_case key is present (`customer_id`, `subscription_id`, `lines`, `totals`, `warnings`, `billing_period_start`, etc.), assert no PascalCase leaks, assert empty fields marshal as `[]` not `null`. Same regression-test pattern the recipes feature uses.
 
 ### Integration tests (real Postgres)
 
@@ -241,7 +241,7 @@ A standout property of this endpoint vs. the existing `/v1/invoices/{id}/finaliz
 
 Quantity field type: **`decimal.Decimal` marshaled as a string**, matching customer-usage. Single-rule meters keep the existing per-line shape but with the precise decimal — fractional AI-usage primitives (GPU-hours, cached-token ratios) round-trip without precision loss. Amounts stay integer cents per ADR-005.
 
-Note: the existing `Engine.Preview` exposed `Quantity int64` and the `description` formatted the decimal. We change to `Quantity decimal.Decimal` (string-marshaled) for v1 — there's no consumer in main yet that would break (only `web-v2/src/components/CostDashboard.tsx` and the `/billing/preview/{subscription_id}` debug route consume the type, both via the typed API client). The TS surface adds a `.toString()` call where the dashboard previously took an integer; one-line change in the consumer.
+Note: the existing `Engine.Preview` exposed `Quantity int64` and the `description` formatted the decimal. We change to `Quantity decimal.Decimal` (string-marshaled) for v1. There's no consumer in main yet that would break: only `web-v2/src/components/CostDashboard.tsx` and the `/billing/preview/{subscription_id}` debug route consume the type, both via the typed API client. The TS surface adds a `.toString()` call where the dashboard previously took an integer; one-line change in the consumer.
 
 ## Open questions
 
@@ -250,7 +250,7 @@ Note: the existing `Engine.Preview` exposed `Quantity int64` and the `descriptio
 3. **Should `lines[]` be one line per `(meter, rule)` pair, or one line per meter with rules nested inside?** **Proposal: flat one-line-per-rule.** Matches Stripe's flat `lines.data` and matches the cycle scan's `invoice_line_items` (one row per rule's roll-up). Nested would be cleaner for multi-rule meters but inconsistent with the canonical invoice shape, and the dashboard already groups by `meter_id` client-side for the customer-usage view.
 4. **Should the preview apply customer credits + coupon discounts?** The cycle scan does, so a true "what will my next invoice look like" view should too. **Proposal: defer to v2.** Reproducing the apply-credit + apply-coupon paths server-side is real work and risks drift; v1 ships subtotal-only, with a clear note in the changelog that credits and coupons aren't reflected. Real consumers (the cost dashboard's projected-bill line) only need subtotal today.
 5. **Should `period` accept a `cycle_offset` shorthand (e.g. `next_cycle`, `last_cycle`)?** Useful for "what would this customer pay next month at current usage." **Proposal: no for v1.** Pure UI math on top of explicit RFC 3339 bounds. Add only when a real consumer asks.
-6. **Why `POST` for a read-only operation?** Stripe convention (`POST /v1/invoices/create_preview`) — the body carries enough structure (period, optional subscription overlay in their version) that GET with query parameters would be ugly, and consistent verb-with-body is more discoverable for the SDK ecosystem than a one-off GET. We follow.
+6. **Why `POST` for a read-only operation?** Stripe convention (`POST /v1/invoices/create_preview`) — the body carries enough structure (period, optional subscription overlay in their version) that GET with query parameters would be ugly. A consistent verb-with-body is also more discoverable for the SDK ecosystem than a one-off GET. We follow.
 7. **Should we surface `invoice_number_preview` (the number the next invoice would receive)?** **Proposal: no.** The number is allocated by the tenant settings store at finalize time; previewing it would either reserve numbers (state mutation, defeating the point) or guess (wrong if a concurrent invoice claims that number first). Punt.
 
 ## Implementation checklist (Week 5b)

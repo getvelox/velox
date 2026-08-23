@@ -8,21 +8,21 @@
 
 ## Motivation
 
-A buyer evaluating Velox asks the same question on day one: "How do I show a customer their current usage and what they'll be charged?" Stripe Billing's answer is a hosted Customer Portal page — but that's locked to Stripe Billing, which Velox does not use (per ADR on PaymentIntent-only). Buyers self-hosting Velox today have no first-party answer; they hand-roll a SQL query against `usage_events` and pray the dimension-match logic stays in sync with their pricing rules.
+A buyer evaluating Velox asks the same question on day one: "How do I show a customer their current usage and what they'll be charged?" Stripe Billing's answer is a hosted Customer Portal page — but that's locked to Stripe Billing, which Velox does not use (per the ADR — Architecture Decision Record — adopting the PaymentIntent-only pattern). Buyers self-hosting Velox today have no first-party answer. They hand-roll a SQL query against `usage_events` and pray the dimension-match logic (the mapping of each event's dimensions to the pricing rule that rates it) stays in sync with their pricing rules.
 
 This is the second flagship developer-experience surface, alongside recipes. Where recipes collapse "set up billing" to one POST, **`GET /v1/customers/{id}/usage` collapses "show me what this customer used and owes" to one GET**. The cost-dashboard component is the in-product manifestation; the API itself unblocks every operator who needs the same data in their own portal, in Slack alerts, in CSV exports.
 
-The dimension-match-aware aggregation is the part that can't be hand-rolled: the rules-ranked LATERAL JOIN in `internal/usage/postgres.go:236–279` is non-trivial, and any external SQL would silently drift from canonical pricing the moment a tenant adds a `meter_pricing_rule`. This endpoint is the supported way to get the right answer.
+The dimension-match-aware aggregation is the part that can't be hand-rolled: the rules-ranked LATERAL JOIN in `internal/usage/postgres.go:236–279` is non-trivial. Any external SQL would silently drift from canonical pricing the moment a tenant adds a `meter_pricing_rule` (a row binding a dimension combination to its price). This endpoint is the supported way to get the right answer.
 
 This endpoint composes the multi-dim aggregation surface and the invoice-line-item fan-out so callers can distinguish billed from not-yet-billed usage in a single response.
 
 ## Goals
 
-- **One call answers "what did this customer use?"** Per-meter aggregates over a caller-chosen window, with the same dimension-match → rating-rule binding the cycle scan uses. Operators read the same numbers their invoices will. No SQL drift.
-- **Cost transparency on the same response.** Each per-meter (and per-rule, for multi-dim) line includes the rated `amount_cents` so dashboards render `$12.34 — 1.2M tokens · gpt-4 input · uncached` without a second pricing call.
+- **One call answers "what did this customer use?"** Per-meter aggregates over a caller-chosen window, with the same dimension-match → rating-rule binding used by the cycle scan (the billing engine's pass that rates a cycle's usage into invoice line items). Operators read the same numbers their invoices will. No SQL drift.
+- **Cost transparency on the same response.** Each per-meter (and per-rule, for multi-dimensional meters) line includes the rated `amount_cents` so dashboards render `$12.34 — 1.2M tokens · gpt-4 input · uncached` without a second pricing call.
 - **Period defaults to current billing cycle.** With no query params, returns the live customer's current cycle so the obvious dashboard call is the cheapest one to write. `?from=…&to=…` overrides for historical / arbitrary windows (last-90d, audit, etc.).
 - **Subscription context co-emitted.** Response includes the plan(s) the customer is on plus the cycle boundaries, so a dashboard can render "Plan: AI API Pro · cycle Apr 1 → May 1 · 87% through" without follow-up calls.
-- **RLS-safe.** All queries scope through `BeginTx(ctx, postgres.TxTenant, tenantID)`; the response cannot leak across tenants even when an operator passes a customer ID from another tenant — the lookup just 404s.
+- **RLS-safe.** RLS (Row-Level Security) is the Postgres mechanism that filters every query down to the calling tenant's rows. All queries scope through `BeginTx(ctx, postgres.TxTenant, tenantID)`; the response cannot leak across tenants even when an operator passes a customer ID from another tenant — the lookup just 404s.
 - **Cheap.** Constant-bounded SQL (one aggregate per meter on the customer's plans). No event-by-event scan in the hot path. Live dashboards refresh every few seconds without melting the DB.
 - **Documented contract for downstream consumers.** This is the API the cost-dashboard component calls and the portal surface uses.
 
@@ -31,7 +31,7 @@ This endpoint composes the multi-dim aggregation surface and the invoice-line-it
 - **Time-series breakdown.** v1 returns aggregates over the window, not per-day buckets. The dashboard's first iteration is "current period total + last period total + plan boundary"; sparkline data lands in v2. Postgres aggregation by `date_trunc('day', timestamp)` is cheap when needed — we just don't wire it yet.
 - **Forecast / projection.** "At current rate, this customer will use 3.4M tokens by cycle end." Pure UI math on top of the v1 response. Punt.
 - **Cross-customer rollups.** No "top customers by usage" query. Use the `/v1/usage-events` list endpoint with appropriate filters; or, when a real user need shows up, design `GET /v1/usage/top-customers` separately. This endpoint is per-customer.
-- **Threshold alerts.** "Notify me when this customer hits 80% of plan cap." Webhook concern (`usage.threshold_crossed`) — owned by the dunning/notification surface, not this endpoint. Defer to Week 6+.
+- **Threshold alerts.** "Notify me when this customer hits 80% of plan cap." Webhook concern (`usage.threshold_crossed`) — owned by the dunning (failed-payment follow-up) / notification surface, not this endpoint. Defer to Week 6+.
 - **Past-cycle line-item replay.** v1 returns aggregates, not the canonical `invoice_line_items` rows for closed cycles. The latter is what `GET /v1/invoices/{id}` already serves; no double-implementation here.
 - **Currency conversion.** Amounts are returned in the plan's currency. If a tenant has multi-currency plans, each line carries its own `currency` field; clients render whichever they need.
 
@@ -43,14 +43,14 @@ This endpoint composes the multi-dim aggregation surface and the invoice-line-it
 - `internal/domain/pricing.go::ComputeAmountCents(rule RatingRuleVersion, quantity decimal.Decimal)` — pricing engine; same path the cycle scan calls.
 - `internal/billing/engine` — orchestrates cycle scan; reads the same store layer this endpoint composes from. The cycle scan is the canonical reference for "how to rate a customer's events", and this design intentionally reuses the same store calls.
 
-This endpoint is **composition, not new aggregation logic**. The hard SQL already exists. The win is exposing it on a stable wire contract so operators (and Track B's dashboard) don't reinvent it.
+This endpoint is **composition, not new aggregation logic**. The hard SQL already exists. The win is exposing it on a stable wire contract so operators (and Track B's dashboard — Track B is the parallel frontend workstream, Track A the backend) don't reinvent it.
 
 ## API surface
 
 > **Wire-contract conventions** (consistent with `/v1/*`, see `docs/design-recipes.md` § wire-contract):
 >
 > - **Snake-case JSON keys**, struct-tag enforced. Picker-side TS types match.
-> - **Customer identity is the customer ID** (`vlx_cus_…`), not external ID. Use `?external_id=` if you need external-ID lookup; defer for v2 or wrap as a separate endpoint.
+> - **Customer identity is the customer ID** (`vlx_cus_…`), not the external ID (the identifier the tenant's own system uses for the customer). Use `?external_id=` if you need external-ID lookup; defer for v2 or wrap as a separate endpoint.
 > - **Period bounds are RFC 3339** (`?from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z`). Both inclusive of `from`, exclusive of `to`. If only `from` is supplied → 400 (we don't guess "to=now"). If both omitted → defaults to the customer's current billing cycle.
 > - **Empty results are `[]`, never `null`.** Aligns with the existing list endpoints.
 
@@ -117,7 +117,7 @@ Response `200`:
 
 `rules` is the per-rule breakdown for multi-dim meters; for a flat single-rule meter the slice is length 1 with no `dimension_match`. `total_quantity` is the sum across rules; `total_amount_cents` is the sum across rules' `amount_cents`. Multi-currency plans (rare) emit one entry per currency under `meters` with `currency` set; `totals` becomes a list of `{currency, amount_cents}` rather than a scalar.
 
-`warnings` is the same shape as recipes' preview warnings — non-fatal conditions (a meter has events outside any rule's `dimension_match` and is falling through to the meter's default aggregation; a subscription is past its cycle end and a re-cycle hasn't run; `currency` mismatch between subscription and rating rule). Empty array in v1 if everything is clean.
+`warnings` is the same shape as recipes' preview warnings — non-fatal conditions the caller should see. Examples: a meter has events outside any rule's `dimension_match` and is falling through to the meter's default aggregation; a subscription is past its cycle end and a re-cycle hasn't run; a `currency` mismatch between subscription and rating rule. Empty array in v1 if everything is clean.
 
 ### `GET /v1/customers/{id}/usage?from=…&to=…` — explicit window
 
@@ -169,7 +169,7 @@ func (s *Service) GetCustomerUsage(
 
 - **Default (no `from`/`to`):** look at the customer's primary active subscription (most recent `current_period_start`). Use its `current_period_start` and `current_period_end`. If multiple active subs with divergent cycles, pick the latest start; emit a warning if cycle bounds disagree.
 - **Explicit:** parse `from` / `to`, validate `from < to`, validate window ≤ 1 year (configurable via env at v2).
-- **Cap to 1 year** because the LATERAL JOIN cost grows linearly with row count; one year of high-volume usage events on a multi-dim meter is already 100M+ rows for active tenants. We surface this in 400, not silently degrade.
+- **Cap to 1 year** because the LATERAL JOIN cost grows linearly with row count; one year of high-volume usage events on a multi-dim meter is already 100M+ rows for active tenants. We surface this as a 400 rather than silently degrading.
 
 ### RLS
 
@@ -198,7 +198,7 @@ Standard `BeginTx(ctx, postgres.TxTenant, tenantID)`. The customer lookup natura
 
 ### End-to-end test (against running stack)
 
-Delivered as `internal/usage/customer_usage_integration_test.go` (real Postgres: ingest across dimension combinations, `GET /v1/customers/{id}/usage` asserted against expected fixtures) plus MANUAL_TEST FLOW S2 for the running-stack smoke. The standalone e2e binary this section originally proposed (`cmd/velox-customer-usage-e2e`, or extending `velox-recipes-e2e`) was never built — neither ever existed in git.
+Delivered as `internal/usage/customer_usage_integration_test.go` (real Postgres: ingest across dimension combinations, `GET /v1/customers/{id}/usage` asserted against expected fixtures) plus MANUAL_TEST FLOW S2 (the matching scripted walkthrough in `MANUAL_TEST.md`) for the running-stack smoke. The standalone e2e binary this section originally proposed (`cmd/velox-customer-usage-e2e`, or extending `velox-recipes-e2e`) was never built — neither ever existed in git.
 
 ## Migrations
 
@@ -213,7 +213,7 @@ Delivered as `internal/usage/customer_usage_integration_test.go` (real Postgres:
 
 ## Decimal & numeric considerations
 
-Quantity is `decimal.Decimal` (NUMERIC(38,12)) per ADR-005, marshaled as a string (`"1234567.000000000000"`) to preserve precision. Amounts are integer cents per ADR-005; the rating-rule mode (`flat`, `graduated`, `package`) determines how the aggregated quantity becomes cents — all math runs through `pricing.ComputeAmountCents`, no recompute here.
+Quantity is `decimal.Decimal` (NUMERIC(38,12)) per ADR-005, marshaled as a string (`"1234567.000000000000"`) to preserve precision. Amounts are integer cents per ADR-005; the rating-rule mode (`flat`, `graduated`, `package`) determines how the aggregated quantity becomes cents. All math runs through `pricing.ComputeAmountCents`; nothing is recomputed here.
 
 ## Open questions
 
@@ -252,7 +252,7 @@ The dashboard shape Track B should aim at:
 - Per-meter cards: `meter_name · total_quantity · total_amount_cents`. Click → expanded view of `rules[]` with dimension chips and per-rule cents.
 - Filters: cycle (default) / last cycle / last 90 days / custom — all map to the same endpoint with different `from`/`to`.
 
-Track B can ship the UI against a mocked API (MSW handlers seeded from the example response above) before Track A finishes the backend, then swap to the real API at integration time. Same design-first / RFC parallel-work pattern as recipes.
+Track B can ship the UI against a mocked API (MSW — Mock Service Worker — handlers seeded from the example response above) before Track A finishes the backend, then swap to the real API at integration time. Same design-first / RFC parallel-work pattern as recipes.
 
 ## Review status
 

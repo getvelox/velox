@@ -1,14 +1,18 @@
 # Stripe end-to-end test runbook
 
 How to manually verify Velox's Stripe integration against a real Stripe test account.
-Designed to be run before each design-partner cutover and after any change touching
+Designed to be run before each design-partner cutover (bringing an early pilot
+customer live on Velox) and after any change touching
 `internal/payment/`, `internal/tenantstripe/`, or `internal/dunning/`.
 
 **Audience:** Velox maintainer, design-partner technical contact during sandbox cutover.
 
-**Prerequisite:** A Stripe **test-mode** account with at least Restricted Key / Standard
-secret + publishable keys minted. The keys never leave the dashboard's connection
-form once entered — Velox encrypts them at rest with the same AES-256-GCM key used
+**Prerequisite:** A Stripe **test-mode** account with at least Restricted Key
+(a Stripe key limited to chosen permissions) / Standard secret + publishable
+keys minted (the secret key authenticates server-side API calls; the
+publishable key is its browser-safe counterpart). The keys never
+leave the dashboard's connection form once entered — Velox encrypts them at
+rest with the same AES-256-GCM key used
 for customer email. **Never use live keys for this runbook.**
 
 ---
@@ -89,8 +93,11 @@ without `read_only` scope on Account.
 
 ## Step 2 — Create a customer with a saved payment method
 
-PaymentIntent flows require a saved payment method. The Velox dashboard handles
-this via Stripe's Setup Intent flow, but the runbook below uses the API directly
+PaymentIntent flows (a PaymentIntent is Stripe's object tracking the
+collection of one payment) require a saved payment method. The Velox
+dashboard handles this via Stripe's Setup Intent flow (which saves a card
+for later charges without charging it now), but the runbook below uses
+the API directly
 with one of Stripe's pre-built test payment methods so the flow doesn't require
 a browser.
 
@@ -119,26 +126,29 @@ Open `http://localhost:5173/customers/<vlx_cus_...>` in a browser, click
 - Postal code: any 5 digits
 
 The dashboard mints a Setup Intent against Stripe via
-`internal/payment/checkout_handler.go`, the user confirms in Stripe Elements,
-and the resulting `pm_*` payment method ID is persisted as a row in the
-`payment_methods` table for that customer (the canonical multi-PM store;
-the old `customer_payment_setups.stripe_payment_method_id` column was
-dropped in migration 0097).
+`internal/payment/checkout_handler.go`, and the user confirms in Stripe
+Elements. The resulting `pm_*` payment method ID is persisted as a row in the
+`payment_methods` table for that customer — the canonical store for a
+customer's multiple payment methods (the old
+`customer_payment_setups.stripe_payment_method_id` column was dropped in
+migration 0097).
 
 **Expected:** customer detail shows the card with last4=4242, brand=visa, status=valid.
 
 ### 2c. Failed-card variant (run after the happy path)
 
 Repeat 2b with `4000 0000 0000 0002` (Stripe's "card declined" test). Setup
-Intent should succeed (card is valid for SI) but the eventual PaymentIntent
-in step 4 will fail and trigger the dunning flow.
+Intent should succeed but the eventual PaymentIntent in step 4 will
+fail and trigger the dunning flow
+(automated retry-and-notify handling of a failed payment).
 
 ---
 
 ## Step 3 — Subscribe the customer to a flat plan
 
 Bootstrap seeds no plans — create one first on the dashboard's Pricing
-page or instantiate a recipe (see the recipes test below), then pick it:
+page or instantiate a recipe (a pre-built pricing template shipped with
+Velox; see the recipes test below), then pick it:
 
 ```bash
 PLAN_ID=$(curl -s http://localhost:8080/v1/plans -b /tmp/velox-cookies.txt \
@@ -181,14 +191,16 @@ auto-confirm and the invoice flips to `status=paid` within ~5 seconds.
 
 ## Step 5 — Webhook delivery from Stripe → Velox
 
-Velox's webhook ingestion verifies signatures with a **per-tenant** secret —
-there is no operator-level `STRIPE_WEBHOOK_SECRET` env var. The signing secret
-lives (encrypted) in `stripe_provider_credentials.webhook_secret` and is
-resolved per request via the `endpoint_id` embedded in the URL path
+Velox's webhook ingestion (receiving Stripe's event notifications) verifies
+signatures with a **per-tenant** secret — there is no operator-level
+`STRIPE_WEBHOOK_SECRET` env var. The signing secret lives (encrypted) in
+`stripe_provider_credentials.webhook_secret`. It is resolved per request via
+the `endpoint_id` embedded in the URL path
 `/v1/webhooks/stripe/{endpoint_id}` (`LookupEndpoint` in
 `internal/payment/handler.go`). Verified events are stored in
 `stripe_webhook_events` keyed on `(tenant_id, stripe_event_id)` for
-idempotency (a UNIQUE constraint; there is no `processed` column).
+idempotency (a UNIQUE constraint, so a replayed event cannot be stored twice;
+there is no `processed` column).
 
 For local testing without exposing port 8080 to the public internet:
 
@@ -209,8 +221,8 @@ through the CLI tunnel.
 `payment_intent.created`, `payment_intent.succeeded`, `charge.succeeded`) lands
 as a row in `stripe_webhook_events` (one per `stripe_event_id`; a
 replayed event is deduped by the UNIQUE constraint). Note the dashboard's
-`/webhook_events` page shows OUTBOUND webhook deliveries, not this inbound
-Stripe-ingestion table.
+`/webhook_events` page shows OUTBOUND webhook deliveries (events Velox sends
+to your configured endpoints), not this inbound Stripe-ingestion table.
 
 ---
 
@@ -225,25 +237,27 @@ curl -s "http://localhost:8080/v1/dunning/runs?customer_id=<vlx_cus_...>" \
 ```
 
 **Expected:** a dunning run appears **only if a dunning policy is configured
-and set default** — bootstrap deliberately seeds none (ADR-036 amendment), so
+and set default**. Bootstrap deliberately seeds none (ADR-036 amendment), so
 on a fresh tenant the failed payment skips enrollment with a
 "dunning not configured" WARN and the runs list stays empty. Create a policy
 first (dashboard → Dunning policies, or `POST /v1/dunning/policies` +
 `set-default`); retries then follow that policy's grace period and
 `retry_schedule`. Each retry is a fresh PaymentIntent; check the Stripe
-dashboard's Payments page to confirm the PI ID changes per attempt.
+dashboard's Payments page to confirm the PI (PaymentIntent) ID changes per
+attempt.
 
-To recover the customer, swap the card via step 2b with `4242`, then
-either wait for the next scheduled dunning retry or, once the payment
-succeeds, the run resolves automatically (`POST /v1/dunning/runs/{id}/resolve`
-is the operator action to close a run manually — there is no per-attempt
-force-retry endpoint).
+To recover the customer, swap the card via step 2b with `4242`, then wait
+for the next scheduled dunning retry; once the payment succeeds, the run
+resolves automatically. (`POST /v1/dunning/runs/{id}/resolve` is the operator
+action to close a run manually — there is no per-attempt force-retry
+endpoint.)
 
 ---
 
 ## Step 7 — Refund via credit note
 
-Issue a credit note against the paid invoice from step 4:
+Issue a credit note (the document that records money credited or refunded
+against an invoice) against the paid invoice from step 4:
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/credit-notes \
@@ -261,12 +275,13 @@ curl -s -X POST http://localhost:8080/v1/credit-notes \
 ```
 
 **Expected:** credit note created with `status=issued`. Because
-`refund_amount_cents` is set, Velox calls `refunds.Create` against Stripe,
-the refund lands on the same charge, and a `charge.refunded` webhook flows
-back — the credit note's `refund_status` flips to `succeeded` and
-`stripe_refund_id` is populated. (Leaving all three allocation fields zero
-on a paid invoice defaults to `credit_amount = total` — a customer-balance
-credit with **no** Stripe refund.)
+`refund_amount_cents` is set, Velox calls `refunds.Create` against Stripe and
+the refund lands on the same charge. A `charge.refunded` webhook flows back —
+the credit note's `refund_status` flips to `succeeded` and
+`stripe_refund_id` is populated. (Leaving all three allocation fields —
+`refund_amount_cents`, `credit_amount_cents`, `out_of_band_amount_cents` —
+zero on a paid invoice defaults to `credit_amount = total` — a
+customer-balance credit with **no** Stripe refund.)
 
 ---
 

@@ -1,24 +1,29 @@
 # Design: additional_emails + CC coverage — multi-recipient billing emails
 
-Settled 2026-07-06 by a divergent design panel (peer-parity lens vs
-plumbing-simplicity lens + adversarial judge, wf_f804205b-528). Register
-item: "Invoice/receipt/dunning emails go to exactly one recipient" (fix-
-now, ~day) + promoted rider `POST /v1/credit-notes/{id}/send` (hours).
-Peer anchor: Orb CCs the customer's additional_emails on every invoice
-email; Lago supports multi-recipient + resend override; Stripe supports
-additional/CC recipients on Billing emails.
+Settled 2026-07-06 by a divergent design panel (independent designs
+argued from competing lenses — peer parity vs plumbing simplicity —
+plus an adversarial judge, wf_f804205b-528). Register item (the tracked
+backlog entry this design resolves): "Invoice/receipt/dunning emails go
+to exactly one recipient" (fix-now, ~day) + promoted rider (a small
+scope item shipped alongside): `POST /v1/credit-notes/{id}/send`
+(hours). Peer anchor (what comparable billing platforms do): Orb CCs
+the customer's additional_emails on every invoice email; Lago supports
+multi-recipient + resend override; Stripe supports additional/CC
+recipients on Billing emails.
 
 ## Settled decisions
 
 1. **Storage**: `customers.additional_emails TEXT NOT NULL DEFAULT ''`
    (migration 0140) holding the **same-encryptor ciphertext of a JSON
-   string array** — rides encryptCustomer/decryptCustomer exactly like
-   the sibling `email` column (nil encryptor = plaintext JSON). A
+   string array** — encrypted with the same encryptor that already
+   protects the sibling `email` column, riding
+   encryptCustomer/decryptCustomer (nil encryptor = plaintext JSON). A
    plaintext TEXT[] was rejected: it would leak in a dump exactly the
    PII the primary-email column encrypts, and no DB cardinality CHECK
    can inspect ciphertext. Domain: `Customer.AdditionalEmails []string`.
-   Down = plain DROP COLUMN. The `customer_email_contacts` table stays
-   phase 3 (trigger: per-recipient preferences / contact names /
+   Down (the migration's rollback) = plain DROP COLUMN. The
+   `customer_email_contacts` table stays phase 3 (trigger:
+   per-recipient preferences / contact names /
    per-contact deliverability).
 
 2. **Validation** (customer service, Create + Update): trim →
@@ -35,18 +40,20 @@ additional/CC recipients on Billing emails.
    **visible `Cc:` header** (rendered per-address via
    `(&mail.Address{Address: a}).String()` — the fromHeaderValue
    injection-neutralization pattern), one SMTP transaction with RCPT TO
-   for primary + each surviving CC. Rejected: N separate envelopes (one
-   outbox row with N retry states = duplicate sends on retry), BCC (no
-   peer blind-copies invoices).
+   for primary + each surviving CC. Rejected: N separate envelopes —
+   each email is one outbox row (a DB-queued send drained by the
+   dispatcher), so one row with N retry states = duplicate sends on
+   retry — and BCC (no peer blind-copies invoices).
 
 4. **deliver() error attribution** (adversarial blindspot fix):
    signature becomes `deliver(ctx, tenantID, to, cc, body)`. Primary
-   RCPT rejection → hard error (today's semantics; bounce reported for
+   RCPT rejection (the SMTP server refusing that recipient at the
+   RCPT TO step) → hard error (today's semantics; bounce reported for
    the primary). CC RCPT **protocol rejection** (*textproto.Error) →
    WARN + reportBounceIfPermanent(**the CC address**) + drop + continue.
    CC **transport/IO error** → whole send errors and retries (DATA not
    yet sent — retry-safe). CC rejections NEVER propagate as deliver's
-   return error: sendRich attributes any returned error to msg.To, so a
+   return error. sendRich attributes any returned error to msg.To, so a
    leaked CC 550 would wrongly flip the PRIMARY customer to bounced.
 
 5. **Coverage matrix**: CC-eligible (6) = invoice, payment_receipt,
@@ -58,7 +65,8 @@ additional/CC recipients on Billing emails.
    STRUCTURAL — the 4 keep their exact signatures, no cc parameter
    exists to misuse.
 
-6. **Suppression**: primary suppressed → whole send blocked loudly at
+6. **Suppression** (the do-not-mail check — an address whose customer has bounced or complained):
+   primary suppressed → whole send blocked loudly at
    both existing gates (enqueue + dispatch), never downgraded to
    CC-only. CC filtering at DISPATCH time only, inside sendRich only,
    per-address IsSuppressed under one shared 5s ctx; each drop = INFO
@@ -77,18 +85,18 @@ additional/CC recipients on Billing emails.
 
 8. **Operator override**: `POST /v1/invoices/{id}/send` body becomes
    `{email, additional_emails *[]string}` — absent → customer's stored
-   list (this makes legacy bodies CC by default = the Orb-parity
-   behavior, called out in CHANGELOG), `[]` → primary only, list →
-   validated exact override.
+   list (so legacy request bodies get CC by default — the Orb-parity
+   behavior, called out in CHANGELOG); `[]` → primary only; an explicit
+   list → validated exact override.
 
-9. **CN send rider**: `POST /v1/credit-notes/{id}/send`, issued-only
-   (draft/voided → 422), PDF via the assembly shared with downloadPDF,
-   new `TypeCreditNote` outbox type (no email_type CHECK exists — no
-   migration), new template (subject "Credit note {number} from
-   {company}", names the applied invoice, PDF attached, NO CTA — no
-   hosted CN page exists), audit `domain.AuditActionSend` on
-   resource credit_note (no recipient address — GDPR convention), NO
-   outbound webhook. **Timeline blindspot fix**: the hardcoded
+9. **CN (credit note) send rider**: `POST /v1/credit-notes/{id}/send`,
+   issued-only (draft/voided → 422). PDF via the assembly shared with
+   downloadPDF. New `TypeCreditNote` outbox type (no email_type CHECK
+   exists — no migration). New template: subject "Credit note {number}
+   from {company}", names the applied invoice, PDF attached, NO CTA
+   (call-to-action link) — no hosted CN page exists. Audit
+   `domain.AuditActionSend` on resource credit_note (no recipient
+   address — GDPR convention), NO outbound webhook. **Timeline blindspot fix**: the hardcoded
    email_type allowlists in OutboxStore.ListByInvoice + ListByCustomer
    gain 'credit_note', plus a web-v2 label.
 
@@ -100,7 +108,8 @@ additional/CC recipients on Billing emails.
 ## Out of scope (named triggers)
 
 contacts table (phase 3); per-CC persistent suppression / auto-removal
-(repeated hard-bounces observed); per-email-type routing (DP ask);
+(repeated hard-bounces observed); per-email-type routing (DP —
+design-partner — ask);
 email-sent webhook events + credit_note.* lifecycle family (design
 whole when a DP automation asks); hosted CN page (DP ask); auto-email
 at finalize (separate register item); CC on the 4 credential types

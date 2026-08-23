@@ -1,6 +1,7 @@
 # Velox self-host on a single VM (Docker Compose)
 
-A 5-minute path from a fresh VM to a working Velox tenant. Five
+A 5-minute path from a fresh VM to a working Velox tenant (one
+isolated billing organization — Velox is multi-tenant). Five
 containers behind one nginx: postgres, redis, velox-api, velox-dashboard, nginx.
 Migrations run on first boot.
 
@@ -53,8 +54,9 @@ First boot does three things you'll see in the logs:
    `postgres-init.sh`).
 2. `velox-api` starts with `RUN_MIGRATIONS_ON_BOOT=true`, applies all
    pending migrations from `internal/platform/migrate/sql/`, verifies
-   the runtime role cannot bypass RLS, then begins serving on `:8080`
-   and starts the in-process scheduler.
+   the runtime role cannot bypass RLS (row-level security, the
+   Postgres feature Velox uses for tenant isolation), then begins
+   serving on `:8080` and starts the in-process scheduler.
 3. `nginx` proxies host `:80` to `velox-api:8080`.
 
 Tail the logs while it converges:
@@ -84,10 +86,11 @@ health check to `/health/ready`.
 The bootstrap endpoint is gated by the token you set in `.env`.
 
 **Run this ON the VM** (`http://localhost/...`) or through an SSH
-tunnel — the response carries your owner password and live API key, and
-this stack terminates no TLS; do not send it over plain HTTP across a
-network. The token travels in the `Authorization` header (never a query
-string) so it stays out of proxy access logs.
+tunnel. The response carries your owner password and live API key,
+and this stack terminates no TLS (no service in it accepts HTTPS, so traffic to the VM travels in plaintext) —
+do not send it over plain HTTP across a network. The token travels in
+the `Authorization` header (never a query string) so it stays out of
+proxy access logs.
 
 ```bash
 curl -X POST http://localhost/v1/bootstrap \
@@ -173,7 +176,7 @@ or on the publicly documented default password.
 **`velox-api` exits with `could not open the app database connection`** —
 the `velox_app` role is missing or its password doesn't match
 `VELOX_APP_DB_PASSWORD`. `postgres-init.sh` only runs on a FRESH
-`pgdata` volume; on an existing volume create or rotate the role
+`pgdata` volume. On an existing volume, create or rotate the role
 manually (psql's `:'pw'` quoting keeps any password intact):
 
 ```bash
@@ -193,9 +196,10 @@ docker compose exec -e VELOX_APP_DB_PASSWORD postgres \
 copied `DATABASE_URL`). Point it at `velox_app`.
 
 **`/health/ready` returns 503 with `scheduler: degraded`** — the
-scheduler tick window has elapsed without a recorded run. Usually means
-the API process is alive but the leader-locked work isn't progressing.
-Check the API logs and the `pg_locks` table.
+scheduler tick window has elapsed without a recorded run. Usually this
+means the API process is alive but the leader-locked background work
+(jobs guarded by a Postgres advisory lock) isn't progressing. Check
+the API logs and the `pg_locks` table.
 
 **Port 80 is already in use** — set `NGINX_HTTP_PORT=8080` (or any free
 port) in `.env` and bring the stack back up.

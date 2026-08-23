@@ -21,7 +21,8 @@ reproducible from a clean checkout with `docker compose up -d postgres` and two
 ## The guarantee
 
 Exactly-once billing in Velox is **not** application logic. It is a partial
-unique index (migration 0101):
+unique index (migration 0101) — a uniqueness rule the database enforces only on
+rows matching the index's `WHERE` clause:
 
 ```sql
 CREATE UNIQUE INDEX idx_invoices_billing_idempotency
@@ -30,9 +31,11 @@ CREATE UNIQUE INDEX idx_invoices_billing_idempotency
 ```
 
 A second live cycle invoice for a period that already has one cannot be
-committed. Not "is unlikely to be" — cannot be. That distinction is the whole
-result, and the negative control below is what makes it a measurement rather
-than a claim.
+committed — the `WHERE` clause scopes the rule to non-voided, regular
+billing-cycle invoices. Not "is unlikely to be" — cannot be. That distinction
+is the whole result, and the negative control below — the same run with the
+index removed, which must produce duplicates — is what makes it a measurement
+rather than a claim.
 
 ---
 
@@ -66,10 +69,10 @@ measuring Go's runtime instead of failover.
 
 ## 2. Four leaders racing at once
 
-A crash produces one interleaving. Running four leaders concurrently against the
-same due set produces many, including both transactions inside the same
-`(subscription, period)` window simultaneously — a state sequential takeover
-cannot construct on purpose.
+A crash produces one interleaving. Running four leaders (four instances of the
+billing engine, raced as goroutines in one test process) concurrently against the same due set produces many, including
+both transactions inside the same `(subscription, period)` window
+simultaneously — a state sequential takeover cannot construct on purpose.
 
 ```
 4 concurrent leaders: generated=[11 8 12 9]  failures=[0 0 0 0]
@@ -110,8 +113,8 @@ whether the crash left some *other* invariant broken — an orphaned line item, 
 ledger entry without its counterpart, a subscription whose period bounds no
 longer agree with its invoices.
 
-`velox-doctor` sweeps **28 money invariants** as read-only SQL. After every
-scenario above:
+`velox-doctor` (Velox's invariant-checking CLI) sweeps **28 money invariants**
+as read-only SQL. After every scenario above:
 
 ```
 doctor: 28 checks, 0 violations, 0 errors, ~23ms
@@ -134,8 +137,10 @@ Two things worth stating about that number rather than leaving implied:
 
 ## 5. How fast a dead leader is replaced
 
-Singleton work is gated by a Postgres advisory lock. Two failure modes, measured
-separately, because they behave nothing alike:
+Singleton work — jobs only one replica may run at a time — is gated by a
+Postgres advisory lock (an application-defined lock the server holds for the
+session). Two failure modes, measured separately, because they behave nothing
+alike:
 
 | Failure | Time until another replica can take over |
 |---|---:|
@@ -150,8 +155,9 @@ measurement pinned to its own granularity looks like.
 
 ### The partition case, actually severed
 
-The 90 s figure used to be arithmetic — we set the keepalives and computed
-`60 + 10×3`. It was the only number in this document that had never been
+The 90 s figure used to be arithmetic — we set the TCP keepalives (the kernel's
+periodic probes that detect a silently dead peer) and computed `60 + 10×3`. It
+was the only number in this document that had never been
 observed, and the one most likely to be wrong, because keepalives depend on the
 network path honouring them.
 
@@ -195,9 +201,10 @@ packaged drill asserts this and refuses to run otherwise:
 ./scripts/partition-drill.sh           # no SET: the pre-fix default
 ```
 
-The second number was **7,875 s (2 h 11 m)** before this work — the Postgres
-default keepalive train — during which every replica skips its tick and billing
-stops with no error and no log line at `Info`. See
+The second number — takeover after a silent host loss — was **7,875 s (2 h 11 m)**
+before this work: the Postgres default keepalive train. During that window every
+replica skips its tick, and billing stops with no error and no log line at
+`Info`. See
 `docs/ops/postgres-requirements.md`.
 
 ---

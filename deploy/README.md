@@ -8,10 +8,10 @@ One install shape ships in this directory. The canonical landing page is
 | [`compose/`](compose/) | Single-VM eval, dev/staging, low-volume production. Reference deploy. |
 
 Kubernetes (Helm) and Terraform paths are deliberately not shipped in
-v1 — they land when a design partner names the flavour they actually
-run (see the "Operational posture" section of `docs/self-host.md`).
-Pre-emptively shipping three deployment paths produced surface nobody
-was running.
+v1 — they land when a design partner (an early production adopter)
+names the flavour they actually run (see the "Operational posture"
+section of `docs/self-host.md`). Pre-emptively shipping three
+deployment paths produced surface area nobody was running.
 
 ## Local development
 
@@ -40,10 +40,11 @@ docker run --rm -e DATABASE_URL="..." -p 8080:8080 velox:latest
 
 ## Required env vars
 
-The compose-level schema is [`compose/.env.example`](compose/.env.example);
-the full binary schema is the repo-root [`.env.example`](../.env.example),
-which mirrors the binary's actual reads from `internal/config/config.go`
-plus the per-package `os.Getenv` callsites. Mandatory in a production
+The compose-level schema (authoritative for the compose stack) is
+[`compose/.env.example`](compose/.env.example). The full binary schema
+is the repo-root [`.env.example`](../.env.example); it mirrors the
+binary's actual reads from `internal/config/config.go` plus the
+per-package `os.Getenv` callsites. Mandatory in a production
 install:
 
 | Variable | Why |
@@ -69,10 +70,14 @@ endpoints are exempt from rate limiting and audit logging.
 
 ## Scaling
 
-- **Horizontal:** Multi-replica is safe on the money paths — schedulers
-  and outbox dispatchers are leader-elected via Postgres advisory locks
-  (`internal/billing/lock_adapter.go`) with SKIP-LOCKED row claims,
-  so replicas coexist without double-billing or double-sending. "Safe"
+- **Horizontal:** Multi-replica is safe on the money paths. Schedulers
+  and outbox dispatchers (the workers that drain the queued
+  side-effect tables — outbound webhooks and emails) are
+  leader-elected: only one replica runs each job at a time, guarded
+  by Postgres advisory locks (`internal/billing/lock_adapter.go`)
+  and SKIP-LOCKED row claims (rows another worker already holds are
+  skipped, not waited on), so replicas coexist without
+  double-billing or double-sending. "Safe"
   is not "fully supported": a few surfaces still assume one process
   (the dashboard's live webhook-event tail only shows events dispatched
   by the replica serving the stream; the password-reset send cap

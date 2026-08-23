@@ -29,15 +29,16 @@ npm run build      # tsc -b + vite build — the strictest of the four
 ## Generated code — do not hand-edit
 
 `src/lib/gen/**` is generated from `api/openapi.yaml` at the repo root.
-Change the spec, then run `make gen` from the root (npm-level generators are
-not the same thing); CI's codegen-drift job fails any PR where the spec and
-generated artifacts disagree.
+Change the spec, then run `make gen` from the root — the npm-level
+generators are not the same thing. CI's codegen-drift job fails any PR
+where the spec and the generated artifacts disagree.
 
 ## Conventions worth knowing before a first PR
 
 - Relative-time / "now"-dependent UI must resolve "now" via
-  `src/hooks/useClockFrozenMap.ts` (test clocks freeze time per entity);
-  an eslint rule bans bare `Date.now()` in the affected surfaces.
+  `src/hooks/useClockFrozenMap.ts` — test clocks (simulated billing
+  timelines) freeze time per entity; an eslint rule bans bare
+  `Date.now()` in the affected surfaces.
 - Money is formatted through `src/lib/priceDisplay.ts` — exact string math,
   never `parseFloat` on money strings.
 - Every user-visible change updates `CHANGELOG.md`, and UI-visible behavior
