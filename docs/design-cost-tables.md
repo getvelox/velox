@@ -23,7 +23,9 @@ the billing engines lack, in the LLM-tooling shape, joined in-app.
   litellm/handler.go persist() drops it — IngestInput, domain.UsageEvent,
   and the INSERT have no metadata carrier; usage_events has NO metadata
   column. payload.go:80-84's "metadata column" comment is doc-code drift —
-  fix it in this build.
+  fix it in this build. *(2026-08-23: superseded — D4 shipped 2026-08-05;
+  observed cost is now persisted per token half — `handler.go:209`,
+  `mapper.go:267/293` — and the payload.go comment was fixed.)*
 - usage_events.quantity is NUMERIC(38,12) (migration 0054 ALTERed it in place).
 - There is NO batch write path: BatchIngest loops per event, each in its
   own tx. Every writer (live POST, batch, backfill, LiteLLM — plus
@@ -125,7 +127,7 @@ ingest.
 
 ## Phase 2+ (trigger-gated)
 
-Observed-cost stamping (D4 rule) · effective_from versioning · import ·
+effective_from versioning · import ·
 regex model match + context-size tiers (Langfuse-verified requirements) ·
 cost-plus pricing (2-2 verified split, not table stakes) · per-customer
 negotiated cost rates · margin analytics page/trends.

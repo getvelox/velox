@@ -96,10 +96,10 @@ without `read_only` scope on Account.
 PaymentIntent flows (a PaymentIntent is Stripe's object tracking the
 collection of one payment) require a saved payment method. The Velox
 dashboard handles this via Stripe's Setup Intent flow (which saves a card
-for later charges without charging it now), but the runbook below uses
-the API directly
-with one of Stripe's pre-built test payment methods so the flow doesn't require
-a browser.
+for later charges without charging it now), but the runbook below uses the
+API directly with one of Stripe's pre-built test payment methods where it
+can: customer creation (2a) needs no browser; attaching the card (2b)
+goes through the dashboard and Stripe's hosted page.
 
 ### 2a. Create the Velox customer
 
@@ -125,9 +125,9 @@ Open `http://localhost:5173/customers/<vlx_cus_...>` in a browser, click
 - CVC: any 3 digits
 - Postal code: any 5 digits
 
-The dashboard mints a Setup Intent against Stripe via
-`internal/payment/checkout_handler.go`, and the user confirms in Stripe
-Elements. The resulting `pm_*` payment method ID is persisted as a row in the
+The dashboard creates a Stripe Checkout session in **setup mode** via
+`internal/payment/checkout.go`; the user enters the card on the hosted
+Stripe page and is redirected back. The resulting `pm_*` payment method ID is persisted as a row in the
 `payment_methods` table for that customer — the canonical store for a
 customer's multiple payment methods (the old
 `customer_payment_setups.stripe_payment_method_id` column was dropped in
@@ -137,9 +137,10 @@ migration 0097).
 
 ### 2c. Failed-card variant (run after the happy path)
 
-Repeat 2b with `4000 0000 0000 0002` (Stripe's "card declined" test). Setup
-Intent should succeed but the eventual PaymentIntent in step 4 will
-fail and trigger the dunning flow
+Repeat 2b with `4000 0000 0000 0341` (Stripe's attach-succeeds,
+charges-decline test card; `4000 0000 0000 0002` declines at SetupIntent
+time too, so it never produces this state). Setup Intent succeeds but the
+eventual PaymentIntent in step 4 will fail and trigger the dunning flow
 (automated retry-and-notify handling of a failed payment).
 
 ---
@@ -148,7 +149,9 @@ fail and trigger the dunning flow
 
 Bootstrap seeds no plans — create one first on the dashboard's Pricing
 page or instantiate a recipe (a pre-built pricing template shipped with
-Velox; see the recipes test below), then pick it:
+Velox; the recipe flows live in `MANUAL_TEST.md`). Price the plan at
+**2900 cents/month** — the expected amounts in steps 4 and 7 assume it.
+Then pick it:
 
 ```bash
 PLAN_ID=$(curl -s http://localhost:8080/v1/plans -b /tmp/velox-cookies.txt \
@@ -194,11 +197,11 @@ auto-confirm and the invoice flips to `status=paid` within ~5 seconds.
 Velox's webhook ingestion (receiving Stripe's event notifications) verifies
 signatures with a **per-tenant** secret — there is no operator-level
 `STRIPE_WEBHOOK_SECRET` env var. The signing secret lives (encrypted) in
-`stripe_provider_credentials.webhook_secret`. It is resolved per request via
+`stripe_provider_credentials.webhook_secret_encrypted`. It is resolved per request via
 the `endpoint_id` embedded in the URL path
 `/v1/webhooks/stripe/{endpoint_id}` (`LookupEndpoint` in
 `internal/payment/handler.go`). Verified events are stored in
-`stripe_webhook_events` keyed on `(tenant_id, stripe_event_id)` for
+`stripe_webhook_events` keyed on `(tenant_id, livemode, stripe_event_id)` for
 idempotency (a UNIQUE constraint, so a replayed event cannot be stored twice;
 there is no `processed` column).
 
@@ -219,7 +222,7 @@ through the CLI tunnel.
 
 **Expected:** every Stripe event for steps 2–4 (`payment_method.attached`,
 `payment_intent.created`, `payment_intent.succeeded`, `charge.succeeded`) lands
-as a row in `stripe_webhook_events` (one per `stripe_event_id`; a
+as a row in `stripe_webhook_events` (one per `stripe_event_id` per mode; a
 replayed event is deduped by the UNIQUE constraint). Note the dashboard's
 `/webhook_events` page shows OUTBOUND webhook deliveries (events Velox sends
 to your configured endpoints), not this inbound Stripe-ingestion table.

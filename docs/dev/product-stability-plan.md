@@ -76,7 +76,7 @@ New code is the largest defect source. The standing gates:
 
 ## Pillar B — Detection: find latent bugs *(the build list)*
 
-### B1. `velox doctor` — the money-invariant sweep *(BUILD FIRST — does not exist)*
+### B1. `velox doctor` — the money-invariant sweep *(SHIPPED — CI-wired, #753/#756)*
 
 One command that interrogates any Velox database and reports invariant
 violations. Converts the class that found the $46.69 stranding from
@@ -225,9 +225,9 @@ both describe a charge-in-place path ADR-113 deleted.
 
 ## Order of execution from here
 
-1. Merge #750 (dep batch) — in flight.
-2. **Fix the Feb-clamp trap, then build B1 (`velox doctor`)** — one arc,
-   playbook rules apply (it touches money math).
+1. ~~Merge #750 (dep batch)~~ — MERGED 2026-08-06.
+2. ~~Fix the Feb-clamp trap, then build B1 (`velox doctor`)~~ — B1 SHIPPED
+   and CI-wired (#753/#756); the clamp trap was fixed by ADR-055.
 3. ~~B2 soak~~ — SHIPPED, CI-locked (and the clamp trap was already fixed by ADR-055; memory corrected).
 4. ~~B3 sample~~ — DONE, 25/25 TRUE. ~~B4 flagger~~ — REFUTED, not built.
 5. C-table triage pass (LOWs + register sweep for fired triggers) — the one

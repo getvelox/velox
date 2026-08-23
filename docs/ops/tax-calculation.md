@@ -123,14 +123,15 @@ transient outage clears on the next tick.
 ### Log lines
 
 ```
-WARN stripe tax failed, deferring invoice reason=api_error error=… livemode=true
-WARN stripe tax failed, deferring invoice reason=no_country
-WARN stripe tax failed, deferring invoice reason=no_client_for_mode livemode=true
+WARN stripe tax failed, deferring invoice for retry reason=api_error error=… livemode=true
+WARN stripe tax failed, deferring invoice for retry reason=no_country
+WARN stripe tax failed, deferring invoice for retry reason=no_client_for_mode livemode=true
 ```
 
 These are `warn`, not `error`, because the system continues correctly —
-either a tenant-configured rate applied or the invoice was deferred to
-retry. Alert on the metric, not on log presence.
+the invoice is deferred and retried (since ADR-041 there is no silent
+manual-rate fallback on a Stripe Tax failure). Alert on the metric, not
+on log presence.
 
 ## When to investigate a fallback or defer
 

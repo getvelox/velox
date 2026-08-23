@@ -5,6 +5,8 @@
 > **Related:** `docs/design-create-preview.md` (sibling — same composition, same wire conventions), `docs/design-multi-dim-meters.md` (multi-dim dependency — `usage.AggregateByPricingRules`)
 >
 > The text below is preserved as the design-time RFC. The implementation is live in `main`; refer to `internal/billing/threshold_scan.go` and `internal/subscription/` for the current behaviour.
+>
+> **2026-08-23 amendment (ship-drift, verified against code):** the shipped surface diverges from the RFC body in six places. Validation failures return **`422 validation_error`**, not 400. `reset_billing_cycle` **defaults `false`** when omitted (Stripe's keep-anchor default; the body's `true` was verified wrong in the 2026-07-10 design review). Only **negative** `usage_gte` is rejected — zero is accepted. The planned base-fee-only PATCH-time rejection was **not shipped** (live validation checks item membership, duplicates, and decimal parse). The once-fired guard is the **partial unique index alone**, surfacing `errs.ErrAlreadyExists` on a retried tick — there is no invoice source-key column, and Postgres's `ON CONFLICT DO NOTHING` returns no row. The scheduler tick has grown to reconcilers → auto-charge retry → dunning enrollment → threshold scan → cycle scan. (Also: `amount_gte` is integer cents — the currency's **minor** unit; the body's "major-unit-cents" contradicts itself.)
 
 ## Motivation
 
