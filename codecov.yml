@@ -1,0 +1,5 @@
+# PR comments off: the codecov-commenter bot posted on every PR (a pure-noise
+# "all lines covered" on docs-only changes) and each comment emailed the repo
+# owner. Coverage still uploads (ci.yml codecov-action step) and is readable
+# on the Codecov dashboard; only the bot comments stop.
+comment: false
