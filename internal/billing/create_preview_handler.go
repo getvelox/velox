@@ -58,7 +58,7 @@ type createPreviewWireRequest struct {
 
 // createPreviewWirePeriod is the optional explicit window. Both bounds
 // must be supplied together; partial windows are rejected by the service
-// layer with a 400.
+// layer with a 422.
 type createPreviewWirePeriod struct {
 	From string `json:"from"`
 	To   string `json:"to"`

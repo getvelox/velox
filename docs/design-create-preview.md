@@ -2,7 +2,7 @@
 
 > **Status:** Shipped (2026-04-26) — `POST /v1/invoices/create_preview`
 > **Owner:** Track A (the backend workstream)
-> **Last revised:** 2026-04-26
+> **Last revised:** 2026-08-23 — error-status corrections: the shipped surface returns 422 for validation failures, not the 400 originally written here
 > **Related:** `docs/design-customer-usage.md` (sibling read surface, same composition pattern), `docs/design-multi-dim-meters.md` (multi-dim dependency — `usage.AggregateByPricingRules` is the engine)
 
 ## Motivation
@@ -53,7 +53,7 @@ The slice is exactly the same composition pattern as `customer-usage`: customer 
 >
 > - **Snake-case JSON keys**, struct-tag enforced.
 > - **Customer identity is the customer ID** (`vlx_cus_…`). Mirrors customer-usage.
-> - **Period bounds are RFC 3339** (`2026-04-01T00:00:00Z`). Both inclusive of `from`, exclusive of `to`. If both omitted → defaults to the subscription's current cycle. Partial bounds (one zero, one non-zero) are rejected with 400.
+> - **Period bounds are RFC 3339** (`2026-04-01T00:00:00Z`). Both inclusive of `from`, exclusive of `to`. If both omitted → defaults to the subscription's current cycle. Partial bounds (one zero, one non-zero) are rejected with 422.
 > - **Empty results are `[]`, never `null`.**
 > - **Decimal quantity** marshals as a precise string (`"1234567.000000000000"`) per ADR-005. Amounts are integer cents.
 > - **Always-array totals.** `totals[]` is one entry per distinct currency, even when there's only one. Same shape customer-usage uses; one TS type covers both surfaces.
@@ -138,11 +138,11 @@ Response `200`:
 
 ### Error shapes
 
-- `400 invalid_request` — `customer_id` blank or missing.
+- `422 validation_error` (field=`customer_id`) — `customer_id` blank or missing.
 - `404 customer_not_found` — no customer with this ID for the tenant.
-- `400 customer_has_no_subscription` (coded) — caller passed no `subscription_id` and the customer has zero active or trialing subscriptions. Same error code as customer-usage so the dashboard's empty-state branch covers both surfaces.
+- `422 customer_has_no_subscription` (coded) — caller passed no `subscription_id` and the customer has zero active or trialing subscriptions. Same error code as customer-usage so the dashboard's empty-state branch covers both surfaces.
 - `404 subscription_not_found` — `subscription_id` was passed but no sub exists for the tenant with that ID.
-- `400 invalid_period` — `from` after `to`, partial bounds, or unparseable RFC 3339.
+- `422 validation_error` (field=`period`) — `from` after `to`, partial bounds, or unparseable RFC 3339.
 
 ## Internals
 
@@ -193,7 +193,7 @@ func (s *PreviewService) CreatePreview(
 
 ### Subscription resolution
 
-- **Explicit `subscription_id`:** look it up via `subs.Get(ctx, tenantID, id)`; 404 propagates as `subscription_not_found`. Verify the sub belongs to the requested customer (defensive against the rare case where the operator typoed both IDs to plausible-looking-but-mismatched values); mismatch is `400 invalid_request`.
+- **Explicit `subscription_id`:** look it up via `subs.Get(ctx, tenantID, id)`; 404 propagates as `subscription_not_found`. Verify the sub belongs to the requested customer (defensive against the rare case where the operator typoed both IDs to plausible-looking-but-mismatched values); mismatch is `422 validation_error` (field=`subscription_id`).
 - **Implicit (no `subscription_id`):** `subs.List(ctx, ListFilter{CustomerID})` then filter to `active`/`trialing`. Pick the one with the latest `current_period_start` (same heuristic as customer-usage's "primary active subscription"). If zero matches, return `customer_has_no_subscription` so the cost dashboard's empty-state branch covers it.
 
 ### Period resolution
@@ -214,7 +214,7 @@ A standout property of this endpoint vs. the existing `/v1/invoices/{id}/finaliz
 ### Unit tests
 
 - `resolveSubscription` table-driven: explicit ID happy path, explicit ID for wrong customer → invalid_request, implicit pick of latest active sub, implicit with zero subs → coded error, implicit with multiple subs → most-recent-cycle wins.
-- `resolvePeriod` table-driven: default to sub's current cycle, explicit window, partial bounds → 400, `from >= to` → 400, default with no current cycle → coded error.
+- `resolvePeriod` table-driven: default to sub's current cycle, explicit window, partial bounds → 422, `from >= to` → 422, default with no current cycle → coded error.
 - `rateMeter`: single-rule meter emits one line, multi-rule meter emits one line per rule with `dimension_match` echoed, mismatched-rule-currency surfaces a warning, missing-rating-rule line is skipped + warning.
 - `assembleResult`: per-currency `totals[]` rolls up correctly, empty meter slice still emits `lines: []` not null.
 - **`TestWireShape_SnakeCase` (the merge gate):** marshal a real `PreviewResult`, assert every required snake_case key is present (`customer_id`, `subscription_id`, `lines`, `totals`, `warnings`, `billing_period_start`, etc.), assert no PascalCase leaks, assert empty fields marshal as `[]` not `null`. Same regression-test pattern the recipes feature uses.

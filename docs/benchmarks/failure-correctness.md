@@ -128,7 +128,7 @@ Two things worth stating about that number rather than leaving implied:
 - One of the 28 checks is new, added by this work.
   `cycle_invoice_unique_per_subscription_period` looks for duplicate cycle
   invoices directly. Before it existed, the doctor ran all 27 checks against a
-  database holding 129 duplicate invoices and **reported zero violations** — it
+  database holding 129 invoices where 40 should exist and **reported zero violations** — it
   was blind to the exact failure the index prevents. The index and the check
   fail independently: an index can be missing after a restore, dropped by a
   migration, left `INVALID` by a failed `CREATE INDEX CONCURRENTLY` (enforcing

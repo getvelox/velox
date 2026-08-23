@@ -7,6 +7,17 @@ verification, (2) a 4-platform peer sweep (Metronome/Lago/Stripe/AI-infra
 site-set — all verdicts folded in below; 4 census errors corrected).
 Decision record: ADR-078.
 
+> **2026-08-23 ship-drift notes** (recorded design vs current code): the
+> dunning `final_action` named in D3 and the census has since split into
+> two axes — `final_subscription_action` / `final_invoice_action`
+> (ADR-112; `internal/dunning/handler.go` rejects the old field). The
+> D10 composer commit fields shipped on the customer page's invoice
+> composer (`CustomerDetail.tsx`), not InvoiceDetail. D9's "next LockKey
+> 76540008" has since been claimed by `LockKeyTopologyCheck`
+> (`advisory_lock.go`); the substantive claim — commits need no lock key
+> — still holds. D5's check-then-act inventory predates the finalize
+> CAS, which has shipped (`invoice/postgres.go` cites ADR-078 D5).
+
 ## Why (wedge fit)
 
 A prepaid commit is an up-front purchase of usage credits: the customer

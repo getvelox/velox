@@ -2,7 +2,7 @@
 
 Velox treats `api/openapi.yaml` as the single source of truth for the
 HTTP API. The Go server interface, the TypeScript types, the
-`@tanstack/react-query` hooks, and the `/docs/api` Scalar viewer all
+`@tanstack/react-query` hooks, and the spec copy served to external consumers at `/openapi.yaml` all
 regenerate from that one file. CI fails the build if any of those
 generated artifacts drift away from what the spec describes.
 
@@ -18,7 +18,7 @@ keep their SDKs aligned with their HTTP surface.
 | `tools/tools.go` | Build-tagged import that pins `oapi-codegen` to `go.mod` | When bumping codegen |
 | `internal/api/generated/api.gen.go` | Generated Go types + chi-compat `ServerInterface` | No — regenerate |
 | `web-v2/orval.config.ts` | `orval` config (TS hooks) | Rarely |
-| `web-v2/scripts/copy-openapi-spec.mjs` | Copies `api/openapi.yaml` into `web-v2/public/openapi.yaml` so the Scalar viewer and codegen read the same file | No |
+| `web-v2/scripts/copy-openapi-spec.mjs` | Copies `api/openapi.yaml` into `web-v2/public/openapi.yaml` so the served spec and codegen read the same file (the in-app Scalar viewer was cut 2026-04-29) | No |
 | `web-v2/src/lib/api.gen.ts` | Generated raw TS types from `openapi-typescript` | No — regenerate |
 | `web-v2/src/lib/gen/queries.gen.ts` | Generated react-query hooks from `orval` | No — regenerate |
 | `web-v2/src/lib/gen/schemas/` | Generated TS schema types (one file per `components.schemas` entry) | No — regenerate |
@@ -55,8 +55,9 @@ keep their SDKs aligned with their HTTP surface.
 
 ## Why a build-time copy of the spec into `web-v2/public/`
 
-The Scalar viewer at `/docs/api` serves the spec from a stable
-same-origin URL (`/openapi.yaml`). `web-v2/scripts/copy-openapi-spec.mjs`
+The spec is served to external consumers at a stable same-origin URL
+(`/openapi.yaml`); the embedded Scalar viewer that rendered it at
+`/docs/api` was cut 2026-04-29. `web-v2/scripts/copy-openapi-spec.mjs`
 copies `api/openapi.yaml` into `web-v2/public/openapi.yaml` and is
 wired as a `predev` / `prebuild` / `gen` hook in
 `web-v2/package.json`. Symlinks would be more elegant but break on

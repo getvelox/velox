@@ -120,7 +120,7 @@ func (s *PreviewService) CreatePreview(ctx context.Context, tenantID string, req
 // against. Two paths:
 //
 //   - Explicit subscriptionID: look it up. ErrNotFound propagates as 404.
-//     Cross-customer mismatch surfaces as 400 invalid_request — defensive
+//     Cross-customer mismatch surfaces as 422 validation_error — defensive
 //     against the operator typoing both IDs to plausible-but-wrong values.
 //
 //   - Implicit (subscriptionID == ""): list the customer's subs, filter
