@@ -340,7 +340,11 @@ jobs:
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # contents: write — anchore/sbom-action attaches the SBOM to the
+      # GitHub release on tag runs (REST call; read-only token fails with
+      # "Resource not accessible by integration", which skipped Grype+Cosign
+      # on v0.3.0/v0.3.1 — those two image sets shipped unsigned).
+      contents: write
       packages: write
       id-token: write
     steps:
