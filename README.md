@@ -211,7 +211,7 @@ The decision tree, honestly: pick **Stripe Billing** (or Stripe + Metronome) for
 
 ---
 
-## "Fewer dependencies" — but will it take our volume?
+## “Fewer dependencies” — but will it take our volume?
 
 Fair question, and the honest answer has three parts.
 
