@@ -164,7 +164,7 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
 Two runs are published in full — method, gates, evidence, and what each one does *not* show:
 
 - **[Correctness under failure](docs/benchmarks/failure-correctness.md)** — what happens to your invoices when the billing process dies mid-run. A leader (the process elected to run the billing cycle) `SIGKILL`ed at five kill points chosen by watching the database rather than by sleeping, four leaders racing the same cycle at once, and a partition drill that severs a real network link to time the takeover: **0 duplicate invoices, 0 lost invoices, 0 cents of drift**, with the money-invariant doctor clean after every scenario. What makes that a measurement rather than a claim is the negative control — drop `idx_invoices_billing_idempotency` and the same run bills **103 invoices for 40 periods, $2,575 against $1,000 of real periods, with every leader reporting success.** Reproduces from a clean checkout with Docker and two `go test` commands.
-- **[Sustained throughput](docs/benchmarks/sustained-throughput.md)** — what the ingest path holds on named AWS hardware, with every event reconciled against Postgres: a run whose sent count does not match the rows stored is discarded rather than reported. The headline figures and the capacity cliffs are in [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) below; the doc adds the method, the `pgbench` control denominator, the closed-loop ceilings (each sender waits for a response before sending again, so these are maxima, not service levels), the *What this does not show* section, and the two defects the runs found in Velox itself ([#818](https://github.com/getvelox/velox/issues/818), [#819](https://github.com/getvelox/velox/issues/819)) — stated beside the numbers rather than fixed quietly.
+- **[Sustained throughput](docs/benchmarks/sustained-throughput.md)** — what the ingest path holds on named AWS hardware, with every event reconciled against Postgres: a run whose sent count does not match the rows stored is discarded rather than reported. The headline figures and the capacity cliffs are in [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) below; the doc adds the method, the `pgbench` control denominator, the closed-loop ceilings (each sender waits for a response before sending again, so these are maxima, not service levels), the *What this does not show* section, and the two defects the runs found in Velox itself — stated beside the numbers rather than fixed quietly (both linked with their numbers in [the volume section](#fewer-dependencies--but-will-it-take-our-volume)).
 
 ---
 
@@ -242,29 +242,8 @@ Stating these loudly so the wrong customers self-select out:
 
 ## Architecture
 
-```
-cmd/velox/                  — single Go binary
-cmd/velox-doctor/           — read-only money-invariant sweep (see Engineering)
-internal/                     (abridged — one package per domain)
-  domain/                   — pure domain models, zero deps
-  auth/                     — API key auth (3 key types, 17 permissions)
-  customer/                 — customer CRUD + billing profiles
-  pricing/                  — meters, rating rules, plans, price overrides
-  subscription/             — lifecycle (draft → trialing → active → paused → canceled)
-  usage/                    — event ingestion + multi-dim aggregation
-  invoice/                  — state machine (draft → finalized → paid) + PDF
-  billing/                  — billing engine + scheduler + preview
-  payment/                  — Stripe PaymentIntent + webhook receiver
-  dunning/                  — payment retry state machine
-  credit/                   — event-sourced prepaid balance ledger
-  creditnote/               — credit notes + refunds
-  webhook/                  — outbound webhooks (HMAC-signed delivery)
-  audit/                    — immutable append-only audit log
-  platform/postgres/        — RLS-aware database layer
-  platform/migrate/         — embedded SQL migrations
-
-web-v2/                     — operator dashboard (React 19 + TypeScript + Tailwind)
-```
+One Go binary, one package per domain — full package layout in
+[`docs/architecture.md`](docs/architecture.md).
 
 Design rules:
 
@@ -296,53 +275,12 @@ Velox moves money, so correctness is the product, not a feature. The disciplines
 
 ---
 
-## API surface (selected)
+## API surface
 
-```
-POST   /v1/usage-events                 — ingest with dimensions + decimal value
-POST   /v1/usage-events/batch           — batch ingest, up to 1000 per call
-POST   /v1/meters/{id}/pricing-rules    — add a dimension-matched pricing rule
-GET    /v1/customers/{id}/usage         — period aggregation, grouped by dimension
-
-POST   /v1/customers                    — create customer
-POST   /v1/subscriptions                — create subscription
-PATCH  /v1/subscriptions/{id}/items/{itemID}     — plan/quantity change (proration on immediate)
-PUT    /v1/subscriptions/{id}/pause-collection   — keep cycle, invoice as draft
-POST   /v1/subscriptions/{id}/extend-trial       — push trial_end_at later
-
-POST   /v1/billing/run                  — finalize all due cycles
-GET    /v1/billing/preview/{sub_id}     — invoice preview (dry run)
-
-POST   /v1/credit-notes                 — issue credit note (credit or refund)
-POST   /v1/credits/grant                — grant prepaid credits to a customer
-GET    /v1/credits/balance/{customer_id} — current balance + ledger
-
-GET    /v1/dunning/runs                 — list dunning runs
-POST   /v1/webhook-endpoints/endpoints  — register an outbound webhook endpoint
-GET    /v1/audit-log                    — query the append-only audit log
-```
-
-API reference: [`api/openapi.yaml`](api/openapi.yaml) covers the core resource routes; some operational routes (exports, analytics, audit log, settings) aren't in the spec yet. Webhook consumers: [`docs/webhooks.md`](docs/webhooks.md) — signature verification, envelope, retry ladder, event catalog, delivery contract.
-
----
-
-## API key types
-
-| Type        | Prefix            | What it can do                                           |
-|-------------|-------------------|----------------------------------------------------------|
-| Platform    | `vlx_platform_`   | Tenant management only — not issuable in-product         |
-| Secret      | `vlx_secret_`     | Full tenant access (server-side)                         |
-| Publishable | `vlx_pub_`        | Authenticate-only — no tenant data access (browser-safe) |
-
-API keys are salted-SHA-256 hashed at rest; rotation supports an optional grace window (immediate by default, up to 7 days) so in-flight requests keep authenticating while the old key winds down.
-
-Platform keys are deliberately not issuable in-product — a single-tenant principal must not be able to self-mint one and escalate to every tenant — so `/v1/tenants` is unreachable in a stock deployment. **The supported way to add a tenant is the bootstrap CLI**, re-run with a different owner email:
-
-```bash
-make bootstrap VELOX_BOOTSTRAP_EMAIL=tenant-b@local \
-  VELOX_BOOTSTRAP_PASSWORD='choose-a-password' \
-  VELOX_BOOTSTRAP_TENANT='Tenant B'
-```
+The core routes at a glance: [`docs/api-surface.md`](docs/api-surface.md).
+The reference is [`api/openapi.yaml`](api/openapi.yaml); webhook consumers
+start at [`docs/webhooks.md`](docs/webhooks.md); key types, rotation, and
+adding tenants: [`docs/api-keys.md`](docs/api-keys.md).
 
 ---
 
@@ -350,15 +288,10 @@ make bootstrap VELOX_BOOTSTRAP_EMAIL=tenant-b@local \
 
 ### Recently shipped
 
-- **Operational hardening (Aug 2026)** — a 28-check money-invariant sweep now runs in CI and inside a 13-month billing soak; the public cost-dashboard credential is stored as a one-way hash (existing links survived the migration in place); and webhook operations got a truth pass — delivery timelines name receivers instead of internal ids, per-endpoint drill-downs, and one live events surface instead of two
-- **Bad debt, decided rather than inherited (Aug 2026, ADR-110–113)** — writing an invoice off no longer silently reverses its tax (that's a relief claim your business makes, on conditions Velox can't know); a dunning policy sets the subscription's fate and the invoice's fate *separately*; and nothing charges a written-off invoice — recovery runs on normal rails via a fresh invoice
-- **Ambiguous-charge safety (Jul–Aug 2026, ADR-105–108)** — a lost Stripe response can no longer double-charge: unidentifiable outcomes park the invoice instead of guessing, every surface says so honestly, and the reconciler adopts the charge only when Stripe can positively confirm it
-- **Team invites (Jul 2026, ADR-081)** — tokenized email invites and member removal with session revocation; kills the shared-password reality and gives the audit log real per-person actors. No RBAC yet — roles are recorded, not enforced
-- **Provider cost tables + margin (Jul 2026, ADR-079)** — enter what you pay providers; every usage event is stamped with its cost at ingest; per-customer margin report in-app
-- **Prepaid commits + drawdown (Jul 2026, ADR-078)** — commit lines fund credit blocks atomically at finalize; usage drains them, promotional credits first; balance-threshold webhooks drive top-ups
-- **Full-product audit hardening (Jul 2026)** — a 117-finding audit remediated in 16 gated PRs, from threshold-billing exactness to race-safe migrations and honest MRR analytics
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
+July–August 2026: prepaid commits + drawdown, provider cost tables with
+in-app per-customer margin, team invites (ADR-081), ambiguous-charge safety
+(ADR-105–108), bad-debt semantics (ADR-110–113), and a 28-check
+money-invariant sweep in CI. Dated detail: [`CHANGELOG.md`](CHANGELOG.md).
 
 ### Explicitly deferred (on hold pending design partner)
 
@@ -389,7 +322,15 @@ make test                # unit tests only
 make test-integration    # full integration suite (needs Postgres)
 ```
 
-Integration tests exercise real Postgres with RLS enforced. Per project convention the database is never mocked — no sqlmock, no mock framework in the repo — so a passing suite means migrations and RLS work end-to-end.
+Integration tests exercise real Postgres with RLS enforced — no sqlmock, no mock framework in the repo (see [Engineering](#engineering)).
+
+---
+
+## Community & support
+
+- **Questions / evaluating a deployment:** [GitHub Discussions](https://github.com/getvelox/velox/discussions)
+- **Bugs:** [Issues](https://github.com/getvelox/velox/issues) — money-path bugs triaged first
+- **Security:** see [`SECURITY.md`](SECURITY.md) — private disclosure, not a public issue
 
 ---
 
