@@ -4,7 +4,7 @@
 **Status:** Accepted — supersedes [ADR-074](074-subscription-billing-timezone-snapshot.md).
 Keeps [ADR-075](075-canonical-utc-api-timestamps.md) (process-UTC pin + canonical
 UTC wire) and [ADR-076](076-enforcing-the-timezone-invariant.md) (lint-tz + FE
-required-zone types) unchanged. Refines [ADR-058](058-billing-date-math-in-a-timezone.md):
+required-zone types) unchanged. Refines [ADR-058](058-billing-date-math-tenant-timezone.md):
 the zone billing math anchors in is the ORG timezone, not a per-sub one.
 
 ## Context

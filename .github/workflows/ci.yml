@@ -268,6 +268,24 @@ jobs:
   # the canonical spec, then assert nothing in the working tree
   # changed. Same pattern Stripe uses internally to keep its SDK
   # repos in sync with the openapi repo.
+  # Internal Markdown links only — a moved or renamed doc breaks a link
+  # silently, and this repo's docs cross-reference heavily (ADRs, benchmark
+  # docs, the failure-mode catalog). External URLs are deliberately NOT
+  # checked here: a third-party site being down or rate-limiting would fail
+  # unrelated PRs. Run `lychee --offline '**/*.md'` locally for the same check.
+  doc-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check internal Markdown links
+        uses: lycheeverse/lychee-action@82202e5e9c2f4ef1a55a3d02563e1cb6041e5332 # v2.4.1
+        with:
+          # --offline: resolve local file paths and anchors, skip the network.
+          args: --offline --no-progress --include-fragments '**/*.md'
+          fail: true
+
   codegen-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15

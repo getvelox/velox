@@ -261,7 +261,7 @@ The Chargebee/Recurly e2e shape (paused_at + resume_at + remaining_pause_cycles 
 
 ## References
 
-- Related ADRs: [ADR-028](028-fully-disjoint-test-clock-flows.md)
+- Related ADRs: [ADR-028](028-billing-engine-period-loop-and-disjoint-flows.md)
   (disjoint flows — clock-pinned vs wall-clock subs go through
   separate scan paths), [ADR-029](029-fully-disjoint-test-clock-flows.md)
   (catchup orchestrator phase ordering), [ADR-031](031-per-plan-base-bill-timing.md)
