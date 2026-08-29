@@ -7,7 +7,7 @@
 >
 > **The design below (schema, single-resolver retarget, render rule, migration, rejected alternatives) was prototyped and adversarially reviewed; build it as specified when the trigger fires.** Also deferred, as strictly-additive follow-ons on top of this split (documented so they aren't silently descoped): a nullable per-**customer** timezone override (ADR-077's named next step), a per-**user** / browser-local display timezone for distributed teams, an immutable-billing-zone option, and a dedicated reporting timezone.
 
-**Amends (when built)** [ADR-077](077-org-level-billing-timezone.md) — org-level single-zone billing stands; this would refine the one zone into two org-level roles. Keeps [ADR-058](058-billing-date-math-in-a-timezone.md) (civil-midnight DST-exact anchoring) and [ADR-076](076-enforcing-the-timezone-invariant.md) (FE required-zone types); [ADR-074](074-subscription-billing-timezone-snapshot.md) stays dead.
+**Amends (when built)** [ADR-077](077-org-level-billing-timezone.md) — org-level single-zone billing stands; this would refine the one zone into two org-level roles. Keeps [ADR-058](058-billing-date-math-tenant-timezone.md) (civil-midnight DST-exact anchoring) and [ADR-076](076-enforcing-the-timezone-invariant.md) (FE required-zone types); [ADR-074](074-subscription-billing-timezone-snapshot.md) stays dead.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-091: An org-timezone change never overbills a subscription — absorb/prorate the re-anchor "seam"
 
-**Status:** Accepted (2026-07-14). Keeps [ADR-077](077-org-level-billing-timezone.md) (one org-level billing timezone) and [ADR-058](058-billing-date-math-in-a-timezone.md) (civil-midnight DST-exact anchoring). The full billing/display decouple is the deferred root fix — [ADR-092](092-split-billing-timezone-from-display.md), triggered by a design partner needing multi-timezone billing.
+**Status:** Accepted (2026-07-14). Keeps [ADR-077](077-org-level-billing-timezone.md) (one org-level billing timezone) and [ADR-058](058-billing-date-math-tenant-timezone.md) (civil-midnight DST-exact anchoring). The full billing/display decouple is the deferred root fix — [ADR-092](092-split-billing-timezone-from-display.md), triggered by a design partner needing multi-timezone billing.
 **Context:** money-path review of the ADR-058 + ADR-077 interaction. Reproduced live on the dev server; the anniversary/yearly case found by a 15-agent adversarial review.
 
 ## The defect
