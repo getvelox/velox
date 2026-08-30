@@ -30,7 +30,7 @@ func resetRoles(t *testing.T, admin *sql.DB) {
 			t.Fatalf("reseed %s: %v", r, err)
 		}
 	}
-	if _, err := admin.ExecContext(ctx, `UPDATE leader_leases SET holder_id=NULL, acquired_at=NULL, heartbeat_at=NULL, expires_at=NULL, last_tick_ended_at=NULL, last_tick_holder=NULL, paused_at=NULL, paused_by=NULL, pause_reason=NULL`); err != nil {
+	if _, err := admin.ExecContext(ctx, `UPDATE leader_leases SET holder_id=NULL, acquired_at=NULL, heartbeat_at=NULL, expires_at=NULL, last_tick_ended_at=NULL, last_tick_holder=NULL, not_before=NULL, paused_at=NULL, paused_by=NULL, pause_reason=NULL`); err != nil {
 		t.Fatalf("reset roles: %v", err)
 	}
 }
@@ -268,6 +268,41 @@ func TestLease_HeartbeatTimeoutAbandons(t *testing.T) {
 	}
 	if took < leader.AbandonAfter || took > leader.LeaseTTL {
 		t.Fatalf("abandoned after %v, want within [%v, %v)", took, leader.AbandonAfter, leader.LeaseTTL)
+	}
+
+	// Sweep 2026-08-30 S5: an abandoned tick is NOT a completed tick. The
+	// observability columns stay untouched (nothing has ever completed here)
+	// and only the cadence column holds the role back — for min(interval,
+	// 60 s). Mutation check: make the lost outcome stamp last_tick_* again
+	// (the pre-0176 release) → the first assertion fails.
+	var holder sql.NullString
+	var ended, notBefore sql.NullTime
+	if err := admin.QueryRowContext(context.Background(), `SELECT last_tick_holder, last_tick_ended_at, not_before FROM leader_leases WHERE role='email_outbox'`).Scan(&holder, &ended, &notBefore); err != nil {
+		t.Fatal(err)
+	}
+	if holder.Valid || ended.Valid {
+		t.Fatalf("an abandoned tick must not read as a completion: last_tick_holder=%v last_tick_ended_at=%v", holder, ended)
+	}
+	if !notBefore.Valid || notBefore.Time.Before(time.Now().Add(30*time.Second)) {
+		t.Fatalf("a lost tick must hold the role back ~60 s via not_before, got %v", notBefore)
+	}
+	// A fresh manager (no per-manager cooldown) is refused until not_before…
+	fresh := leader.New(db.Pool, nil)
+	if led, err := fresh.Lead(context.Background(), leader.RoleEmailOutbox, 0, func(context.Context) {}); err != nil || led {
+		t.Fatalf("role must not be due during the cooldown: led=%v err=%v", led, err)
+	}
+	// …and due the moment it passes.
+	if _, err := admin.ExecContext(context.Background(), `UPDATE leader_leases SET not_before = now() WHERE role='email_outbox'`); err != nil {
+		t.Fatal(err)
+	}
+	if led, err := fresh.Lead(context.Background(), leader.RoleEmailOutbox, 0, func(context.Context) {}); err != nil || !led {
+		t.Fatalf("role must be due once not_before has passed: led=%v err=%v", led, err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT last_tick_holder, not_before FROM leader_leases WHERE role='email_outbox'`).Scan(&holder, &notBefore); err != nil {
+		t.Fatal(err)
+	}
+	if !holder.Valid || notBefore.Valid {
+		t.Fatalf("a completed tick must stamp last_tick_holder and clear not_before: holder=%v not_before=%v", holder, notBefore)
 	}
 }
 

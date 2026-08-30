@@ -60,6 +60,7 @@ ON CONFLICT (role) DO UPDATE
    AND (leader_leases.expires_at IS NULL OR leader_leases.expires_at <= now())
    AND (leader_leases.last_tick_ended_at IS NULL
         OR leader_leases.last_tick_ended_at <= now() - make_interval(secs => $4))
+   AND (leader_leases.not_before IS NULL OR leader_leases.not_before <= now())
 RETURNING holder_token, now()`
 
 	// RENEW — the heartbeat. 0 rows is DEFINITIVE loss (takeover, release, or
@@ -78,20 +79,24 @@ RETURNING now()`
 	sqlWhyLost = `SELECT holder_id, holder_token, paused_by IS NOT NULL FROM leader_leases WHERE role = $1`
 
 	// RELEASE — after work returns. $3 is the outcome: 0 = completed (stamp
-	// last_tick_ended_at = now(): due again after one interval); 1 =
-	// interrupted by the parent ctx (clean SIGTERM: leave the cadence alone
-	// so the role is due on another replica at its next poll, R3); 2 = lease
-	// lost or heartbeat timed out (due again after a bounded cooldown, so a
-	// slow database cannot turn an hourly tick into a partial tick every few
-	// seconds). 0 rows is fine (already lost).
+	// last_tick_* = this holder, now — due again after one interval; clear any
+	// cooldown); 1 = interrupted by the parent ctx (clean SIGTERM: leave the
+	// cadence alone so the role is due on another replica at its next poll,
+	// R3); 2 = lease lost or heartbeat timed out — NOT a completion, so
+	// last_tick_* is left alone (leader_status and the stall gauge report
+	// completed ticks only) and the role is held back by not_before for a
+	// bounded cooldown (min(interval, 60 s)) so a slow database cannot turn an
+	// hourly tick into a partial tick every few seconds. 0 rows is fine
+	// (already lost).
 	sqlRelease = `
 UPDATE leader_leases
    SET holder_id = NULL, acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL,
-       last_tick_holder   = holder_id,
-       last_tick_ended_at = CASE $3::int
-                              WHEN 0 THEN now()
-                              WHEN 1 THEN last_tick_ended_at
-                              ELSE now() - make_interval(secs => $4) + LEAST(make_interval(secs => $4), make_interval(secs => $5))
+       last_tick_holder   = CASE $3::int WHEN 0 THEN holder_id ELSE last_tick_holder END,
+       last_tick_ended_at = CASE $3::int WHEN 0 THEN now()     ELSE last_tick_ended_at END,
+       not_before         = CASE $3::int
+                              WHEN 0 THEN NULL
+                              WHEN 1 THEN not_before
+                              ELSE now() + LEAST(make_interval(secs => $4), make_interval(secs => $5))
                             END
  WHERE role = $1 AND holder_token = $2 AND holder_id IS NOT NULL`
 )

@@ -50,6 +50,7 @@ SELECT role, held, holder_id, expires_in_s, last_tick_holder,
 | `expires_in_s` | seconds until the lease lapses if the holder stops renewing |
 | `last_tick_holder`, `last_tick_age_s` | which replica last finished a tick, and how long ago — **the cluster fact** |
 | `paused_*` | an operator paused the role (below) |
+| `not_before`, `not_before_in_s` | the role is held back after a tick LOST its lease (heartbeat timeout, takeover, pause) — at most 60 s; a lost tick never counts as a completed one, so `last_tick_*` is untouched by it |
 
 The same facts as metrics, on every scrape:
 
