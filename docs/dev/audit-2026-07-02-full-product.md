@@ -57,7 +57,7 @@ Velox's core machinery is genuinely industry-grade: RLS tenant isolation, timing
 - Threshold reset=true bills the full unprorated in_arrears base per partial cycle (~$75 overcharge in the scenario) — `internal/billing/threshold_scan.go:196` / `preview.go:151`. Fix: prorate like `emitBaseSegmentLine`.
 - Threshold watermark splits max/last meters into two summed windows — peak-priced usage over-billed — `internal/billing/engine.go:2402`. Fix: bill max/last only at cycle close (un-clamped).
 - Explicit `quantity: 0` is indistinguishable from absent and billed as 1 — systematic over-billing on zero-unit events — `internal/usage/service.go:153`, `handler.go:79`. Fix: pointer/presence detection.
-- Invoice line items: unchecked int64 multiply overflows to negative persisted totals; `line_type` un-validated → 500 — `internal/invoice/service.go:1091`. Fix: overflow check/cap + RequireOneOf.
+- Invoice line items: unchecked int64 multiply overflows to negative persisted totals; `line_type` un-validated → 500 — `internal/invoice/service.go:1091`. Fix: overflow check/cap + RequireOneOf. *(2026-08-30: `line_type` is validated with a `switch` + `errs.Invalid` in `internal/invoice/service.go`; `RequireOneOf` was never called anywhere and `internal/api/middleware/validate.go` is deleted.)*
 
 **Customer-facing money communication**
 - Receipt email states invoice TOTAL as "your payment"; invoice email labels TOTAL "Amount due" — both wrong under credits/partials — `internal/payment/settlement.go:167`, `invoice/handler.go:813`. Fix: pass AmountDueCents.

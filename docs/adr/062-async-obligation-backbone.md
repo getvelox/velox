@@ -69,7 +69,8 @@ Decided **against**:
   dual-write the queue eliminates. It is also a stateful cluster (or SaaS that
   breaks the self-host wedge) solving a **bigger problem** — long-running,
   multi-step, stateful *workflows* — than we have (single-step idempotent jobs).
-- **River (Go/Postgres) — for now.** Right shape, but its transactional
+- **River (Go/Postgres) — for now.** *(Premise corrected 2026-08-30 — see the
+  Amendment at the end; the decision stands on other grounds.)* Right shape, but its transactional
   `InsertTx` takes a **pgx-native `pgx.Tx`**; we are on `database/sql`, so its
   headline in-tx-enqueue property would not compose with our coordinator
   `*sql.Tx` without migrating the whole data layer. Buying the library and
@@ -138,8 +139,9 @@ shouldn't).
 **Triggers to revisit pgx-native (and then River):** usage-event ingestion
 becomes a *measured* bottleneck → stand up a pgx-native pool on **just the
 ingestion path**, prove the `COPY` gain against a target, expand only if
-justified. River falls out for free on whatever ends up pgx-native — the clean
-way to arrive, not a speculative rewrite.
+justified. *(Amended 2026-08-30: this trigger is about `COPY` on the ingestion
+path only. River is NOT gated on pgx-native — see the Amendment below for its own
+trigger.)*
 
 ## Consequences
 
@@ -228,3 +230,39 @@ enqueue-in-tx hedge originally recorded:
 work list) — or immediately if the orphan is ever observed. At pilot
 scale the triple coincidence (two same-second write failures + >24h
 recovery unavailability) stays negligible.
+
+## Amendment 2026-08-30 — the River premise was false; the decision stands
+
+The "River — for now" bullet above rejected River because its transactional
+`InsertTx` "takes a pgx-native `pgx.Tx`". That has been false since River
+v0.10.0 (2024-07-19): `riverdriver/riverdatabasesql` (`New(*sql.DB)`,
+`UnwrapExecutor(*sql.Tx)`) lets `river.Client[*sql.Tx].InsertTx` compose with
+the coordinator's `*sql.Tx` from `db.BeginTx(ctx, postgres.TxTenant, tenantID)`
+directly — no data-layer migration. The premise was wrong for 23 months and is
+repeated in ADR-061; both are corrected today.
+
+What is actually true of River (verified against its source and changelog,
+2026-08-30): the `database/sql` driver is poll-only — no LISTEN/NOTIFY — unless
+`NewWithPgxListener` (v0.46.0) adds a dedicated pgx pool; River's tables carry
+no `tenant_id` and sit outside the RLS fence exactly like `schema_migrations`;
+v0.45.0+ requires Go ≥ 1.26 (satisfied by the 2026-08-30 toolchain bump); its
+nightly `REINDEX INDEX CONCURRENTLY` runs under its leader and logs failures at
+ERROR rather than silently; and `river_job` bloat under churn is generic to any
+high-churn table — River ships a batched cleaner and a reindexer that this
+repo's own outboxes do not.
+
+Why the decision stands anyway:
+
+1. **The billing path is correctly not job-shaped.** The entity is the queue:
+   `subscriptions.next_billing_at` scanned with `FOR UPDATE SKIP LOCKED`. A job
+   row per subscription per cycle would dual-write the due time against
+   `next_billing_at` — the exact class the outbox exists to kill.
+2. **The outboxes work and are tested against real Postgres.** Replacing them
+   with a schema Velox does not own costs a data migration for in-flight rows
+   and a rewrite of money-path code for no current gain.
+
+**Trigger to adopt River for the outbox drainers specifically:** a design
+partner's outbox volume makes the drainers a measured bottleneck, or a third
+outbox-shaped table is needed (the obligation backbone above). Then River is the
+first option evaluated, not the last — and it needs no pgx-native migration.
+

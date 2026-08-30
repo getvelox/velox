@@ -1,6 +1,6 @@
 // Package middleware provides HTTP middleware for the Velox API server.
-// Includes rate limiting, idempotency keys, Prometheus metrics, CORS,
-// cursor-based pagination helpers, and structured request validation.
+// Includes rate limiting, idempotency keys, Prometheus metrics, CORS, and
+// cursor-based pagination helpers.
 package middleware
 
 import (

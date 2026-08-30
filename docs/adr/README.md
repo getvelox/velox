@@ -98,7 +98,7 @@ messages + CHANGELOG.md, not here.
 | [059](059-guard-invoice-mutations-while-payment-in-flight.md) | 2026-06-22 | Accepted | Guard invoice mutations while a payment is in flight — block void/uncollectible/offline-record; single void writer; defer the automated clawback until the source settles |
 | [060](060-no-payment-method-dunning-enrollment.md) | 2026-06-23 | Accepted | Card-less invoices enter dunning (no-payment-method enrollment) |
 | [061](061-credit-note-issue-atomicity.md) | 2026-06-25 | Built (PR2) | Credit-note `Issue()` atomicity — CAS + internal money effect in one coordinator tx; external effects post-commit + recoverable |
-| [062](062-async-obligation-backbone.md) | 2026-06-25 | Decided (design); build deferred | Async obligation backbone — generalise the outbox (not Temporal/River/pgx-now); consolidate the four re-drive sweeps; trigger-gated |
+| [062](062-async-obligation-backbone.md) | 2026-06-25 | Decided (design); build deferred (River premise corrected 2026-08-30) | Async obligation backbone — generalise the outbox (not Temporal/River/pgx-now); consolidate the four re-drive sweeps; trigger-gated |
 | [063](063-refund-status-webhook-reconciliation.md) | 2026-06-28 | Accepted | Refund status is reconciled from Stripe webhooks (async truth); create-time status recorded faithfully; monotonic terminal-wins |
 | [064](064-dunning-run-creation-derived-from-invoice-state.md) | 2026-07-02 | Accepted | Dunning-run creation — triggered-primary + derived-backstop; run existence & schedule are derivable (self-heals by construction), NOT a single-mechanism scalar; full-derive rejected |
 | [065](065-threshold-scan-boundary-fire-once-drain.md) | 2026-07-03 | Accepted | Threshold-scan kernel — boundary-skip, fire-once probe, full drain |
