@@ -1,5 +1,19 @@
 # HA readiness — SPOF register and the multi-replica plan (2026-07-06)
 
+> **Amendment 2026-08-30 — the premise below is retired.** The supported
+> production posture is now **N ≥ 2 `velox-api` replicas behind a load
+> balancer, on managed Postgres with failover + PITR and managed Redis,
+> optionally behind a transaction-mode pooler / RDS Proxy.** The trigger
+> that gated the multi-replica build ("a design-partner pilot approaching
+> production cutover") is treated as fired by decision, not by event;
+> every item in the ordered work-item table below is being re-decided under
+> that posture in the same session. What this does NOT change yet: the
+> code. Until the leader-lease arc (ADR-114, in flight) replaces the
+> session-advisory-lock gate, transaction-mode poolers stay unsupported and
+> the server still refuses to boot behind them — that refusal is the truth
+> of the shipped binary, not of the posture. Single-instance remains a
+> supported *deployment size*; it is no longer the design assumption.
+
 Single-instance is the supported v1 deployment shape: one `velox-api` process, one Postgres, no load balancer, "~minutes of downtime per deploy/restart is acceptable" ([docs/self-host.md](../self-host.md), Operational posture, lines 55-66). Money paths are crash-safe by construction — invoice generation is idempotency-index exactly-once (internal/subscription/postgres.go:1089-1094), dunning transitions are exactly-once CAS (#325), outbound email/webhooks are durable Postgres outboxes with lease claims, and every scheduler sweep re-derives eligibility from durable state — so process death costs latency, not correctness. What single-instance does NOT give you is redundancy, and what N=2 does not yet give you is safety on a handful of named surfaces. This document is the pre-work for the multi-replica build: every single point of failure, every verified hazard of running two API replicas today, and the ordered work list — so that when a design-partner pilot approaches production cutover (the named trigger, docs/self-host.md:67-69), the build is execution, not discovery. Every claim below carries the file:line it was verified against; surfaces that are already safe say so explicitly.
 
 ---
@@ -115,7 +129,7 @@ The honest answer: **inside Velox, nothing is ever lost — the entire loss surf
 
 ## The scoped multi-replica build
 
-**Named trigger**: a design-partner pilot approaching production cutover (docs/self-host.md:67-69). Until then, single-instance + supervision + PITR is the supported posture.
+**Named trigger**: a design-partner pilot approaching production cutover (docs/self-host.md:67-69). Until then, single-instance + supervision + PITR is the supported posture. *(Amended 2026-08-30: trigger treated as fired — see the header. The table below is re-decided under the N ≥ 2 posture; item 0's "keep session-mode pooling only" is superseded by the leader-lease arc, which makes the app pool pooler-safe by construction.)*
 
 **Already exists (build on, don't rediscover)**: advisory-lock leader gating wired for scheduler + all three drainers (main.go:193, 262-284); SKIP LOCKED + lease + CAS claims verified disjoint by tests; Postgres-backed sessions and idempotency; migration serialization on `LockKeyMigrateHybrid`; `VerifyAdvisoryLockTopology`; dunning exactly-once CAS as the claim template; `RunCycleForClock`/`RunCycleForTenant` drain loops as the backlog template (engine.go:1506-1598, 1626-1695); `FallbackFailureCounter` as the Redis-counter template (lockout.go:165-200); the SSE LISTEN/NOTIFY design note (sse.go:33-41); the swappable `CatchupQueue` interface (catchup.go:30-43).
 

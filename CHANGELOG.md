@@ -20,6 +20,8 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Changed
 
+- **Supported production posture is now multi-replica (2026-08-30).** N ≥ 2 `velox-api` replicas behind a load balancer on managed Postgres (failover + PITR) with managed Redis is the design assumption; single-instance remains a supported size, not the premise. The HA-readiness plan of record, `docs/self-host.md`, and the README's deferred list say so, and say honestly what has not changed yet: until the leader-lease arc replaces the session-advisory-lock gate, transaction-mode poolers remain unsupported. Docs only — the code changes follow, each in its own PR.
+
 - **Go toolchain bumped 1.25.13 → 1.26.7 (2026-08-30).** Go 1.25 left support on 2026-08-19 when 1.27.0 shipped; the next standard-library advisory would have turned CI red on every branch with no 1.25 fix available — the class that fired twice this summer (1.25.11 → 1.25.12 in July, 1.25.12 → 1.25.13 on 2026-08-14). No application code change: `go.mod`, the four CI `go-version` pins, the Dockerfile builder image, and the prerequisite lines in README / CONTRIBUTING / MANUAL_TEST. Not 1.27: golangci-lint v2.13.0, the first release that understands go1.27, is the one that broke every open PR on stripe-go deprecation warnings (#834) — the CI-pinned v2.12.2 stays.
 
 - **Throughput benchmark measured under the protocol** on `db.m7g.2xlarge` and `db.m7g.4xlarge`; every earlier figure superseded and kept in the doc's appendix. Results, the two product findings it produced (#818, #819), and the capacity limits with their numbers: `docs/benchmarks/sustained-throughput.md`.

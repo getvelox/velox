@@ -80,14 +80,19 @@ This deployment shape is a **single-VM, single-instance** install:
 
 This is appropriate for: development, evaluation, single-tenant
 self-hosting where ~minutes of downtime per deploy/restart is acceptable.
-It is **not** a production-with-availability shape — for that, the next
-step is a load-balanced multi-replica deployment with managed Postgres
-(failover + PITR). Much of the groundwork already exists (leader-elected
+It is **not** a production-with-availability shape. The supported
+production posture (decided 2026-08-30) is a load-balanced multi-replica
+deployment — N ≥ 2 `velox-api` behind a load balancer, managed Postgres
+with failover + PITR, managed Redis — and that is what the engine is being
+designed for. Much of the groundwork already exists (leader-elected
 scheduling, SKIP-LOCKED outbox claims, DB-backed sessions/idempotency);
-the remaining scoped work list is in the HA-readiness doc above. That
-build is paused until a design partner with a specific Kubernetes
-flavour approaches production cutover; pre-emptively shipping three
-independent deployment paths produced surface area nobody was running.
+the remaining work list and its status live in the HA-readiness doc
+above. Honest current state: until the leader-lease arc lands, leadership
+is a session advisory lock, so transaction-mode poolers (PgBouncer
+transaction mode, RDS Proxy) are still unsupported and the server refuses
+to boot behind them; session-mode pooling and direct connections work.
+Packaging (Helm chart, Terraform module) stays deferred until a design
+partner names the flavour — the architecture no longer waits for that.
 
 ## Postgres
 
