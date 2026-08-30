@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -52,49 +51,17 @@ type Handler struct {
 	dashboardBaseURL string      // canonical dashboard origin for reset links; never from request headers. empty => reset emails disabled
 	smtpConfigured   bool        // SMTP wired at boot (email.Sender.IsConfigured); drives the email_delivery hint
 	auditLogger      AuditRecorder
-	resetThrottle    *resetThrottle
+	resetLimiter     ResetSendLimiter
 }
 
-// resetThrottle bounds password-reset EMAILS per target address. The
-// /v1/auth block's per-IP limiter slows credential stuffing but does
-// nothing against a single caller pointing many requests at ONE
-// victim's address — each within the IP budget — flooding their inbox
-// and burning SMTP quota. Cap: 3 sends per address per hour.
-// Deliberately in-process (per-instance): the current deploy shape is
-// a single API process, and a distributed attacker across instances is
-// already bounded by the per-IP limiter. The throttle must NEVER
-// change the response — the endpoint's fixed generic 200 is the
-// account-enumeration defence; throttling silently skips the send.
-type resetThrottle struct {
-	mu     sync.Mutex
-	sends  map[string][]time.Time
-	limit  int
-	window time.Duration
-}
-
-func newResetThrottle(limit int, window time.Duration) *resetThrottle {
-	return &resetThrottle{sends: make(map[string][]time.Time), limit: limit, window: window}
-}
-
-// allow records an attempt for the address and reports whether the
-// send may proceed. Prunes expired entries as it goes (the map stays
-// bounded by active-attacker cardinality × limit).
-func (t *resetThrottle) allow(email string, now time.Time) bool {
-	key := strings.ToLower(strings.TrimSpace(email))
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	kept := t.sends[key][:0]
-	for _, ts := range t.sends[key] {
-		if now.Sub(ts) < t.window {
-			kept = append(kept, ts)
-		}
-	}
-	if len(kept) >= t.limit {
-		t.sends[key] = kept
-		return false
-	}
-	t.sends[key] = append(kept, now)
-	return true
+// ResetSendLimiter bounds password-reset EMAILS per target address,
+// cluster-wide. Satisfied by *middleware.RateLimiter (Redis GCRA — the
+// same budget across every replica, which the old per-process map was not:
+// at N replicas the documented 3/hour cap silently became 3N/hour, HA
+// register hazard 9). Fail-open by design: a Redis blip must not block
+// password resets — the per-IP limiter on /v1/auth remains the floor.
+type ResetSendLimiter interface {
+	AllowKey(ctx context.Context, key string) (int, time.Time, bool)
 }
 
 // AuditRecorder is the narrow audit surface the auth handler needs — kept here
@@ -173,8 +140,14 @@ func NewHandler(users *Service, sessions SessionService, cookie session.CookieCo
 		email:            emailSender,
 		dashboardBaseURL: strings.TrimRight(strings.TrimSpace(dashboardBaseURL), "/"),
 		smtpConfigured:   smtpConfigured,
-		resetThrottle:    newResetThrottle(3, time.Hour),
 	}
+}
+
+// SetResetSendLimiter wires the cluster-wide per-address reset-send cap
+// (3/hour via the shared Redis GCRA). nil disables the per-address cap —
+// the per-IP limiter still applies.
+func (h *Handler) SetResetSendLimiter(l ResetSendLimiter) {
+	h.resetLimiter = l
 }
 
 // Routes returns the dashboard auth surface. Mount under /v1/auth.
@@ -417,7 +390,9 @@ func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	// doesn't stop one caller flooding a single victim's inbox. Over
 	// the cap we skip issuance + send entirely but return the SAME
 	// generic 200 — the fixed response is the enumeration defence.
-	if h.resetThrottle != nil && !h.resetThrottle.allow(req.Email, time.Now()) {
+	// The budget lives in Redis (ha-14 PR-B) so it is ONE cap across
+	// every replica; the old per-process map degraded 3/hour → 3N/hour.
+	if h.resetLimiter != nil && !allowResetSend(r.Context(), h.resetLimiter, req.Email) {
 		slog.Warn("password reset throttled — send skipped", "reason", "per-address cap")
 		// Throttled: no token issued, nothing mutated, nothing to audit.
 		audit.MarkSkip(r.Context())
@@ -590,4 +565,12 @@ func (h *Handler) buildResetLink(token string) (string, bool) {
 		return "", false
 	}
 	return h.dashboardBaseURL + "/reset-password?token=" + token, true
+}
+
+// allowResetSend asks the shared limiter for the address's send budget.
+// The key is the normalized address; the limiter namespaces it under its
+// own name ("pwreset_addr"), so this cannot collide with the IP buckets.
+func allowResetSend(ctx context.Context, l ResetSendLimiter, email string) bool {
+	_, _, ok := l.AllowKey(ctx, strings.ToLower(strings.TrimSpace(email)))
+	return ok
 }
