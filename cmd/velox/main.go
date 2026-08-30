@@ -163,7 +163,27 @@ func serve() {
 		slog.Info("billing-intervals backfill complete", "intervals", n)
 	}
 
-	server := api.NewServer(db, nil)
+	// Redis: production refuses to boot without a reachable one (the
+	// general and hosted-invoice rate limiters fail CLOSED without Redis,
+	// so a Redis-less replica would boot green and answer 429 to 1/N of
+	// traffic — including hosted-invoice pay pages — while /health/ready
+	// stays ok). config.validateFatal already rejects an UNSET REDIS_URL
+	// in production; this catches invalid/unreachable. Other environments
+	// warn and run fail-open.
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
+	rdb, err := mw.OpenRedis(pingCtx, cfg.RedisURL)
+	cancelPing()
+	if redisBootFatal(cfg.Env, err) {
+		slog.Error("refusing to start: REDIS_URL is set but Redis is invalid or unreachable — in production the general and hosted-invoice rate limiters fail CLOSED without it (every covered request 429); fix REDIS_URL or the network path", "error", err)
+		os.Exit(1)
+	}
+	if err != nil {
+		slog.Warn("redis unavailable — rate limiting fails open in this environment", "env", cfg.Env, "error", err)
+	} else if rdb != nil {
+		slog.Info("redis connected for rate limiting")
+	}
+
+	server := api.NewServer(db, nil, rdb)
 
 	billingInterval := 1 * time.Hour
 	if cfg.Env == "local" {
@@ -517,4 +537,10 @@ func openAppPool(cfg config.Config, adminPool *sql.DB) (*sql.DB, func()) {
 
 	slog.Info("using app database connection (RLS enforced)", "role", role)
 	return appPool, func() { _ = appPool.Close() }
+}
+
+// redisBootFatal is the one place the Redis boot verdict lives: an error
+// opening/pinging Redis is fatal in production only.
+func redisBootFatal(env string, err error) bool {
+	return err != nil && env == "production"
 }

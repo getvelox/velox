@@ -26,7 +26,7 @@ import (
 func TestE2E_AuditRequestIDIsServerMinted(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	clk := clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
-	srv := NewServer(db, clk)
+	srv := NewServer(db, clk, nil)
 
 	tenantID := testutil.CreateTestTenant(t, db, "ReqID Corp")
 	apiKey := createTestAPIKey(t, db, tenantID)

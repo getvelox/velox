@@ -317,6 +317,18 @@ rows from every other tenant) is the worst-case bug.
 - Audit `audit_log` for affected tenant pair.
 - Notify both customers + breach review.
 
+### 9. A replica will not start: "REDIS_URL is required" / "Redis is invalid or unreachable"
+
+Production refuses to boot without a reachable Redis (2026-08-30): the
+general and hosted-invoice rate limiters fail CLOSED without it, so a
+Redis-less replica would boot green and answer 429 to its share of
+traffic — including hosted-invoice pay pages — while `/health/ready` stays
+ok. The refusal is the fix. Check `REDIS_URL`, the security group / network
+path to 6379, and that the managed Redis is up; the replica starts on the
+next attempt. Redis going down AFTER boot is a different situation: general
+and hosted-invoice requests 429 (fail closed), ingest and `/v1/auth` keep
+working (fail open) — restore Redis, no restart needed.
+
 ## After a large backfill, expect a few minutes of elevated write I/O
 
 Measured on the benchmark rig (2026-08-16): a 20M-row bulk load into

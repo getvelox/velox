@@ -147,3 +147,21 @@ hybrid runner applies nothing, no dirty, no rewind); two racing
 correct final version. Boot: fail-closed matrix unit tests
 (unset/default/empty-password/username-equal × env) + capability-check
 fatal on a BYPASSRLS role.
+
+## Amendment 2026-08-30 — Redis joins the production boot contract
+
+Under the N ≥ 2 production posture a replica that boots without Redis is
+not degraded, it is wrong: the general and hosted-invoice rate limiters
+fail CLOSED without a client (nil or unreachable ⇒ 429 for every covered
+request, including hosted-invoice pay pages), `/health/ready` checks only
+api/database/scheduler, and the limiter exempts `/health*` — so the load
+balancer keeps routing 1/N of traffic to a process that answers 429 to
+all of it. The boot contract now has two Redis guards, one per failure
+class: `config.validateFatal` rejects an UNSET `REDIS_URL` in production
+(beside the encryption-key fatal); `cmd/velox/main.go` opens and pings
+Redis (`mw.OpenRedis`, 5 s bound) after the topology check and refuses
+to start in production on an invalid or unreachable one. Other
+environments warn and run fail-open. The config warning that said the
+opposite ("rate limiting will fail open") is corrected. `APP_ENV` is
+case-normalised so `Production` cannot slip past either fatal.
+

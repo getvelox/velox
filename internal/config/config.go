@@ -22,7 +22,11 @@ type Config struct {
 	DB      DBConfig
 	Migrate bool
 
-	// Redis (optional — rate limiting fails open without it)
+	// Redis — REQUIRED in production: the general and hosted-invoice rate
+	// limiters fail CLOSED without it (every covered request 429) and a
+	// replica would boot green and serve 1/N of traffic that way, so
+	// production refuses to start without a reachable Redis (validateFatal +
+	// cmd/velox/main.go). Optional elsewhere: limiters fail open.
 	RedisURL string
 
 	// Bootstrap
@@ -46,7 +50,7 @@ type DBConfig struct {
 }
 
 func Load() (Config, error) {
-	env := envOr("APP_ENV", "local")
+	env := strings.ToLower(strings.TrimSpace(envOr("APP_ENV", "local")))
 
 	dbURL, err := loadDatabaseURL()
 	if err != nil {
@@ -94,6 +98,9 @@ func (c Config) validateFatal() error {
 	if c.Env == "production" && encKey == "" {
 		return fmt.Errorf("VELOX_ENCRYPTION_KEY is required in production — refusing to start with plaintext PII storage")
 	}
+	if c.Env == "production" && c.RedisURL == "" {
+		return fmt.Errorf("REDIS_URL is required in production — the general and hosted-invoice rate limiters fail CLOSED without Redis, so every dashboard, export, bootstrap and hosted-invoice request would answer 429 while /health/ready reports ok; point REDIS_URL at a managed Redis (docs/self-host.md)")
+	}
 
 	if encKey != "" {
 		if len(encKey) != 64 {
@@ -136,7 +143,7 @@ func (c Config) Validate() []string {
 	}
 
 	if c.RedisURL == "" && c.Env == "production" {
-		warnings = append(warnings, "REDIS_URL is not set — rate limiting will fail open (not enforced)")
+		warnings = append(warnings, "REDIS_URL is not set — in production the general and hosted-invoice rate limiters fail CLOSED (every covered request 429); boot refuses")
 	}
 
 	switch c.Env {

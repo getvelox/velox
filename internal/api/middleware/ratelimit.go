@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -34,6 +35,29 @@ type RateLimiter struct {
 	// — a request to one surface would consume another's allowance and the
 	// conflicting rate/period would corrupt the smoothing state.
 	name string
+}
+
+// OpenRedis parses url, opens a client and verifies it with a Ping bounded
+// by ctx. An empty url is not an error — it returns (nil, nil), the
+// fail-open shape every limiter accepts. The caller decides the verdict:
+// production REFUSES to boot on an error (cmd/velox/main.go), because
+// the general and hosted-invoice limiters fail CLOSED without Redis and a
+// replica would otherwise boot green and 429 its share of traffic; other
+// environments warn and continue fail-open.
+func OpenRedis(ctx context.Context, url string) (*goredis.Client, error) {
+	if url == "" {
+		return nil, nil
+	}
+	opt, err := goredis.ParseURL(url)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REDIS_URL: %w", err)
+	}
+	c := goredis.NewClient(opt)
+	if err := c.Ping(ctx).Err(); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("redis unreachable at %s: %w", opt.Addr, err)
+	}
+	return c, nil
 }
 
 // SetFailClosed controls what happens when Redis is unreachable or unconfigured.

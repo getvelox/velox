@@ -110,7 +110,7 @@ type Server struct {
 	TestClockSvc *testclock.Service
 }
 
-func NewServer(db *postgres.DB, clk clock.Clock) *Server {
+func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	if clk == nil {
 		clk = clock.Real()
 	}
@@ -1216,26 +1216,18 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 		TestClockSvc:        testClockSvc,
 	}
 
-	// Redis for distributed rate limiting. Failure direction is split:
-	// general + hosted-invoice limiters fail CLOSED in production (DDoS
+	// Redis for distributed rate limiting. The client is opened and
+	// verified in cmd/velox/main.go (mw.OpenRedis): production REFUSES to
+	// boot without a reachable Redis (config.validateFatal covers "unset",
+	// main.go covers "unreachable/invalid"), because the general and
+	// hosted-invoice limiters fail CLOSED without it and a replica would
+	// otherwise boot green and answer 429 to its share of traffic. rdb is
+	// nil only outside production, where every limiter fails open. The
+	// split below describes the RUNTIME direction for a Redis outage
+	// after boot: general + hosted-invoice fail CLOSED in production (DDoS
 	// posture), ingest and /v1/auth always fail open (revenue events and
 	// operator login must survive a Redis blip).
-	var rdb *redis.Client
-	if redisURL := strings.TrimSpace(os.Getenv("REDIS_URL")); redisURL != "" {
-		opt, err := redis.ParseURL(redisURL)
-		if err != nil {
-			slog.Warn("invalid REDIS_URL — general/hosted rate limiters FAIL CLOSED in production (requests 429), fail open otherwise; ingest always fails open", "error", err)
-		} else {
-			rdb = redis.NewClient(opt)
-			if err := rdb.Ping(context.Background()).Err(); err != nil {
-				slog.Warn("redis not reachable — general/hosted rate limiters FAIL CLOSED in production (requests 429), fail open otherwise; ingest always fails open", "error", err)
-			} else {
-				slog.Info("redis connected for rate limiting")
-			}
-		}
-	} else {
-		slog.Info("REDIS_URL not set — rate limiting disabled in dev; in production the general/hosted limiters FAIL CLOSED (all covered requests 429) — set REDIS_URL")
-	}
+	prod := strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
 	// Login brute-force protection: v1 ships NO automatic per-account throttle.
 	// The old users.locked_until auto-lockout (fragmenting across Redis↔in-memory
 	// and weaponizable — any known operator email → a 15-min lockout on demand)
@@ -1252,7 +1244,7 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// ASVS + practitioner consensus) generic API rate limiting should fail
 	// open on a store blip. v1 has no dedicated per-account login throttle
 	// (deferred — ADR-094); the per-IP /v1/auth limiter below is the floor.
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+	if prod {
 		rateLimiter.SetFailClosed(true)
 	}
 	// /v1/auth gets its OWN limiter instance — same Redis namespace and
@@ -1297,7 +1289,7 @@ func NewServer(db *postgres.DB, clk clock.Clock) *Server {
 	// simultaneous customers behind a single corporate NAT while keeping
 	// enumerations and scraping bounded.
 	hostedInvoiceRL := mw.NewRateLimiter(rdb, "hosted_invoice", 60, time.Minute)
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+	if prod {
 		hostedInvoiceRL.SetFailClosed(true)
 	}
 

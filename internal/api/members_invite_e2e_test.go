@@ -27,7 +27,7 @@ func TestE2E_MemberInviteAcceptRemove(t *testing.T) {
 	t.Setenv("VELOX_BOOTSTRAP_TOKEN", "invite-e2e-bootstrap-token")
 	t.Setenv("DASHBOARD_BASE_URL", "http://dash.e2e.test")
 
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)), nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
