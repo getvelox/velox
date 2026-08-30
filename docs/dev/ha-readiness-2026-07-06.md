@@ -138,7 +138,7 @@ Ordered work items:
 | # | Item | Size |
 |---|---|---|
 | 0 | **Ops prerequisites**: managed Postgres HA + PITR; managed Redis; LB + health-check wiring. Keep session-mode pooling only | ops, days |
-| 1 | **Redis truth + boot guard**: fix the lying "fail open" messages (config.go:138-139, router.go:1053/1063); refuse prod boot when `rdb==nil`; fix the router.go:1084-1086 auth-limiter comment | trivial-small |
+| 1 | ~~**Redis truth + boot guard**: fix the lying "fail open" messages (config.go:138-139, router.go:1053/1063); refuse prod boot when `rdb==nil`; fix the router.go:1084-1086 auth-limiter comment~~ — **SHIPPED 2026-08-30** (production refuses to boot on unset OR unreachable Redis; messages corrected; ADR-073 amended) | done |
 | 2 | ~~**Auto-charge sweep claim** (hazard 1)~~ — **SHIPPED 2026-07-06** (per-invoice CAS in processAutoCharge, NOT on the list — see hazard 1) | done |
 | 3 | ~~**Email dispatcher skew** (hazard 2): unknown `email_type` ⇒ retryable, attempt-capped~~ — **SHIPPED 2026-08-30** | done |
 | 4 | **Scheduler**: immediate first tick at boot (runner.go, ~5 lines); port the drain-until-empty loop into `RunCycle` + batch-capped sweeps | ~half day |

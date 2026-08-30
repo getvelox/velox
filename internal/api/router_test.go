@@ -14,7 +14,7 @@ func newTestServer() *Server {
 	// Create server with nil DB — handlers that don't touch DB will work,
 	// auth middleware will reject (no valid keys), which is what we want to test.
 	db := &postgres.DB{}
-	return NewServer(db, nil)
+	return NewServer(db, nil, nil)
 }
 
 func TestHealthEndpoint(t *testing.T) {

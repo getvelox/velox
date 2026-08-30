@@ -20,7 +20,7 @@ func TestNewServer_BootWiresEveryEngineCollaborator(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	// NewServer runs engine.MustValidate() after the last collaborator is
 	// wired — reaching the return without panicking IS the assertion.
-	srv := NewServer(db, clock.Real())
+	srv := NewServer(db, clock.Real(), nil)
 	if srv == nil {
 		t.Fatal("NewServer returned nil")
 	}

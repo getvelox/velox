@@ -35,7 +35,7 @@ func TestE2E_FullBillingCycle(t *testing.T) {
 	march1 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	clk := clock.NewFake(march1)
 
-	srv := NewServer(db, clk)
+	srv := NewServer(db, clk, nil)
 
 	tenantID := testutil.CreateTestTenant(t, db, "E2E Test Corp")
 	apiKey := createTestAPIKey(t, db, tenantID)

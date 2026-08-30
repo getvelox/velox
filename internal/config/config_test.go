@@ -68,7 +68,7 @@ func TestValidate_ProductionWarnsMissingRedis(t *testing.T) {
 	warnings := cfg.Validate()
 	var found bool
 	for _, w := range warnings {
-		if w == "REDIS_URL is not set — rate limiting will fail open (not enforced)" {
+		if w == "REDIS_URL is not set — in production the general and hosted-invoice rate limiters fail CLOSED (every covered request 429); boot refuses" {
 			found = true
 		}
 	}
@@ -215,5 +215,70 @@ func TestLoad_DiscreteDBVars(t *testing.T) {
 	}
 	if cfg.DB.URL == "" {
 		t.Error("DB URL should be constructed from discrete vars")
+	}
+}
+
+// TestLoad_ProductionRequiresRedisURL pins HA-1 (2026-08-30): production
+// refuses to boot without REDIS_URL, because the general and hosted-invoice
+// limiters fail CLOSED without Redis and a Redis-less replica would boot
+// green and 429 its share of traffic. Mutation-verify: change the env
+// check in validateFatal to "staging" → this fails.
+func TestLoad_ProductionRequiresRedisURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost/test")
+	t.Setenv("APP_DATABASE_URL", "postgres://app:app@localhost/test")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("VELOX_ENCRYPTION_KEY", strings.Repeat("ab", 32))
+	t.Setenv("REDIS_URL", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when REDIS_URL is missing in production")
+	}
+	if !strings.Contains(err.Error(), "REDIS_URL is required in production") {
+		t.Errorf("error should name REDIS_URL, got: %v", err)
+	}
+}
+
+func TestLoad_ProductionWithRedisURLLoads(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost/test")
+	t.Setenv("APP_DATABASE_URL", "postgres://app:app@localhost/test")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("VELOX_ENCRYPTION_KEY", strings.Repeat("ab", 32))
+	t.Setenv("REDIS_URL", "redis://redis:6379")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("production with REDIS_URL set must load: %v", err)
+	}
+}
+
+func TestLoad_StagingWithoutRedisLoadsFailOpen(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost/test")
+	t.Setenv("APP_ENV", "staging")
+	t.Setenv("VELOX_ENCRYPTION_KEY", "")
+	t.Setenv("REDIS_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("staging without Redis must load (fail-open): %v", err)
+	}
+	for _, w := range cfg.Validate() {
+		if strings.Contains(w, "REDIS_URL") {
+			t.Errorf("staging must not warn about REDIS_URL, got %q", w)
+		}
+	}
+}
+
+// APP_ENV is normalised: "Production" must be treated as production
+// everywhere, not slip past the fatal checks as an unrecognised value.
+func TestLoad_AppEnvIsCaseNormalised(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost/test")
+	t.Setenv("APP_DATABASE_URL", "postgres://app:app@localhost/test")
+	t.Setenv("APP_ENV", " Production ")
+	t.Setenv("VELOX_ENCRYPTION_KEY", strings.Repeat("ab", 32))
+	t.Setenv("REDIS_URL", "")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "REDIS_URL is required in production") {
+		t.Fatalf("' Production ' must normalise to production and hit the fatal check, got: %v", err)
 	}
 }

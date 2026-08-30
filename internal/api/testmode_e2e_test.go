@@ -26,7 +26,7 @@ func TestE2E_TestModeIsolation(t *testing.T) {
 
 	// Use a fake clock so created-at timestamps are deterministic.
 	clk := clock.NewFake(time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC))
-	srv := NewServer(db, clk)
+	srv := NewServer(db, clk, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

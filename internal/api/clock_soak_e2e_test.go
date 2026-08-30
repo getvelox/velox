@@ -38,7 +38,7 @@ func TestE2E_ClockSoak_MonthEndAnchorThroughYearBoundary(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	t.Setenv("VELOX_BOOTSTRAP_TOKEN", "soak-bootstrap-token-1234")
 
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 1, 31, 10, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 1, 31, 10, 0, 0, 0, time.UTC)), nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

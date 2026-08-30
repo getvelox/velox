@@ -46,7 +46,7 @@ Passwords must be at least 12 characters.)
 That gives you:
 
 - `postgres` on `:5432` (volume-backed, password `velox`)
-- `redis` on `:6379` (used by the rate limiter)
+- `redis` on `:6379` (used by the rate limiter). **Required in production**: the general and hosted-invoice limiters fail closed without it, so `APP_ENV=production` refuses to boot unless `REDIS_URL` points at a reachable Redis (2026-08-30). Outside production it is optional — limiters fail open.
 - `mailpit` on `:1025` SMTP / `:8025` web UI (catches outbound transactional mail)
 - `velox-api` on `:8080` (from `make dev`, not a container)
 

@@ -23,7 +23,7 @@ func TestE2E_BootstrapToLoginToLiveKey(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	t.Setenv("VELOX_BOOTSTRAP_TOKEN", "p7-e2e-bootstrap-token")
 
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)), nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

@@ -71,7 +71,7 @@ func readExportRows(t *testing.T, db *postgres.DB, tenantID, resourceType string
 // one action=export row, attributed to the caller, naming the file it handed over.
 func TestExportsAudit_EachExportWritesExactlyOneRow(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), nil)
 	tenantID := testutil.CreateTestTenant(t, db, "Egress Audit Corp")
 	apiKey := createTestAPIKey(t, db, tenantID)
 	bearer := "Bearer " + apiKey
@@ -171,7 +171,7 @@ func TestExportsAudit_EachExportWritesExactlyOneRow(t *testing.T) {
 // customer display name that IS a formula comes back quote-prefixed.
 func TestExportsAudit_CustomerCSVNeutralizesFormulaInjection(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), nil)
 	tenantID := testutil.CreateTestTenant(t, db, "Formula Corp")
 	bearer := "Bearer " + createTestAPIKey(t, db, tenantID)
 
@@ -246,7 +246,7 @@ func TestExportsAudit_CustomerCSVNeutralizesFormulaInjection(t *testing.T) {
 // CONTAINS the record of its own export.
 func TestExportsAudit_AuditLogExportStreamsEveryRow(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), nil)
 	tenantID := testutil.CreateTestTenant(t, db, "Big Log Corp")
 	bearer := "Bearer " + createTestAPIKey(t, db, tenantID)
 
@@ -321,7 +321,7 @@ func TestExportsAudit_AuditLogExportStreamsEveryRow(t *testing.T) {
 // ever wraps the writer without preserving Flusher, this goes false.
 func TestExports_FlusherPassesThroughToTheSocket(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), nil)
 	tenantID := testutil.CreateTestTenant(t, db, "Flusher Corp")
 	bearer := "Bearer " + createTestAPIKey(t, db, tenantID)
 
@@ -444,7 +444,7 @@ func TestExportsAudit_FailClosed_NoBytesStreamWhenTheRowCannotBeWritten(t *testi
 // neutralize the column even though nothing can poison it any more.
 func TestAuditLogCSV_NeutralizesHistoricalPoisonedRequestID(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)))
+	srv := NewServer(db, clock.NewFake(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), nil)
 	tenantID := testutil.CreateTestTenant(t, db, "Legacy Poison Co")
 	bearer := "Bearer " + createTestAPIKey(t, db, tenantID)
 
