@@ -2,6 +2,7 @@ package dunning
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -60,6 +61,14 @@ func (e *capturingEscalationEmail) SendDunningWarning(context.Context, string, s
 func (e *capturingEscalationEmail) SendDunningEscalation(_ context.Context, _, _ string, _ []string, _, _ string, outcome domain.DunningEscalationOutcome, _ string) error {
 	e.outcomes = append(e.outcomes, outcome)
 	return nil
+}
+
+func (e *capturingEscalationEmail) SendDunningWarningTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, attemptNumber, maxAttempts int, nextRetryDate, failureReason, publicToken string) error {
+	return e.SendDunningWarning(ctx, tenantID, to, cc, customerName, invoiceNumber, attemptNumber, maxAttempts, nextRetryDate, failureReason, publicToken)
+}
+
+func (e *capturingEscalationEmail) SendDunningEscalationTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error {
+	return e.SendDunningEscalation(ctx, tenantID, to, cc, customerName, invoiceNumber, outcome, publicToken)
 }
 
 func twoAxisPolicy(store *memStore, sub domain.DunningSubscriptionAction, inv domain.DunningInvoiceAction) {

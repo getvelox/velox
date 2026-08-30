@@ -67,7 +67,7 @@ func TestUpdateRunIfActive_AttemptCountCAS(t *testing.T) {
 			r.AttemptCount = 1
 			at := now.Add(time.Duration(i) * time.Millisecond)
 			r.LastAttemptAt = &at
-			ok, err := store.UpdateRunIfActive(ctx, tenantID, r, 0)
+			ok, err := store.UpdateRunIfActive(ctx, tenantID, r, 0, nil)
 			if err != nil {
 				t.Errorf("racer %d: %v", i, err)
 				return
@@ -106,7 +106,7 @@ func TestUpdateRunIfActive_AttemptCountCAS(t *testing.T) {
 	}
 	stale := run
 	stale.AttemptCount = 0
-	if ok, err := store.UpdateRunIfActive(ctx, tenantID, stale, 1); err != nil {
+	if ok, err := store.UpdateRunIfActive(ctx, tenantID, stale, 1, nil); err != nil {
 		t.Fatalf("stale rewind: %v", err)
 	} else if ok {
 		t.Fatal("a rewind derived from a superseded attempt applied — it just erased another processor's recorded attempt")

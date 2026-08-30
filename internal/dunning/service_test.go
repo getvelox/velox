@@ -21,6 +21,7 @@ type memStore struct {
 	defaultID string
 	runs      map[string]domain.InvoiceDunningRun
 	events    []domain.InvoiceDunningEvent
+	hookErrs  []error // errors returned by UpdateRunIfActive `then` hooks (non-vetoing)
 }
 
 func newMemStore() *memStore {
@@ -189,7 +190,7 @@ func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDun
 // UpdateRunIfActive mirrors the REAL store's full predicate — state guard AND
 // attempt-count CAS — rather than stubbing "true": a fake that always applies
 // would keep every stale-processor test green forever (fake-fidelity rule).
-func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.InvoiceDunningRun, expectedAttempts int) (bool, error) {
+func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error) {
 	existing, ok := m.runs[run.ID]
 	if ok && existing.State == domain.DunningResolved {
 		return false, nil
@@ -198,6 +199,13 @@ func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.Inv
 		return false, nil
 	}
 	m.runs[run.ID] = run
+	// Mirror the real store: the hook runs only when the write applied, and
+	// its error never vetoes (recorded for tests).
+	if then != nil {
+		if err := then(nil); err != nil {
+			m.hookErrs = append(m.hookErrs, err)
+		}
+	}
 	return true, nil
 }
 
@@ -588,9 +596,17 @@ func (r *recordingEmailNotifier) SendDunningWarning(context.Context, string, str
 	r.warnings++
 	return nil
 }
+func (r *recordingEmailNotifier) SendDunningWarningTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, attemptNumber, maxAttempts int, nextRetryDate, failureReason, publicToken string) error {
+	return r.SendDunningWarning(ctx, tenantID, to, cc, customerName, invoiceNumber, attemptNumber, maxAttempts, nextRetryDate, failureReason, publicToken)
+}
+
 func (r *recordingEmailNotifier) SendDunningEscalation(context.Context, string, string, []string, string, string, domain.DunningEscalationOutcome, string) error {
 	r.escalations++
 	return nil
+}
+
+func (r *recordingEmailNotifier) SendDunningEscalationTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error {
+	return r.SendDunningEscalation(ctx, tenantID, to, cc, customerName, invoiceNumber, outcome, publicToken)
 }
 
 type stubCustomerEmail struct{}

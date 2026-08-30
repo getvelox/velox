@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"log/slog"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -515,7 +516,12 @@ func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run dom
 // overlap. The money itself was never double-charged (ClaimChargeForDunningRetry
 // is the per-invoice charge lease); the CAS makes the BOOKKEEPING honest, and
 // email-money-in-tx builds on it.
-func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int) (bool, error) {
+// then (nil = none) runs INSIDE the same transaction, after the CAS applied,
+// under a SAVEPOINT: the dunning state change and its customer email commit
+// together (ADR-040 — a failover between the two used to lose the email with
+// the state standing), but an email-side failure only rolls back to the
+// savepoint and is logged loud — it never vetoes the money write.
+func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return false, err
@@ -537,6 +543,20 @@ func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, 
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, err
+	}
+	if n == 1 && then != nil {
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT dunning_email"); err != nil {
+			return false, err
+		}
+		if herr := then(tx); herr != nil {
+			if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT dunning_email"); rerr != nil {
+				return false, rerr
+			}
+			slog.Error("dunning email enqueue failed inside the state transaction — transition committed, email skipped",
+				"run_id", run.ID, "invoice_id", run.InvoiceID, "error", herr)
+		} else if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT dunning_email"); err != nil {
+			return false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
