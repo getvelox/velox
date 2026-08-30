@@ -2279,6 +2279,10 @@ func (s *Service) PauseCollection(ctx context.Context, tenantID, id string, inpu
 func (s *Service) ResumeCollection(ctx context.Context, tenantID, id string) (domain.Subscription, error) {
 	ctx = s.bindForSub(ctx, tenantID, id)
 	sub, err := s.store.ClearPauseCollection(ctx, tenantID, id)
+	if errors.Is(err, ErrNotPaused) {
+		// Idempotent for the operator: nothing changed, nothing announced.
+		return s.store.Get(ctx, tenantID, id)
+	}
 	if err != nil {
 		return domain.Subscription{}, err
 	}
@@ -2692,6 +2696,12 @@ func (s *Service) ProcessExpiredPauseCollectionsForClock(ctx context.Context, te
 		// runs inside a named clock's catchup — WithSim keeps the pair.
 		bound := clock.WithSim(s.bindForSub(ctx, tenantID, sub.ID), clock.Sim{At: resumeAt, TestClockID: clockID})
 		cleared, err := s.store.ClearPauseCollection(bound, tenantID, sub.ID)
+		if errors.Is(err, ErrNotPaused) {
+			// Another clearer (a sibling leader, an operator) got there
+			// first: it announced the resume; we announce nothing.
+			slog.InfoContext(bound, "pause collection already cleared — skipping resume announcement", "subscription_id", sub.ID)
+			continue
+		}
 		if err != nil {
 			batchErrs = append(batchErrs, fmt.Errorf("clear pause %s: %w", sub.ID, err))
 			continue
@@ -2744,6 +2754,12 @@ func (s *Service) ProcessExpiredPauseCollections(ctx context.Context, batch int)
 			resumeAt = *sub.PauseCollection.ResumesAt
 		}
 		cleared, err := s.store.ClearPauseCollection(ctx, sub.TenantID, sub.ID)
+		if errors.Is(err, ErrNotPaused) {
+			// Another clearer (a sibling leader in a failover window, an
+			// operator) got there first and announced the resume.
+			slog.InfoContext(ctx, "pause collection already cleared — skipping resume announcement", "subscription_id", sub.ID)
+			continue
+		}
 		if err != nil {
 			batchErrs = append(batchErrs, fmt.Errorf("clear pause %s: %w", sub.ID, err))
 			continue

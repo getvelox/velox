@@ -216,3 +216,36 @@ the Go role list to the CHECK constraint. CI: `test-pgbouncer` job
 through it first is the negative control. Drill: `scripts/partition-drill.sh`
 rewritten; `docs/benchmarks/failure-correctness.md` §leader numbers marked
 superseded until re-measured.
+
+## Amendment 2026-08-30 (PR-B) — effect-firer audit and the two CAS fixes
+
+The gate condition for hazard 5 reading CLOSED was an enumeration of every
+external effect reachable from a leader tick, classified by what stops a
+superseded leader from firing it twice. Enumerated from
+`billing/scheduler.go` (`runBillingCycleForMode`: reconcilers,
+`RetryPendingCharges`, `EnrollStalledForDunning`, `ScanThresholds`,
+`ProcessExpiredTrials`, `ProcessExpiredPauseCollections`, `RunCycle`;
+`runCrossModeCleanup`; `ProcessDueRuns`):
+
+| Effect | Site | Guard |
+|---|---|---|
+| `invoice.finalized` webhook (cycle, threshold, cancel-final) | `billing/engine.go` `dispatchInvoiceFinalized` | fires only after the invoice INSERT succeeded; a second creator hits `idx_invoices_billing_idempotency` → `ErrAlreadyExists` → returns before the dispatch (`threshold_scan.go:812-816`) |
+| `subscription.pending_change.applied` webhook + audit | `billing/engine.go` after `ApplyDuePendingItemPlansAtomic` | the store returns ONLY the rows its conditional `UPDATE … RETURNING` transitioned (`subscription/postgres.go`); a stale leader gets an empty slice and fires nothing |
+| `subscription.threshold_crossed` webhook + audit | `billing/threshold_scan.go:915` | after the fire-once probe + invoice idempotency index; `ErrAlreadyExists` returns `(false, nil)` before the dispatch |
+| `subscription.trial_ended` / lifecycle webhooks | `subscription/postgres.go:854,961` `enqueueLifecycle` | enqueued **in the transition's transaction** (`ActivateAfterTrial` CAS on status; `ErrInvalidState` for the loser) |
+| `credit.balance_*`, `credit.commit_retired` | `credit/postgres.go:60-83,1087` | in-tx with the ledger append (`ExpireGrantAtomic` CAS) |
+| `invoice.paid`, `payment.succeeded`, `payment.failed` | `invoice/postgres.go:917,1131,1151` | in-tx with the settle CAS (`transitioned` / `firstForThisPI`) |
+| `dunning.*` webhooks, warning/escalation emails, timeline rows | `dunning/service.go` (`fireEvent` callers at :398/:1028/:1269; emails :1476/:1505) | every transition is `UpdateRunIfActive(run) (applied bool)` and the effect fires only when `applied` (:621,:764,:968,:992); the one `_`-ignored call (:652) is the transient-skip **rewind**, which fires nothing |
+| `payment.failed` email + `payment_setup_request` email from the auto-charge sweep | `billing/engine.go` collect legs | per-invoice `ClaimAutoCharge` lease (m0141) + the `NoPMNotifiedAt` marker |
+| `subscription.collection_resumed` webhook + audit | `subscription/service.go` `ProcessExpiredPauseCollections[ForClock]` | **was unguarded — fixed in PR-B:** `ClearPauseCollection` is now a CAS (`AND pause_collection_behavior IS NOT NULL`); `ErrNotPaused` → the schedule paths announce nothing, the operator path returns the row unchanged |
+| billing-cycle watermark write | `billing/engine.go` `advanceCycleOrCancel`, `handleTrialState` | **was unguarded — fixed in PR-B:** `AdvanceBillingCycle` is a CAS on the watermark the tick read (`next_billing_at IS NOT DISTINCT FROM $expected`); `ErrWatermarkMoved` → logged no-op. Plan swaps and threshold resets keep the unguarded variant on purpose: they truncate periods (move the watermark backward) |
+| Stripe calls from reconcilers (tax retry/reversal, payment_unknown, refunds) | `billing/tax_retry.go`, `creditnote/service.go`, `payment/reconciler.go` | idempotency keys per object (`velox_tax_rev_<cn>`, `inv_taxrev_<inv>`, attempt-sequence PI keys) + CAS marks; Stripe dedups the second call |
+| audit rows | everywhere | evidence, not money; a duplicate row is noise the reader tolerates — deliberately not gated |
+
+Verdict: after PR-B no effect reachable from a leader tick fires without a
+conditional write in front of it. Hazard 5 reads CLOSED in the HA-readiness
+doc from this PR. The two fixes are pinned by real-Postgres tests
+(`TestClearPauseCollection_CASOneWinner` — 20 racing clearers, exactly one
+winner; `TestAdvanceBillingCycle_StaleWatermarkIsNoOp`) and by service/engine
+unit tests, each mutation-verified.
+

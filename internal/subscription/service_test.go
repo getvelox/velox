@@ -20,9 +20,13 @@ import (
 // does — it covers just the behaviour the service layer depends on (item CRUD,
 // atomic transitions, and pending-item bookkeeping).
 type memStore struct {
-	subs        map[string]domain.Subscription
-	items       map[string]domain.SubscriptionItem
-	itemChanges []domain.SubscriptionItemChange
+	// clearPauseOverride, when set, is what ClearPauseCollection returns —
+	// simulates a sibling leader having cleared the pause between the list
+	// and the clear (HA hazard 5).
+	clearPauseOverride error
+	subs               map[string]domain.Subscription
+	items              map[string]domain.SubscriptionItem
+	itemChanges        []domain.SubscriptionItemChange
 }
 
 func newMemStore() *memStore {
@@ -291,9 +295,15 @@ func (m *memStore) SetPauseCollection(ctx context.Context, tenantID, id string, 
 }
 
 func (m *memStore) ClearPauseCollection(ctx context.Context, tenantID, id string) (domain.Subscription, error) {
+	if m.clearPauseOverride != nil {
+		return domain.Subscription{}, m.clearPauseOverride
+	}
 	s, ok := m.subs[id]
 	if !ok || s.TenantID != tenantID {
 		return domain.Subscription{}, errs.ErrNotFound
+	}
+	if s.PauseCollection == nil {
+		return domain.Subscription{}, ErrNotPaused // mirrors the real store's CAS
 	}
 	s.PauseCollection = nil
 	s.UpdatedAt = clock.Now(ctx)
@@ -3841,4 +3851,33 @@ func (m *memStore) CancelAtTrialEnd(ctx context.Context, tenantID, id string, ob
 // by the real-Postgres integration tests.
 func (m *memStore) CustomerSubPlanCurrencies(_ context.Context, _, _, _ string) ([]SubPlanCurrency, error) {
 	return nil, nil
+}
+
+// TestProcessExpiredPauseCollections_AlreadyClearedAnnouncesNothing pins the
+// hazard-5 root fix at the service seam: when the store reports the pause was
+// already cleared (a sibling leader won the CAS), the cron must fire NO
+// `subscription.collection_resumed` and write NO audit row. Mutation-verify:
+// remove the ErrNotPaused branch in ProcessExpiredPauseCollections → the
+// batch reports an error and, with the branch turned into a fall-through, the
+// event fires.
+func TestProcessExpiredPauseCollections_AlreadyClearedAnnouncesNothing(t *testing.T) {
+	store := newMemStore()
+	resumes := time.Now().Add(-time.Hour)
+	store.subs["sub_paused"] = domain.Subscription{ID: "sub_paused", TenantID: "t1", CustomerID: "cus_1", Status: domain.SubscriptionActive,
+		PauseCollection: &domain.PauseCollection{Behavior: "keep_as_draft", ResumesAt: &resumes}}
+	store.clearPauseOverride = ErrNotPaused // the sibling got there first
+	events := &fakeDispatcher{}
+	svc := NewService(store, nil)
+	svc.SetEventDispatcher(events)
+
+	processed, errsOut := svc.ProcessExpiredPauseCollections(context.Background(), 10)
+	if len(errsOut) != 0 {
+		t.Fatalf("an already-cleared pause is not an error: %v", errsOut)
+	}
+	if processed != 0 {
+		t.Fatalf("processed=%d, want 0 — nothing was resumed by this leader", processed)
+	}
+	if len(events.events) != 0 {
+		t.Fatalf("dispatched %d events, want 0 — a second collection_resumed is the hazard-5 duplicate", len(events.events))
+	}
 }

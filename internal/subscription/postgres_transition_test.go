@@ -2,6 +2,8 @@ package subscription_test
 
 import (
 	"context"
+	"errors"
+	"github.com/sagarsuperuser/velox/internal/errs"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -573,9 +575,17 @@ func TestPauseCollection_Roundtrip(t *testing.T) {
 		t.Errorf("clear left pause_collection set: %+v", cleared.PauseCollection)
 	}
 
-	// 4. Clear again is idempotent — returns the unchanged sub.
-	if _, err := store.ClearPauseCollection(ctx, tenantID, subID); err != nil {
-		t.Fatalf("idempotent clear: %v", err)
+	// 4. Clear again is a CAS miss at the store (2026-08-30, HA hazard 5):
+	// nothing changed, so it reports ErrNotPaused instead of pretending it
+	// cleared — the schedule callers use that to announce nothing; the
+	// operator path (Service.ResumeCollection) stays idempotent by returning
+	// the row unchanged.
+	if _, err := store.ClearPauseCollection(ctx, tenantID, subID); !errors.Is(err, subscription.ErrNotPaused) {
+		t.Fatalf("second clear: got %v, want ErrNotPaused", err)
+	}
+	svc := subscription.NewService(store, nil)
+	if again, err := svc.ResumeCollection(ctx, tenantID, subID); err != nil || again.ID != subID || again.PauseCollection != nil {
+		t.Fatalf("operator resume on an unpaused sub must be an idempotent no-op: %+v %v", again.PauseCollection, err)
 	}
 
 	// 5. Set on a canceled sub is rejected.
@@ -587,5 +597,99 @@ func TestPauseCollection_Roundtrip(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error setting pause_collection on canceled sub, got nil")
+	}
+}
+
+// --- HA-readiness hazard 5 root fix (2026-08-30, ADR-114 PR-B) ---
+
+// TestClearPauseCollection_CASOneWinner: two leaders clearing the same pause
+// (a failover window, a resumed frozen process) must produce exactly ONE
+// success — the winner announces `subscription.collection_resumed`, every
+// other clearer gets ErrNotPaused and announces nothing. Mutation-verify:
+// drop `AND pause_collection_behavior IS NOT NULL` from the UPDATE → every
+// goroutine succeeds.
+func TestClearPauseCollection_CASOneWinner(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	store := subscription.NewPostgresStore(db)
+	tenantID := testutil.CreateTestTenant(t, db, "Pause Clear Race")
+	subID := seedActiveSubscription(t, db, tenantID, "cus_pause_race", "plan_pause_race", "sub-pause-race")
+
+	resumes := time.Now().Add(-time.Minute)
+	if _, err := store.SetPauseCollection(ctx, tenantID, subID, domain.PauseCollection{Behavior: domain.PauseCollectionBehavior("keep_as_draft"), ResumesAt: &resumes}); err != nil {
+		t.Fatalf("set pause: %v", err)
+	}
+
+	const goroutines = 20
+	var (
+		wg        sync.WaitGroup
+		successes atomic.Int64
+		notPaused atomic.Int64
+	)
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.ClearPauseCollection(ctx, tenantID, subID)
+			switch {
+			case err == nil:
+				successes.Add(1)
+			case errors.Is(err, subscription.ErrNotPaused):
+				notPaused.Add(1)
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if successes.Load() != 1 || notPaused.Load() != goroutines-1 {
+		t.Fatalf("successes=%d notPaused=%d, want exactly 1 winner and %d ErrNotPaused", successes.Load(), notPaused.Load(), goroutines-1)
+	}
+	// And a clear on an unpaused row is ErrNotPaused, never a silent no-op.
+	if _, err := store.ClearPauseCollection(ctx, tenantID, subID); !errors.Is(err, subscription.ErrNotPaused) {
+		t.Fatalf("second clear: got %v, want ErrNotPaused", err)
+	}
+	if _, err := store.ClearPauseCollection(ctx, tenantID, "sub_does_not_exist"); !errors.Is(err, errs.ErrNotFound) {
+		t.Fatalf("missing row: got %v, want ErrNotFound", err)
+	}
+}
+
+// TestAdvanceBillingCycle_StaleWatermarkIsNoOp: the cycle-close advance is a
+// CAS on the watermark the tick read. A superseded leader finishing its
+// in-memory close finds next_billing_at already moved and changes nothing.
+// Mutation-verify: drop `AND next_billing_at IS NOT DISTINCT FROM $7` →
+// the second advance rewinds the watermark and this fails.
+func TestAdvanceBillingCycle_StaleWatermarkIsNoOp(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	store := subscription.NewPostgresStore(db)
+	tenantID := testutil.CreateTestTenant(t, db, "Watermark CAS")
+	subID := seedActiveSubscription(t, db, tenantID, "cus_wm", "plan_wm", "sub-wm")
+
+	sub, err := store.Get(ctx, tenantID, subID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	read := sub.NextBillingAt // what this tick read
+	t1 := time.Now().UTC().Truncate(time.Second)
+	next1 := t1.Add(30 * 24 * time.Hour)
+	if err := store.AdvanceBillingCycle(ctx, tenantID, subID, read, t1, next1, next1, sub.BillingAnchorDay); err != nil {
+		t.Fatalf("first advance (fresh read): %v", err)
+	}
+	// The stale leader resumes with the same stale read and tries to advance
+	// to a DIFFERENT (older) cycle end.
+	next0 := t1.Add(15 * 24 * time.Hour)
+	err = store.AdvanceBillingCycle(ctx, tenantID, subID, read, t1, next0, next0, sub.BillingAnchorDay)
+	if !errors.Is(err, subscription.ErrWatermarkMoved) {
+		t.Fatalf("stale advance: got %v, want ErrWatermarkMoved", err)
+	}
+	after, _ := store.Get(ctx, tenantID, subID)
+	if after.NextBillingAt == nil || !after.NextBillingAt.Equal(next1) {
+		t.Fatalf("watermark after stale advance = %v, want %v (the newer leader's value must stand)", after.NextBillingAt, next1)
+	}
+	// The newer leader's own next advance, reading the current watermark, works.
+	next2 := next1.Add(30 * 24 * time.Hour)
+	if err := store.AdvanceBillingCycle(ctx, tenantID, subID, &next1, next1, next2, next2, sub.BillingAnchorDay); err != nil {
+		t.Fatalf("advance with a fresh read: %v", err)
 	}
 }
