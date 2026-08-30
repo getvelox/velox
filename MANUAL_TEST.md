@@ -2074,6 +2074,7 @@ The wedge integration. Validates the adapter accepts LiteLLM's `StandardLoggingP
 ---
 
 # Diagnostics
+- [ ] **A usage-store failure refuses the batch for retry (HA-10, 2026-08-30)** — with Postgres up, `REVOKE INSERT ON usage_events FROM velox_app` (as the owner role, from the main tree's compose Postgres), POST a valid 2-call batch → **503** `api_error/ingest_unavailable`, body carries no SQLSTATE/role text, nothing new in `usage_events`; `GRANT` it back and re-POST the same batch → 200 with `accepted` for the rows never recorded. Negative control: an unmapped `user` on a healthy DB → 200 with a per-row `not found` error, never 503. *(automated: `TestSpend_StoreUnavailableIs503`, `TestSpend_VerdictsStay200`, real-store `TestSpend_RealStoreContract`)*
 
 ## Server won't start
 - `VELOX_ENCRYPTION_KEY` rejected → FLOW X9 (must be 64 hex chars).
