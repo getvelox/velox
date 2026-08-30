@@ -28,6 +28,12 @@ type Config struct {
 	// production refuses to start without a reachable Redis (validateFatal +
 	// cmd/velox/main.go). Optional elsewhere: limiters fail open.
 	RedisURL string
+	// TrustProxy is the TRUST_PROXY CIDR list the router honours forwarded
+	// client addresses from. Required in production: behind a balancer with
+	// it unset, every request's client address is the balancer's and the
+	// per-IP limits on the public pay pages and /v1/auth collapse into ONE
+	// bucket for the whole install. "none" declares there is no proxy.
+	TrustProxy string
 
 	// ShutdownDrainDelay is how long a replica keeps its listener open AFTER
 	// flipping /health/ready to 503 'draining' on SIGTERM, so a health-check
@@ -80,6 +86,7 @@ func Load() (Config, error) {
 			QueryTimeout:    time.Duration(intEnv("DB_QUERY_TIMEOUT_MS", 5000)) * time.Millisecond,
 		},
 		RedisURL:       strings.TrimSpace(os.Getenv("REDIS_URL")),
+		TrustProxy:     strings.TrimSpace(os.Getenv("TRUST_PROXY")),
 		BootstrapToken: strings.TrimSpace(os.Getenv("VELOX_BOOTSTRAP_TOKEN")),
 	}
 	drain, err := loadShutdownDrainDelay(env)
@@ -113,6 +120,9 @@ func (c Config) validateFatal() error {
 	}
 	if c.Env == "production" && c.RedisURL == "" {
 		return fmt.Errorf("REDIS_URL is required in production — the general and hosted-invoice rate limiters fail CLOSED without Redis, so every dashboard, export, bootstrap and hosted-invoice request would answer 429 while /health/ready reports ok; point REDIS_URL at a managed Redis (docs/self-host.md)")
+	}
+	if c.Env == "production" && c.TrustProxy == "" {
+		return fmt.Errorf("TRUST_PROXY is required in production — behind a load balancer or ingress every request's client address is the balancer's, so the per-IP limits on the public pay pages (60/min) and on /v1/auth (100/min) become ONE bucket shared by every customer and operator of the install; set TRUST_PROXY to the balancer/ingress CIDR(s), or TRUST_PROXY=none if replicas accept client connections directly (deploy/README.md)")
 	}
 
 	if encKey != "" {
@@ -155,6 +165,9 @@ func (c Config) Validate() []string {
 		}
 	}
 
+	if c.TrustProxy == "" && c.Env == "production" {
+		warnings = append(warnings, "TRUST_PROXY is not set — in production every per-IP rate limit collapses into one bucket behind a balancer; boot refuses (set the ingress CIDR, or TRUST_PROXY=none)")
+	}
 	if c.RedisURL == "" && c.Env == "production" {
 		warnings = append(warnings, "REDIS_URL is not set — in production the general and hosted-invoice rate limiters fail CLOSED (every covered request 429); boot refuses")
 	}

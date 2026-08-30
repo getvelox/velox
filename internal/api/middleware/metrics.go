@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -157,14 +158,6 @@ var (
 		[]string{"mode", "class"},
 	)
 
-	parkedInvoices = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "velox_parked_invoices",
-			Help: "Invoices whose charge attempt could not be identified with the provider (ADR-107), by disposition. open = still awaiting an operator decision; written_off = already decided, retained only because the ADR-108 search may still name the PaymentIntent. Alert on `open` growing — summing both hides a decision that was already made.",
-		},
-		[]string{"mode", "disposition"},
-	)
-
 	scheduledCleanupRows = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "velox_scheduled_cleanup_rows_total",
@@ -278,14 +271,6 @@ func RecordStripeBreakerState(state string) {
 // differently from "nothing is parked".
 func RecordParkedSearchError(mode, class string) {
 	parkedSearchErrors.WithLabelValues(mode, class).Inc()
-}
-
-// RecordParkedInvoices publishes the count of invoices parked by ADR-107 for
-// the given mode. Called from the payment reconciler each tick — the sweep that
-// deliberately no longer PROCESSES them is still the right place to REPORT
-// them, so excluding them from the queue did not also make them invisible.
-func RecordParkedInvoices(mode, disposition string, n int) {
-	parkedInvoices.WithLabelValues(mode, disposition).Set(float64(n))
 }
 
 // Metrics returns middleware that records HTTP request metrics.
@@ -524,6 +509,27 @@ func RegisterQueueDepthGauges(count func(query string) (float64, error)) {
 			}
 			return n
 		})
+	}
+	// Parked invoices (ADR-107) — a cluster fact, so it is computed from the
+	// database on every replica's scrape. Until sweep-2026-08-30 S4 it was a
+	// per-process Set() gauge stamped only by whichever replica led the
+	// billing tick; followers exported a stale copy and the runbook's
+	// "needs a human" alert fired from replicas whose number had resolved.
+	parkedHelp := "Invoices whose charge attempt could not be identified with the provider (ADR-107), by disposition. open = still awaiting an operator decision; written_off = already decided, retained only because the ADR-108 search may still name the PaymentIntent. Alert on `open` growing — summing both hides a decision that was already made. -1 = metric query failed."
+	for _, m := range []struct {
+		label string
+		live  bool
+	}{{"live", true}, {"test", false}} {
+		for _, d := range []struct{ label, status string }{{"open", "finalized"}, {"written_off", "uncollectible"}} {
+			q := fmt.Sprintf(`SELECT COUNT(*) FROM invoices WHERE status = '%s' AND payment_status = 'unknown' AND COALESCE(stripe_payment_intent_id, '') = '' AND livemode = %t`, d.status, m.live)
+			promauto.NewGaugeFunc(prometheus.GaugeOpts{Name: "velox_parked_invoices", Help: parkedHelp, ConstLabels: prometheus.Labels{"mode": m.label, "disposition": d.label}}, func() float64 {
+				n, err := count(q)
+				if err != nil {
+					return -1
+				}
+				return n
+			})
+		}
 	}
 	gauge("velox_email_outbox_pending",
 		"Emails waiting for the outbox dispatcher (status='pending'). -1 = metric query failed.",

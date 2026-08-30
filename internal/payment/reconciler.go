@@ -37,10 +37,6 @@ type ReconcileInvoiceStore interface {
 	// what turns a long-running payment from silent into diagnosable
 	// (migration 0167).
 	RecordProviderSync(ctx context.Context, tenantID, id, providerStatus string) error
-	// CountParkedInvoices reports invoices this sweep deliberately does NOT
-	// process (ADR-107) — excluding them from the queue must not also make
-	// them invisible.
-	CountParkedInvoices(ctx context.Context) (open int, writtenOff int, err error)
 	// ListParkedSearchable is the ADR-108 sweep's input: parked invoices
 	// (unknown, empty PI id, finalized OR written off) old enough to search
 	// and not searched
@@ -169,19 +165,10 @@ func (r *Reconciler) SetResolver(res clock.Resolver) { r.resolver = res }
 // settler), so a backstop-recovered settlement fires the full side-effects.
 // Returns the number resolved (succeeded or failed) and any per-invoice errors.
 func (r *Reconciler) Run(ctx context.Context, limit int) (int, []error) {
-	// Report the parked set before sweeping. These rows are excluded from the
-	// queries below by design; publishing the count is what keeps "stuck and
-	// loud" (ADR-107) actually loud, instead of log-only.
-	if open, writtenOff, err := r.invoices.CountParkedInvoices(ctx); err == nil {
-		mode := "live"
-		if !postgres.Livemode(ctx) {
-			mode = "test"
-		}
-		mw.RecordParkedInvoices(mode, "open", open)
-		mw.RecordParkedInvoices(mode, "written_off", writtenOff)
-	} else {
-		slog.WarnContext(ctx, "could not count parked invoices for the gauge", "error", err)
-	}
+	// The parked-invoice count (ADR-107's alerting surface) is exported by
+	// every replica from the database at scrape time (metrics.go,
+	// velox_parked_invoices) — not stamped here, where only the billing
+	// leader would set it.
 
 	n1, e1 := r.sweep(ctx, "unknown", r.invoices.ListUnknownPayments, r.olderThan, limit)
 	n2, e2 := r.sweep(ctx, "processing", r.invoices.ListProcessingPayments, r.olderThanProcessing, limit)

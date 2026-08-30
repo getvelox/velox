@@ -3,6 +3,7 @@ package subscription
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -685,5 +686,68 @@ func TestIntervals_HardDeleteRefusedLoudly(t *testing.T) {
 	}
 	if err := tx2.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
+	}
+}
+
+// TestIntervals_BackfillTwoReplicasConverge is sweep-2026-08-30 S6: two
+// replicas boot together and both run BackfillBillingIntervals on the same
+// partition. Both must return nil — the second committer's EXCLUDE violation
+// means "a sibling reconstructed this first", not a boot failure — and the
+// table must hold exactly the one reconstruction. The barrier hook makes the
+// race deterministic: both goroutines read "no rows" before either inserts.
+// Mutation check: drop the IsExclusionViolation branch in
+// BackfillBillingIntervals → one goroutine errors → this fails.
+func TestIntervals_BackfillTwoReplicasConverge(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "IV Backfill Race")
+	cust := ivCustomer(t, db, ctx, tenantID, "cus_iv_race")
+	planA := ivPlan(t, db, ctx, tenantID, "iv-race-a", 1000)
+	store := NewPostgresStore(db)
+	sub := ivActiveSub(t, store, ctx, tenantID, cust, "sub-iv-race", []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}})
+	itemID := sub.Items[0].ID
+
+	tx, err := db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM billing_intervals WHERE subscription_id = $1`, sub.ID); err != nil {
+		t.Fatalf("wipe intervals: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Barrier: both "replicas" must have read the partition before either
+	// inserts. Each calls the hook once per partition (one partition here).
+	var arrive sync.WaitGroup
+	arrive.Add(2)
+	backfillBeforeInsert = func() { arrive.Done(); arrive.Wait() }
+	t.Cleanup(func() { backfillBeforeInsert = nil })
+
+	type result struct {
+		n   int
+		err error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			n, err := store.BackfillBillingIntervals(ctx)
+			results <- result{n, err}
+		}()
+	}
+	var total int
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("a booting replica failed its backfill because a sibling won the race: %v", r.err)
+		}
+		total += r.n
+	}
+	if total != 1 {
+		t.Fatalf("exactly one replica must reconstruct the segment; inserted=%d", total)
+	}
+	if ivs := readItemIntervals(t, db, ctx, tenantID, itemID); len(ivs) != 1 {
+		t.Fatalf("table must hold one reconstructed segment, got %+v", ivs)
 	}
 }

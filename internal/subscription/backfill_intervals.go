@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -37,12 +38,27 @@ func (s *PostgresStore) BackfillBillingIntervals(ctx context.Context) (int, erro
 	for _, p := range parts {
 		n, err := s.backfillIntervalsPartition(postgres.WithLivemode(ctx, p.livemode), p.tenantID)
 		if err != nil {
+			if postgres.IsExclusionViolation(err) {
+				// Every replica runs this at boot with no cross-replica
+				// serialization. Two booting together read "no rows" for the
+				// same items; the second committer trips the EXCLUDE
+				// constraint AFTER the first committed, so the partition is
+				// already reconstructed. Skip it — a boot failure here cost
+				// one replica a restart for nothing (sweep 2026-08-30 S6).
+				slog.Info("billing-intervals backfill: partition reconstructed by a sibling replica first — skipping", "tenant_id", p.tenantID, "livemode", p.livemode)
+				continue
+			}
 			return total, fmt.Errorf("backfill billing intervals tenant %s livemode %v: %w", p.tenantID, p.livemode, err)
 		}
 		total += n
 	}
 	return total, nil
 }
+
+// backfillBeforeInsert is a test-only barrier called after a partition's
+// items have been read and before its segments are inserted — the window two
+// booting replicas race through. nil in production.
+var backfillBeforeInsert func()
 
 type backfillPartition struct {
 	tenantID string
@@ -316,6 +332,9 @@ func backfillOneItem(ctx context.Context, tx *sql.Tx, tenantID string, loc *time
 		}
 	}
 
+	if backfillBeforeInsert != nil {
+		backfillBeforeInsert()
+	}
 	for _, seg := range segs {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO billing_intervals (tenant_id, subscription_id, subscription_item_id, plan_id, quantity, starts_at, ends_at, source)
