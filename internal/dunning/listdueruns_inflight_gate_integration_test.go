@@ -2,6 +2,8 @@ package dunning_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -45,7 +47,7 @@ import (
 // the claim's own predicate answers it for every in-flight shape at once.
 func TestListDueRuns_InFlightGate(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleDunning)
 	tenantID := testutil.CreateTestTenant(t, db, "DueRuns InFlight Gate")
 
 	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{

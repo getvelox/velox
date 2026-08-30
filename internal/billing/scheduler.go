@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"log/slog"
 	"sync"
 	"time"
@@ -105,93 +106,8 @@ type PaymentReconciler interface {
 	Run(ctx context.Context, limit int) (int, []error)
 }
 
-// Lock represents a held cluster-wide lock that the holder must release.
-type Lock interface {
-	Release()
-}
-
-// roleState remembers whether this replica currently holds a singleton role,
-// so a CHANGE can be logged once rather than the state being logged every
-// tick.
-//
-// The skip used to log at Debug, which meant production at Info emitted
-// nothing at all: a replica that stopped leading, or one that never started,
-// looked exactly like one doing its job. That invisibility is what let a
-// stranded lock halt billing for over two hours without a single log line
-// (see TryAdvisoryLock). Bounding the window to 90s fixed the duration; it did
-// not make the state visible.
-//
-// Transitions, not levels, are what deserve a line. Leadership changes on
-// deploys, restarts and failover — rare events — so this costs two lines per
-// change instead of one per replica per tick forever.
-//
-// Deliberately NOT implemented here: a "this replica has been following for N
-// hours, something may be wrong" warning. A follower cannot distinguish a
-// healthy leader from a dead one holding a stranded lock — both look like "the
-// lock is taken" — so any such warning would fire constantly on every healthy
-// multi-replica deployment. Detecting cluster-wide stall needs a leader-side
-// heartbeat that followers compare against, which is a larger design than this
-// gap warrants now that the stranding window is 90 seconds.
-type roleState struct {
-	mu    sync.Mutex
-	known bool
-	lead  bool
-	since time.Time
-}
-
-// observe records the current leadership state and returns a log line to emit,
-// or "" when nothing changed. Returning the message rather than logging keeps
-// the lock scope tight and the call sites readable.
-func (r *roleState) observe(now time.Time, lead bool) (msg string, heldFor time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.known && r.lead == lead {
-		return "", 0
-	}
-	prior := now.Sub(r.since)
-	first := !r.known
-	r.known, r.lead, r.since = true, lead, now
-
-	switch {
-	case first && lead:
-		return "acquired leadership", 0
-	case first && !lead:
-		return "following; another replica holds the lock", 0
-	case lead:
-		return "acquired leadership", prior
-	default:
-		return "lost leadership; another replica holds the lock", prior
-	}
-}
-
-// Locker acquires cluster-wide singleton locks by key — typically backed by
-// Postgres advisory locks. Returned (nil, false, nil) means another leader
-// holds the lock; caller should skip the tick. Nil Locker disables leader
-// gating (single-replica mode).
-type Locker interface {
-	TryAdvisoryLock(ctx context.Context, key int64) (Lock, bool, error)
-}
-
-// logRoleChange emits one Info line when this replica's leadership for a role
-// changes, and nothing at all when it has not. Info, not Debug: an operator
-// running at the default level needs to see which replica is doing the work.
-func logRoleChange(r *roleState, role string, lead bool) {
-	msg, prior := r.observe(time.Now(), lead)
-	if msg == "" {
-		return
-	}
-	if prior > 0 {
-		slog.Info(role+": "+msg, "previous_state_held_for", prior.Round(time.Second).String())
-		return
-	}
-	slog.Info(role + ": " + msg)
-}
-
 // Scheduler runs the billing cycle engine and dunning processor on a periodic interval.
 type Scheduler struct {
-	billingRole       roleState
-	dunningRole       roleState
 	engine            *Engine
 	dunning           DunningProcessor
 	tenants           TenantLister
@@ -203,9 +119,7 @@ type Scheduler struct {
 	trialExpirer      TrialExpirer
 	pauseResumer      PauseResumer
 	paymentReconciler PaymentReconciler
-	locker            Locker
-	billingLockKey    int64
-	dunningLockKey    int64
+	gate              leader.Gate
 	interval          time.Duration
 	batch             int
 	onRun             func() // called after each complete scheduler tick (for health tracking)
@@ -288,15 +202,10 @@ func (s *Scheduler) SetPaymentReconciler(r PaymentReconciler) {
 	s.paymentReconciler = r
 }
 
-// SetLocker enables leader gating. When set, the scheduler only runs the
-// billing and dunning halves of its tick if it wins the relevant advisory
-// lock — preventing two app replicas from both generating invoices or both
-// advancing the same dunning run. Pass nil (default) for single-replica or
-// test-mode operation where gating is unwanted.
-func (s *Scheduler) SetLocker(locker Locker, billingKey, dunningKey int64) {
-	s.locker = locker
-	s.billingLockKey = billingKey
-	s.dunningLockKey = dunningKey
+// SetGate wires the leader gate (ADR-114). Start refuses to run without one:
+// an ungated singleton loop at N>=2 is a double-billing machine.
+func (s *Scheduler) SetGate(gate leader.Gate) {
+	s.gate = gate
 }
 
 // SetOnRun registers a callback invoked after each complete scheduler tick.
@@ -305,26 +214,37 @@ func (s *Scheduler) SetOnRun(fn func()) {
 	s.onRun = fn
 }
 
-// Start runs the scheduler in a background goroutine.
-// It blocks until the context is canceled (graceful shutdown).
+// Start runs the two singleton roles this scheduler owns — billing and
+// dunning — as independent leader-gated loops (ADR-114), so one replica can
+// run dunning while another finishes a long billing half, and a Postgres
+// failover or a frozen process can never leave either role running twice.
+// The two halves may now also overlap on ONE replica; that is safe by the
+// same argument that made them safe across replicas (they share nothing
+// but the row-level claims). Blocks until ctx is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
+	if s.gate == nil {
+		slog.Error("billing scheduler: no leader gate wired — refusing to start ungated")
+		return
+	}
 	slog.Info("billing scheduler started",
 		"interval", s.interval.String(),
 		"batch_size", s.batch,
 	)
-	scheduler.Run(ctx, "billing", s.interval, s.runOnce)
-}
-
-func (s *Scheduler) runOnce(ctx context.Context) {
-	s.runBillingHalf(ctx)
-	s.runDunningHalf(ctx)
-
-	// Notify health check that a scheduler tick completed. Fires even when
-	// both halves were skipped (lock contention) so the health probe still
-	// sees the scheduler as alive on follower replicas.
-	if s.onRun != nil {
-		s.onRun()
-	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		// onRun fires on EVERY poll (followers too): /health/ready and
+		// velox_scheduler_last_run_timestamp_seconds mean "this replica's
+		// loop is alive"; the cluster fact "billing last ran" is the
+		// leader_leases row.
+		scheduler.Run(ctx, leader.RoleBilling, s.interval, s.gate, s.runBillingHalf, s.onRun)
+	}()
+	go func() {
+		defer wg.Done()
+		scheduler.Run(ctx, leader.RoleDunning, s.interval, s.gate, s.runDunningHalf, nil)
+	}()
+	wg.Wait()
 }
 
 // runBillingHalf runs the leader-gated half that generates money — recovery
@@ -341,20 +261,6 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 // steps (token + idempotency purge) run once, outside the fan-out.
 func (s *Scheduler) runBillingHalf(ctx context.Context) {
 	start := time.Now()
-
-	if s.locker != nil {
-		lock, acquired, err := s.locker.TryAdvisoryLock(ctx, s.billingLockKey)
-		if err != nil {
-			slog.Error("billing scheduler: lock acquire failed", "error", err)
-			return
-		}
-		if !acquired {
-			logRoleChange(&s.billingRole, "billing scheduler", false)
-			return
-		}
-		logRoleChange(&s.billingRole, "billing scheduler", true)
-		defer lock.Release()
-	}
 
 	// Mode-scoped work: live first (the bulk of traffic), then test. One
 	// mode's errors do not gate the other — they share nothing at the
@@ -561,20 +467,6 @@ func (s *Scheduler) runCrossModeCleanup(ctx context.Context) {
 func (s *Scheduler) runDunningHalf(ctx context.Context) {
 	if s.dunning == nil || s.tenants == nil {
 		return
-	}
-
-	if s.locker != nil {
-		lock, acquired, err := s.locker.TryAdvisoryLock(ctx, s.dunningLockKey)
-		if err != nil {
-			slog.Error("dunning scheduler: lock acquire failed", "error", err)
-			return
-		}
-		if !acquired {
-			logRoleChange(&s.dunningRole, "dunning scheduler", false)
-			return
-		}
-		logRoleChange(&s.dunningRole, "dunning scheduler", true)
-		defer lock.Release()
 	}
 
 	tenantIDs, err := s.tenants.ListTenantIDs(ctx)

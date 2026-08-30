@@ -101,7 +101,7 @@ func TestLease_TwoManagersContend(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				ok, err := m.Lead(context.Background(), leader.RoleWebhookOutbox, 0, func(ctx context.Context) {
-					_, tok, ferr := leader.Fence(ctx)
+					tok, ferr := leader.Fence(ctx, leader.RoleWebhookOutbox)
 					if ferr != nil {
 						t.Errorf("led work without a token: %v", ferr)
 					}
@@ -147,7 +147,7 @@ func TestLease_TakeoverAfterExpiry(t *testing.T) {
 	var ledAt time.Time
 	for time.Now().Before(deadline) {
 		led, err := m.Lead(ctx, leader.RoleBilling, 0, func(ctx context.Context) {
-			_, tok, _ := leader.Fence(ctx)
+			tok, _ := leader.Fence(ctx, leader.RoleBilling)
 			if tok != deadToken+1 {
 				t.Errorf("takeover token %d, want %d", tok, deadToken+1)
 			}
@@ -377,7 +377,7 @@ func TestLease_MissingRowRecreated(t *testing.T) {
 	}
 	m := leader.New(db.Pool, nil)
 	var got int64
-	if led, err := m.Lead(ctx, leader.RoleEmailOutbox, 0, func(ctx context.Context) { _, got, _ = leader.Fence(ctx) }); !led || err != nil {
+	if led, err := m.Lead(ctx, leader.RoleEmailOutbox, 0, func(ctx context.Context) { got, _ = leader.Fence(ctx, leader.RoleEmailOutbox) }); !led || err != nil {
 		t.Fatalf("Lead after delete: led=%v err=%v", led, err)
 	}
 	if got <= old {

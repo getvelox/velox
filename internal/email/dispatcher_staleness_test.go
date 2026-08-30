@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"errors"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"testing"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -84,7 +85,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 	t.Run("obsolete action-required row returns ErrEmailObsolete, nothing sent", func(t *testing.T) {
 		for _, typ := range []string{TypePaymentSetupRequest, TypePaymentFailed, TypeDunningWarning, TypeDunningEscalation} {
 			sender := &recordingDeliverer{}
-			d := NewDispatcher(nil, sender, DispatcherConfig{})
+			d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 			d.SetSettledChecker(&recordingChecker{state: "paid"})
 			err := d.handle(ctx, rowOf(typ))
 			if !errors.Is(err, ErrEmailObsolete) {
@@ -113,7 +114,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		// dunning_warning stay muted below — those really are stale on a
 		// written-off invoice — which is what keeps the exemption narrow.
 		sender := &recordingDeliverer{}
-		d := NewDispatcher(nil, sender, DispatcherConfig{})
+		d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 		d.SetSettledChecker(&recordingChecker{state: "uncollectible"})
 		if err := d.handle(ctx, rowOf(TypeDunningEscalation)); err != nil {
 			t.Fatalf("escalation must deliver on uncollectible: %v", err)
@@ -123,7 +124,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		}
 		// The setup link now delivers: it is the recovery on-ramp.
 		s1 := &recordingDeliverer{}
-		d1 := NewDispatcher(nil, s1, DispatcherConfig{})
+		d1 := NewDispatcher(nil, s1, DispatcherConfig{}, leader.AlwaysLead{})
 		d1.SetSettledChecker(&recordingChecker{state: "uncollectible"})
 		if err := d1.handle(ctx, rowOf(TypePaymentSetupRequest)); err != nil {
 			t.Fatalf("setup link must deliver on uncollectible — the card is the on-ramp to recovery on normal rails (ADR-113): %v", err)
@@ -133,7 +134,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		}
 		for _, typ := range []string{TypePaymentFailed, TypeDunningWarning} {
 			s2 := &recordingDeliverer{}
-			d2 := NewDispatcher(nil, s2, DispatcherConfig{})
+			d2 := NewDispatcher(nil, s2, DispatcherConfig{}, leader.AlwaysLead{})
 			d2.SetSettledChecker(&recordingChecker{state: "uncollectible"})
 			if err := d2.handle(ctx, rowOf(typ)); !errors.Is(err, ErrEmailObsolete) {
 				t.Errorf("%s on an uncollectible invoice must stay muted, got %v", typ, err)
@@ -142,7 +143,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		// paid/voided still mute the escalation itself.
 		for _, st := range []string{"paid", "voided"} {
 			s3 := &recordingDeliverer{}
-			d3 := NewDispatcher(nil, s3, DispatcherConfig{})
+			d3 := NewDispatcher(nil, s3, DispatcherConfig{}, leader.AlwaysLead{})
 			d3.SetSettledChecker(&recordingChecker{state: st})
 			if err := d3.handle(ctx, rowOf(TypeDunningEscalation)); !errors.Is(err, ErrEmailObsolete) {
 				t.Errorf("escalation on a %s invoice must stay muted, got %v", st, err)
@@ -152,7 +153,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 
 	t.Run("live invoice sends normally", func(t *testing.T) {
 		sender := &recordingDeliverer{}
-		d := NewDispatcher(nil, sender, DispatcherConfig{})
+		d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 		d.SetSettledChecker(&recordingChecker{state: ""})
 		if err := d.handle(ctx, rowOf(TypePaymentSetupRequest)); err != nil {
 			t.Fatalf("send: %v", err)
@@ -164,7 +165,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 
 	t.Run("checker error fails OPEN — the email still sends", func(t *testing.T) {
 		sender := &recordingDeliverer{}
-		d := NewDispatcher(nil, sender, DispatcherConfig{})
+		d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 		d.SetSettledChecker(&recordingChecker{err: errors.New("db blip")})
 		if err := d.handle(ctx, rowOf(TypePaymentFailed)); err != nil {
 			t.Fatalf("fail-open send: %v", err)
@@ -178,7 +179,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 		for _, typ := range []string{TypeInvoice, TypePaymentReceipt} {
 			sender := &recordingDeliverer{}
 			checker := &recordingChecker{state: "paid"}
-			d := NewDispatcher(nil, sender, DispatcherConfig{})
+			d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 			d.SetSettledChecker(checker)
 			if err := d.handle(ctx, rowOf(typ)); err != nil {
 				t.Fatalf("%s: %v", typ, err)
@@ -194,7 +195,7 @@ func TestDispatcherStalenessGate(t *testing.T) {
 
 	t.Run("nil checker leaves the pre-gate behavior", func(t *testing.T) {
 		sender := &recordingDeliverer{}
-		d := NewDispatcher(nil, sender, DispatcherConfig{})
+		d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 		if err := d.handle(ctx, rowOf(TypePaymentSetupRequest)); err != nil {
 			t.Fatalf("nil checker: %v", err)
 		}

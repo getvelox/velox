@@ -197,9 +197,10 @@ copied `DATABASE_URL`). Point it at `velox_app`.
 
 **`/health/ready` returns 503 with `scheduler: degraded`** — the
 scheduler tick window has elapsed without a recorded run. Usually this
-means the API process is alive but the leader-locked background work
-(jobs guarded by a Postgres advisory lock) isn't progressing. Check
-the API logs and the `pg_locks` table.
+means the API process is alive but its scheduler loop has stopped
+polling. Check the API logs; for the cluster-wide view — which replica
+last ran each role, and whether an operator paused one — run
+`SELECT * FROM leader_status;` (ADR-114).
 
 **Port 80 is already in use** — set `NGINX_HTTP_PORT=8080` (or any free
 port) in `.env` and bring the stack back up.

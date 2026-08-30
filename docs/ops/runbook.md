@@ -32,6 +32,8 @@ alerting tier — what should page someone vs. what's informational.
 | `up{job="velox"}` | == 0 | Process down |
 | Postgres connection errors (count) | > 10/min | DB connectivity broken |
 | `time() - velox_scheduler_last_run_timestamp_seconds` | > 2× tick interval | Scheduler stalled (also flips `/health/ready` to 503) |
+| `velox_leader_last_tick_age_seconds{role}` | > 3× the role's interval | The role has not finished a tick on ANY replica — the cluster-wide stall signal a per-replica liveness gauge cannot give. `SELECT * FROM leader_status;` shows the holder and whether an operator paused the role ([runbook-leader-leases.md](runbook-leader-leases.md)) |
+| `increase(velox_leader_lease_lost_total[1h])` | > 0 | A leader could not keep its lease mid-tick (frozen process, DB stall, pooler hiccup). Correctness held — fence + row CAS — but find out why |
 
 ### Warn (slack/email, not page)
 
@@ -455,10 +457,12 @@ demand via `POST /v1/billing/run` (loops until that tenant is empty)
 rather than by tuning these knobs.
 
 Watch `velox_billing_cycle_duration_seconds` to ensure each tick fits
-inside the interval. If a tick runs long, the leader-held advisory lock
-(a Postgres application-level lock that lets only one instance run the
-tick) makes the next tick skip rather than collide, so you'll see skipped
-ticks (not lock waits) and a lengthening backlog.
+inside the interval. If a tick runs long, the leader lease (ADR-114 — one
+replica holds the `billing` role per tick and renews it while it works)
+means the next tick starts one interval after the long one ENDS, on
+whichever replica polls first — no collision, no lock wait, just a
+lengthening backlog. `velox_leader_last_tick_age_seconds{role="billing"}`
+is the cluster-wide lag; see [runbook-leader-leases.md](runbook-leader-leases.md).
 
 ## Manual operator interventions
 

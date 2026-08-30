@@ -67,7 +67,7 @@ This deployment shape is a **single-VM, single-instance** install:
   point `DATABASE_URL` elsewhere).
 - Scheduler: in-process goroutine inside `velox-api` (per ADR-006 —
   ADRs, the numbered architecture decision records, live in `docs/adr/`).
-  Leader-elected via Postgres advisory locks — a second replica's
+  Leader-elected per tick through a Postgres lease row (ADR-114) — a second replica's
   scheduler and outbox dispatchers (the workers draining the outbox
   tables, where side effects such as outbound webhook deliveries are
   enqueued in the same transaction as the state change that caused them)
@@ -89,10 +89,9 @@ with failover + PITR, managed Redis — and that is what the engine is being
 designed for. Much of the groundwork already exists (leader-elected
 scheduling, SKIP-LOCKED outbox claims, DB-backed sessions/idempotency);
 the remaining work list and its status live in the HA-readiness doc
-above. Honest current state: until the leader-lease arc lands, leadership
-is a session advisory lock, so transaction-mode poolers (PgBouncer
-transaction mode, RDS Proxy) are still unsupported and the server refuses
-to boot behind them; session-mode pooling and direct connections work.
+above. Leadership is a per-tick lease row (ADR-114, shipped 2026-08-30),
+so PgBouncer transaction mode and RDS Proxy work for the server; migrations
+still want a direct or session-mode connection.
 Packaging (Helm chart, Terraform module) stays deferred until a design
 partner names the flavour — the architecture no longer waits for that.
 

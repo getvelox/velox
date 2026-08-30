@@ -3,6 +3,8 @@ package webhook
 import (
 	"context"
 	"errors"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -30,7 +32,7 @@ func seedEndpoint(t *testing.T, db *postgres.DB, ctx context.Context, tenantID s
 // violating it): BatchSize×outboxPerRowBudget ≤ BatchTimeout <
 // outboxClaimLease(BatchSize).
 func TestP5_WebhookOutboxLeaseInvariant(t *testing.T) {
-	d := NewDispatcher(nil, nil, DispatcherConfig{})
+	d := NewDispatcher(nil, nil, DispatcherConfig{}, leader.AlwaysLead{})
 	cfg := d.Config()
 	if got := time.Duration(cfg.BatchSize) * outboxPerRowBudget; got > cfg.BatchTimeout {
 		t.Errorf("BatchSize×outboxPerRowBudget (%v) > BatchTimeout (%v)", got, cfg.BatchTimeout)
@@ -51,7 +53,7 @@ func TestP5_WebhookOutboxLeaseInvariant(t *testing.T) {
 // goroutine before the birth lease expires.
 func TestP5_EventAndDeliveriesOneTx_BornLeased(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery)
 	tenantID := testutil.CreateTestTenant(t, db, "P5 Born Leased")
 	store := NewPostgresStore(db)
 	ep := seedEndpoint(t, db, ctx, tenantID)
@@ -147,7 +149,7 @@ func TestP5_UpdateDeliveryCAS_StaleMarkDropped(t *testing.T) {
 // window did exactly that, with a fresh undedupable event id).
 func TestP5_HandlerOwnsOutboxMark(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery)
 	tenantID := testutil.CreateTestTenant(t, db, "P5 Handler Owns Mark")
 	store := NewPostgresStore(db)
 	outbox := NewOutboxStore(db)

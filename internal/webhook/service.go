@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"io"
 	"log/slog"
 	mrand "math/rand/v2"
@@ -1074,35 +1075,16 @@ func (s *Service) attemptDelivery(ctx context.Context, d domain.WebhookDelivery,
 	}
 }
 
-// StartRetryWorker runs a background loop that retries pending deliveries on
-// the given interval. It blocks until the context is cancelled. When the
-// store exposes an advisory lock (production Postgres), each tick is
-// leader-gated — the claim lease alone is a correct multi-replica guard,
-// but gating makes its sizing non-critical (P5; same posture as both
-// outbox dispatchers).
-func (s *Service) StartRetryWorker(ctx context.Context, interval time.Duration) {
+// StartRetryWorker runs the webhook_delivery role: a leader-gated loop
+// (ADR-114) that retries pending deliveries on the given interval. Blocks
+// until ctx is cancelled. The claim lease alone is a correct multi-replica
+// guard; the gate makes its sizing non-critical and the fence in
+// ListPendingDeliveries makes a superseded leader's claim return nothing.
+func (s *Service) StartRetryWorker(ctx context.Context, interval time.Duration, gate leader.Gate) {
 	slog.Info("webhook retry worker started", "interval", interval.String())
-	locker, _ := s.store.(RetryLocker)
-	scheduler.Run(ctx, "webhook_retry", interval, func(ctx context.Context) {
-		if locker != nil {
-			lock, acquired, err := locker.TryRetryLock(ctx)
-			if err != nil {
-				slog.Error("webhook retry worker: lock acquire failed", "error", err)
-				return
-			}
-			if !acquired {
-				return
-			}
-			defer lock.Release()
-		}
+	scheduler.Run(ctx, leader.RoleWebhookDelivery, interval, gate, func(ctx context.Context) {
 		if err := s.RetryPendingDeliveries(ctx); err != nil {
 			slog.Error("webhook retry worker error", "error", err)
 		}
-	})
-}
-
-// RetryLocker is the optional leader-gate the retry worker uses when the
-// store provides it (PostgresStore does; unit-test fakes usually don't).
-type RetryLocker interface {
-	TryRetryLock(ctx context.Context) (DispatchLock, bool, error)
+	}, nil)
 }

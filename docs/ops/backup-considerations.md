@@ -160,8 +160,8 @@ idempotent (receiving the same delivery twice must be harmless).
 
 ### 5. Scheduler resumes cleanly
 
-The billing scheduler is leader-elected via Postgres advisory locks
-(application-level locks held in the database) — one leader runs each
+The billing scheduler is leader-elected per tick via a lease row in
+`leader_leases` (ADR-114) — one leader runs each
 tick, other replicas stand by, so a single instance or a multi-replica
 set both resume cleanly. On restart it picks up where it left off:
 

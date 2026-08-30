@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -171,7 +172,89 @@ var (
 		},
 		[]string{"table"},
 	)
+
+	leaderLeaseLost = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "velox_leader_lease_lost_total",
+			Help: "Ticks whose leader lease was lost mid-tick (ADR-114), by role and reason. heartbeat = the holder could not renew within the abandon window and cancelled its own work; release = the release UPDATE found the row taken over. Any non-zero rate means a role ran two overlapping ticks' worth of wall-clock somewhere — the fence and row-CAS kept it correct, but look at why (frozen process, DB stall, pooler).",
+		},
+		[]string{"role", "reason"},
+	)
 )
+
+// RecordLeaderLeaseLost counts a lost lease (leader.LostFunc adapter).
+func RecordLeaderLeaseLost(role, reason string) {
+	leaderLeaseLost.WithLabelValues(role, reason).Inc()
+}
+
+// LeaderStatusRow is one role's row from the leader_status view, as the
+// metrics collector needs it.
+type LeaderStatusRow struct {
+	Role               string
+	Held               bool
+	HasTicked          bool
+	LastTickAgeSeconds float64
+	Paused             bool
+}
+
+// leaderStatusCollector exposes leader_leases as gauges on every scrape —
+// a query per scrape, not a cache, because a cached "last tick 30s ago"
+// is exactly the lie an operator alerts on. velox_leader_last_tick_age_seconds
+// is the cluster fact (WHEN did the role last finish anywhere); the
+// per-replica velox_scheduler_last_run_timestamp_seconds only says this
+// replica's loop is alive.
+type leaderStatusCollector struct {
+	query   func(context.Context) ([]LeaderStatusRow, error)
+	age     *prometheus.Desc
+	held    *prometheus.Desc
+	paused  *prometheus.Desc
+	scrapeE *prometheus.Desc
+}
+
+// RegisterLeaderStatus wires the leader_status collector. Call once at
+// boot; a second call panics (duplicate registration), which is the right
+// outcome for a double-wire.
+func RegisterLeaderStatus(query func(context.Context) ([]LeaderStatusRow, error)) {
+	prometheus.MustRegister(&leaderStatusCollector{
+		query:   query,
+		age:     prometheus.NewDesc("velox_leader_last_tick_age_seconds", "Seconds since the role's last completed tick on ANY replica (leader_leases.last_tick_ended_at). Absent until the role has ticked once. Alert when it exceeds a few multiples of the role's interval — that is the cluster-wide stall signal a single replica's liveness gauge cannot give.", []string{"role"}, nil),
+		held:    prometheus.NewDesc("velox_leader_held", "1 while some replica holds the role's lease (a tick is running), else 0.", []string{"role"}, nil),
+		paused:  prometheus.NewDesc("velox_leader_paused", "1 while the role is paused by an operator (leader_pause), else 0.", []string{"role"}, nil),
+		scrapeE: prometheus.NewDesc("velox_leader_status_scrape_errors_total", "Scrapes on which leader_status could not be read (counts 1 on the failing scrape, so a sustained failure reads as a flat 1).", nil, nil),
+	})
+}
+
+func (c *leaderStatusCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.age
+	ch <- c.held
+	ch <- c.paused
+	ch <- c.scrapeE
+}
+
+func (c *leaderStatusCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	rows, err := c.query(ctx)
+	if err != nil {
+		ch <- prometheus.MustNewConstMetric(c.scrapeE, prometheus.GaugeValue, 1)
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(c.scrapeE, prometheus.GaugeValue, 0)
+	for _, r := range rows {
+		if r.HasTicked {
+			ch <- prometheus.MustNewConstMetric(c.age, prometheus.GaugeValue, r.LastTickAgeSeconds, r.Role)
+		}
+		ch <- prometheus.MustNewConstMetric(c.held, prometheus.GaugeValue, b2f(r.Held), r.Role)
+		ch <- prometheus.MustNewConstMetric(c.paused, prometheus.GaugeValue, b2f(r.Paused), r.Role)
+	}
+}
+
+func b2f(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 // RecordStripeBreakerState updates the global breaker state gauge. Called
 // from the breaker's OnStateChange hook. Values mirror gobreaker's semantics:

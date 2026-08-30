@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -565,6 +566,11 @@ func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, 
 // orchestrator drives those through ListDueRunsForClock against the
 // clock's frozen_time.
 func (s *PostgresStore) ListDueRuns(ctx context.Context, tenantID string, dueBefore time.Time, limit int) ([]domain.InvoiceDunningRun, error) {
+	// Leader-only funnel (ADR-114): see subscription.GetDueBilling.
+	token, err := leader.Fence(ctx, leader.RoleDunning)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return nil, err
@@ -649,9 +655,10 @@ func (s *PostgresStore) ListDueRuns(ctx context.Context, tenantID string, dueBef
 			    AND i.payment_status IN ('processing', 'unknown')
 			    AND i.status NOT IN ('voided', 'uncollectible')
 			)
+		  AND leader_fence($3, $4)
 		ORDER BY r.next_action_at ASC LIMIT $2
 		FOR UPDATE SKIP LOCKED
-	`, dueBefore, limit)
+	`, dueBefore, limit, string(leader.RoleDunning), token)
 	if err != nil {
 		return nil, err
 	}

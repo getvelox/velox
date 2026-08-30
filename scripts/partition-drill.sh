@@ -1,82 +1,81 @@
 #!/usr/bin/env bash
-# Severs a real network link between an advisory-lock holder and Postgres, and
-# measures how long the lock stays stranded.
+# Severs a real network link between a leader-lease holder and Postgres, and
+# measures how long the role stays held (ADR-114).
 #
-# This exists because the dead-leader recovery window was arithmetic for a
-# while — we set tcp_keepalives on the lock connection and computed
-# idle + interval*count. That is the one number in the failure benchmark that
-# depends on the NETWORK honouring a setting, so it is the one worth severing a
-# link to check rather than reasoning about.
+# Before ADR-114 leadership was a session advisory lock, and this drill measured
+# how long a partitioned holder's lock stayed stranded — a number that depended
+# on the NETWORK honouring TCP keepalives (95 s measured; 7875 s by default).
+# The lease has no such dependency: the row expires on the database clock
+# LeaseTTL (10 s) after the holder's last acknowledged renew, whatever the
+# holder's socket is doing. This drill exists so that claim stays measured,
+# not reasoned about.
 #
-#   ./scripts/partition-drill.sh 60 10 3     # production setting, expect ~90s
-#   ./scripts/partition-drill.sh             # no SET: inherits the 7875s default
+#   ./scripts/partition-drill.sh          # expect RELEASED within ~10-13 s
 #
-# Requires the bench Postgres container (see docs/benchmarks/sustained-throughput.md).
+# Requires the bench Postgres container with migrations applied (see
+# docs/benchmarks/sustained-throughput.md). Uses the webhook_delivery role;
+# never run against a database an app replica is using.
 set -euo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-velox-bench-pg}"
 PG_PORT="${PG_PORT:-55432}"
 NET="velox-partition-drill"
 HOLDER="velox-partition-holder"
-KEY="${KEY:-99888299}"
-GIVE_UP="${GIVE_UP:-300}"
-
-# No arguments means "inherit the server default", which is what the code did
-# before the keepalive fix — the negative control.
-if [ $# -eq 3 ]; then
-  SETS="SET tcp_keepalives_idle=$1; SET tcp_keepalives_interval=$2; SET tcp_keepalives_count=$3;"
-  PREDICTED=$(( $1 + $2 * $3 ))
-  echo "keepalives ${1}/${2}/${3} -> predicted ${PREDICTED}s"
-else
-  SETS=""
-  echo "no keepalive SET — inheriting the server default (predicted 7875s)"
-fi
+ROLE="${ROLE:-webhook_delivery}"
+TTL_S=10        # leader.LeaseTTL
+BEAT_S=3        # leader.HeartbeatEvery
+GIVE_UP="${GIVE_UP:-120}"
 
 cleanup() {
   docker rm -f "$HOLDER" >/dev/null 2>&1 || true
   docker network disconnect "$NET" "$PG_CONTAINER" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  q "UPDATE leader_leases SET holder_id = NULL, acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL WHERE role = '${ROLE}' AND holder_id = 'drill'" >/dev/null 2>&1 || true
 }
+q() { PGPASSWORD=velox psql -h localhost -p "$PG_PORT" -U velox -d velox -A -t -c "$1" 2>/dev/null; }
 trap cleanup EXIT
 
 docker network create "$NET" >/dev/null 2>&1 || true
 docker network connect "$NET" "$PG_CONTAINER" >/dev/null 2>&1 || true
 
-# The holder MUST end up idle, not running a query. A backend executing
-# pg_sleep never touches its socket, so it cannot notice the peer is gone no
-# matter what the kernel decides — an earlier version of this drill did exactly
-# that and reported a false negative. Piping the statements and then holding
-# stdin open leaves psql connected and waiting for input: state='idle', which
-# is how the scheduler actually holds this lock.
+# The holder takes the role exactly the way Manager.acquire does (free or
+# expired row → mine, token bumped) and then renews every BEAT_S seconds the
+# way the heartbeat does. Each renew is its own statement on its own
+# connection, so a severed link makes the NEXT renew hang — and the row
+# expires TTL_S after the last one that landed. Nothing here depends on the
+# holder noticing.
+ACQ="UPDATE leader_leases SET holder_id='drill', holder_token=holder_token+1, acquired_at=now(), heartbeat_at=now(), expires_at=now()+interval '${TTL_S} seconds' WHERE role='${ROLE}' AND (expires_at IS NULL OR expires_at < now()) AND paused_at IS NULL RETURNING holder_token"
+BEAT="UPDATE leader_leases SET heartbeat_at=now(), expires_at=now()+interval '${TTL_S} seconds' WHERE role='${ROLE}' AND holder_id='drill'"
 docker run -d --name "$HOLDER" --network "$NET" postgres:16-alpine \
-  sh -c "(echo \"${SETS} SELECT pg_advisory_lock(${KEY});\"; sleep 3600) | psql 'postgres://velox:velox@${PG_CONTAINER}:5432/velox'" >/dev/null
-
-q() { PGPASSWORD=velox psql -h localhost -p "$PG_PORT" -U velox -d velox -A -t -c "$1" 2>/dev/null; }
+  sh -c "U='postgres://velox:velox@${PG_CONTAINER}:5432/velox'; psql \"\$U\" -A -t -c \"${ACQ}\" || exit 1; while :; do sleep ${BEAT_S}; psql \"\$U\" -A -t -c \"${BEAT}\" >/dev/null || echo 'renew failed'; done" >/dev/null
 
 for _ in $(seq 1 30); do
-  state=$(q "SELECT state FROM pg_stat_activity WHERE pid IN (SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=${KEY})")
-  [ -n "$state" ] && break
+  held=$(q "SELECT held FROM leader_status WHERE role='${ROLE}' AND holder_id='drill'")
+  [ "$held" = "t" ] && break
   sleep 1
 done
-[ -n "${state:-}" ] || { echo "FAIL: holder never acquired the lock"; exit 1; }
-[ "$state" = "idle" ] || { echo "FAIL: holder session is '$state', must be 'idle' — see comment above"; exit 1; }
-echo "holder ready, session state=idle"
+[ "${held:-}" = "t" ] || { echo "FAIL: holder never acquired the ${ROLE} lease (is the role free and unpaused?)"; exit 1; }
+# Let at least one renew land so the measurement starts from a renewed lease.
+sleep $(( BEAT_S + 1 ))
+echo "holder ready: role=${ROLE} held, renewing every ${BEAT_S}s, TTL ${TTL_S}s"
 
 start=$(date +%s)
 docker network disconnect "$NET" "$HOLDER"
-echo "link severed (interface removed, no FIN sent)"
+echo "link severed (interface removed, no FIN sent) — predicted release within ${TTL_S}s of the last renew"
 
 while :; do
   elapsed=$(( $(date +%s) - start ))
-  if [ "$(q "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=${KEY}")" = "0" ]; then
-    echo "RELEASED after ${elapsed}s"
+  if [ "$(q "SELECT held FROM leader_status WHERE role='${ROLE}'")" = "f" ]; then
+    echo "RELEASED after ${elapsed}s (lease expired on the database clock)"
+    tok=$(q "UPDATE leader_leases SET holder_id='drill-successor', holder_token=holder_token+1, acquired_at=now(), heartbeat_at=now(), expires_at=now()+interval '1 second' WHERE role='${ROLE}' AND expires_at < now() RETURNING holder_token")
+    [ -n "$tok" ] && echo "successor acquired the role (token ${tok}) — takeover confirmed" || echo "FAIL: successor could not acquire"
     [ "$(docker inspect -f '{{.State.Running}}' "$HOLDER" 2>/dev/null)" = "true" ] \
       && echo "holder process still alive — this measured a partition, not a process death"
     exit 0
   fi
   if [ "$elapsed" -ge "$GIVE_UP" ]; then
-    echo "STILL HELD at ${elapsed}s (gave up; raise GIVE_UP to wait longer)"
-    exit 0
+    echo "STILL HELD at ${elapsed}s — the lease did not expire; that is a bug, not a tuning question"
+    exit 1
   fi
-  sleep 2
+  sleep 1
 done

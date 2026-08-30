@@ -70,7 +70,7 @@ Velox's connection-pool defaults (env-overridable):
 |---|---|---|
 | `DB_MAX_OPEN_CONNS` | 20 | Raise if you see connection-pool waits in metrics + Postgres has headroom (`max_connections` typically 100-200) |
 | `DB_MAX_IDLE_CONNS` | 5 | Raise to match `MaxOpenConns` if you have spiky workload |
-| `DB_CONN_MAX_LIFETIME_MIN` | 30 | Lower to 5-10 if running behind a session-mode pooler with a short `server_lifetime` (transaction mode is refused at boot — see below) |
+| `DB_CONN_MAX_LIFETIME_MIN` | 30 | Lower to 5-10 if running behind a pooler with a short `server_lifetime` |
 | `DB_CONN_MAX_IDLE_TIME_SEC` | 120 | Idle-eviction; lower for tight-pool environments |
 
 **Concurrent-connection profile**: at peak, Velox holds connections for:
@@ -88,65 +88,63 @@ For a single-tenant deployment running ~50 RPS (requests per second),
 20 open connections is comfortable. For multi-tenant deployments,
 scale linearly with tenant count up to your Postgres
 `max_connections` ceiling. Use PgBouncer (a common Postgres
-connection pooler) **in session mode** in front of Postgres if you
-exceed ~100 application-side pool size (transaction mode is
-unsupported — see below).
+connection pooler) or RDS Proxy in front of Postgres if you exceed
+~100 application-side pool size — session or transaction mode both
+work for the server (see below); migrations want a direct or
+session-mode connection.
 
-## PgBouncer compatibility
+## PgBouncer / RDS Proxy compatibility
 
 A pooler in *session mode* gives each client one dedicated server
 connection for as long as the client stays connected; *transaction
 mode* hands each transaction to whichever server connection is free.
-Velox is **session-pooler safe** (PgBouncer session mode, or direct
-connections). Velox is **NOT transaction-pooler safe** — PgBouncer
-transaction/statement mode and RDS Proxy (which multiplexes at
-transaction granularity) are unsupported, and the server **refuses to
-boot** behind them:
+**The Velox server is safe behind either** — PgBouncer session or
+transaction mode, RDS Proxy (which multiplexes at transaction
+granularity), or direct connections. Since ADR-114 every statement the
+server issues is self-contained: tenant isolation is set per
+transaction (`SET LOCAL app.tenant_id`), and the singleton roles —
+billing, dunning, the two outbox dispatchers, webhook delivery retry;
+each must run on exactly one replica at a time — take their leadership
+from a row in `leader_leases`, not from a database session. (Before
+ADR-114 leadership was a session-scoped advisory lock, which a
+transaction pooler silently strands; the boot-time topology probe that
+guarded against that is retired with it.) A PgBouncer transaction-mode
+CI job is the next step in this arc (ADR-114 PR-E); until it lands,
+treat transaction mode as designed-for and unit-proven, not yet
+CI-proven.
 
-- Velox's singleton workers — billing scheduler, dunning, webhook +
-  email outbox dispatchers, webhook retry; each must run on exactly
-  one app replica at a time — elect a leader via **session-scoped
-  advisory locks**: application-defined locks that Postgres ties to
-  one database session (`pg_try_advisory_lock` held on a pinned
-  connection for the tick's duration). Under transaction pooling,
-  consecutive statements on one client connection can run on
-  DIFFERENT server sessions: the unlock lands on a session that never
-  took the lock, the original server session holds it forever, and
-  every future tick on every replica skips as "another leader is
-  running". Billing halts silently — no error is ever raised.
-- At boot, Velox runs `VerifyAdvisoryLockTopology` — a probe that
-  locks, contends, and releases across two connections and checks
-  that the backend process ID stays stable. On definite
-  transaction-pooling evidence, the process exits with an actionable
-  error instead of starting a server that would stop invoicing.
+The one exception is **migrations**: `RUN_MIGRATIONS_ON_BOOT=true` and
+`velox-migrate` hold `pg_advisory_lock(76540007)` on a dedicated
+single-connection pool for the whole run, and some migrations run
+outside a transaction (`-- no-tx`). Run migrations on a direct
+connection or a session-mode pooler, as a deploy step.
 
-### Dead-leader detection window
+### Failover bound
 
-A leader that *crashes* is detected for free: the kernel closes its
-sockets, Postgres reads EOF, and the advisory lock releases in
-milliseconds. A leader whose **host disappears without closing the
-socket** — network partition, power loss, VM terminate or pause, a
-security-group change — is not. No FIN (TCP's connection-close signal)
-ever arrives, so Postgres cannot tell that session from a healthy idle
-client and the lock survives. Every replica then skips its tick, and
-because that skip logs at `Debug`, a production log at `Info` shows
-nothing at all.
+A role's tick is a lease of **10 s** (`leader.LeaseTTL`), renewed every
+3 s by the holder while its work runs; every replica polls each role at
+least every 5 s (`leader.MaxPoll`). A leader that crashes, is
+partitioned, is paused by the OS (SIGSTOP), or whose VM vanishes simply
+stops renewing; the lease expires on the **database clock** and another
+replica takes the role on its next poll — worst case **LeaseTTL + MaxPoll
+= 15 s**, typically under 10. There is no TCP-keepalive dependency,
+nothing to tune on a load balancer or service mesh, and nothing that can
+strand: the lease is a row with an expiry, not a session.
 
-The only bound on that outage is TCP keepalive — the kernel's periodic
-are-you-still-there probe on idle connections. Postgres defaults give
-`tcp_keepalives_idle` 7200s + `interval` 75s × `count` 9 = **7875s
-(2h11m)** of silently halted billing. Velox therefore sets these on the
-lock-holding connection itself (they are `context=user` settings, so no
-superuser is needed) to **60 + 10×3 = 90s**.
+The other half of the problem — the old holder that is still running —
+is handled in-process and in SQL. A holder that cannot renew for 6 s
+(`leader.AbandonAfter`) cancels its own tick, well inside the 10 s TTL, so
+it stops before anyone else can start. Every claim funnel re-checks its
+fence token in the claim statement itself (`leader_fence(role, token)`),
+so a superseded tick that races through anyway claims nothing. Row-level
+compare-and-swap at the completion writes (ADR-114 PR-B) covers work that
+was already in flight. Observe it with `SELECT * FROM leader_status;`,
+`velox_leader_last_tick_age_seconds{role}` and
+`velox_leader_lease_lost_total{role,reason}`; pause a role with
+`SELECT leader_pause('billing', 'oncall', 'why');`. Full procedures:
+[runbook-leader-leases.md](runbook-leader-leases.md).
 
-Operators: if you front Postgres with anything that terminates or rewrites
-TCP — a load balancer, a service mesh, an NLB (network load balancer) with
-its own idle timeout — confirm it does not strip keepalives, and keep any
-idle timeout it enforces *above* 60s so it doesn't sever healthy lock
-connections mid-tick. `TestLeaderFailover_LockConnBoundsDetectionWindow`
-is the regression gate: the test that fails if this bound is ever lost.
-
-Within a supported topology the rest of the stack is unremarkable:
+The rest of the stack is unremarkable:
 session GUCs (`app.tenant_id`, `app.bypass_rls`) are set with
 `set_config(.., true)` (transaction-scoped — the `true` makes the
 value revert when the transaction ends), and there are no

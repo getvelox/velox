@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -103,7 +105,7 @@ func TestEmailOutbox_Enqueue_TxAtomicity(t *testing.T) {
 // nil, row transitions to 'dispatched', attempts=1, dispatched_at populated.
 func TestEmailOutbox_ProcessBatch_Success(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Email Outbox Success")
@@ -145,7 +147,7 @@ func TestEmailOutbox_ProcessBatch_Success(t *testing.T) {
 // subsequent immediate ProcessBatch MUST NOT re-claim the row.
 func TestEmailOutbox_ProcessBatch_RetryBackoff(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Email Outbox Retry")
@@ -199,7 +201,7 @@ func TestEmailOutbox_ProcessBatch_RetryBackoff(t *testing.T) {
 // batches — the dead-letter-queue contract.
 func TestEmailOutbox_ProcessBatch_DLQ(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 30*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox), 30*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Email Outbox DLQ")
@@ -258,7 +260,7 @@ func TestEmailOutbox_ProcessBatch_DLQ(t *testing.T) {
 // per ADR-040 — no env flag, no direct-SMTP fallback.
 func TestEmailOutbox_OutboxSender_RoundTrip(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Email Outbox RoundTrip")
@@ -271,7 +273,7 @@ func TestEmailOutbox_OutboxSender_RoundTrip(t *testing.T) {
 	}
 
 	fake := &fakeDeliverer{}
-	dispatcher := email.NewDispatcher(store, fake, email.DispatcherConfig{})
+	dispatcher := email.NewDispatcher(store, fake, email.DispatcherConfig{}, leader.AlwaysLead{})
 
 	// Manually drive the handler by calling ProcessBatch with the dispatcher's
 	// underlying handle logic (via the public EmailDeliverer path). We rely on
@@ -315,7 +317,7 @@ func TestEmailOutbox_OutboxSender_RoundTrip(t *testing.T) {
 // (binary-skew / rollback compat).
 func TestEmailOutbox_CreditNote_RoundTrip(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Email Outbox CN RoundTrip")

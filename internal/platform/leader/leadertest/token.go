@@ -11,11 +11,23 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/leader"
 )
 
-// Token acquires role for one hour on admin (bypassing cadence and pause)
-// and returns a ctx carrying its token. t.Cleanup releases the row.
-func Token(t *testing.T, admin *sql.DB, role leader.Role) context.Context {
+// Token acquires each role for one hour on admin (bypassing cadence and
+// pause) and returns base with the tokens attached — one ctx can drive
+// several roles' funnels (an end-to-end test that bills and then duns).
+// t.Cleanup releases the rows. Tests using it must not run in parallel
+// with another test holding the same role: the row is cluster state.
+func Token(t *testing.T, admin *sql.DB, base context.Context, roles ...leader.Role) context.Context {
 	t.Helper()
-	ctx := context.Background()
+	ctx := base
+	for _, role := range roles {
+		ctx = one(t, admin, ctx, role)
+	}
+	return ctx
+}
+
+func one(t *testing.T, admin *sql.DB, base context.Context, role leader.Role) context.Context {
+	t.Helper()
+	ctx := base
 	var token int64
 	err := admin.QueryRowContext(ctx, `
 INSERT INTO leader_leases (role, holder_token, holder_id, acquired_at, heartbeat_at, expires_at)
@@ -33,5 +45,5 @@ RETURNING holder_token`, string(role)).Scan(&token)
 			`UPDATE leader_leases SET holder_id = NULL, acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL WHERE role = $1 AND holder_token = $2`,
 			string(role), token)
 	})
-	return leader.WithToken(ctx, role, token)
+	return leader.WithToken(base, role, token)
 }

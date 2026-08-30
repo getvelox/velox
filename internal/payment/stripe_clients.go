@@ -19,7 +19,7 @@ import (
 // uses an http.Client with no Timeout (0 = unbounded), so a stalled Stripe or
 // network call would hang the caller indefinitely — and the background workers
 // (payment reconciler, tax retrier) run on the long-lived process context with
-// no request deadline to bail them out, holding the scheduler's advisory lock
+// no request deadline to bail them out, holding the scheduler's leader lease
 // and a DB connection. One shared, bounded client fixes that everywhere.
 var stripeHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
