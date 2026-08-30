@@ -30,12 +30,15 @@ else
 fi
 sed "s/@DB_HOST@/${DB_HOST}/g" "$DIR/pgbouncer.ini.tmpl" > "$CONF/pgbouncer.ini"
 cp "$DIR/userlist.txt" "$CONF/userlist.txt"
-chmod 644 "$CONF"/*
+# The image's entrypoint runs as an unprivileged user and touches the
+# userlist; a mktemp dir is mode 700 and root-owned on a Linux runner, so
+# open it up (test-only, throwaway) and mount it read-write.
+chmod 777 "$CONF" && chmod 666 "$CONF"/*
 
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$CONF"; }
 trap cleanup EXIT
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" "${NETFLAGS[@]}" -v "$CONF:/etc/pgbouncer:ro" "$IMAGE" >/dev/null
+docker run -d --name "$NAME" "${NETFLAGS[@]}" -v "$CONF:/etc/pgbouncer" "$IMAGE" >/dev/null
 
 # Each probe is bounded (perl alarm — portable): a client of a PgBouncer
 # whose backend is unreachable otherwise waits query_wait_timeout (120 s).
