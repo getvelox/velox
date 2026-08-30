@@ -130,6 +130,13 @@ ORDER BY count(*) DESC
 LIMIT 10;
 ```
 
+A `last_error` beginning `email outbox: unknown email_type` on a *pending*
+row means a replica older than the row's producer claimed it (rolling
+deploy); it retries on the backoff ramp and a replica that knows the type
+delivers it. The same text on a *failed* row means no replica in the fleet
+knew the type for the whole ramp — the producer shipped without its
+dispatcher case.
+
 **Fix**:
 1. Diagnose SMTP provider via `last_error`.
 2. Once provider is healthy, the dispatcher drains automatically;
