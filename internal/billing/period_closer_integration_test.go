@@ -20,9 +20,11 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/testutil"
 	"github.com/sagarsuperuser/velox/internal/usage"
+	"github.com/shopspring/decimal"
 )
 
 // ADR-115 collision tests: the threshold fire and the cycle close (and the
@@ -870,4 +872,201 @@ func TestCycleClose_InvoiceAndAdvance_ShareFate(t *testing.T) {
 	}
 	r.assertPeriod(t, r.f.cycleEnd, nil)
 	assertUsageBilledOnce(t, r.base)
+}
+
+// ---------------------------------------------------------------------------
+// 3b — schedules where ONLY current_billing_period_start moves (the `$8`
+// predicate of ClosePeriodTx). A calendar-billed sub's period ends on the
+// 1st; NextBillingPeriodEnd for a calendar monthly cadence snaps to the 1st
+// of the next month, so a writer that re-anchors the start mid-month lands
+// on the SAME period end and leaves next_billing_at untouched.
+// ---------------------------------------------------------------------------
+
+// ingestAt seeds count events at base + i minutes (× qty) on the fixture
+// meter — fixed instants, so these tests do not depend on the wall clock.
+func ingestAt(t *testing.T, r *s1Rig, base time.Time, count int, qty int64) {
+	t.Helper()
+	for i := range count {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		if _, err := r.f.usageSvc.Ingest(r.base, r.f.tenantID, usage.IngestInput{
+			CustomerID: r.f.customerID, MeterID: r.f.meterID, Quantity: decimal.NewFromInt(qty), Timestamp: &ts,
+		}); err != nil {
+			t.Fatalf("ingest %d: %v", i, err)
+		}
+	}
+}
+
+// calendarize re-stamps the fixture sub as calendar-billed on [p0, p1).
+func calendarize(t *testing.T, r *s1Rig, p0, p1 time.Time) {
+	t.Helper()
+	tx, err := r.f.db.BeginTx(r.base, postgres.TxTenant, r.f.tenantID)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.ExecContext(r.base, `UPDATE subscriptions SET billing_time = 'calendar' WHERE id = $1`, r.f.subID); err != nil {
+		t.Fatalf("calendarize: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	subscriptiontest.SetBillingCycle(t, r.base, r.f.db, r.f.tenantID, r.f.subID, p0, p1, p1, 1)
+}
+
+// TestThresholdFire_vs_Close_FireFirst_ResetTrue_CalendarStartOnly: a
+// calendar-billed sub on [Jun 1, Jul 1); the close has read it and built its
+// lines; before its tx opens a reset=true fire at t1 = Jun 15 commits T
+// [Jun 1, t1) and re-anchors to [t1, Jul 1) — NextBillingPeriodEnd snaps back
+// to Jul 1, so ONLY current_billing_period_start moved and next_billing_at
+// still equals the close's snapshot (asserted: the premise). The close's CAS
+// misses on the start predicate; the retry re-reads [t1, Jul 1), which is
+// itself due at the close instant, and closes it: usage lands once, split
+// [Jun 1, t1) on T and [t1, Jul 1) on the residual cycle invoice, and no
+// invoice covers [Jun 1, Jul 1).
+//
+// Mutation-verify: this schedule is covered by BOTH the start predicate and
+// the in-tx threshold re-read (T sits in [Jun 1, Jul 1), so the re-read sees
+// it even when the CAS passes). Dropping ONLY `current_billing_period_start …
+// $8` stays green; `$8` + `sameInstant(...) || true` together → the close
+// commits I1 for [Jun 1, Jul 1) beside T. The schedule where `$8` alone is
+// load-bearing is the calendar plan swap below (no threshold invoice for the
+// re-read to see).
+func TestThresholdFire_vs_Close_FireFirst_ResetTrue_CalendarStartOnly(t *testing.T) {
+	r := newS1Rig(t, "S1 calendar start-only fire", 200, true)
+	p0 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	p1 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	usageBase := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	r.t1 = usageBase.Add(30 * time.Minute) // 30 events (300c) before the fire, 70 (700c) after
+	r.close = p1.Add(time.Nanosecond)
+	calendarize(t, r, p0, p1)
+	ingestAt(t, r, usageBase, 100, 10)
+
+	var afterFire domain.Subscription
+	r.closer.subs.beforeTx = func() {
+		r.closer.subs.beforeTx = nil
+		if fired := r.runFire(t); fired != 1 {
+			t.Fatalf("fire reported %d, want 1", fired)
+		}
+		afterFire = r.sub(t)
+	}
+	gen := r.runClose(t)
+
+	// The premise: the fire moved ONLY the period start.
+	if afterFire.CurrentBillingPeriodStart == nil || !afterFire.CurrentBillingPeriodStart.Equal(r.t1) ||
+		afterFire.CurrentBillingPeriodEnd == nil || !afterFire.CurrentBillingPeriodEnd.Equal(p1) ||
+		afterFire.NextBillingAt == nil || !afterFire.NextBillingAt.Equal(p1) {
+		t.Fatalf("after the calendar fire: [%v, %v) next %v, want [t1=%v, %v) next %v (start moves, next does not)",
+			afterFire.CurrentBillingPeriodStart, afterFire.CurrentBillingPeriodEnd, afterFire.NextBillingAt, r.t1, p1, p1)
+	}
+
+	cycle, threshold, other := r.liveInvoices(t)
+	if len(threshold) != 1 || len(cycle) != 1 || len(other) != 0 {
+		t.Fatalf("invoices: cycle=%d threshold=%d other=%d, want T plus the residual cycle invoice", len(cycle), len(threshold), len(other))
+	}
+	if !threshold[0].BillingPeriodStart.Equal(p0) || !threshold[0].BillingPeriodEnd.Equal(r.t1) || threshold[0].SubtotalCents != 300 {
+		t.Fatalf("T = [%v, %v) %dc, want [Jun 1, t1) 300c", threshold[0].BillingPeriodStart, threshold[0].BillingPeriodEnd, threshold[0].SubtotalCents)
+	}
+	if !cycle[0].BillingPeriodStart.Equal(r.t1) || !cycle[0].BillingPeriodEnd.Equal(p1) || cycle[0].SubtotalCents != 700 {
+		t.Fatalf("cycle invoice = [%v, %v) %dc, want the residual [t1, Jul 1) 700c — never [Jun 1, Jul 1) beside T",
+			cycle[0].BillingPeriodStart, cycle[0].BillingPeriodEnd, cycle[0].SubtotalCents)
+	}
+	if gen != 1 {
+		t.Fatalf("close generated %d, want 1 (the re-anchored [t1, Jul 1) is itself due at Jul 1)", gen)
+	}
+	r.assertPeriod(t, p1, nil) // [Jul 1, Aug 1)
+	assertUsageBilledOnce(t, r.base)
+}
+
+// TestPlanSwap_vs_Close_SwapFirst_InAdvanceCalendar_StartOnly: the schedule
+// where the `current_billing_period_start` predicate is load-bearing ON ITS
+// OWN. A calendar-billed in_advance YEARLY sub on [Jan 1 2025, Jan 1 2026)
+// swaps to in_advance MONTHLY on Dec 10: the swap re-anchors the period to
+// [Dec 10, NextBillingPeriodEnd(Dec 10, calendar, monthly)) = [Dec 10, Jan 1)
+// — start moves, next_billing_at stays Jan 1 (asserted). No threshold invoice
+// exists, so the close's in-tx watermark re-read has nothing to see; only the
+// start predicate tells the stale close (snapshot {Jan 1 2025, Jan 1 2026})
+// that its period is gone. It misses, re-reads [Dec 10, Jan 1) on the
+// monthly plan and closes it: the cycle invoice prepays [Jan 1, Feb 1) at
+// the monthly rate and the sub opens [Jan 1, Feb 1).
+//
+// Mutation-verify: drop ONLY `current_billing_period_start … $8` → the stale
+// close passes the CAS, overwrites the swap's re-anchor with the OLD yearly
+// plan's [Jan 1 2026, Jan 1 2027) and prepays a year the customer just left.
+func TestPlanSwap_vs_Close_SwapFirst_InAdvanceCalendar_StartOnly(t *testing.T) {
+	r := newS1Rig(t, "S1 calendar start-only swap", 200, false)
+	p0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	p1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	swapAt := time.Date(2025, 12, 10, 0, 0, 0, 0, time.UTC)
+	feb1 := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	r.close = p1.Add(time.Nanosecond)
+
+	yearly, err := r.f.pricingSvc.CreatePlan(r.base, r.f.tenantID, pricing.CreatePlanInput{
+		Code: "pln_adv_yearly", Name: "Adv Yearly", Currency: "USD", BillingInterval: domain.BillingYearly,
+		BaseAmountCents: 12000, BaseBillTiming: domain.BillInAdvance, MeterIDs: []string{r.f.meterID},
+	})
+	if err != nil {
+		t.Fatalf("create yearly: %v", err)
+	}
+	monthly, err := r.f.pricingSvc.CreatePlan(r.base, r.f.tenantID, pricing.CreatePlanInput{
+		Code: "pln_adv_monthly", Name: "Adv Monthly", Currency: "USD", BillingInterval: domain.BillingMonthly,
+		BaseAmountCents: 1000, BaseBillTiming: domain.BillInAdvance, MeterIDs: []string{r.f.meterID},
+	})
+	if err != nil {
+		t.Fatalf("create monthly: %v", err)
+	}
+	tx, err := r.f.db.BeginTx(r.base, postgres.TxTenant, r.f.tenantID)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.ExecContext(r.base, `UPDATE subscription_items SET plan_id = $1 WHERE id = $2`, yearly.ID, r.f.itemID); err != nil {
+		t.Fatalf("re-plan item: %v", err)
+	}
+	if _, err := tx.ExecContext(r.base, `UPDATE billing_intervals SET plan_id = $1, starts_at = $2 WHERE subscription_item_id = $3`, yearly.ID, p0, r.f.itemID); err != nil {
+		t.Fatalf("re-plan interval: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit re-plan: %v", err)
+	}
+	calendarize(t, r, p0, p1)
+
+	plans := &hookedPlanReader{plans: map[string]domain.Plan{yearly.ID: yearly, monthly.ID: monthly}}
+	svc := subscription.NewService(r.f.subStore, nil)
+	svc.SetPlanReader(plans)
+	svc.SetBiller(r.fire.engine) // not the closer's engine: keep the closer's hook to the close
+	sw := &swapRig{svc: svc, plans: plans, newPlan: monthly, itemID: r.f.itemID}
+
+	var afterSwap domain.Subscription
+	r.closer.subs.beforeTx = func() {
+		r.closer.subs.beforeTx = nil
+		if err := sw.swap(t, r, swapAt); err != nil {
+			t.Fatalf("swap: %v", err)
+		}
+		afterSwap = r.sub(t)
+	}
+	gen := r.runClose(t)
+
+	// The premise: the swap moved ONLY the period start.
+	if afterSwap.CurrentBillingPeriodStart == nil || !afterSwap.CurrentBillingPeriodStart.Equal(swapAt) ||
+		afterSwap.NextBillingAt == nil || !afterSwap.NextBillingAt.Equal(p1) {
+		t.Fatalf("after the calendar swap: [%v, ...) next %v, want [Dec 10, ...) next Jan 1 (start moves, next does not)",
+			afterSwap.CurrentBillingPeriodStart, afterSwap.NextBillingAt)
+	}
+	if got := r.itemPlan(t); got != monthly.ID {
+		t.Fatalf("item plan = %s, want the monthly plan %s", got, monthly.ID)
+	}
+
+	cycle, threshold, other := r.liveInvoices(t)
+	if len(cycle) != 1 || len(threshold) != 0 || len(other) != 1 {
+		t.Fatalf("invoices: cycle=%d threshold=%d other=%d, want one cycle invoice and the swap's day-1 invoice", len(cycle), len(threshold), len(other))
+	}
+	if !other[0].BillingPeriodStart.Equal(swapAt) || !other[0].BillingPeriodEnd.Equal(p1) {
+		t.Fatalf("swap day-1 invoice = [%v, %v), want [Dec 10, Jan 1)", other[0].BillingPeriodStart, other[0].BillingPeriodEnd)
+	}
+	if !cycle[0].BillingPeriodStart.Equal(p1) || !cycle[0].BillingPeriodEnd.Equal(feb1) {
+		t.Fatalf("cycle invoice header [%v, %v), want the swapped monthly plan's [Jan 1, Feb 1) — never the old yearly plan's [Jan 1 2026, Jan 1 2027)",
+			cycle[0].BillingPeriodStart, cycle[0].BillingPeriodEnd)
+	}
+	if gen != 1 {
+		t.Fatalf("close generated %d, want 1", gen)
+	}
+	r.assertPeriod(t, p1, &feb1) // [Jan 1, Feb 1): the monthly cadence stands
 }
