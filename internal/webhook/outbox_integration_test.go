@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,6 +278,164 @@ func TestOutbox_Counts(t *testing.T) {
 	}
 	if failed != 0 {
 		t.Errorf("failed: got %d, want 0", failed)
+	}
+}
+
+// TestOutbox_ProcessBatch_ConcurrentClaimersDisjoint is the webhook-outbox
+// port of email's TestP5_ConcurrentClaimersDisjoint. The 2026-07-06 HA
+// posture named all three drainers as pinned by concurrent-claimer tests,
+// but only the email outbox and the webhook RETRY claim had one — this
+// drainer's claim was held by convention. Two dispatchers racing the same
+// due set must attempt each row exactly once: a dual-leader window (a
+// failover releases the session advisory lock while the old leader's tick
+// is still running) would otherwise mint the same webhook event twice
+// under two different ids — a semantic duplicate consumers cannot dedupe.
+//
+// What this pins is the LEASE: the 50ms handler sleep keeps the winner's
+// rows claimed-but-unmarked while the sibling claims, and the sibling must
+// see nothing. In this harness the two claims serialize (the second
+// BeginTx opens a fresh pool connection, which outlasts the ~1ms claim
+// tx), so the lock clause is not exercised here — it is pinned
+// deterministically by TestOutbox_ProcessBatch_SkipsRowsLockedBySibling.
+//
+// Mutation-verify: keep next_attempt_at unchanged in the claim UPDATE
+// (drop the lease stamp) — the sibling re-claims every row, red 10/10.
+// Deleting `FOR UPDATE SKIP LOCKED` stays green here (0/10 red): that is
+// the sibling test's mutation, not this one's.
+func TestOutbox_ProcessBatch_ConcurrentClaimersDisjoint(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 20*time.Second)
+	defer cancel()
+
+	tenantID := testutil.CreateTestTenant(t, db, "Outbox Disjoint Claims")
+	store := webhook.NewOutboxStore(db)
+
+	const n = 10
+	for range n {
+		if _, err := store.EnqueueStandalone(ctx, tenantID, "invoice.finalized", map[string]any{"id": "inv_disjoint"}); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	handler := func(_ context.Context, row webhook.OutboxRow) error {
+		mu.Lock()
+		seen[row.ID]++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // keep the claimed rows leased-but-unmarked while the sibling claims
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.ProcessBatch(ctx, n, handler); err != nil {
+				t.Errorf("process batch: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	for id, count := range seen {
+		if count != 1 {
+			t.Errorf("row %s attempted %d times, want exactly 1 (double-dispatch)", id, count)
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("attempted %d distinct rows, want %d (nothing stranded)", len(seen), n)
+	}
+}
+
+// TestOutbox_ProcessBatch_SkipsRowsLockedBySibling pins the claim's
+// FOR UPDATE SKIP LOCKED deterministically: a sibling replica holding row
+// locks on half the due set (its own claim in flight) must neither block
+// this claim nor hand it those rows — and once the sibling lets go, the
+// next tick claims exactly what it held.
+//
+// Mutation-verify: delete `SKIP LOCKED` (the subselect blocks behind the
+// holder until the 5s ctx expires → claim error) or the whole
+// `FOR UPDATE SKIP LOCKED` line (the UPDATE itself blocks on the held
+// rows → same) — red either way.
+func TestOutbox_ProcessBatch_SkipsRowsLockedBySibling(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+
+	tenantID := testutil.CreateTestTenant(t, db, "Outbox Skip Locked")
+	store := webhook.NewOutboxStore(db)
+
+	const half = 5
+	held, free := map[string]bool{}, map[string]bool{}
+	for range half {
+		id, err := store.EnqueueStandalone(ctx, tenantID, "sibling.holds", map[string]any{})
+		if err != nil {
+			t.Fatalf("enqueue held: %v", err)
+		}
+		held[id] = true
+		id, err = store.EnqueueStandalone(ctx, tenantID, "sibling.free", map[string]any{})
+		if err != nil {
+			t.Fatalf("enqueue free: %v", err)
+		}
+		free[id] = true
+	}
+
+	// The sibling's claim: row locks on half the due set, held open across
+	// our claim (a separate pool connection, so a real lock conflict).
+	holder, err := db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	defer postgres.Rollback(holder)
+	if _, err := holder.ExecContext(ctx,
+		`SELECT id FROM webhook_outbox WHERE event_type = 'sibling.holds' FOR UPDATE`); err != nil {
+		t.Fatalf("hold locks: %v", err)
+	}
+
+	// 5s, not shorter: ProcessBatch refuses to start a row with <3s left.
+	claimCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	seen := map[string]int{}
+	record := func(_ context.Context, row webhook.OutboxRow) error {
+		seen[row.ID]++
+		return nil
+	}
+	n, err := store.ProcessBatch(claimCtx, 2*half, record)
+	if err != nil {
+		t.Fatalf("claim beside a lock-holding sibling: %v (blocked instead of skipping)", err)
+	}
+	if n != half {
+		t.Errorf("attempted %d rows beside the sibling, want %d (the unlocked half)", n, half)
+	}
+	for id := range seen {
+		if held[id] {
+			t.Errorf("row %s was claimed while the sibling held its lock (double-dispatch)", id)
+		}
+	}
+	if len(seen) != half {
+		t.Errorf("attempted %d distinct rows, want %d", len(seen), half)
+	}
+
+	// Sibling releases (its tx ends) → the next tick claims exactly its half.
+	// Fresh 5s budget: ProcessBatch refuses to start a row with <3s left, and
+	// the first claim + handler pass may have consumed part of claimCtx on a
+	// slow CI database — a reused ctx would read as a SKIP LOCKED regression.
+	postgres.Rollback(holder)
+	releaseCtx, cancelRelease := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelRelease()
+	seen = map[string]int{}
+	n, err = store.ProcessBatch(releaseCtx, 2*half, record)
+	if err != nil {
+		t.Fatalf("claim after the sibling released: %v", err)
+	}
+	if n != half || len(seen) != half {
+		t.Errorf("after release: attempted %d rows (%d distinct), want %d", n, len(seen), half)
+	}
+	for id := range seen {
+		if !held[id] {
+			t.Errorf("after release: re-attempted %s, which the first tick already dispatched", id)
+		}
 	}
 }
 
