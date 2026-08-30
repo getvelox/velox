@@ -9,7 +9,7 @@ change, and the house rules that gate a merge.
 ## Development Setup
 
 ```bash
-# Prerequisites: Go 1.25+, Docker; Node 22+ only for dashboard work;
+# Prerequisites: Go 1.26+, Docker; Node 22+ only for dashboard work;
 # jq only for scripts/demo.sh
 
 # Clone
