@@ -409,3 +409,42 @@ func TestExhaustRun_ResolvedDuringTerminalAction_NoEscalatedClobber(t *testing.T
 		t.Errorf("dunning.resolved should fire exactly once (from the settle): got %d", n)
 	}
 }
+
+// TestProcessRun_StaleSnapshot_DoesNotChargeOrClobber locks the ha-8
+// attempt-count CAS at the service level: a processor whose run snapshot
+// predates ANOTHER processor's recorded attempt (the ADR-114 frozen-process
+// window — a superseded dunning tick resuming beside the new leader's) must
+// neither charge nor write. Pre-fix its pre-charge persist applied blindly:
+// the charge-lease loser then REWOUND the winner's recorded attempt, so one
+// charge burned zero budget and MaxRetryAttempts over-ran by one charge per
+// overlap. Mutation check: drop the count CAS from memStore.UpdateRunIfActive
+// (or `attempt_count = $11` in the real store) → the stale processor charges.
+func TestProcessRun_StaleSnapshot_DoesNotChargeOrClobber(t *testing.T) {
+	store := newMemStore()
+	retrier := &recordingRetrier{}
+	svc := NewService(store, &noopRetrier{}, nil)
+	svc.SetRetrier(retrier)
+	run := dueRunAt(t, store, svc, 1)
+
+	// Another processor records attempt 2 after this tick read its snapshot.
+	sibling := store.runs[run.ID]
+	sibling.AttemptCount = 2
+	now := time.Now()
+	sibling.LastAttemptAt = &now
+	store.runs[run.ID] = sibling
+
+	stale := run // snapshot from before the sibling's attempt (count=1)
+	if err := svc.processRun(context.Background(), "t1", stale, false); err != nil {
+		t.Fatalf("a stale snapshot must skip quietly, got: %v", err)
+	}
+	if retrier.calls != 0 {
+		t.Fatalf("stale processor charged %d time(s); the CAS must stop the charge, not just the write", retrier.calls)
+	}
+	got := store.runs[run.ID]
+	if got.AttemptCount != 2 {
+		t.Fatalf("attempt_count = %d, want 2 — the stale write must change nothing", got.AttemptCount)
+	}
+	if got.State != domain.DunningActive {
+		t.Fatalf("state = %q, want active", got.State)
+	}
+}
