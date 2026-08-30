@@ -104,6 +104,11 @@ outside a transaction; run them on a direct or session-mode connection
 ## Drill it
 
 `scripts/partition-drill.sh` severs a holder's network link and reports
-when the row expires and a successor acquires — expect ~10-13 s. The
-retired advisory-lock drill measured 95 s and depended on TCP keepalives;
-this one depends on nothing but the database clock.
+when the row expires and a successor acquires — **9 s** measured
+(2026-08-30). `TestLeaseFailover_SIGKILLedHolderReplacedWithinTTL` is the
+process-death half: **9.5 s** across five runs, with an assertion that no
+successor takes the role while the dead holder's lease could still be
+live. The retired advisory-lock drill measured 95 s and depended on TCP
+keepalives; this one depends on nothing but the database clock.
+`scripts/pgbouncer-test.sh` runs the integration suite behind PgBouncer in
+transaction mode — the same job CI runs.

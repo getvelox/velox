@@ -141,11 +141,20 @@ Two things worth stating about that number rather than leaving implied:
 > advisory lock to a per-tick lease row on the database clock (10 s TTL,
 > renewed every 3 s, polled at least every 5 s). Both rows below collapse
 > into one bound that no longer depends on the network honouring a
-> keepalive: **any** dead leader — process, host, partition, VM pause —
-> is replaced within **LeaseTTL + MaxPoll = 15 s**, and the old holder
-> stops itself after 6 s without an acknowledged renew. The measured
-> numbers for the lease shape land with PR-E of that arc; until then the
-> figures below describe the retired mechanism, kept for the record.
+> keepalive, and the old holder stops itself after 6 s without an
+> acknowledged renew. Measured on the lease shape (local Docker Postgres,
+> 2026-08-30):
+>
+> | Failure | Time until a successor holds the role |
+> |---|---:|
+> | Process dies, host survives (`SIGKILL` of a mid-tick holder) | **9.52–9.55 s**, 5 of 5 runs (`TestLeaseFailover_SIGKILLedHolderReplacedWithinTTL`, which also asserts no successor takes over while the dead holder's lease could still be live) |
+> | Host disappears without closing the socket (severed link) | **9 s** (`scripts/partition-drill.sh`, successor acquire confirmed; the holder process was still alive) |
+>
+> Same number for both, because the mechanism is the same: the row expires
+> `LeaseTTL` after the last renew that landed, whatever the holder's socket
+> is doing. Add one scheduler poll (≤ 5 s) for the worst-case time to the
+> next tick. The figures below describe the retired mechanism, kept for the
+> record.
 
 Singleton work — jobs only one replica may run at a time — is gated by a
 Postgres advisory lock (an application-defined lock the server holds for the

@@ -1,0 +1,25 @@
+; PgBouncer in TRANSACTION mode, the pooler shape Velox must be safe behind
+; (ADR-114). scripts/pgbouncer-test.sh renders @DB_HOST@ and runs the
+; integration suite through port 6432; CI runs the same script.
+;
+; max_prepared_statements > 0 is what lets pgx's default prepared-statement
+; cache work under transaction pooling (PgBouncer >= 1.21). It is set here,
+; not worked around in the driver, because that is how a production pooler
+; is configured — the test proves the real shape.
+[databases]
+velox_test = host=@DB_HOST@ port=5432 dbname=velox_test
+velox = host=@DB_HOST@ port=5432 dbname=velox
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+auth_type = plain
+auth_file = /etc/pgbouncer/userlist.txt
+pool_mode = transaction
+max_prepared_statements = 200
+max_client_conn = 300
+default_pool_size = 25
+server_reset_query =
+ignore_startup_parameters = extra_float_digits
+log_connections = 0
+log_disconnections = 0

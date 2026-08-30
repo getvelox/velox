@@ -108,10 +108,10 @@ each must run on exactly one replica at a time — take their leadership
 from a row in `leader_leases`, not from a database session. (Before
 ADR-114 leadership was a session-scoped advisory lock, which a
 transaction pooler silently strands; the boot-time topology probe that
-guarded against that is retired with it.) A PgBouncer transaction-mode
-CI job is the next step in this arc (ADR-114 PR-E); until it lands,
-treat transaction mode as designed-for and unit-proven, not yet
-CI-proven.
+guarded against that is retired with it.) The `test-pgbouncer` CI job
+runs the whole integration suite with the app pool behind PgBouncer in
+transaction mode on every push (`scripts/pgbouncer-test.sh` runs the same
+thing locally), so a statement that assumes a session cannot land unnoticed.
 
 The one exception is **migrations**: `RUN_MIGRATIONS_ON_BOOT=true` and
 `velox-migrate` hold `pg_advisory_lock(76540007)` on a dedicated
