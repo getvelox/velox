@@ -46,6 +46,14 @@ func SetupTestDB(t *testing.T) *postgres.DB {
 	runMigrations(t, adminURL)
 
 	adminPool := openPool(t, adminURL)
+	// Truncate ONCE, at setup. Setup-time truncation is what guarantees a
+	// clean start regardless of how the previous test ended (a test that
+	// Fatalf'd mid-way leaves residue; the next setup wipes it). A second
+	// truncate in t.Cleanup bought nothing and doubled the ACCESS EXCLUSIVE
+	// lock churn (700 truncates per integration run where 350 will do).
+	// Consequence to know: the LAST test in a process leaves its rows
+	// behind — the CI velox-doctor sweep after the integration job examines
+	// whatever the alphabetically-last DB package left.
 	cleanDB(t, adminPool)
 
 	// App connection: actual queries (RLS enforced)
@@ -53,7 +61,6 @@ func SetupTestDB(t *testing.T) *postgres.DB {
 	db := postgres.NewDB(appPool, 5*time.Second)
 
 	t.Cleanup(func() {
-		cleanDB(t, adminPool)
 		_ = appPool.Close()
 		_ = adminPool.Close()
 	})
@@ -84,39 +91,50 @@ func openPool(t *testing.T, url string) *sql.DB {
 
 func cleanDB(t *testing.T, pool *sql.DB) {
 	t.Helper()
-
-	// Truncate all data tables. Uses DO block to skip tables that don't exist
-	// yet (e.g., on first run before migrations). This is safe because
-	// TRUNCATE CASCADE handles FK ordering.
-	//
-	// audit_log carries a statement-level BEFORE TRUNCATE trigger (migration
-	// 0115) that blocks TRUNCATE to keep the log tamper-evident; disable
-	// triggers for this transaction-scoped reset (replica mode, reverts at
-	// block end) so the harness can still wipe it between tests.
-	_, err := pool.ExecContext(context.Background(), `
-		DO $$ BEGIN
-			PERFORM set_config('session_replication_role', 'replica', true);
-			TRUNCATE
-				invoice_dunning_events, invoice_dunning_runs, dunning_policies,
-				invoice_line_items, invoices, billed_entries, usage_events,
-				subscriptions, plans, meters, rating_rule_versions,
-				customer_billing_profiles, customers,
-				stripe_webhook_events, api_keys, billing_provider_connections,
-				credit_note_line_items, credit_notes, customer_credit_ledger,
-				coupon_redemptions, coupons,
-				customer_price_overrides, webhook_deliveries, webhook_events,
-				webhook_endpoints, idempotency_keys, audit_log, tenant_settings,
-				tenants,
-				users, user_tenants, password_reset_tokens
-			CASCADE;
-		EXCEPTION WHEN undefined_table THEN
-			-- Tables don't exist yet (fresh DB before first migration)
-			NULL;
-		END $$;
-	`)
-	if err != nil {
+	if err := cleanDBErr(pool); err != nil {
 		t.Fatalf("clean db: %v", err)
 	}
+}
+
+// cleanDBErr truncates every public base table except golang-migrate's
+// schema_migrations, in ONE statement, with the table list derived from
+// the catalog at call time.
+//
+// Why derived, and why no EXCEPTION handler: the previous hand-maintained
+// list was wrapped in `EXCEPTION WHEN undefined_table THEN NULL`. When
+// migration 0083 dropped two tables the list still named, the handler
+// swallowed the whole TRUNCATE and cleanup silently became a no-op for
+// an entire run (commit 9f08e52b, 2026-05-17). A derived list cannot go
+// stale, and an error here is a real error and must surface.
+//
+// Why schema_migrations is excluded: truncating it leaves the schema in
+// place with version=nil; the next process's migrate.Up then fails on
+// 0001's CREATE TABLE and runMigrations' dirty-state path nukes and
+// rebuilds every table — a slower route to the same silent-no-op class.
+//
+// Why no CASCADE: every table is in the list, so FK ordering is moot.
+//
+// audit_log carries a statement-level BEFORE TRUNCATE trigger (migration
+// 0115) that blocks TRUNCATE to keep the log tamper-evident; replica
+// mode disables it for this transaction only.
+func cleanDBErr(pool *sql.DB) error {
+	_, err := pool.ExecContext(context.Background(), `
+		DO $$
+		DECLARE tbls text;
+		BEGIN
+			PERFORM set_config('session_replication_role', 'replica', true);
+			SELECT string_agg(quote_ident(tablename), ', ')
+			  INTO tbls
+			  FROM pg_tables
+			 WHERE schemaname = 'public'
+			   AND tablename <> 'schema_migrations';
+			IF tbls IS NULL THEN
+				RAISE EXCEPTION 'testutil.cleanDB: no public tables found — migrations not applied?';
+			END IF;
+			EXECUTE 'TRUNCATE ' || tbls;
+		END $$;
+	`)
+	return err
 }
 
 // TestCtx returns a context with livemode pinned to false (test mode)
@@ -159,33 +177,53 @@ func envOr(key, fallback string) string {
 	return v
 }
 
-// runMigrations applies pending migrations. On failure, drops everything
-// and retries from scratch (safe because this is a test-only database).
-// migrate.Up manages its own pool internally so the DSN is all we need here.
+// runMigrations applies pending migrations ONCE per test process (one
+// package's test binary): every SetupTestDB after the first reuses the
+// result instead of opening a migration pool, taking golang-migrate's
+// advisory lock, and re-checking the version — ~13 redundant round-trips
+// per package before this. On failure, drops everything and retries from
+// scratch (safe because this is a test-only database). migrate.Up manages
+// its own pool internally so the DSN is all we need here.
+//
+// migrateRuns is exported for the harness's own test, which asserts the
+// once-ness.
+var (
+	migrateOnce sync.Once
+	migrateErr  error
+	migrateRuns int
+)
+
 func runMigrations(t *testing.T, adminURL string) {
 	t.Helper()
-
-	if err := migrate.Up(adminURL); err == nil {
-		return
-	}
-
-	// Dirty or incompatible state (e.g., schema_migrations records a version
-	// that no longer exists in the embedded FS — common after switching
-	// branches). Drop everything and retry.
-	nukePool := openPool(t, adminURL)
-	dropAllTables(t, nukePool)
-	_ = nukePool.Close()
-
-	if err := migrate.Up(adminURL); err != nil {
-		t.Fatalf("run migrations: %v", err)
+	migrateOnce.Do(func() {
+		migrateRuns++
+		if err := migrate.Up(adminURL); err == nil {
+			return
+		}
+		// Dirty or incompatible state (e.g., schema_migrations records a
+		// version that no longer exists in the embedded FS — common after
+		// switching branches). Drop everything and retry.
+		nukePool, err := sql.Open("pgx", adminURL)
+		if err != nil {
+			migrateErr = err
+			return
+		}
+		defer func() { _ = nukePool.Close() }()
+		if err := dropAllTablesErr(nukePool); err != nil {
+			migrateErr = err
+			return
+		}
+		migrateErr = migrate.Up(adminURL)
+	})
+	if migrateErr != nil {
+		t.Fatalf("run migrations: %v", migrateErr)
 	}
 }
 
-func dropAllTables(t *testing.T, pool *sql.DB) {
-	t.Helper()
+func dropAllTablesErr(pool *sql.DB) error {
 	if _, err := pool.ExecContext(context.Background(),
 		"DROP TABLE IF EXISTS schema_migrations CASCADE"); err != nil {
-		t.Fatalf("drop schema_migrations: %v", err)
+		return err
 	}
 	_, err := pool.ExecContext(context.Background(), `
 		DO $$ DECLARE r RECORD;
@@ -195,9 +233,7 @@ func dropAllTables(t *testing.T, pool *sql.DB) {
 			END LOOP;
 		END $$;
 	`)
-	if err != nil {
-		t.Fatalf("drop public tables: %v", err)
-	}
+	return err
 }
 
 // AdminPool opens the owner-role connection — the same role that runs
