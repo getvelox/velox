@@ -109,7 +109,6 @@ func setupThresholdEngine(thresholds *domain.BillingThresholds, usageQty int64) 
 	invoices := &mockInvoices{}
 
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, nil))
-	engine.SetTxRunner(&fakeTxRunner{})
 	return engine, subs, invoices
 }
 
@@ -434,16 +433,16 @@ func TestEvaluateThresholds_ResetProration_CrossIntervalDenominator(t *testing.T
 }
 
 // TestScanThresholds_ResetAdvanceFailure_IsLoud locks the ADR-066 error
-// contract: a reset=true fire whose cycle re-anchor fails must surface an
-// ERROR from the scan (the whole tx rolls back and the next tick retries).
-// Pre-fix the failure arm logged and returned (fired=true, nil) — and because
-// the invoice had already committed, the fire-once probe blocked every retry,
-// stranding the reset forever.
+// contract: a reset=true fire whose cycle re-anchor (the period CAS, ADR-115)
+// fails must surface an ERROR from the scan (the whole tx rolls back and the
+// next tick retries). Pre-fix the failure arm logged and returned
+// (fired=true, nil) — and because the invoice had already committed, the
+// fire-once probe blocked every retry, stranding the reset forever.
 func TestScanThresholds_ResetAdvanceFailure_IsLoud(t *testing.T) {
 	thresholds := &domain.BillingThresholds{AmountGTE: 50000, ResetBillingCycle: true}
-	engine, subs, _ := setupThresholdEngine(thresholds, 1000)
+	engine, subs, invoices := setupThresholdEngine(thresholds, 1000)
 	engine.clock = clock.NewFake(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	subs.updateBillingCycleErr = fmt.Errorf("injected advance failure")
+	subs.closePeriodErr = fmt.Errorf("injected advance failure")
 
 	fired, errs := engine.ScanThresholds(context.Background(), 50)
 	if fired != 0 {
@@ -452,23 +451,56 @@ func TestScanThresholds_ResetAdvanceFailure_IsLoud(t *testing.T) {
 	if len(errs) == 0 {
 		t.Fatal("scan swallowed the cycle-advance failure; want a loud per-sub error (retryable next tick)")
 	}
+	if len(invoices.invoices) != 0 {
+		t.Fatalf("the CAS failed before the insert, yet %d invoice(s) exist", len(invoices.invoices))
+	}
 }
 
-// TestScanThresholds_ResetWithoutTxRunner_FailsLoud: the engine must refuse a
-// reset=true fire when the coordinator-tx seam is missing rather than degrade
-// to the non-atomic two-write shape (no silent fallbacks).
-func TestScanThresholds_ResetWithoutTxRunner_FailsLoud(t *testing.T) {
+// TestScanThresholds_CommitFailure_IsLoud: a fire whose tx fails at the
+// commit boundary must surface an ERROR (retryable next tick) and count
+// nothing — never a silent success, never a degraded two-write shape.
+func TestScanThresholds_CommitFailure_IsLoud(t *testing.T) {
 	thresholds := &domain.BillingThresholds{AmountGTE: 50000, ResetBillingCycle: true}
-	engine, _, invoices := setupThresholdEngine(thresholds, 1000)
+	engine, subs, _ := setupThresholdEngine(thresholds, 1000)
 	engine.clock = clock.NewFake(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
-	engine.txRunner = nil
+	subs.txErr = fmt.Errorf("injected commit failure")
 
 	fired, errs := engine.ScanThresholds(context.Background(), 50)
 	if fired != 0 || len(errs) == 0 {
-		t.Fatalf("fired=%d errs=%v; want 0 fired + a loud tx-runner-required error", fired, errs)
+		t.Fatalf("fired=%d errs=%v; want 0 fired + a loud commit error", fired, errs)
 	}
-	if len(invoices.invoices) != 0 {
-		t.Fatalf("invoice created without the atomic seam: %d", len(invoices.invoices))
+	if subs.cycleUpdated["sub_1"] {
+		t.Fatal("cycle re-anchor survived a failed commit")
+	}
+}
+
+// TestScanThresholds_PeriodMoved_SkipsQuietly (ADR-115): a fire whose period
+// CAS misses — a cycle close, a swap or a sibling fire committed after the
+// scan page was read — writes nothing, counts nothing and returns no error;
+// the next tick re-evaluates against the new period. Both reset arms.
+func TestScanThresholds_PeriodMoved_SkipsQuietly(t *testing.T) {
+	for _, reset := range []bool{true, false} {
+		t.Run(fmt.Sprintf("reset=%v", reset), func(t *testing.T) {
+			thresholds := &domain.BillingThresholds{AmountGTE: 50000, ResetBillingCycle: reset}
+			engine, subs, invoices := setupThresholdEngine(thresholds, 1000)
+			engine.clock = clock.NewFake(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
+			// Concurrent closer: the row's period moves right before the fire's tx.
+			subs.beforeCloserTx = func(m *mockSubs) {
+				s := m.subs["sub_1"]
+				moved := s.NextBillingAt.AddDate(0, 1, 0)
+				s.CurrentBillingPeriodStart = s.CurrentBillingPeriodEnd
+				s.CurrentBillingPeriodEnd = &moved
+				s.NextBillingAt = &moved
+				m.subs["sub_1"] = s
+			}
+			fired, errs := engine.ScanThresholds(context.Background(), 50)
+			if fired != 0 || len(errs) != 0 {
+				t.Fatalf("fired=%d errs=%v; want 0 fired and no error on a lost race", fired, errs)
+			}
+			if len(invoices.invoices) != 0 {
+				t.Fatalf("a lost race wrote %d invoice(s), want 0", len(invoices.invoices))
+			}
+		})
 	}
 }
 
@@ -764,6 +796,9 @@ func TestScanThresholds_DrainsPastBatchSize(t *testing.T) {
 		})
 	}
 	subs.candidates = many
+	for _, s := range many {
+		subs.subs[s.ID] = s // the fire's verify-only CAS (ADR-115) reads the row
+	}
 
 	fired, errs := engine.ScanThresholds(context.Background(), 50)
 	if len(errs) != 0 {

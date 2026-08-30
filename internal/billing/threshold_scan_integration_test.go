@@ -3,11 +3,13 @@ package billing_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
+	"github.com/sagarsuperuser/velox/internal/errs"
 	"github.com/sagarsuperuser/velox/internal/invoice"
 	"github.com/sagarsuperuser/velox/internal/platform/money"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
@@ -42,6 +45,7 @@ type thresholdFixture struct {
 	settings   *tenant.SettingsStore
 	pricingSvc *pricing.Service
 	subAdapter *failableSubAdapter
+	invAdapter *failableInvoiceAdapter
 	engine     *billing.Engine
 
 	// Seed-by-default test data
@@ -74,11 +78,12 @@ func newThresholdFixture(t *testing.T, name string) *thresholdFixture {
 	settingsStore := tenant.NewSettingsStore(db)
 
 	subAdapter := &failableSubAdapter{subStoreAdapter: &subStoreAdapter{subStore}}
+	invAdapter := &failableInvoiceAdapter{invoiceStoreAdapter: &invoiceStoreAdapter{invoiceStore}}
 	engine := billing.NewEngine(
 		subAdapter,
 		&usageStoreAdapter{usageStore},
 		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
+		invAdapter,
 		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, nil,
 	)
 	engine.SetIntervalReader(subStore)
@@ -87,7 +92,6 @@ func newThresholdFixture(t *testing.T, name string) *thresholdFixture {
 	// minimal wiring for tests that don't exercise tax behavior.
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetTxRunner(db)
 
 	ctx := postgres.WithLivemode(context.Background(), false)
 
@@ -178,6 +182,7 @@ func newThresholdFixture(t *testing.T, name string) *thresholdFixture {
 		settings:   settingsStore,
 		pricingSvc: pricingSvc,
 		subAdapter: subAdapter,
+		invAdapter: invAdapter,
 		engine:     engine,
 		customerID: cust.ID,
 		planID:     plan.ID,
@@ -868,29 +873,70 @@ func TestThresholdScan_ConcurrentDoubleFire_IndexHolds(t *testing.T) {
 	}
 }
 
-// failableSubAdapter wraps subStoreAdapter with an injectable
-// UpdateBillingCycleTx failure — the fault-injection point for the
-// fire→reset atomicity test (crash between invoice insert and cycle
-// re-anchor, simulated as the second write failing inside the tx).
+// failableSubAdapter wraps subStoreAdapter with (a) an injectable
+// ClosePeriodTx failure — the closer's CAS — and (b) a hook that runs INSIDE
+// WithTenantTx before the engine's tx is opened: the concurrent-resolver seam
+// (playbook §5.3) the ADR-115 collision tests use to commit a competing
+// period writer between the engine's read and its write.
 type failableSubAdapter struct {
 	*subStoreAdapter
-	updateCycleTxErr error
+	closePeriodTxErr error
+	beforeTx         func()
+	// moved counts ClosePeriodTx calls that lost the ADR-115 CAS.
+	moved atomic.Int32
 }
 
-func (a *failableSubAdapter) UpdateBillingCycleTx(ctx context.Context, tx *sql.Tx, tenantID, id string, start, end, next time.Time, anchorDay int) error {
-	if a.updateCycleTxErr != nil {
-		return a.updateCycleTxErr
+func (a *failableSubAdapter) WithTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error {
+	if a.beforeTx != nil {
+		a.beforeTx()
 	}
-	return a.subStoreAdapter.UpdateBillingCycleTx(ctx, tx, tenantID, id, start, end, next, anchorDay)
+	return a.subStoreAdapter.WithTenantTx(ctx, tenantID, fn)
+}
+
+func (a *failableSubAdapter) ClosePeriodTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected subscription.PeriodSnapshot, start, end, next time.Time, anchorDay int) error {
+	if a.closePeriodTxErr != nil {
+		return a.closePeriodTxErr
+	}
+	err := a.subStoreAdapter.ClosePeriodTx(ctx, tx, tenantID, id, expected, start, end, next, anchorDay)
+	if errors.Is(err, subscription.ErrWatermarkMoved) {
+		a.moved.Add(1)
+	}
+	return err
+}
+
+// failableInvoiceAdapter wraps invoiceStoreAdapter with an injectable
+// CreateInvoiceWithLineItemsTx failure — the INSERT side of the closer tx,
+// after the period CAS has already run (the crash window ADR-066 closed and
+// ADR-115 keeps closed: the re-anchor must not survive a failed insert).
+type failableInvoiceAdapter struct {
+	*invoiceStoreAdapter
+	createTxErr error
+	// alreadyExists counts inserts that hit an invoice unique index — the
+	// pre-ADR-115 loser's exit, which no racing closer should reach now.
+	alreadyExists atomic.Int32
+}
+
+func (a *failableInvoiceAdapter) CreateInvoiceWithLineItemsTx(ctx context.Context, tx *sql.Tx, tenantID string, inv domain.Invoice, items []domain.InvoiceLineItem) (domain.Invoice, error) {
+	if a.createTxErr != nil {
+		return domain.Invoice{}, a.createTxErr
+	}
+	out, err := a.invoiceStoreAdapter.CreateInvoiceWithLineItemsTx(ctx, tx, tenantID, inv, items)
+	if errors.Is(err, errs.ErrAlreadyExists) {
+		a.alreadyExists.Add(1)
+	}
+	return out, err
 }
 
 // TestThresholdFire_ResetAtomic_RollsBackOnAdvanceFailure is the ADR-066
-// crash-point test on real Postgres: a reset=true fire whose cycle re-anchor
-// fails must leave NO invoice behind (single-tx rollback), so the next tick
-// retries the whole fire cleanly. The pre-fix two-write shape left the
-// invoice committed with the reset stranded forever — the fire-once probe
-// blocked every retry, and under base proration (fix 4) the customer's base
-// was permanently under-billed.
+// crash-point test on real Postgres: a reset=true fire whose tx fails AFTER
+// the cycle re-anchor — the invoice insert, now the second write behind the
+// period CAS (ADR-115) — must leave NO invoice and NO re-anchor behind
+// (single-tx rollback), so the next tick retries the whole fire cleanly. The
+// pre-fix two-write shape left the invoice committed with the reset stranded
+// forever — the fire-once probe blocked every retry, and under base proration
+// (fix 4) the customer's base was permanently under-billed. A failure on the
+// CAS side trivially yields no invoice (it runs first), so the injection sits
+// on the insert.
 func TestThresholdFire_ResetAtomic_RollsBackOnAdvanceFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: skipped in -short mode")
@@ -908,8 +954,8 @@ func TestThresholdFire_ResetAtomic_RollsBackOnAdvanceFailure(t *testing.T) {
 		t.Fatalf("set threshold: %v", err)
 	}
 
-	// Fault-inject the re-anchor inside the coordinator tx.
-	f.subAdapter.updateCycleTxErr = fmt.Errorf("injected: advance failed inside tx")
+	// Fault-inject the insert inside the coordinator tx, after the re-anchor.
+	f.invAdapter.createTxErr = fmt.Errorf("injected: invoice insert failed inside tx")
 	fired, errs := f.engine.ScanThresholds(ctx, 50)
 	if fired != 0 {
 		t.Fatalf("fired = %d, want 0 on a failed reset fire", fired)
@@ -931,7 +977,7 @@ func TestThresholdFire_ResetAtomic_RollsBackOnAdvanceFailure(t *testing.T) {
 
 	// Clear the fault: the next tick retries the WHOLE fire cleanly — invoice
 	// lands and the cycle re-anchors, atomically.
-	f.subAdapter.updateCycleTxErr = nil
+	f.invAdapter.createTxErr = nil
 	fired2, errs2 := f.engine.ScanThresholds(ctx, 50)
 	if len(errs2) > 0 {
 		t.Fatalf("retry scan errors: %v", errs2)

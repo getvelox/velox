@@ -23,6 +23,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -130,9 +131,7 @@ func seedDueSubscriptions(t *testing.T, db *postgres.DB, n int) exactlyOnceSeed 
 		}
 		// next_billing_at = periodEnd makes the sub due the moment the clock
 		// passes the period close.
-		if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 1); err != nil {
-			t.Fatalf("billing cycle %d: %v", i, err)
-		}
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 1)
 		subIDs = append(subIDs, sub.ID)
 	}
 

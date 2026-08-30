@@ -15,6 +15,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -67,9 +68,7 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
 	}
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-		t.Fatalf("set billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := billing.NewEngine(
@@ -94,9 +93,7 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 
 	// Re-arm the SAME period (simulate a duplicate trigger / a re-run that did not
 	// advance the cycle) so run 2 re-attempts billing the already-billed period.
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-		t.Fatalf("re-arm billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
 	// Run 2: must idempotently skip — no second invoice, no surfaced error.
 	count2, errs2 := engine.RunCycle(ctx, 50)

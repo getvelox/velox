@@ -14,6 +14,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -108,9 +109,7 @@ func newSeamFixture(t *testing.T, zone string, billingTime domain.SubscriptionBi
 		t.Fatalf("create sub: %v", err)
 	}
 	f.subID = sub.ID
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, f.p0start, f.p0end, f.p0end, anchorDay); err != nil {
-		t.Fatalf("billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, f.p0start, f.p0end, f.p0end, anchorDay)
 	sub.CurrentBillingPeriodStart = &f.p0start
 	sub.CurrentBillingPeriodEnd = &f.p0end
 	sub.BillingAnchorDay = anchorDay

@@ -24,7 +24,7 @@ func TestMustValidate_NamesEveryNilCollaborator(t *testing.T) {
 		}
 		msg, _ := r.(string)
 		// The deliberately-unwired deps must ALL be named.
-		for _, want := range []string{"credits", "paymentSetups", "charger", "events", "auditLogger", "txRunner", "creditGranter"} {
+		for _, want := range []string{"credits", "paymentSetups", "charger", "events", "auditLogger", "creditGranter"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("panic must name nil collaborator %q, got: %s", want, msg)
 			}
@@ -61,7 +61,9 @@ func TestMustValidate_CoversEveryCollaborator(t *testing.T) {
 		// 26th: IntervalSnapshotter (ADR-101 segment-source seam — the
 		// producer always wires the real subscription store, even in
 		// reader mode "off", so the kill switch can never dangle unwired).
-		const collaborators = 26
+		// Back to 25 at ADR-115: TxRunner is gone — the subscription store
+		// owns the period closer's tx (SubscriptionReader.WithTenantTx).
+		const collaborators = 25
 		if nilCount != collaborators {
 			t.Errorf("zero engine names %d nil collaborators, expected %d — Engine's dep set changed; update router wiring + this count deliberately", nilCount, collaborators)
 		}
