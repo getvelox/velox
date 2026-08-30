@@ -22,12 +22,29 @@ type SubPlanCurrency struct {
 // as an idempotent no-op, the schedule paths skip the row.
 var ErrNotPaused = errors.New("subscription: collection is not paused")
 
-// ErrWatermarkMoved is returned by AdvanceBillingCycle when next_billing_at
-// no longer equals the value the caller read: another leader already advanced
-// the cycle. The write is a benign no-op for the caller — the invoice
-// idempotency index already made the second invoice impossible; this makes
-// the second WATERMARK write impossible too (ADR-114 §Consequences).
-var ErrWatermarkMoved = errors.New("subscription: billing watermark already advanced")
+// PeriodSnapshot is the period state a writer derived its inputs from — the
+// status, period start and watermark it read before building an invoice or
+// computing a new period. Every period-closing write proves it in the WHERE
+// of its FIRST statement (ADR-115), so two writers planning from the same
+// period can never both commit.
+type PeriodSnapshot struct {
+	Start  *time.Time // current_billing_period_start
+	Next   *time.Time // next_billing_at
+	Status domain.SubscriptionStatus
+}
+
+// SnapshotOf captures the period snapshot of the row a caller read.
+func SnapshotOf(sub domain.Subscription) PeriodSnapshot {
+	return PeriodSnapshot{Start: sub.CurrentBillingPeriodStart, Next: sub.NextBillingAt, Status: sub.Status}
+}
+
+// ErrWatermarkMoved: the row's period or status no longer matches the
+// caller's PeriodSnapshot — another closer (a cycle close, a threshold reset,
+// a plan swap, a cancel) committed first. Everything derived from that
+// snapshot is stale; the caller wrote nothing, rolls back and re-reads.
+// A backward move is legal (a swap or a reset truncates a period); a STALE
+// move is not — the snapshot, not monotonicity, is the guard (ADR-115).
+var ErrWatermarkMoved = errors.New("subscription: billing period moved under the caller's snapshot")
 
 type Store interface {
 	// CustomerSubPlanCurrencies backs the ADR-100 customer currency pin:
@@ -54,15 +71,17 @@ type Store interface {
 	List(ctx context.Context, filter ListFilter) ([]domain.Subscription, int, error)
 	GetDueBilling(ctx context.Context, before time.Time, limit int) ([]domain.Subscription, error)
 
-	// Update mutates subscription-level columns only (status, billing period,
-	// trial, etc). Item mutations use the item-scoped methods below so a
-	// partial update to one field doesn't accidentally overwrite an entire
-	// item list.
-	UpdateBillingCycle(ctx context.Context, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
-	// UpdateBillingCycleTx is the in-tx variant — advances the watermark on the
-	// caller's tx so a coordinator (e.g. the atomic cross-interval swap) can move
-	// the billing period only when the same tx also commits the new-period invoice.
-	UpdateBillingCycleTx(ctx context.Context, tx *sql.Tx, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
+	// ClosePeriodTx is THE period writer (ADR-115): one UPDATE that row-locks
+	// the subscription and proves `expected` (status, period start, watermark)
+	// in the same statement, then re-stamps the period boundaries,
+	// next_billing_at and the billing anchor day. Every closer — cycle close,
+	// threshold fire (reset or verify-only), plan swap — runs it as the FIRST
+	// statement of its tx, so nothing derived from a stale snapshot can commit.
+	// 0 rows → ErrWatermarkMoved (ErrNotFound if the row is gone).
+	ClosePeriodTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
+	// ClosePeriod is the own-tx wrapper for advance-only callers (the
+	// trial-active advance, the tests-only non-atomic swap fallback).
+	ClosePeriod(ctx context.Context, tenantID, id string, expected PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
 
 	// CancelAtomic executes a conditional UPDATE that only transitions
 	// when the row is in an allowed source state. Closes the
@@ -101,11 +120,15 @@ type Store interface {
 	// on the row. Idempotent.
 	ClearScheduledCancellation(ctx context.Context, tenantID, id string) (domain.Subscription, error)
 
-	// FireScheduledCancellation atomically transitions a sub to canceled when
-	// its scheduled cancel boundary has been crossed. Called by the billing
-	// engine cycle scan. Returns errs.InvalidState if the row was no longer
-	// active by the time the UPDATE ran.
-	FireScheduledCancellation(ctx context.Context, tenantID, id string, at time.Time) (domain.Subscription, error)
+	// FireScheduledCancellationTx is the terminal cycle close (ADR-115): on
+	// the caller's tx it flips an active sub with a due cancel schedule to
+	// canceled, CAS-ing on `expected` (period start + watermark) as well as
+	// status, seals its intervals at `at` and enqueues subscription.canceled
+	// (canceled_by=schedule). The engine inserts the final invoice on the
+	// same tx. 0 rows → ErrWatermarkMoved for BOTH a moved period and an
+	// already-terminated sub (the closer's snapshot is stale either way, and
+	// it wrote nothing); ErrNotFound if the row is gone.
+	FireScheduledCancellationTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected PeriodSnapshot, at time.Time) (domain.Subscription, error)
 
 	// FireScheduledCancellationWithBill is the ADR-097 mid-period variant:
 	// flip + billFn (final partial invoice + relief drafts) in ONE tx, CAS

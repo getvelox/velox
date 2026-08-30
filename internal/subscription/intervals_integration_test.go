@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"sync"
 	"testing"
@@ -398,7 +399,14 @@ func TestIntervals_CancelClosesAll(t *testing.T) {
 	// A backdated fire (ADR-097 contracted-instant shape) predating the
 	// open zero-widths the interval instead of minting a negative range.
 	sub3 := ivActiveSub(t, store, ctx, tenantID, cust, "sub-iv-cxl3", []domain.SubscriptionItem{{PlanID: planA.ID, Quantity: 1}})
-	if _, err := store.FireScheduledCancellation(ctx, tenantID, sub3.ID, ivPS.Add(-time.Hour)); err != nil {
+	fresh3, err := store.Get(ctx, tenantID, sub3.ID)
+	if err != nil {
+		t.Fatalf("get sub3: %v", err)
+	}
+	if err := store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := store.FireScheduledCancellationTx(ctx, tx, tenantID, sub3.ID, SnapshotOf(fresh3), ivPS.Add(-time.Hour))
+		return err
+	}); err != nil {
 		t.Fatalf("backdated fire: %v", err)
 	}
 	ivs = readItemIntervals(t, db, ctx, tenantID, sub3.Items[0].ID)

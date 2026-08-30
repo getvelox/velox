@@ -76,6 +76,15 @@ type Biller interface {
 	// Bug B, closed 2026-07-05) — this runs only when the in-tx half
 	// declined (unpaid funding source / lookup blip).
 	BillOnPlanSwapImmediate(ctx context.Context, sub domain.Subscription, at time.Time) (int64, error)
+	// ThresholdBilledThroughTx reads, on the caller's tx, the instant a
+	// mid-cycle threshold invoice already billed sub's CURRENT period
+	// through (nil = no threshold fire this period). The atomic plan swap
+	// calls it under the subscription row lock (ADR-115): a reset=false fire
+	// that committed after the swap read the sub passes the period CAS but
+	// may have billed usage past the swap's effective instant; truncating the
+	// period below that window would re-bill it at the next close, so the
+	// swap refuses instead.
+	ThresholdBilledThroughTx(ctx context.Context, tx *sql.Tx, sub domain.Subscription) (*time.Time, error)
 	// BillOnPlanSwapDraftsTx is the ATOMIC half of the cross-interval swap
 	// refund — the BillOnCancelDraftsTx shape: when every funding source
 	// for the OLD period is PAID, the refund credit-note drafts commit ON
@@ -1578,10 +1587,13 @@ func (s *Service) applyCrossIntervalPlanSwap(
 	// recomputed for the new cadence (ADR-055) — it must NOT keep the old
 	// interval's anchor day.
 	swapAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, newInterval, loc)
+	// ADR-115: the period write proves the snapshot this request was planned
+	// from; a closer that moved the period since the read makes it a 409.
+	expected := SnapshotOf(sub)
 	if newTiming == domain.BillInAdvance {
 		newPE := domain.NextBillingPeriodEnd(now, sub.BillingTime, newInterval, loc, swapAnchorDay)
-		if err := s.store.UpdateBillingCycle(ctx, tenantID, subscriptionID, now, newPE, newPE, swapAnchorDay); err != nil {
-			return ItemChangeResult{}, err
+		if err := s.store.ClosePeriod(ctx, tenantID, subscriptionID, expected, now, newPE, newPE, swapAnchorDay); err != nil {
+			return ItemChangeResult{}, mapPeriodMoved(err)
 		}
 		if s.biller != nil {
 			refreshed, err := s.store.Get(ctx, tenantID, subscriptionID)
@@ -1603,19 +1615,30 @@ func (s *Service) applyCrossIntervalPlanSwap(
 		// in_arrears: truncate. Period start preserved; period end +
 		// next_billing pulled in to `now`.
 		if sub.CurrentBillingPeriodStart != nil {
-			if err := s.store.UpdateBillingCycle(ctx, tenantID, subscriptionID, *sub.CurrentBillingPeriodStart, now, now, swapAnchorDay); err != nil {
-				return ItemChangeResult{}, err
+			if err := s.store.ClosePeriod(ctx, tenantID, subscriptionID, expected, *sub.CurrentBillingPeriodStart, now, now, swapAnchorDay); err != nil {
+				return ItemChangeResult{}, mapPeriodMoved(err)
 			}
 		}
 	}
 	return ItemChangeResult{Item: updated, EffectiveAt: now, OrchestratedCrossAxis: true}, nil
 }
 
+// mapPeriodMoved turns the store's stale-snapshot sentinel into the 409 an
+// item change returns when the subscription's billing period changed between
+// the request's read and its write (ADR-115). Everything else passes through.
+func mapPeriodMoved(err error) error {
+	if errors.Is(err, ErrWatermarkMoved) {
+		return errs.InvalidState("subscription billing period changed while this request ran — re-read the subscription and retry").WithCode("subscription_period_moved")
+	}
+	return err
+}
+
 // applyCrossIntervalPlanSwapTx is the atomic, in-tx variant of
 // applyCrossIntervalPlanSwap used by the handler's tx-owning path. It runs the
-// cycle-restructuring DB writes — the plan swap, the watermark advance, and (for
-// in_advance) the new-period invoice insert via BillOnCreateTx — on the caller's
-// single tx, so any failure rolls ALL of them back. This is the fix for the
+// cycle-restructuring DB writes — the period CAS (first statement, ADR-115),
+// the refund drafts, the plan swap, and (for in_advance) the new-period invoice
+// insert via BillOnCreateTx — on the caller's single tx, so any failure rolls
+// ALL of them back. This is the fix for the
 // silent revenue drop: the watermark can no longer advance past a new in_advance
 // period whose day-1 invoice failed to commit. The OLD-period refund and the new
 // invoice's external steps (tax commit, auto-charge) are deliberately NOT done
@@ -1633,12 +1656,62 @@ func (s *Service) applyCrossIntervalPlanSwapTx(
 	newTiming domain.BillTiming,
 	now time.Time,
 ) (ItemChangeResult, error) {
-	// OLD-period refund drafts FIRST, on this same tx (deferred Bug B,
-	// closed 2026-07-05): computed from the pre-swap `sub` snapshot so the
-	// math resolves the OUTGOING plan rate and the old period's funding
-	// invoices. A draft-create error fails the whole swap (never a swapped
-	// sub with a silently-lost refund); handled=false defers the refund to
-	// the post-commit fallback in FinalizeCrossIntervalSwap (unpaid funding
+	loc := s.tenantLocation(ctx, sub.TenantID)
+	// Re-anchor the cycle to `now` for the new cadence (ADR-055) — must NOT keep
+	// the old interval's anchor day.
+	swapAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, newInterval, loc)
+
+	// The period write is the FIRST statement of the swap tx (ADR-115): it
+	// row-locks the subscription and proves the snapshot this request was
+	// planned from — status, period start, watermark — before the refund
+	// drafts, the plan write or the new-period invoice touch anything. A cycle
+	// close, a threshold reset or a sibling swap that committed after the Get
+	// in UpdateItemTx makes it 0 rows → ErrWatermarkMoved → 409 here, and the
+	// handler's deferred rollback has nothing to undo. Holding the row
+	// exclusively from the first statement also removes the share→exclusive
+	// upgrade the old order had (items → intervalTransition FOR SHARE → the
+	// period UPDATE last), which two concurrent swaps on one sub could
+	// deadlock on.
+	expected := SnapshotOf(sub)
+	var newPE time.Time
+	if newTiming == domain.BillInAdvance {
+		newPE = domain.NextBillingPeriodEnd(now, sub.BillingTime, newInterval, loc, swapAnchorDay)
+		// The watermark moves on the SAME tx as the new-period invoice below,
+		// so it can never move without the day-1 invoice existing.
+		if err := s.store.ClosePeriodTx(ctx, tx, tenantID, subscriptionID, expected, now, newPE, newPE, swapAnchorDay); err != nil {
+			return ItemChangeResult{}, mapPeriodMoved(err)
+		}
+	} else if sub.CurrentBillingPeriodStart != nil {
+		// in_arrears: truncate the current period to (oldPS, now); the scheduler
+		// closes the partial period under the OLD plan via segment-aware billing.
+		if err := s.store.ClosePeriodTx(ctx, tx, tenantID, subscriptionID, expected, *sub.CurrentBillingPeriodStart, now, now, swapAnchorDay); err != nil {
+			return ItemChangeResult{}, mapPeriodMoved(err)
+		}
+	}
+
+	// Fire-vs-swap residual (ADR-115): a reset=false threshold fire that
+	// committed after UpdateItemTx read the sub passes the CAS above — it does
+	// not move the period — but may have billed usage through an instant AFTER
+	// `now`. Re-anchoring the period below that window would re-bill
+	// [now, fire end) at the next close, on either cadence. Read the watermark
+	// under the row lock we now hold and refuse; never silently move the
+	// operator's instant.
+	if s.biller != nil && sub.CurrentBillingPeriodStart != nil && sub.CurrentBillingPeriodEnd != nil {
+		billedThrough, err := s.biller.ThresholdBilledThroughTx(ctx, tx, sub)
+		if err != nil {
+			return ItemChangeResult{}, fmt.Errorf("plan-swap threshold watermark: %w", err)
+		}
+		if billedThrough != nil && billedThrough.After(now) {
+			return ItemChangeResult{}, errs.InvalidState("a threshold invoice already billed this subscription past the requested effective instant — retry after it").WithCode("subscription_period_moved")
+		}
+	}
+
+	// OLD-period refund drafts, on this same tx (deferred Bug B, closed
+	// 2026-07-05): computed from the pre-swap `sub` snapshot so the math
+	// resolves the OUTGOING plan rate and the old period's funding invoices. A
+	// draft-create error fails the whole swap (never a swapped sub with a
+	// silently-lost refund); handled=false defers the refund to the
+	// post-commit fallback in FinalizeCrossIntervalSwap (unpaid funding
 	// source / lookup blip — the cancel path's exact decline contract).
 	var swapDraftIDs []string
 	swapRefundHandled := false
@@ -1656,57 +1729,37 @@ func (s *Service) applyCrossIntervalPlanSwapTx(
 		return ItemChangeResult{}, err
 	}
 
-	loc := s.tenantLocation(ctx, sub.TenantID)
-	// Re-anchor the cycle to `now` for the new cadence (ADR-055) — must NOT keep
-	// the old interval's anchor day.
-	swapAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, newInterval, loc)
 	res := ItemChangeResult{
 		Item: updated, EffectiveAt: now, OrchestratedCrossAxis: true,
 		swapRefundDraftIDs: swapDraftIDs, swapRefundHandled: swapRefundHandled,
 	}
 
-	if newTiming == domain.BillInAdvance {
-		newPE := domain.NextBillingPeriodEnd(now, sub.BillingTime, newInterval, loc, swapAnchorDay)
-		// Advance the watermark on the SAME tx as the new-period invoice below,
-		// so the watermark can never move without the day-1 invoice existing.
-		if err := s.store.UpdateBillingCycleTx(ctx, tx, tenantID, subscriptionID, now, newPE, newPE, swapAnchorDay); err != nil {
-			return ItemChangeResult{}, err
-		}
-		if s.biller != nil {
-			// Build a prospective sub reflecting the swapped plan + new period:
-			// s.store.Get would NOT observe the uncommitted tx writes, so derive
-			// it in-memory from the pre-swap sub + the swap result.
-			prospective := sub
-			prospective.CurrentBillingPeriodStart = &now
-			prospective.CurrentBillingPeriodEnd = &newPE
-			prospective.NextBillingAt = &newPE
-			prospective.BillingAnchorDay = swapAnchorDay
-			items := make([]domain.SubscriptionItem, len(sub.Items))
-			for i, it := range sub.Items {
-				if it.ID == itemID {
-					items[i] = updated
-				} else {
-					items[i] = it
-				}
+	if newTiming == domain.BillInAdvance && s.biller != nil {
+		// Build a prospective sub reflecting the swapped plan + new period:
+		// s.store.Get would NOT observe the uncommitted tx writes, so derive
+		// it in-memory from the pre-swap sub + the swap result.
+		prospective := sub
+		prospective.CurrentBillingPeriodStart = &now
+		prospective.CurrentBillingPeriodEnd = &newPE
+		prospective.NextBillingAt = &newPE
+		prospective.BillingAnchorDay = swapAnchorDay
+		items := make([]domain.SubscriptionItem, len(sub.Items))
+		for i, it := range sub.Items {
+			if it.ID == itemID {
+				items[i] = updated
+			} else {
+				items[i] = it
 			}
-			prospective.Items = items
+		}
+		prospective.Items = items
 
-			inv, ok, err := s.biller.BillOnCreateTx(ctx, tx, prospective)
-			if err != nil {
-				return ItemChangeResult{}, fmt.Errorf("plan-swap new in_advance bill: %w", err)
-			}
-			if ok {
-				invCopy := inv
-				res.crossAxisNewInvoice = &invCopy
-			}
+		inv, ok, err := s.biller.BillOnCreateTx(ctx, tx, prospective)
+		if err != nil {
+			return ItemChangeResult{}, fmt.Errorf("plan-swap new in_advance bill: %w", err)
 		}
-	} else {
-		// in_arrears: truncate the current period to (oldPS, now); the scheduler
-		// closes the partial period under the OLD plan via segment-aware billing.
-		if sub.CurrentBillingPeriodStart != nil {
-			if err := s.store.UpdateBillingCycleTx(ctx, tx, tenantID, subscriptionID, *sub.CurrentBillingPeriodStart, now, now, swapAnchorDay); err != nil {
-				return ItemChangeResult{}, err
-			}
+		if ok {
+			invCopy := inv
+			res.crossAxisNewInvoice = &invCopy
 		}
 	}
 	return res, nil
