@@ -103,6 +103,11 @@ jobs:
       # THIS step asks a different question — did any test's real writer
       # sequence leave data no legal writer should produce? Owner DSN on
       # purpose: an RLS-scoped role would make the sweep silently blind.
+      # The harness truncates at SETUP only (internal/testutil/db.go), so the
+      # rows this sweep sees are whatever the alphabetically-last DB package's
+      # last test left behind — today that residue is doctor-clean; a package
+      # sorting after internal/webhook, or a test seeding a doctor-visible
+      # inconsistency, changes what is examined here.
       - name: Money-invariant sweep (velox-doctor)
         run: go run ./cmd/velox-doctor
         env:
