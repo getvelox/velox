@@ -41,8 +41,10 @@ import (
 // structural branch is not optional.
 //
 // Two known bounds, deliberate rather than accidental: the structural branches
-// carry a 24h freshness window (anti-churn + no first-deploy re-reversal burst,
-// #310), so an orphan older than that is not recovered; and payment_unknown
+// carry a 24h freshness window (anti-churn, #310) that bounds DETECTION only —
+// cn_tax_reversal promotes a marker-less orphan onto its unbounded marker
+// branch on the first failed re-drive (2026-08-30), so an orphan is never aged
+// out of recovery, only out of the cheap scan; and payment_unknown
 // keys on a payment_status the CHARGE path must have stamped — a crash before
 // that stamp is recovered by the auto-charge retry's stable Stripe idempotency
 // key instead, not by this sweep.

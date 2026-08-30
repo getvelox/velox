@@ -16,12 +16,18 @@ type fakeTaxReverser struct {
 	calls    []tax.ReversalRequest
 	failWith error
 	returnID string
+	// emptyResult makes ReverseTax return an empty ReversalResult with no
+	// error — what Engine.ReverseTax returns when no provider resolves.
+	emptyResult bool
 }
 
 func (f *fakeTaxReverser) ReverseTax(_ context.Context, _ string, req tax.ReversalRequest) (*tax.ReversalResult, error) {
 	f.calls = append(f.calls, req)
 	if f.failWith != nil {
 		return nil, f.failWith
+	}
+	if f.emptyResult {
+		return &tax.ReversalResult{}, nil
 	}
 	id := f.returnID
 	if id == "" {
@@ -560,5 +566,126 @@ func TestRetryPendingCreditNoteTaxReversal_ClearsMarkerWhenActuallySet(t *testin
 	}
 	if got.TaxTransactionID != "tx_reversal_ok" {
 		t.Errorf("reversal tx id: got %q, want tx_reversal_ok", got.TaxTransactionID)
+	}
+}
+
+// --- HA-13 (2026-08-30): promote-on-failure ---
+
+func seedTaxOrphan(t *testing.T, store *memStore, pending bool) domain.CreditNote {
+	t.Helper()
+	cn, err := store.Create(context.Background(), "t1", domain.CreditNote{
+		InvoiceID: "inv_tax", CustomerID: "cus_1", Status: domain.CreditNoteIssued,
+		TotalCents: 5500, TaxReversalPending: pending, TaxTransactionID: "",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return cn
+}
+
+func taxInvoiceReader() *memInvoiceReader {
+	return &memInvoiceReader{invoices: map[string]domain.Invoice{
+		"inv_tax": {
+			ID: "inv_tax", TenantID: "t1", CustomerID: "cus_1",
+			Status: domain.InvoicePaid, PaymentStatus: domain.PaymentSucceeded,
+			Currency: "USD", SubtotalCents: 10000, TaxFacts: domain.TaxFacts{TaxAmountCents: 1000},
+			TotalAmountCents: 11000, AmountPaidCents: 11000, TaxTransactionID: "tx_upstream",
+		},
+	}}
+}
+
+// TestRetryPendingCreditNoteTaxReversal_PromotesMarkerlessOrphanOnFailure:
+// a marker-less orphan whose re-drive fails is promoted onto the unbounded
+// marker branch — one local write, no Stripe dependency — so a provider
+// outage longer than the 24h detection window can no longer age it out.
+// Mutation-verify: remove the promoteOrphan call in the error arm → marker
+// stays false, this fails.
+func TestRetryPendingCreditNoteTaxReversal_PromotesMarkerlessOrphanOnFailure(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	rev := &fakeTaxReverser{failWith: errors.New("stripe 503")}
+	svc := NewService(store, taxInvoiceReader(), &fakeRefunder{}, &fakeCreditGranter{})
+	svc.SetTaxReverser(rev)
+	cn := seedTaxOrphan(t, store, false)
+
+	n, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(context.Background(), 10)
+	if n != 0 || len(sweepErrs) != 1 {
+		t.Fatalf("reversed=%d errs=%v, want 0 reversed and exactly the re-drive error", n, sweepErrs)
+	}
+	got, _ := store.Get(context.Background(), "t1", cn.ID)
+	if !got.TaxReversalPending {
+		t.Fatal("orphan was not promoted to tax_reversal_pending on its first failed re-drive")
+	}
+	if got.TaxTransactionID != "" || len(rev.calls) != 1 || store.setPendingCalls != 1 {
+		t.Fatalf("tx=%q calls=%d setPending=%d", got.TaxTransactionID, len(rev.calls), store.setPendingCalls)
+	}
+}
+
+// A row that already carries the marker is never re-written on repeated
+// failure (the real store bumps updated_at on every write).
+func TestRetryPendingCreditNoteTaxReversal_RepeatedFailureDoesNotRewriteMarker(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	rev := &fakeTaxReverser{failWith: errors.New("stripe 503")}
+	svc := NewService(store, taxInvoiceReader(), &fakeRefunder{}, &fakeCreditGranter{})
+	svc.SetTaxReverser(rev)
+	seedTaxOrphan(t, store, true)
+
+	if _, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(context.Background(), 10); len(sweepErrs) != 1 {
+		t.Fatalf("errs=%v, want exactly the re-drive error", sweepErrs)
+	}
+	if store.setPendingCalls != 0 {
+		t.Fatalf("SetTaxReversalPending writes: %d, want 0 — a set marker must not be refreshed", store.setPendingCalls)
+	}
+}
+
+// A failed promote write is reported (two errors) and the row stays on the
+// structural branch for the next tick.
+func TestRetryPendingCreditNoteTaxReversal_PromoteWriteFailureIsReported(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	store.setPendingErr = errors.New("db: connection reset")
+	rev := &fakeTaxReverser{failWith: errors.New("stripe 503")}
+	svc := NewService(store, taxInvoiceReader(), &fakeRefunder{}, &fakeCreditGranter{})
+	svc.SetTaxReverser(rev)
+	cn := seedTaxOrphan(t, store, false)
+
+	_, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(context.Background(), 10)
+	if len(sweepErrs) != 2 {
+		t.Fatalf("errs=%v, want the re-drive error AND the promote error", sweepErrs)
+	}
+	if got, _ := store.Get(context.Background(), "t1", cn.ID); got.TaxReversalPending {
+		t.Fatal("marker must stay false when the promote write failed")
+	}
+}
+
+// An empty reversal result on a TAX-BEARING invoice (the engine resolved
+// no provider) is a failure, not a success: the marker is never cleared,
+// the row is not counted reversed, and it is promoted. Before 2026-08-30 this
+// path cleared the marker and reported advanced=1 — undoing the promotion.
+func TestRetryPendingCreditNoteTaxReversal_EmptyResultOnTaxBearingInvoiceIsFailure(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	rev := &fakeTaxReverser{emptyResult: true} // provider returned no transaction
+	svc := NewService(store, taxInvoiceReader(), &fakeRefunder{}, &fakeCreditGranter{})
+	svc.SetTaxReverser(rev)
+	cnPending := seedTaxOrphan(t, store, true)
+	cnOrphan := seedTaxOrphan(t, store, false)
+
+	n, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(context.Background(), 10)
+	if n != 0 {
+		t.Fatalf("reversed=%d, want 0 — an empty result reversed nothing", n)
+	}
+	if len(sweepErrs) != 2 {
+		t.Fatalf("errs=%v, want one per row", sweepErrs)
+	}
+	for _, id := range []string{cnPending.ID, cnOrphan.ID} {
+		got, _ := store.Get(context.Background(), "t1", id)
+		if !got.TaxReversalPending {
+			t.Errorf("%s: marker must be true after an empty-result re-drive (was it cleared, or never promoted?)", id)
+		}
+		if got.TaxTransactionID != "" {
+			t.Errorf("%s: no transaction must be stamped", id)
+		}
 	}
 }
