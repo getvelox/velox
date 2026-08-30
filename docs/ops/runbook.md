@@ -106,7 +106,10 @@ curl -s http://localhost:8080/health/ready
    `cmd/velox/main.go`) and is not env-configurable today. A
    hot-spotting tenant (one tenant dominating the batch) is drained
    on demand with `POST /v1/billing/run` (per tenant, loops until empty)
-   rather than by shrinking the batch.
+   rather than by shrinking the batch. Safe to run while the leader's tick
+   is in flight (ADR-115): a drain may report 0 for a subscription the
+   leader is committing at that instant — the leader's commit bills it,
+   and the two can never both bill a period.
 
 ### 2. Email outbox backed up
 
@@ -457,7 +460,10 @@ the scheduler ticks every **1 hour** in staging/production and **5
 minutes** only when `APP_ENV=local`, and processes a fixed **50 subs per
 tick** (`cmd/velox/main.go`). A tenant with a backlog is drained on
 demand via `POST /v1/billing/run` (loops until that tenant is empty)
-rather than by tuning these knobs.
+rather than by tuning these knobs. A drain running under the leader's
+tick may report 0 for a subscription the leader is committing at that
+instant (its due fetch skips locked rows); the leader's commit bills it
+(ADR-115).
 
 Watch `velox_billing_cycle_duration_seconds` to ensure each tick fits
 inside the interval. If a tick runs long, the leader lease (ADR-114 — one

@@ -99,9 +99,15 @@ closed hazard); operator-path methods (`RunCycleForTenant`, replay). The one
 named non-CAS effect-firer reachable from a leader tick —
 `ClearPauseCollection` → `subscription.collection_resumed` — becomes a CAS in
 PR-B (the clear reports whether it changed the row; the event fires only if
-it did), and the subscription watermark writer gains a monotonic guard
-(`UpdateBillingCycleTx … AND next_billing_at < $new`) — the one unguarded
-writer a resumed stale leader could still reach with in-memory work.
+it did), and the subscription period writer is guarded against a resumed
+stale leader's in-memory work. *(Amended 2026-08-30, ADR-115: the monotonic
+guard this sentence first named — `UpdateBillingCycleTx … AND next_billing_at
+< $new` — never shipped and would have been wrong: a plan swap and a
+threshold reset truncate a period, moving the watermark backward on purpose.
+Every period writer now proves the (status, period start, watermark)
+snapshot it read, in the first statement of the transaction that also
+inserts the invoice; a truncation from a fresh snapshot is accepted, any
+write from a stale one is refused.)*
 
 ### Runtime (`internal/platform/leader`, hand-built, ~200 LOC)
 
@@ -239,7 +245,7 @@ superseded leader from firing it twice. Enumerated from
 | `dunning.*` webhooks, warning/escalation emails, timeline rows | `dunning/service.go` (`fireEvent` callers at :398/:1028/:1269; emails :1476/:1505) | every transition is `UpdateRunIfActive(run) (applied bool)` and the effect fires only when `applied` (:621,:764,:968,:992); the one `_`-ignored call (:652) is the transient-skip **rewind**, which fires nothing |
 | `payment.failed` email + `payment_setup_request` email from the auto-charge sweep | `billing/engine.go` collect legs | per-invoice `ClaimAutoCharge` lease (m0141) + the `NoPMNotifiedAt` marker |
 | `subscription.collection_resumed` webhook + audit | `subscription/service.go` `ProcessExpiredPauseCollections[ForClock]` | **was unguarded — fixed in PR-B:** `ClearPauseCollection` is now a CAS (`AND pause_collection_behavior IS NOT NULL`); `ErrNotPaused` → the schedule paths announce nothing, the operator path returns the row unchanged |
-| billing-cycle watermark write | `billing/engine.go` `advanceCycleOrCancel`, `handleTrialState` | **was unguarded — fixed in PR-B:** `AdvanceBillingCycle` is a CAS on the watermark the tick read (`next_billing_at IS NOT DISTINCT FROM $expected`); `ErrWatermarkMoved` → logged no-op. Plan swaps and threshold resets keep the unguarded variant on purpose: they truncate periods (move the watermark backward) |
+| billing-cycle period write | `billing/engine.go` `commitPeriodClose`, `handleTrialState`; `billing/threshold_scan.go` `fireThreshold`; `subscription/service.go` `applyCrossIntervalPlanSwapTx` | **was unguarded — fixed in PR-B, superseded by ADR-115 (2026-08-30):** every period writer runs `ClosePeriodTx`, one UPDATE that row-locks the subscription and proves the (status, period start, watermark) snapshot the writer read, as the FIRST statement of the transaction that also inserts its invoice. Plan swaps and threshold resets go through the same CAS — they truncate from a fresh snapshot, which the CAS accepts; a stale write is refused. `ErrWatermarkMoved` → the loser wrote nothing (the engine re-reads once; the swap returns 409 `subscription_period_moved`) |
 | Stripe calls from reconcilers (tax retry/reversal, payment_unknown, refunds) | `billing/tax_retry.go`, `creditnote/service.go`, `payment/reconciler.go` | idempotency keys per object (`velox_tax_rev_<cn>`, `inv_taxrev_<inv>`, attempt-sequence PI keys) + CAS marks; Stripe dedups the second call |
 | audit rows | everywhere | evidence, not money; a duplicate row is noise the reader tolerates — deliberately not gated |
 
@@ -247,6 +253,7 @@ Verdict: after PR-B no effect reachable from a leader tick fires without a
 conditional write in front of it. Hazard 5 reads CLOSED in the HA-readiness
 doc from this PR. The two fixes are pinned by real-Postgres tests
 (`TestClearPauseCollection_CASOneWinner` — 20 racing clearers, exactly one
-winner; `TestAdvanceBillingCycle_StaleWatermarkIsNoOp`) and by service/engine
-unit tests, each mutation-verified.
+winner; `TestClosePeriodTx_CASOneWinner`, which replaced
+`TestAdvanceBillingCycle_StaleWatermarkIsNoOp` at ADR-115) and by
+service/engine unit tests, each mutation-verified.
 
