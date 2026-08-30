@@ -24,7 +24,6 @@ type Store interface {
 	// lifetime idempotency check.
 	GetRunByInvoice(ctx context.Context, tenantID, invoiceID string) (domain.InvoiceDunningRun, error)
 	ListRuns(ctx context.Context, filter RunListFilter) ([]domain.InvoiceDunningRun, int, error)
-	UpdateRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error)
 	// ResolveRun is the exactly-once resolve transition: it flips the run to its
 	// resolved fields ONLY if it is not already resolved (CAS on
 	// `state <> 'resolved'`) and reports whether THIS call won the transition.
@@ -39,7 +38,7 @@ type Store interface {
 	// persist and the transient-skip rewind) use it so a concurrent card-settle
 	// webhook resolve landing during the up-to-15s charge window is never clobbered
 	// back to active — preserving the exactly-once dunning.resolved contract.
-	UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (bool, error)
+	UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int) (bool, error)
 	ListDueRuns(ctx context.Context, tenantID string, dueBefore time.Time, limit int) ([]domain.InvoiceDunningRun, error)
 
 	// ListDueRunsForClock is the catchup-path counterpart to ListDueRuns.

@@ -618,10 +618,15 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 	// actually happened. Guarded on state <> 'resolved': if a concurrent settle
 	// resolved this run between the paid-pre-check above and here, don't clobber it
 	// back to active — and don't charge an already-resolved run — just stop.
-	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run); err != nil {
+	// expected = the count this tick READ (the increment above is ours to
+	// prove). applied=false now covers two causes with one skip: resolved
+	// concurrently, or another processor already recorded an attempt this
+	// tick's read predates — charging on a stale read would burn budget
+	// dishonestly (ha-8).
+	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount-1); err != nil {
 		return fmt.Errorf("persist dunning attempt before retry: %w", err)
 	} else if !applied {
-		slog.Info("dunning retry skipped — run resolved concurrently before the charge",
+		slog.Info("dunning retry skipped — run resolved or attempt recorded by another processor",
 			"run_id", run.ID, "invoice_id", run.InvoiceID)
 		return nil
 	}
@@ -649,7 +654,7 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		// A failed rewind on a still-active run leaves the count one high — the SAFE
 		// direction: the exhaustion gate uses `>=`, so an over-count can only end a
 		// retry cycle early, never over-retry.
-		if _, err := s.store.UpdateRunIfActive(ctx, tenantID, run); err != nil {
+		if _, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount+1); err != nil {
 			slog.Warn("dunning transient-skip: failed to rewind the pre-charge attempt persist",
 				"run_id", run.ID, "invoice_id", run.InvoiceID, "error", err)
 		}
@@ -761,7 +766,7 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		run.NextActionAt = nil
 	}
 
-	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run); err != nil {
+	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount); err != nil {
 		return err
 	} else if !applied {
 		// Concurrently resolved during the failed-charge window (a non-charge settle
@@ -965,7 +970,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		// Guarded: a settle may have resolved this run during the failed terminal
 		// action. Don't clobber that resolve back to active — the invoice is paid,
 		// so resolved is the correct terminal state and no re-attempt is needed.
-		if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run); err != nil {
+		if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount); err != nil {
 			return err
 		} else if !applied {
 			slog.Info("dunning terminal action failed but run resolved concurrently — leaving it resolved",
@@ -989,7 +994,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 	// contradictory dunning.escalated on top of the settle's dunning.resolved.
 	// The timeline row, escalation email, and webhook below fire only when THIS
 	// call actually escalated the run.
-	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run); err != nil {
+	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount); err != nil {
 		return err
 	} else if !applied {
 		slog.Info("dunning exhaust: run resolved concurrently during the terminal action — not escalating",

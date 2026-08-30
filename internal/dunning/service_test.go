@@ -174,11 +174,6 @@ func (m *memStore) ListRuns(_ context.Context, filter RunListFilter) ([]domain.I
 	return result, len(result), nil
 }
 
-func (m *memStore) UpdateRun(_ context.Context, _ string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error) {
-	m.runs[run.ID] = run
-	return run, nil
-}
-
 // ResolveRun mirrors the store's CAS: apply the resolved fields only if the row is
 // not already resolved, and report whether this call won the transition.
 func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDunningRun) (bool, error) {
@@ -191,8 +186,15 @@ func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDun
 
 // UpdateRunIfActive mirrors the guarded update: apply the run's fields only if the row
 // is not already resolved, and report whether it applied.
-func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.InvoiceDunningRun) (bool, error) {
-	if existing, ok := m.runs[run.ID]; ok && existing.State == domain.DunningResolved {
+// UpdateRunIfActive mirrors the REAL store's full predicate — state guard AND
+// attempt-count CAS — rather than stubbing "true": a fake that always applies
+// would keep every stale-processor test green forever (fake-fidelity rule).
+func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.InvoiceDunningRun, expectedAttempts int) (bool, error) {
+	existing, ok := m.runs[run.ID]
+	if ok && existing.State == domain.DunningResolved {
+		return false, nil
+	}
+	if ok && existing.AttemptCount != expectedAttempts {
 		return false, nil
 	}
 	m.runs[run.ID] = run

@@ -470,32 +470,6 @@ func (s *PostgresStore) ListRuns(ctx context.Context, filter RunListFilter) ([]d
 	return runs, total, rows.Err()
 }
 
-func (s *PostgresStore) UpdateRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error) {
-	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
-	if err != nil {
-		return domain.InvoiceDunningRun{}, err
-	}
-	defer postgres.Rollback(tx)
-
-	now := clock.Now(ctx)
-	_, err = tx.ExecContext(ctx, `
-		UPDATE invoice_dunning_runs SET state=$1, reason=$2, attempt_count=$3,
-			last_attempt_at=$4, next_action_at=$5, paused=$6, resolved_at=$7, resolution=$8, updated_at=$9
-		WHERE id=$10`,
-		run.State, postgres.NullableString(run.Reason), run.AttemptCount,
-		postgres.NullableTime(run.LastAttemptAt), postgres.NullableTime(run.NextActionAt),
-		run.Paused, postgres.NullableTime(run.ResolvedAt), postgres.NullableString(string(run.Resolution)),
-		now, run.ID)
-	if err != nil {
-		return domain.InvoiceDunningRun{}, err
-	}
-	run.UpdatedAt = now
-	if err := tx.Commit(); err != nil {
-		return domain.InvoiceDunningRun{}, err
-	}
-	return run, nil
-}
-
 // ResolveRun applies the run's resolved fields as a CAS — only when the row is not
 // already 'resolved' — and returns whether THIS call won the transition. Same field
 // set as UpdateRun plus the `state <> 'resolved'` guard; the RowsAffected==1 result
@@ -529,10 +503,19 @@ func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run dom
 	return n == 1, nil
 }
 
-// UpdateRunIfActive is UpdateRun guarded on `state <> 'resolved'` — it applies the
-// run's fields only when the row has not been concurrently resolved, returning
-// whether it applied. See the Store interface doc-comment.
-func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (bool, error) {
+// UpdateRunIfActive applies the run's fields only when the row has not been
+// concurrently resolved AND still carries the attempt_count the caller's write
+// was derived from (ha-8, 2026-08-31). The state guard alone left the COUNT a
+// blind read-modify-write: two processors of one run — a superseded-but-running
+// dunning tick beside the new leader's (the ADR-114 frozen-process window;
+// ListDueRuns' claim tx is rolled back before processing, so rows are not
+// leased) — both read N, both wrote N+1, and the charge-lease loser's rewind
+// then clobbered the winner's recorded attempt back to N: one charge burned
+// zero budget, and a tenant's MaxRetryAttempts over-ran by one charge per
+// overlap. The money itself was never double-charged (ClaimChargeForDunningRetry
+// is the per-invoice charge lease); the CAS makes the BOOKKEEPING honest, and
+// email-money-in-tx builds on it.
+func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return false, err
@@ -543,11 +526,11 @@ func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoice_dunning_runs SET state=$1, reason=$2, attempt_count=$3,
 			last_attempt_at=$4, next_action_at=$5, paused=$6, resolved_at=$7, resolution=$8, updated_at=$9
-		WHERE id=$10 AND state <> 'resolved'`,
+		WHERE id=$10 AND state <> 'resolved' AND attempt_count = $11`,
 		run.State, postgres.NullableString(run.Reason), run.AttemptCount,
 		postgres.NullableTime(run.LastAttemptAt), postgres.NullableTime(run.NextActionAt),
 		run.Paused, postgres.NullableTime(run.ResolvedAt), postgres.NullableString(string(run.Resolution)),
-		now, run.ID)
+		now, run.ID, expectedAttempts)
 	if err != nil {
 		return false, err
 	}
