@@ -148,6 +148,7 @@ messages + CHANGELOG.md, not here.
 | [111](111-a-write-off-has-no-tax-leg.md) | 2026-08-05 | Accepted | A write-off has no tax leg |
 | [112](112-dunning-exhaustion-settles-two-questions.md) | 2026-08-05 | Accepted | Dunning exhaustion settles two questions, not one |
 | [113](113-nothing-charges-a-written-off-invoice.md) | 2026-08-06 | Accepted | Nothing charges a written-off invoice — recording writers only; recovery runs on normal rails |
+| [114](114-leader-leases-tick-scoped-fencing.md) | 2026-08-30 | Proposed (Accepted at cutover, PR-D) | Leader election is a row, not a session — tick-scoped `leader_leases` with fencing tokens proven in the five claim funnels; pooler-safe by construction; advisory-lock gate + topology prober retired |
 
 > ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
 > across every ref). It is a skipped number, not a lost decision.
