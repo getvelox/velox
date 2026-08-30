@@ -86,6 +86,12 @@ func FrameFromEvent(e domain.WebhookEvent, status string, lastAttemptAt *time.Ti
 type EventBus struct {
 	mu          sync.RWMutex
 	subscribers map[string]map[*subscription]struct{} // tenant_id → set
+	// closed is set by CloseAll on shutdown: every subscriber channel is
+	// closed (the SSE loop exits on a closed frames channel, so
+	// http.Server.Shutdown's idle-connection wait completes in ms instead
+	// of the full 30s drain) and a Subscribe that races shutdown gets an
+	// already-closed channel instead of re-arming the wait.
+	closed bool
 }
 
 // NewEventBus returns an empty in-memory bus. Single instance per
@@ -114,6 +120,11 @@ func (b *EventBus) Subscribe(tenantID string) (<-chan StreamFrame, func()) {
 	sub := &subscription{ch: make(chan StreamFrame, 32)}
 
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		close(sub.ch)
+		return sub.ch, func() {}
+	}
 	if b.subscribers[tenantID] == nil {
 		b.subscribers[tenantID] = make(map[*subscription]struct{})
 	}
@@ -156,5 +167,27 @@ func (b *EventBus) Publish(tenantID string, frame StreamFrame) {
 			// reconnect will pick up the missing event when their UI
 			// re-establishes the EventSource connection.
 		}
+	}
+}
+
+// CloseAll closes every subscriber channel and marks the bus closed.
+// Wired via http.Server.RegisterOnShutdown in cmd/velox/main.go: Shutdown
+// never cancels request contexts and waits for connections to go idle,
+// and the SSE handler (sse.go) only returns when its frames channel
+// closes — without this, every deploy with a dashboard tab on Webhook
+// Events held the HTTP drain open for its full 30s bound. EventSource
+// clients reconnect to a live replica on their own. Idempotent.
+func (b *EventBus) CloseAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.closed = true
+	for tenantID, set := range b.subscribers {
+		for sub := range set {
+			close(sub.ch)
+		}
+		delete(b.subscribers, tenantID)
 	}
 }

@@ -251,6 +251,22 @@ func serve() {
 		MaxHeaderBytes:    1 << 13, // 8 KB
 	}
 
+	// Shutdown is a published three-stage budget — 90s worst case, typically
+	// under two seconds — and every stage's bound abandons only work that is
+	// designed to be resumed. Configure the orchestrator's grace period at
+	// 120s (deploy/README.md 'Rolling deploys and shutdown'; compose sets
+	// stop_grace_period). Docker's 10s default SIGKILLs mid-drain.
+	const (
+		shutdownHTTPDrain   = 30 * time.Second // stage 1: in-flight requests
+		shutdownCatchupWait = 30 * time.Second // stage 2: an in-flight test-clock advance
+		shutdownWorkerDrain = 30 * time.Second // stage 3: scheduler + dispatcher ticks
+	)
+
+	// Stage 0: the moment Shutdown is called, close every SSE subscriber so
+	// the dashboard's live tail does not hold the HTTP drain open for its
+	// full 30s bound (see EventBus.CloseAll).
+	srv.RegisterOnShutdown(server.WebhookOutSvc.EventBus().CloseAll)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -317,31 +333,49 @@ func serve() {
 	}()
 
 	<-ctx.Done()
-	slog.Info("shutting down — draining workers and in-flight requests")
+	slog.Info("shutting down — announcing drain, then draining workers and in-flight requests",
+		"drain_delay", cfg.ShutdownDrainDelay)
 
-	// Stop accepting new HTTP requests first, then drain in-flight ones.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Readiness-first: /health/ready answers 503 'draining' from now on
+	// while /health (liveness) stays 200, so a health-check-driven load
+	// balancer stops routing to this replica BEFORE the listener closes —
+	// otherwise every rolling deploy ends with connection resets on the
+	// draining replica. Keep listening for the configured delay so the
+	// balancer's probes observe the 503 (orchestrator-driven removal, e.g.
+	// Kubernetes endpoints, is immediate — the delay just covers the
+	// health-check path). 0 in local.
+	api.SetDraining()
+	if cfg.ShutdownDrainDelay > 0 {
+		time.Sleep(cfg.ShutdownDrainDelay)
+	}
+
+	// Stage 1 (≤ 30s): stop accepting new HTTP requests, drain in-flight
+	// ones. RegisterOnShutdown above closes the SSE subscribers first, so
+	// an open live tail no longer pins this stage to its bound.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownHTTPDrain)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("http shutdown error", "error", err)
 	}
 
-	// Stop the test-clock catchup worker. Catchup deliberately runs on
+	// Stage 2 (≤ 30s): the test-clock catch-up worker. Catch-up runs on
 	// context.Background() (an in-flight advance must not be cut short
-	// mid-write), so parent-ctx cancellation does NOT propagate into it;
-	// Stop() just WAITS up to CatchupTimeout (10min) for the in-flight
-	// advance. Deployment grace periods shorter than that (K8s default
-	// 30s) SIGKILL mid-catchup — designed-for: the clock stays
-	// 'advancing' and boot-time recovery resumes it. See
-	// docs/dev/ha-readiness-2026-07-06.md (shutdown mechanics).
-	if !catchupWorker.Stop(testclock.CatchupTimeout) {
-		slog.Warn("test-clock catchup worker did not drain within timeout")
+	// mid-write), so cancellation does not reach it; Stop waits up to
+	// shutdownCatchupWait for the in-flight advance — typical advances
+	// finish in seconds — then abandons it. An abandoned advance leaves the
+	// clock 'advancing' and resumes from durable state on the next boot's
+	// RecoverInFlight; nothing is lost, only delayed. (Was CatchupTimeout =
+	// 10 min, which blew every orchestrator grace period.)
+	if !catchupWorker.Stop(shutdownCatchupWait) {
+		slog.Warn("test-clock catchup worker still busy — abandoning the in-flight advance; it resumes on the next boot")
 	}
 
-	// Wait for scheduler + webhook worker to return. Both exit cleanly when
-	// their context (ctx above, now cancelled) is done, but a mid-tick run
-	// might still be completing. Bound the wait so a hung worker doesn't
-	// prevent exit indefinitely.
+	// Stage 3 (≤ 30s): scheduler + dispatchers. Their ticks run on ctx
+	// (cancelled above) and abort atomically at their next DB call; this
+	// wait exists for the WithoutCancel completions — a Stripe charge
+	// bounded by the 30s client timeout, an outbox row's detached mark —
+	// so a mid-tick run lands its result instead of leaving a claimed row
+	// for the lease to expire. Bounded so a hung worker cannot prevent exit.
 	done := make(chan struct{})
 	go func() {
 		workers.Wait()
@@ -350,8 +384,8 @@ func serve() {
 	select {
 	case <-done:
 		slog.Info("workers drained cleanly")
-	case <-time.After(30 * time.Second):
-		slog.Warn("workers did not drain within timeout — forcing exit")
+	case <-time.After(shutdownWorkerDrain):
+		slog.Warn("workers did not drain within the budget — forcing exit; claimed rows resume via their leases")
 	}
 }
 

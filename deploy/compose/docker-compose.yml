@@ -54,6 +54,10 @@ services:
       retries: 10
 
   velox-api:
+    # Shutdown budget is 90s worst case (HTTP drain 30s → test-clock
+    # catch-up 30s → worker drain 30s), typically under 2s. Docker's 10s
+    # default SIGKILLs mid-drain.
+    stop_grace_period: 120s
     # Buildable locally as well as pullable. Without the build stanza this
     # service could ONLY come from the registry, and ghcr.io/getvelox/velox
     # is not anonymously readable (an unauthenticated manifest fetch returns

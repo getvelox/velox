@@ -181,9 +181,10 @@ func (w *CatchupWorker) process(job CatchupJob) {
 	)
 }
 
-// Stop signals the worker to exit and waits up to CatchupTimeout
-// for any in-flight job to finish. Returns true if the worker
-// stopped cleanly, false on timeout.
+// Stop signals the worker to exit and waits up to deadline for any
+// in-flight job to finish. Returns true if the worker stopped cleanly,
+// false on timeout — an abandoned advance leaves the clock 'advancing'
+// and resumes from durable state on the next boot's RecoverInFlight.
 func (w *CatchupWorker) Stop(deadline time.Duration) bool {
 	close(w.stopCh)
 	select {

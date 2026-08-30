@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -59,7 +60,20 @@ var (
 	schedulerInterval time.Duration
 
 	registerQueueGaugesOnce sync.Once
+
+	// draining flips /health/ready to 503 {"status":"draining"} on SIGTERM
+	// while /health (liveness) stays 200, so a load balancer stops routing
+	// to this replica before it stops listening and an orchestrator does
+	// not kill it early. Set once by SetDraining; never cleared — the
+	// process is exiting.
+	draining atomic.Bool
 )
+
+// SetDraining announces shutdown: readiness answers 503 from now on.
+func SetDraining() { draining.Store(true) }
+
+// resetDrainingForTest is test-only.
+func resetDrainingForTest() { draining.Store(false) }
 
 // RecordSchedulerRun is called by the billing scheduler after each cycle
 // so the health check can determine whether the scheduler is alive.
@@ -1701,6 +1715,17 @@ func handleDeepHealth(db *postgres.DB) http.HandlerFunc {
 
 		overallStatus := "ok"
 		checks := map[string]string{"api": "ok"}
+
+		// Draining: the replica is shutting down. Readiness-first so the
+		// balancer drains us before the listener closes (cmd/velox/main.go).
+		if draining.Load() {
+			checks["api"] = "draining"
+			respond.JSON(w, r, http.StatusServiceUnavailable, map[string]any{
+				"status": "draining",
+				"checks": checks,
+			})
+			return
+		}
 
 		// Database check
 		if err := db.Pool.PingContext(ctx); err != nil {
