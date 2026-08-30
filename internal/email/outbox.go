@@ -13,9 +13,11 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 )
 
-// OutboxRow is a single queued outbound-email intent. Produced inside the
-// business-op transaction (or standalone when no tx is available), drained
-// by the dispatcher.
+// OutboxRow is a single queued outbound-email intent. Today every
+// production site produces it POST-COMMIT via EnqueueStandalone (its own
+// transaction after the business transaction commits); Enqueue(ctx, tx) is
+// the in-tx primitive the money emails move onto (ADR-040 amendment
+// 2026-08-30). Drained by the dispatcher.
 type OutboxRow struct {
 	ID            string
 	TenantID      string
@@ -182,6 +184,9 @@ func NewOutboxStore(db *postgres.DB) *OutboxStore {
 // a business-op store method so the email is persisted atomically with the
 // state change — if the tx rolls back, no email is sent; if it commits, the
 // dispatcher will eventually deliver.
+// Sole production caller today is EnqueueStandalone (post-commit); the
+// rollback/commit semantics are pinned by outbox_integration_test.go. The
+// money emails move onto this in-tx path per ADR-040's 2026-08-30 amendment.
 func (s *OutboxStore) Enqueue(ctx context.Context, tx *sql.Tx, tenantID, emailType string, payload map[string]any) (string, error) {
 	if tenantID == "" {
 		return "", fmt.Errorf("email outbox: tenant_id required")

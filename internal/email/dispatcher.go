@@ -111,8 +111,8 @@ func (d *Dispatcher) Start(ctx context.Context) {
 }
 
 // tick drains one batch. Errors are logged and swallowed — the next tick will
-// retry. A per-tick timeout ensures a stuck handler can't hold row locks
-// indefinitely if the dispatcher ctx is long-lived.
+// retry. The per-tick timeout bounds a tick so leased rows are re-claimable
+// on schedule (no row locks are held across a batch post-ADR-072).
 func (d *Dispatcher) tick(ctx context.Context) {
 	batchCtx, cancel := context.WithTimeout(ctx, d.cfg.BatchTimeout)
 	defer cancel()

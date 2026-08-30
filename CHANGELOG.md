@@ -22,6 +22,8 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Changed
 
+- **Outbox docs now say what the code does (2026-08-30).** The email outbox was described as transactional; it never was — every producer enqueues after the business transaction commits (ADR-040 amended; the money emails move in-tx in the next PR of the HA program). ADR-072 claimed a 30-day retention that nothing implements (amended: dispatched email rows are the delivery record and persist; the token-URL fix is a payload scrub, not deletion). The Postgres sizing table stopped prescribing a prune that would delete the invoice-email delivery record, and its `webhook_events` row was corrected — that table is Velox's *outbound* log, not Stripe inbound (`stripe_webhook_events` is). Dispatcher comments no longer claim row locks are held across a batch.
+
 - **Production refuses to boot without a reachable Redis (2026-08-30).** With two or more replicas, one that cannot reach Redis used to start green and answer `429 rate_limited` to its share of every dashboard, export and hosted-invoice request — the general and hosted-invoice limiters fail closed without Redis, `/health/ready` never looked at Redis, and the config message said rate limiting would "fail open", the opposite of what happened. `APP_ENV=production` now refuses to start when `REDIS_URL` is unset (config) or the server is invalid/unreachable (a 5-second ping at boot); other environments warn and run fail-open as before. `APP_ENV` is case-normalised. Readiness deliberately still does not check Redis: a post-boot outage should fail the affected requests, not pull the replica from the balancer.
 
 - **Supported production posture is now multi-replica (2026-08-30).** N ≥ 2 `velox-api` replicas behind a load balancer on managed Postgres (failover + PITR) with managed Redis is the design assumption; single-instance remains a supported size, not the premise. The HA-readiness plan of record, `docs/self-host.md`, and the README's deferred list say so, and say honestly what has not changed yet: until the leader-lease arc replaces the session-advisory-lock gate, transaction-mode poolers remain unsupported. Docs only — the code changes follow, each in its own PR.
@@ -43,7 +45,7 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 - **A single API key could not exceed ~570 requests/s on any hardware (#818).** Every request rewrote `api_keys.last_used_at` on the same row; the row lock was the ceiling. It is now written at most once per key per minute, exactly-once under a concurrent burst. Verified on the rig: 6,000 ev/s at batch 10 went from "not held" to p99 18 ms; 12,000 ev/s (1,200 req/s) sustained at p99 22.6 ms.
 - **The manual tax provider silently misapportioned when given a negative line amount** (line taxes did not sum to the total; one line negative). It now returns an error; the only caller already prevents the input (#556).
 - **A billing leader whose host vanished could hold the scheduler lock for over two hours.** TCP keepalives on the advisory-lock connection; a severed link now releases in ~95 s (measured with `scripts/partition-drill.sh`).
-- **A replica silently changing leadership left no trace at the default log level.** Leadership transitions log at INFO, once per transition.
+- **A replica silently changing leadership left no trace at the default log level.** Leadership transitions of the billing and dunning schedulers log at INFO, once per transition (the three outbox/retry loops gain the same in the scheduler.Gated refactor).
 
 ### Added
 
