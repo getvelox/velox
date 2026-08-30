@@ -575,9 +575,17 @@ func TestPauseCollection_Roundtrip(t *testing.T) {
 		t.Errorf("clear left pause_collection set: %+v", cleared.PauseCollection)
 	}
 
-	// 4. Clear again is idempotent — returns the unchanged sub.
-	if _, err := store.ClearPauseCollection(ctx, tenantID, subID); err != nil {
-		t.Fatalf("idempotent clear: %v", err)
+	// 4. Clear again is a CAS miss at the store (2026-08-30, HA hazard 5):
+	// nothing changed, so it reports ErrNotPaused instead of pretending it
+	// cleared — the schedule callers use that to announce nothing; the
+	// operator path (Service.ResumeCollection) stays idempotent by returning
+	// the row unchanged.
+	if _, err := store.ClearPauseCollection(ctx, tenantID, subID); !errors.Is(err, subscription.ErrNotPaused) {
+		t.Fatalf("second clear: got %v, want ErrNotPaused", err)
+	}
+	svc := subscription.NewService(store, nil)
+	if again, err := svc.ResumeCollection(ctx, tenantID, subID); err != nil || again.ID != subID || again.PauseCollection != nil {
+		t.Fatalf("operator resume on an unpaused sub must be an idempotent no-op: %+v %v", again.PauseCollection, err)
 	}
 
 	// 5. Set on a canceled sub is rejected.
