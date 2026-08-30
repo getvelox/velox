@@ -98,20 +98,39 @@ session-mode connection.
 A pooler in *session mode* gives each client one dedicated server
 connection for as long as the client stays connected; *transaction
 mode* hands each transaction to whichever server connection is free.
-**The Velox server is safe behind either** — PgBouncer session or
-transaction mode, RDS Proxy (which multiplexes at transaction
-granularity), or direct connections. Since ADR-114 every statement the
-server issues is self-contained: tenant isolation is set per
-transaction (`SET LOCAL app.tenant_id`), and the singleton roles —
-billing, dunning, the two outbox dispatchers, webhook delivery retry;
-each must run on exactly one replica at a time — take their leadership
-from a row in `leader_leases`, not from a database session. (Before
-ADR-114 leadership was a session-scoped advisory lock, which a
-transaction pooler silently strands; the boot-time topology probe that
-guarded against that is retired with it.) The `test-pgbouncer` CI job
-runs the whole integration suite with the app pool behind PgBouncer in
-transaction mode on every push (`scripts/pgbouncer-test.sh` runs the same
-thing locally), so a statement that assumes a session cannot land unnoticed.
+**The Velox server is safe behind PgBouncer in either mode, and behind a
+direct connection.** Since ADR-114 every statement the server issues is
+self-contained: tenant isolation is set per transaction
+(`set_config(.., true)` — reverts when the transaction ends), and the
+singleton roles — billing, dunning, the two outbox dispatchers, webhook
+delivery retry; each must run on exactly one replica at a time — take
+their leadership from a row in `leader_leases`, not from a database
+session. (Before ADR-114 leadership was a session-scoped advisory lock,
+which a transaction pooler silently strands; the boot-time topology probe
+that guarded against that is retired with it.) The `test-pgbouncer` CI
+job runs the whole integration suite with the app pool behind PgBouncer
+1.24 in transaction mode on every push (`scripts/pgbouncer-test.sh` runs
+the same thing locally), so a statement that assumes a session cannot
+land unnoticed.
+
+**One floor, stated plainly:** the Go driver (pgx) prepares and caches
+named statements on each connection by default. A transaction-mode pooler
+must therefore track protocol-level prepared statements — **PgBouncer ≥
+1.21 with `max_prepared_statements` > 0** (CI runs 200; the harness's
+negative control at 0 fails two thirds of statements with `prepared
+statement "stmtcache_…" does not exist`). Behind an older PgBouncer or a
+pooler without that feature, add `default_query_exec_mode=cache_describe`
+to `DATABASE_URL`/`APP_DATABASE_URL` (no named statements survive a
+transaction; a little more round-trip cost).
+
+**RDS Proxy: safe, multiplexing unverified.** Every tenant transaction
+issues `set_config`, and AWS lists `SET`/`set_config` as session-pinning
+triggers for PostgreSQL with no transaction-local carve-out — so expect
+the proxy to pin each client connection to a backend for its lifetime.
+That is correct (pinned means session semantics) but gives little pooling
+benefit: size the proxy for N × `DB_MAX_OPEN_CONNS` backends, and watch
+`DatabaseConnectionsCurrentlySessionPinned`. Nothing in this repository has
+run against a live RDS Proxy; treat it as unproven until it has.
 
 The one exception is **migrations**: `RUN_MIGRATIONS_ON_BOOT=true` and
 `velox-migrate` hold `pg_advisory_lock(76540007)` on a dedicated
@@ -147,8 +166,8 @@ was already in flight. Observe it with `SELECT * FROM leader_status;`,
 The rest of the stack is unremarkable:
 session GUCs (`app.tenant_id`, `app.bypass_rls`) are set with
 `set_config(.., true)` (transaction-scoped — the `true` makes the
-value revert when the transaction ends), and there are no
-session-lifetime prepared statements.
+value revert when the transaction ends). Prepared statements: see the
+pgx floor above — they exist, per connection, and the pooler must know.
 
 **Queries are not bounded by default.** Velox never sets a
 server-side `statement_timeout`, and `BeginTx` (the transaction-open

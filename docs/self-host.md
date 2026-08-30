@@ -5,10 +5,12 @@ deployment shape, Postgres requirements, environment variables, scaling, and
 observability. **Who it's for:** an engineer standing up or operating an
 install, whether new to this repo or checking one flag mid-deploy.
 
-Velox runs as a single Go binary against Postgres. The supported deployment
-shape today is Docker Compose on a single VM. A managed-Kubernetes path
-(Helm chart, multi-replica HA, Terraform-as-IaC) is not in v1; it lands
-when a design partner names which Kubernetes flavour they actually run.
+Velox runs as a single Go binary against Postgres. Two shapes: **Docker
+Compose on a single VM** — the reference and evaluation install described
+first below — and the **production posture, N ≥ 2 replicas behind a load
+balancer on managed Postgres and Redis** (decided 2026-08-30; see
+"Operating" below). Only the packaging for the second shape (Helm chart,
+Terraform) is deferred until a design partner names the flavour they run.
 
 ## Deploying (single-VM compose stack)
 

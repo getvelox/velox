@@ -68,6 +68,13 @@ gates inbound Stripe webhook signature verification.
 Wire your load balancer / ingress / probes to `/health/ready`. Both
 endpoints are exempt from rate limiting and audit logging.
 
+Behind a load balancer or ingress set **`TRUST_PROXY`** to the proxy's
+CIDR(s). Without it every request's client address is the balancer's, so
+the per-IP limits on the public pay pages (60/min) and on `/v1/auth`
+(100/min) become one bucket shared by every customer and every operator of
+the install. Production will refuse to boot without it once the guard lands
+(HA register sweep 2026-08-30, S3); set it now.
+
 ## Scaling
 
 - **Horizontal:** Multi-replica is safe on the money paths. Schedulers
@@ -95,13 +102,29 @@ endpoints are exempt from rate limiting and audit logging.
   local) so a health-check-driven balancer stops routing to it; then it
   drains in three bounded stages — in-flight HTTP (≤ 30s; the dashboard's
   live webhook tail is closed first so it cannot pin this stage), an
-  in-flight test-clock advance (≤ 30s, then abandoned and resumed at the
-  next boot), background workers (≤ 30s). Worst case 90s, typically under
+  in-flight test-clock advance (≤ 30s, then abandoned — the clock stays
+  `advancing` until some replica restarts, see the runbook's test-clock
+  section), background workers (≤ 30s). Worst case 90s, typically under
   2s. **Set the orchestrator's grace period to 120s** (Kubernetes
   `terminationGracePeriodSeconds: 120`; compose `stop_grace_period: 120s`,
   already set). Shorter grace SIGKILLs mid-drain, which is designed-for
-  (claimed outbox rows resume via their leases; a killed catch-up resumes at
-  boot) but costs bounded at-least-once duplicates.
+  (claimed outbox rows resume via their leases; a killed catch-up is
+  recovered by the next replica boot) but costs bounded at-least-once
+  duplicates.
+
+  **Size `SHUTDOWN_DRAIN_DELAY` to the balancer.** The draining replica
+  keeps listening for this long after flipping readiness, so it must be at
+  least the balancer's health-check interval × unhealthy threshold (an AWS
+  ALB's defaults are 30s × 2 = 60s; set `SHUTDOWN_DRAIN_DELAY=60s`). `0` is
+  fine when the orchestrator removes the endpoint itself (Kubernetes).
+
+  **Upgrading from ≤ v0.3.2** (the release before the leader-lease cutover,
+  #870): do this one rollout as stop-all-then-start (Kubernetes `Recreate`,
+  or `maxSurge: 0, maxUnavailable: 100%`), not rolling. An old binary still
+  takes the retired session advisory locks and a new one ignores them, so
+  a mixed fleet runs every singleton role twice for the length of the
+  rollout (money converges by the registered CAS guards; webhook events
+  can duplicate). Run migrations first as usual.
 - **Database:** Velox uses connection pooling (`DB_MAX_OPEN_CONNS`,
   default 20). When scaling replicas, ensure total connections across
   all instances don't exceed your PostgreSQL `max_connections`.

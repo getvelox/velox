@@ -269,8 +269,11 @@ sees Advancing badge stuck.
 - Billing-engine error mid-catchup; sub flipped to
   `internal_failure`.
 - A deploy abandoned an in-flight advance (shutdown waits 30s for it,
-  then exits); the clock stays `advancing` and resumes automatically on
-  the next boot's recovery — wait for the new replica, no action needed.
+  then exits); the clock stays `advancing` until **any replica
+  (re)starts** — recovery runs once at boot, never on a schedule. In a
+  rolling deploy the new replica has usually already booted, so nothing
+  will pick it up: restart one replica. (Program ha-9 makes recovery a
+  scheduled leader tick; until then this is the operator action.)
 
 **Diagnose**:
 ```sql

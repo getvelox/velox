@@ -76,9 +76,12 @@ unpause (an outbox drains, a billing cycle catches up on its next tick).
 A pause survives restarts — it is a row, not a process — so **unpause is
 part of the change**, and `velox_leader_paused` is the reminder.
 
-Do not edit `leader_leases` by hand beyond these two functions, and never
-delete its rows: the five roles are seeded by migration 0174 and a missing
-row is a role that never runs.
+Do not edit `leader_leases` by hand beyond these two functions. Deleting a
+row is harmless — the next poll's acquire recreates it with a fresh token
+(seeded from the clock so it lands above any token ever issued); the
+reason not to hand-edit is that the fence token and the pause state live
+in that row, and a hand-set token can make a running tick's claims
+silently return nothing.
 
 ## When a role looks stuck
 
