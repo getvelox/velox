@@ -61,7 +61,6 @@ func thresholdNoPMFixture() (*Engine, *mockInvoices, *recordingCharger, *fakeNoP
 	pms := &fakePaymentSetups{ready: false, stripeCustomerID: "cus_stripe_1"} // NO payment method
 
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, applier, &mockSettings{}, pms, charger, billingTestClock()))
-	engine.SetTxRunner(&fakeTxRunner{})
 	notifier := &fakeNoPMNotifier{}
 	engine.SetNoPaymentMethodNotifier(notifier)
 	return engine, invoices, charger, notifier

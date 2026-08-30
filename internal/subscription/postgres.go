@@ -463,23 +463,25 @@ func (s *PostgresStore) ClearScheduledCancellation(ctx context.Context, tenantID
 	return sub, nil
 }
 
-// FireScheduledCancellation transitions a subscription with a due cancel
-// schedule to canceled in one statement. Differs from CancelAtomic in that
-// (a) it accepts the engine's effectiveNow as the canceled_at timestamp so
-// the audit trail stays consistent under test clocks, and (b) it clears
-// the schedule fields so a subsequent cycle tick is a no-op rather than a
-// confusing re-fire attempt. Returns errs.ErrNotFound if the row vanished
-// or InvalidState if status was not active by the time the UPDATE ran (a
-// concurrent immediate-cancel API call winning the race).
-func (s *PostgresStore) FireScheduledCancellation(ctx context.Context, tenantID, id string, at time.Time) (domain.Subscription, error) {
-	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
-	if err != nil {
-		return domain.Subscription{}, err
-	}
-	defer postgres.Rollback(tx)
-
+// FireScheduledCancellationTx is the terminal cycle close (ADR-115): it runs
+// on the engine's closer tx, as its FIRST statement, so the final invoice the
+// engine inserts afterwards shares fate with the flip. Differs from
+// CancelAtomic in that (a) it accepts the engine's effectiveNow as the
+// canceled_at timestamp so the audit trail stays consistent under test
+// clocks, and (b) it clears the schedule fields so a subsequent cycle tick is
+// a no-op rather than a confusing re-fire attempt.
+//
+// The CAS proves `expected` (period start + watermark) as well as
+// status='active': a closer that planned this terminal close from a period
+// another writer has since moved (a threshold reset, a swap, a sibling
+// close) writes nothing. Zero rows disambiguate to ErrNotFound (row gone) or
+// ErrWatermarkMoved — ONE sentinel for "already canceled" and "period
+// moved", because in both cases the closer's snapshot is stale and it must
+// roll back and re-read; the engine's bounded retry then finds the sub
+// terminated (or re-plans against the new period).
+func (s *PostgresStore) FireScheduledCancellationTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected PeriodSnapshot, at time.Time) (domain.Subscription, error) {
 	var sub domain.Subscription
-	err = scanSubRow(tx.QueryRowContext(ctx, `
+	err := scanSubRow(tx.QueryRowContext(ctx, `
 		UPDATE subscriptions
 		SET status = 'canceled',
 		    canceled_at = $1,
@@ -487,19 +489,20 @@ func (s *PostgresStore) FireScheduledCancellation(ctx context.Context, tenantID,
 		    cancel_at_period_end = false,
 		    updated_at = $1
 		WHERE id = $2 AND status = 'active'
+		  AND current_billing_period_start IS NOT DISTINCT FROM $3
+		  AND next_billing_at              IS NOT DISTINCT FROM $4
 		RETURNING `+subCols,
-		at, id,
+		at, id, expected.Start, expected.Next,
 	), &sub)
 	if err == sql.ErrNoRows {
-		var currentStatus string
-		err2 := tx.QueryRowContext(ctx, `SELECT status FROM subscriptions WHERE id = $1`, id).Scan(&currentStatus)
-		if err2 == sql.ErrNoRows {
+		var exists bool
+		if e := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE id = $1)`, id).Scan(&exists); e != nil {
+			return domain.Subscription{}, e
+		}
+		if !exists {
 			return domain.Subscription{}, errs.ErrNotFound
 		}
-		if err2 != nil {
-			return domain.Subscription{}, err2
-		}
-		return domain.Subscription{}, errs.InvalidState(fmt.Sprintf("scheduled cancel cannot fire on %s subscription", currentStatus))
+		return domain.Subscription{}, ErrWatermarkMoved
 	}
 	if err != nil {
 		return domain.Subscription{}, err
@@ -523,11 +526,17 @@ func (s *PostgresStore) FireScheduledCancellation(ctx context.Context, tenantID,
 	}); err != nil {
 		return domain.Subscription{}, err
 	}
-
-	if err := tx.Commit(); err != nil {
-		return domain.Subscription{}, err
-	}
 	return sub, nil
+}
+
+// WithTenantTx runs fn inside one tenant-scoped transaction: commit when fn
+// returns nil, rollback otherwise. The store that owns the period state
+// machine owns the coordinator tx (the same ownership rule as
+// CancelAtomicWithBill): the billing engine's period closers open their tx
+// here, run ClosePeriodTx / FireScheduledCancellationTx as the first
+// statement, then hand the same *sql.Tx to the invoice and settings stores.
+func (s *PostgresStore) WithTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error {
+	return s.db.WithTenantTx(ctx, tenantID, fn)
 }
 
 // FireScheduledCancellationWithBill is the ADR-097 mid-period variant of
@@ -1428,49 +1437,43 @@ func (s *PostgresStore) ListExpiredPauseCollectionsForClock(ctx context.Context,
 	return subs, nil
 }
 
-// UpdateBillingCycle re-stamps the period boundaries, next_billing_at, and the
-// billing anchor day. Normal cycle close passes the sub's existing
-// BillingAnchorDay unchanged; the re-anchor paths (cross-interval plan swap,
-// threshold reset) pass the recomputed anchor day for the new "now" cadence
-// (ADR-055).
-func (s *PostgresStore) UpdateBillingCycle(ctx context.Context, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
-	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+// ClosePeriodTx is THE period writer (ADR-115). It X-locks the row — an
+// UPDATE of non-key columns takes FOR NO KEY UPDATE, and no period column is
+// in a unique index (0020's key is (tenant_id, livemode, code)) — and proves
+// the caller's PeriodSnapshot in the same statement: status, period start and
+// next_billing_at must still equal what the caller read. Under READ COMMITTED
+// a closer that blocks on another closer's lock re-evaluates this WHERE
+// against the row that other closer committed, so the loser sees 0 rows and
+// writes nothing; the engine and the swap roll their tx back before any
+// invoice exists.
+//
+// Normal cycle close passes the sub's existing BillingAnchorDay unchanged;
+// the re-anchor paths (cross-interval plan swap, threshold reset) pass the
+// recomputed anchor day for the new "now" cadence (ADR-055). A verify-only
+// caller (the reset=false threshold fire) passes the row's CURRENT values: it
+// must be an UPDATE, not SELECT … FOR UPDATE, so every closer shares one
+// statement, one lock mode and one test — FOR UPDATE would also take the
+// stronger lock that blocks the FK FOR KEY SHARE of unrelated invoice inserts.
+// tenantID is accepted for symmetry with the store's other *Tx methods; RLS
+// scoping rides the tx's tenant binding.
+func (s *PostgresStore) ClosePeriodTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE subscriptions
+		   SET current_billing_period_start = $1,
+		       current_billing_period_end   = $2,
+		       next_billing_at              = $3,
+		       billing_anchor_day           = $4,
+		       updated_at                   = $5
+		 WHERE id = $6
+		   AND status = $7
+		   AND current_billing_period_start IS NOT DISTINCT FROM $8
+		   AND next_billing_at              IS NOT DISTINCT FROM $9
+	`, periodStart, periodEnd, nextBillingAt, anchorDay, clock.Now(ctx), id,
+		string(expected.Status), expected.Start, expected.Next)
 	if err != nil {
 		return err
 	}
-	defer postgres.Rollback(tx)
-
-	if err := s.UpdateBillingCycleTx(ctx, tx, tenantID, id, periodStart, periodEnd, nextBillingAt, anchorDay); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// AdvanceBillingCycle is the cycle-CLOSE variant of UpdateBillingCycle: it
-// moves the watermark only if next_billing_at still equals the value the
-// caller read (expectedNext; NULL-safe). A leader that was superseded
-// mid-tick — a failover window, a resumed frozen process — and finishes its
-// in-memory period close therefore cannot rewind a watermark a newer leader
-// already advanced: 0 rows → ErrWatermarkMoved (ErrNotFound if the row is
-// gone). The plan-swap and threshold-reset paths keep UpdateBillingCycle(Tx):
-// they legitimately move the watermark backward to truncate a period.
-func (s *PostgresStore) AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
-	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
-	if err != nil {
-		return err
-	}
-	defer postgres.Rollback(tx)
-
-	result, err := tx.ExecContext(ctx, `
-		UPDATE subscriptions SET current_billing_period_start = $1, current_billing_period_end = $2,
-			next_billing_at = $3, billing_anchor_day = $4, updated_at = $5
-		WHERE id = $6
-		  AND next_billing_at IS NOT DISTINCT FROM $7
-	`, periodStart, periodEnd, nextBillingAt, anchorDay, clock.Now(ctx), id, expectedNext)
-	if err != nil {
-		return err
-	}
-	if n, _ := result.RowsAffected(); n == 0 {
+	if n, _ := res.RowsAffected(); n == 0 {
 		var exists bool
 		if e := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE id = $1)`, id).Scan(&exists); e != nil {
 			return e
@@ -1480,32 +1483,15 @@ func (s *PostgresStore) AdvanceBillingCycle(ctx context.Context, tenantID, id st
 		}
 		return ErrWatermarkMoved
 	}
-	return tx.Commit()
+	return nil
 }
 
-// UpdateBillingCycleTx is the in-transaction variant of UpdateBillingCycle: it
-// runs the watermark UPDATE on the caller's tx so a coordinator can advance the
-// billing period atomically alongside other writes. The cross-interval plan
-// swap relies on this — the watermark must never move unless the new-period
-// invoice is committed in the same tx, otherwise a failed day-1 bill silently
-// drops the new period (the scheduler advances past it and never re-bills).
-// tenantID is accepted for symmetry with the store's other *Tx methods; RLS
-// scoping rides the tx's tenant binding.
-func (s *PostgresStore) UpdateBillingCycleTx(ctx context.Context, tx *sql.Tx, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
-	result, err := tx.ExecContext(ctx, `
-		UPDATE subscriptions SET current_billing_period_start = $1, current_billing_period_end = $2,
-			next_billing_at = $3, billing_anchor_day = $4, updated_at = $5
-		WHERE id = $6
-	`, periodStart, periodEnd, nextBillingAt, anchorDay, clock.Now(ctx), id)
-	if err != nil {
-		return err
-	}
-
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return errs.ErrNotFound
-	}
-	return nil
+// ClosePeriod is the own-tx wrapper of ClosePeriodTx for advance-only callers
+// (the trial-active advance, the tests-only non-atomic swap fallback).
+func (s *PostgresStore) ClosePeriod(ctx context.Context, tenantID, id string, expected PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
+	return s.db.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return s.ClosePeriodTx(ctx, tx, tenantID, id, expected, periodStart, periodEnd, nextBillingAt, anchorDay)
+	})
 }
 
 // ---------------------------------------------------------------------------

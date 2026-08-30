@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,6 +38,10 @@ func (s *taxSettings) Get(_ context.Context, _ string) (domain.TenantSettings, e
 
 func (s *taxSettings) NextInvoiceNumber(_ context.Context, _ string) (string, error) {
 	return "", errors.New("NextInvoiceNumber must not be called in tax-apply tests")
+}
+
+func (s *taxSettings) NextInvoiceNumberTx(_ context.Context, _ *sql.Tx, _ string) (string, error) {
+	return "", errors.New("NextInvoiceNumberTx must not be called in tax-apply tests")
 }
 
 // taxProfiles returns a billing profile for configured customers; missing

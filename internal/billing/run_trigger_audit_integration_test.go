@@ -96,6 +96,7 @@ func TestTriggerCycleAudit_OperatorTriggerRow(t *testing.T) {
 			subs:         map[string]domain.Subscription{"sub_run": dueSubForTenant(tenantID, "sub_run")},
 			cycleUpdated: make(map[string]bool),
 		}
+		subs.db = db // the closer tx is real too, so the in-tx finalize emission has a handle
 		engine := tenantRunEngineWith(subs, &mockInvoices{db: db})
 		engine.SetAuditLogger(logger)
 		h := NewHandler(engine, subs)
@@ -151,6 +152,7 @@ func TestTriggerCycleAudit_OperatorTriggerRow(t *testing.T) {
 			subs:         map[string]domain.Subscription{"sub_fail": dueSubForTenant(tenantID, "sub_fail")},
 			cycleUpdated: make(map[string]bool),
 		}
+		subs.db = db // the closer tx is real too, so the in-tx finalize emission has a handle
 		engine := tenantRunEngineWith(subs, &mockInvoices{db: db})
 		failing := &erroringRunAudit{}
 		engine.SetAuditLogger(failing)

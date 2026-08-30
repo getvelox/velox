@@ -53,7 +53,6 @@ func TestThresholdScan_CreditApplyFailure_FlagsAndSkipsCharge(t *testing.T) {
 	pms := &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe_1"}
 
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, applier, &mockSettings{}, pms, charger, billingTestClock()))
-	engine.SetTxRunner(&fakeTxRunner{})
 
 	fired, errs := engine.ScanThresholds(context.Background(), 50)
 	if len(errs) != 0 {
@@ -121,7 +120,6 @@ func TestThresholdScan_CreditsApplied_ChargesRemainder(t *testing.T) {
 	pms := &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe_1"}
 
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, applier, &mockSettings{}, pms, charger, billingTestClock()))
-	engine.SetTxRunner(&fakeTxRunner{})
 
 	fired, errs := engine.ScanThresholds(context.Background(), 50)
 	if len(errs) != 0 || fired != 1 {

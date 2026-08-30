@@ -14,6 +14,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -90,9 +91,7 @@ func TestBillOnCreate_CreditBalance_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create sub: %v", err)
 		}
-		if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-			t.Fatalf("billing cycle: %v", err)
-		}
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 		sub.CurrentBillingPeriodStart = &periodStart
 		sub.CurrentBillingPeriodEnd = &periodEnd
 		return sub

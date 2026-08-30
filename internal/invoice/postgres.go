@@ -3306,9 +3306,27 @@ func (s *PostgresStore) GetLatestThresholdInvoiceForCycle(ctx context.Context, t
 		return domain.Invoice{}, err
 	}
 	defer postgres.Rollback(tx)
+	return s.latestThresholdInvoiceForCycleTx(ctx, tx, subscriptionID, periodStart, periodEnd)
+}
 
+// GetLatestThresholdInvoiceForCycleTx is GetLatestThresholdInvoiceForCycle
+// on the caller's tx — the period closer's in-tx watermark re-read
+// (ADR-115). Under READ COMMITTED a statement issued AFTER the closer's
+// row-lock wait sees every threshold fire that committed before it took the
+// lock, so the closer can prove the watermark it built its lines against is
+// still the watermark, and roll back if a fire landed in between.
+// tenantID is accepted for symmetry with the store's other *Tx methods; RLS
+// scoping rides the tx's tenant binding.
+func (s *PostgresStore) GetLatestThresholdInvoiceForCycleTx(ctx context.Context, tx *sql.Tx, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
+	if subscriptionID == "" {
+		return domain.Invoice{}, errs.ErrNotFound
+	}
+	return s.latestThresholdInvoiceForCycleTx(ctx, tx, subscriptionID, periodStart, periodEnd)
+}
+
+func (s *PostgresStore) latestThresholdInvoiceForCycleTx(ctx context.Context, tx *sql.Tx, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
 	var inv domain.Invoice
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT `+invCols+` FROM invoices i
 		WHERE i.subscription_id = $1
 		  AND i.billing_reason = 'threshold'

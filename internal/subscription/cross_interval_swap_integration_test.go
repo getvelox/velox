@@ -62,6 +62,9 @@ func (b *billOnCreateTxErrBiller) BillOnCreateTx(context.Context, *sql.Tx, domai
 }
 func (b *billOnCreateTxErrBiller) FinalizeOnCreateInvoice(context.Context, domain.Subscription, domain.Invoice) {
 }
+func (b *billOnCreateTxErrBiller) ThresholdBilledThroughTx(context.Context, *sql.Tx, domain.Subscription) (*time.Time, error) {
+	return nil, nil
+}
 
 // TestUpdateItemTx_CrossIntervalSwap_RealTxRollsBackOnBillFailure is the
 // real-Postgres proof of the ADR-056 atomicity guarantee: when the in-tx

@@ -2,6 +2,7 @@ package subscription_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"github.com/sagarsuperuser/velox/internal/errs"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/testutil"
 )
 
@@ -484,7 +486,7 @@ func TestScheduleAndFireCancellation_Roundtrip(t *testing.T) {
 		t.Fatalf("re-schedule: %v", err)
 	}
 	fireAt := time.Now().UTC().Truncate(time.Microsecond)
-	fired, err := store.FireScheduledCancellation(ctx, tenantID, subID, fireAt)
+	fired, err := fireScheduledCancellation(ctx, store, tenantID, subID, fireAt)
 	if err != nil {
 		t.Fatalf("fire: %v", err)
 	}
@@ -501,12 +503,30 @@ func TestScheduleAndFireCancellation_Roundtrip(t *testing.T) {
 		t.Errorf("schedule fields not cleared on fire: %+v", fired)
 	}
 
-	// 4. Firing again must return ErrInvalidState — the engine uses this to
-	// no-op when an immediate-cancel API call won the race.
-	_, err = store.FireScheduledCancellation(ctx, tenantID, subID, fireAt)
-	if err == nil {
-		t.Fatal("expected ErrInvalidState firing on already-canceled sub, got nil")
+	// 4. Firing again must return ErrWatermarkMoved — the closer's snapshot
+	// is stale (ADR-115); the engine's bounded retry re-reads and finds the
+	// sub terminated.
+	_, err = fireScheduledCancellation(ctx, store, tenantID, subID, fireAt)
+	if !errors.Is(err, subscription.ErrWatermarkMoved) {
+		t.Fatalf("firing on an already-canceled sub: got %v, want ErrWatermarkMoved", err)
 	}
+}
+
+// fireScheduledCancellation drives the ADR-115 terminal closer the way the
+// engine does: a fresh snapshot, then FireScheduledCancellationTx as the
+// first statement of one tenant tx.
+func fireScheduledCancellation(ctx context.Context, store *subscription.PostgresStore, tenantID, subID string, at time.Time) (domain.Subscription, error) {
+	fresh, err := store.Get(ctx, tenantID, subID)
+	if err != nil {
+		return domain.Subscription{}, err
+	}
+	var fired domain.Subscription
+	err = store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var ferr error
+		fired, ferr = store.FireScheduledCancellationTx(ctx, tx, tenantID, subID, subscription.SnapshotOf(fresh), at)
+		return ferr
+	})
+	return fired, err
 }
 
 // TestPauseCollection_Roundtrip exercises the full set → re-set → clear
@@ -654,42 +674,149 @@ func TestClearPauseCollection_CASOneWinner(t *testing.T) {
 	}
 }
 
-// TestAdvanceBillingCycle_StaleWatermarkIsNoOp: the cycle-close advance is a
-// CAS on the watermark the tick read. A superseded leader finishing its
-// in-memory close finds next_billing_at already moved and changes nothing.
-// Mutation-verify: drop `AND next_billing_at IS NOT DISTINCT FROM $7` →
-// the second advance rewinds the watermark and this fails.
-func TestAdvanceBillingCycle_StaleWatermarkIsNoOp(t *testing.T) {
+// TestClosePeriodTx_CASOneWinner locks ADR-115's one period guard on real
+// Postgres: ClosePeriodTx proves the caller's PeriodSnapshot (status, period
+// start, watermark) in the WHERE of the UPDATE that takes the row lock, so of
+// N closers planning from the same snapshot exactly one commits and the rest
+// write nothing. Two racing shapes: the TRUNCATION shape (an in_arrears swap
+// keeps the period start and pulls the watermark in — only next_billing_at
+// distinguishes the winner) and the CLOSE shape (start and watermark both
+// move). A backward re-stamp from a FRESH snapshot succeeds (a swap or reset
+// truncates a period legally — stale is what is refused), and a concurrent
+// immediate cancel defeats every closer through the status predicate.
+//
+// Mutation-verify: drop `next_billing_at IS NOT DISTINCT FROM $9` → the
+// truncation race has 20 winners; drop `status = $7` → the cancel subcase
+// re-anchors a canceled sub.
+func TestClosePeriodTx_CASOneWinner(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := postgres.WithLivemode(context.Background(), false)
 	store := subscription.NewPostgresStore(db)
-	tenantID := testutil.CreateTestTenant(t, db, "Watermark CAS")
-	subID := seedActiveSubscription(t, db, tenantID, "cus_wm", "plan_wm", "sub-wm")
+	tenantID := testutil.CreateTestTenant(t, db, "Period CAS")
 
-	sub, err := store.Get(ctx, tenantID, subID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
+	p0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	p1 := p0.AddDate(0, 1, 0)
+
+	// race runs 20 closers from ONE snapshot; racer i's target period is
+	// [start(i), p1 + (i+1) months) so the row afterwards names its winner.
+	// Returns the winner's index.
+	race := func(t *testing.T, subID string, start func(i int) time.Time) int {
+		t.Helper()
+		sub, err := store.Get(ctx, tenantID, subID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		expected := subscription.SnapshotOf(sub) // {active, p0, p1}: what every racer read
+
+		const racers = 20
+		type outcome struct {
+			i   int
+			err error
+		}
+		results := make(chan outcome, racers)
+		begin := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range racers {
+			wg.Go(func() {
+				<-begin
+				target := p1.AddDate(0, i+1, 0)
+				err := store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+					return store.ClosePeriodTx(ctx, tx, tenantID, subID, expected, start(i), target, target, 1)
+				})
+				results <- outcome{i: i, err: err}
+			})
+		}
+		close(begin)
+		wg.Wait()
+		close(results)
+
+		winner, moved := -1, 0
+		for r := range results {
+			switch {
+			case r.err == nil:
+				if winner != -1 {
+					t.Fatalf("two winners: racer %d and racer %d both committed", winner, r.i)
+				}
+				winner = r.i
+			case errors.Is(r.err, subscription.ErrWatermarkMoved):
+				moved++
+			default:
+				t.Fatalf("racer %d: unexpected error %v", r.i, r.err)
+			}
+		}
+		if winner == -1 || moved != racers-1 {
+			t.Fatalf("winner=%d moved=%d, want exactly one winner and %d ErrWatermarkMoved", winner, moved, racers-1)
+		}
+		after, err := store.Get(ctx, tenantID, subID)
+		if err != nil {
+			t.Fatalf("get after race: %v", err)
+		}
+		wantNext := p1.AddDate(0, winner+1, 0)
+		if after.NextBillingAt == nil || !after.NextBillingAt.Equal(wantNext) || !after.CurrentBillingPeriodStart.Equal(start(winner)) {
+			t.Fatalf("row after race = [%v, next %v), want the winner's [%v, next %v)", after.CurrentBillingPeriodStart, after.NextBillingAt, start(winner), wantNext)
+		}
+		return winner
 	}
-	read := sub.NextBillingAt // what this tick read
-	t1 := time.Now().UTC().Truncate(time.Second)
-	next1 := t1.Add(30 * 24 * time.Hour)
-	if err := store.AdvanceBillingCycle(ctx, tenantID, subID, read, t1, next1, next1, sub.BillingAnchorDay); err != nil {
-		t.Fatalf("first advance (fresh read): %v", err)
-	}
-	// The stale leader resumes with the same stale read and tries to advance
-	// to a DIFFERENT (older) cycle end.
-	next0 := t1.Add(15 * 24 * time.Hour)
-	err = store.AdvanceBillingCycle(ctx, tenantID, subID, read, t1, next0, next0, sub.BillingAnchorDay)
-	if !errors.Is(err, subscription.ErrWatermarkMoved) {
-		t.Fatalf("stale advance: got %v, want ErrWatermarkMoved", err)
-	}
-	after, _ := store.Get(ctx, tenantID, subID)
-	if after.NextBillingAt == nil || !after.NextBillingAt.Equal(next1) {
-		t.Fatalf("watermark after stale advance = %v, want %v (the newer leader's value must stand)", after.NextBillingAt, next1)
-	}
-	// The newer leader's own next advance, reading the current watermark, works.
-	next2 := next1.Add(30 * 24 * time.Hour)
-	if err := store.AdvanceBillingCycle(ctx, tenantID, subID, &next1, next1, next2, next2, sub.BillingAnchorDay); err != nil {
-		t.Fatalf("advance with a fresh read: %v", err)
-	}
+
+	t.Run("truncation shape: start kept, watermark decides", func(t *testing.T) {
+		subID := seedActiveSubscription(t, db, tenantID, "cus_cas_tr", "plan_cas_tr", "sub-cas-tr")
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, subID, p0, p1, p1, 1)
+		race(t, subID, func(int) time.Time { return p0 })
+	})
+
+	t.Run("close shape: start and watermark move", func(t *testing.T) {
+		subID := seedActiveSubscription(t, db, tenantID, "cus_cas_cl", "plan_cas_cl", "sub-cas-cl")
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, subID, p0, p1, p1, 1)
+		race(t, subID, func(int) time.Time { return p1 })
+
+		after, err := store.Get(ctx, tenantID, subID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		stale := subscription.PeriodSnapshot{Start: &p0, Next: &p1, Status: domain.SubscriptionActive}
+
+		// Backward is legal from a FRESH snapshot: a swap truncating the period.
+		fresh := subscription.SnapshotOf(after)
+		truncated := p1.Add(24 * time.Hour)
+		if err := store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+			return store.ClosePeriodTx(ctx, tx, tenantID, subID, fresh, p1, truncated, truncated, 2)
+		}); err != nil {
+			t.Fatalf("backward re-stamp from a fresh snapshot must succeed: %v", err)
+		}
+		// ...and the snapshot the racers held is still refused.
+		err = store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+			return store.ClosePeriodTx(ctx, tx, tenantID, subID, stale, p1, truncated, truncated, 2)
+		})
+		if !errors.Is(err, subscription.ErrWatermarkMoved) {
+			t.Fatalf("stale snapshot after the race: got %v, want ErrWatermarkMoved", err)
+		}
+	})
+
+	t.Run("immediate cancel first defeats every closer", func(t *testing.T) {
+		cancelSubID := seedActiveSubscription(t, db, tenantID, "cus_cas_cxl", "plan_cas_cxl", "sub-cas-cxl")
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, cancelSubID, p0, p1, p1, 1)
+		read, err := store.Get(ctx, tenantID, cancelSubID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		snap := subscription.SnapshotOf(read)
+		if _, err := store.CancelAtomicWithBill(ctx, tenantID, cancelSubID, nil); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		for i := range 3 {
+			err := store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+				return store.ClosePeriodTx(ctx, tx, tenantID, cancelSubID, snap, p1, p1.AddDate(0, 1, 0), p1.AddDate(0, 1, 0), 1)
+			})
+			if !errors.Is(err, subscription.ErrWatermarkMoved) {
+				t.Fatalf("closer %d on a canceled sub: got %v, want ErrWatermarkMoved", i, err)
+			}
+		}
+		canceled, err := store.Get(ctx, tenantID, cancelSubID)
+		if err != nil {
+			t.Fatalf("get canceled: %v", err)
+		}
+		if canceled.Status != domain.SubscriptionCanceled || !canceled.CurrentBillingPeriodStart.Equal(p0) || canceled.NextBillingAt == nil || !canceled.NextBillingAt.Equal(p1) {
+			t.Fatalf("canceled sub's period must be untouched: status=%s period=[%v, next %v)", canceled.Status, canceled.CurrentBillingPeriodStart, canceled.NextBillingAt)
+		}
+	})
 }

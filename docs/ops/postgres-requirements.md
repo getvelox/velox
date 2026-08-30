@@ -185,6 +185,23 @@ the role:
 ALTER ROLE velox_app SET statement_timeout = '30s';
 ```
 
+**One transaction-idle bound IS required (ADR-115).** Every write that
+closes or moves a subscription's billing period — the cycle close, a
+threshold fire, a plan swap, a scheduled cancel — takes the subscription
+row lock as the first statement of its transaction and holds it until the
+invoice commits. No such transaction spans network I/O (tax runs before,
+the card charge after), so a healthy holder releases in milliseconds. A
+holder that froze mid-transaction (a paused VM, a wedged process) would
+stall every other closer of that subscription and hide it from the
+scheduler's `SKIP LOCKED` fetches for as long as the session lives. The
+idle-in-transaction timeout (the server dropping a session that sits
+inside an open transaction without issuing a statement) is the liveness
+bound; nothing in Velox sets it, so set it on the role:
+
+```sql
+ALTER ROLE velox_app SET idle_in_transaction_session_timeout = '30s';
+```
+
 ## Schema sizing
 
 Tables ordered by expected row growth (top = grows fastest in

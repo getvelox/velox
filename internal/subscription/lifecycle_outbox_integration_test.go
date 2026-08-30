@@ -142,7 +142,14 @@ func TestLifecycleEvents_EnqueuedInTransitionTx(t *testing.T) {
 
 	// (4) canceled (schedule) — FireScheduledCancellation on an active sub.
 	subB := newSub("lc-sched", domain.SubscriptionActive, nil)
-	if _, err := store.FireScheduledCancellation(ctx, tenantID, subB.ID, time.Now().UTC()); err != nil {
+	freshB, err := store.Get(ctx, tenantID, subB.ID)
+	if err != nil {
+		t.Fatalf("get subB: %v", err)
+	}
+	if err := store.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := store.FireScheduledCancellationTx(ctx, tx, tenantID, subB.ID, subscription.SnapshotOf(freshB), time.Now().UTC())
+		return err
+	}); err != nil {
 		t.Fatalf("fire scheduled cancel: %v", err)
 	}
 	if n, p := events(domain.EventSubscriptionCanceled); n != 2 || p["canceled_by"] != "schedule" {

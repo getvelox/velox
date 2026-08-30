@@ -142,10 +142,15 @@ func (m *memStore) GetDueBilling(ctx context.Context, _ time.Time, _ int) ([]dom
 	return nil, nil
 }
 
-func (m *memStore) UpdateBillingCycle(_ context.Context, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
+// ClosePeriodTx mirrors the store's ADR-115 CAS exactly: the row must still
+// match `expected` (status, period start, watermark) or nothing changes.
+func (m *memStore) ClosePeriodTx(_ context.Context, _ *sql.Tx, tenantID, id string, expected PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
 	s, ok := m.subs[id]
 	if !ok || s.TenantID != tenantID {
 		return errs.ErrNotFound
+	}
+	if !snapshotMatches(s, expected) {
+		return ErrWatermarkMoved
 	}
 	s.CurrentBillingPeriodStart = &periodStart
 	s.CurrentBillingPeriodEnd = &periodEnd
@@ -155,8 +160,18 @@ func (m *memStore) UpdateBillingCycle(_ context.Context, tenantID, id string, pe
 	return nil
 }
 
-func (m *memStore) UpdateBillingCycleTx(ctx context.Context, _ *sql.Tx, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
-	return m.UpdateBillingCycle(ctx, tenantID, id, periodStart, periodEnd, nextBillingAt, anchorDay)
+func (m *memStore) ClosePeriod(ctx context.Context, tenantID, id string, expected PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
+	return m.ClosePeriodTx(ctx, nil, tenantID, id, expected, periodStart, periodEnd, nextBillingAt, anchorDay)
+}
+
+func snapshotMatches(s domain.Subscription, expected PeriodSnapshot) bool {
+	sameTime := func(a, b *time.Time) bool {
+		if a == nil || b == nil {
+			return a == nil && b == nil
+		}
+		return a.Equal(*b)
+	}
+	return s.Status == expected.Status && sameTime(s.CurrentBillingPeriodStart, expected.Start) && sameTime(s.NextBillingAt, expected.Next)
 }
 
 func (m *memStore) CancelAtomic(ctx context.Context, tenantID, id string) (domain.Subscription, error) {
@@ -228,13 +243,13 @@ func (m *memStore) ClearScheduledCancellation(ctx context.Context, tenantID, id 
 	return s, nil
 }
 
-func (m *memStore) FireScheduledCancellation(ctx context.Context, tenantID, id string, at time.Time) (domain.Subscription, error) {
+func (m *memStore) FireScheduledCancellationTx(_ context.Context, _ *sql.Tx, tenantID, id string, expected PeriodSnapshot, at time.Time) (domain.Subscription, error) {
 	s, ok := m.subs[id]
 	if !ok || s.TenantID != tenantID {
 		return domain.Subscription{}, errs.ErrNotFound
 	}
-	if s.Status != domain.SubscriptionActive {
-		return domain.Subscription{}, fmt.Errorf("scheduled cancel cannot fire on %s subscription", s.Status)
+	if s.Status != domain.SubscriptionActive || !snapshotMatches(s, expected) {
+		return domain.Subscription{}, ErrWatermarkMoved
 	}
 	s.Status = domain.SubscriptionCanceled
 	s.CanceledAt = &at
@@ -1135,23 +1150,27 @@ func TestCreate(t *testing.T) {
 // fakeBiller captures BillOnCreate / BillOnCancel invocations for
 // ADR-031 tests.
 type fakeBiller struct {
-	calls               int
-	finalCalls          int
-	cancelCalls         int
-	planSwapCalls       int
-	planSwapAt          time.Time
-	err                 error
-	finalCancelErr      error
-	finalCancelInv      domain.Invoice
-	cancelErr           error
-	planSwapErr         error
-	cancelCreditCents   int64
-	planSwapCreditCents int64
-	createTxCalls       int
-	createTxOK          bool
-	createTxInv         domain.Invoice
-	createTxErr         error
-	finalizeCalls       int
+	// thresholdBilledThrough feeds ThresholdBilledThroughTx — the swap's
+	// fire-vs-swap guard (ADR-115). nil = no threshold fire this period.
+	thresholdBilledThrough    *time.Time
+	thresholdBilledThroughErr error
+	calls                     int
+	finalCalls                int
+	cancelCalls               int
+	planSwapCalls             int
+	planSwapAt                time.Time
+	err                       error
+	finalCancelErr            error
+	finalCancelInv            domain.Invoice
+	cancelErr                 error
+	planSwapErr               error
+	cancelCreditCents         int64
+	planSwapCreditCents       int64
+	createTxCalls             int
+	createTxOK                bool
+	createTxInv               domain.Invoice
+	createTxErr               error
+	finalizeCalls             int
 	// cancel-credit draft path (ADR-057 ext). draftHandled defaults FALSE, so
 	// existing cancel tests fall through to BillOnCancel (today's path) unchanged.
 	draftTxCalls    int
@@ -1221,6 +1240,10 @@ func (f *fakeBiller) IssueSwapDrafts(_ context.Context, _ domain.Subscription, i
 func (f *fakeBiller) BillOnCreateTx(_ context.Context, _ *sql.Tx, _ domain.Subscription) (domain.Invoice, bool, error) {
 	f.createTxCalls++
 	return f.createTxInv, f.createTxOK, f.createTxErr
+}
+
+func (f *fakeBiller) ThresholdBilledThroughTx(_ context.Context, _ *sql.Tx, _ domain.Subscription) (*time.Time, error) {
+	return f.thresholdBilledThrough, f.thresholdBilledThroughErr
 }
 
 func (f *fakeBiller) FinalizeOnCreateInvoice(_ context.Context, _ domain.Subscription, _ domain.Invoice) {

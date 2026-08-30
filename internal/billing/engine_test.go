@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -320,6 +321,10 @@ func (m *mockSettings) NextInvoiceNumber(_ context.Context, _ string) (string, e
 	return fmt.Sprintf("VLX-%06d", m.next), nil
 }
 
+func (m *mockSettings) NextInvoiceNumberTx(ctx context.Context, _ *sql.Tx, tenantID string) (string, error) {
+	return m.NextInvoiceNumber(ctx, tenantID)
+}
+
 func (m *mockSettings) Get(_ context.Context, _ string) (domain.TenantSettings, error) {
 	return domain.TenantSettings{}, nil
 }
@@ -345,10 +350,93 @@ type mockSubs struct {
 	// defaultIntervals() or explicit rows.
 	intervals    []domain.ItemInterval
 	intervalsErr error
-	// updateBillingCycleErr, when set, makes UpdateBillingCycle fail — used to
-	// drive the idempotent-skip heal path's loud-fail (a failed watermark
-	// advance must surface, not be swallowed).
-	updateBillingCycleErr error
+	// closePeriodErr, when set, makes ClosePeriodTx (the closer's CAS) fail.
+	// closePeriodErrOnCall picks WHICH call fails (1-based; 0 = every call),
+	// so a test can let the first close reach its insert and fail only the
+	// heal-path re-drive — a failed period write must surface, not be
+	// swallowed.
+	closePeriodErr       error
+	closePeriodErrOnCall int
+	closePeriodCalls     int
+	// beforeCloserTx runs when the engine opens a closer tx, BEFORE the
+	// emulated tx snapshot — the concurrent-resolver hook (playbook §5.3): a
+	// test moves the row here to emulate a competing closer that COMMITTED
+	// between the engine's read and its write, so the faithful CAS below
+	// misses and the loser's rollback (which restores only its own writes)
+	// leaves the competitor's change in place, exactly as Postgres would.
+	beforeCloserTx func(m *mockSubs)
+	// txErr, when set, is returned by WithTenantTx INSTEAD of committing (fn
+	// already ran and its row writes are rolled back) — a tx that fails at the
+	// commit boundary.
+	txErr error
+	// db, when set, gives WithTenantTx a REAL tenant tx (the mockInvoices.db
+	// shape): the engine's in-tx finalize emission (ADR-090) needs a real
+	// handle when the test wires the real audit logger. The mock stores
+	// ignore the handle.
+	db *postgres.DB
+}
+
+// WithTenantTx models the closer tx: fn runs against the in-memory row, and
+// an error from fn or an injected commit error restores the pre-tx rows —
+// the rollback the real tx would do. Invoice-mock writes are NOT rolled back
+// (mockInvoices has no tx); tests that need shared fate on the invoice side
+// run on Postgres.
+func (m *mockSubs) WithTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error {
+	if m.beforeCloserTx != nil {
+		m.beforeCloserTx(m)
+	}
+	if m.db != nil {
+		return m.db.WithTenantTx(ctx, tenantID, fn)
+	}
+	savedSubs := maps.Clone(m.subs)
+	savedUpdated := maps.Clone(m.cycleUpdated)
+	err := fn(nil)
+	if err == nil {
+		err = m.txErr
+	}
+	if err != nil {
+		m.subs = savedSubs
+		m.cycleUpdated = savedUpdated
+	}
+	return err
+}
+
+// mockSnapshotMatches is the mock's copy of the store's ADR-115 CAS predicate.
+func mockSnapshotMatches(s domain.Subscription, expected subscription.PeriodSnapshot) bool {
+	return s.Status == expected.Status && sameInstant(s.CurrentBillingPeriodStart, expected.Start) && sameInstant(s.NextBillingAt, expected.Next)
+}
+
+// ClosePeriodTx is a FAITHFUL concurrent-resolver fake of the store's period
+// CAS: the row must still match `expected` or nothing changes and
+// ErrWatermarkMoved is returned.
+func (m *mockSubs) ClosePeriodTx(_ context.Context, _ *sql.Tx, _, id string, expected subscription.PeriodSnapshot, start, end, next time.Time, anchorDay int) error {
+	m.closePeriodCalls++
+	if m.closePeriodErr != nil && (m.closePeriodErrOnCall == 0 || m.closePeriodErrOnCall == m.closePeriodCalls) {
+		return m.closePeriodErr
+	}
+	s, ok := m.subs[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	if !mockSnapshotMatches(s, expected) {
+		return subscription.ErrWatermarkMoved
+	}
+	s.CurrentBillingPeriodStart = &start
+	s.CurrentBillingPeriodEnd = &end
+	s.NextBillingAt = &next
+	s.BillingAnchorDay = anchorDay
+	m.subs[id] = s
+	if m.cycleUpdated == nil {
+		m.cycleUpdated = map[string]bool{}
+	}
+	m.cycleUpdated[id] = true
+	return nil
+}
+
+func (m *mockSubs) ClosePeriod(ctx context.Context, tenantID, id string, expected subscription.PeriodSnapshot, start, end, next time.Time, anchorDay int) error {
+	return m.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return m.ClosePeriodTx(ctx, tx, tenantID, id, expected, start, end, next, anchorDay)
+	})
 }
 
 func (m *mockSubs) GetDueBilling(_ context.Context, before time.Time, limit int) ([]domain.Subscription, error) {
@@ -412,68 +500,16 @@ func (m *mockSubs) Get(_ context.Context, _, id string) (domain.Subscription, er
 	return s, nil
 }
 
-func (m *mockSubs) AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, start, end, next time.Time, anchorDay int) error {
-	s, ok := m.subs[id]
-	if !ok {
-		return fmt.Errorf("not found")
-	}
-	// CAS on the watermark, mirroring the real store.
-	switch {
-	case expectedNext == nil && s.NextBillingAt != nil, expectedNext != nil && s.NextBillingAt == nil:
-		return subscription.ErrWatermarkMoved
-	case expectedNext != nil && !expectedNext.Equal(*s.NextBillingAt):
-		return subscription.ErrWatermarkMoved
-	}
-	return m.UpdateBillingCycle(ctx, tenantID, id, start, end, next, anchorDay)
-}
-
-func (m *mockSubs) UpdateBillingCycle(_ context.Context, _, id string, start, end, next time.Time, anchorDay int) error {
-	if m.updateBillingCycleErr != nil {
-		return m.updateBillingCycleErr
-	}
-	s, ok := m.subs[id]
-	if !ok {
-		return fmt.Errorf("not found")
-	}
-	s.CurrentBillingPeriodStart = &start
-	s.CurrentBillingPeriodEnd = &end
-	s.NextBillingAt = &next
-	s.BillingAnchorDay = anchorDay
-	m.subs[id] = s
-	m.cycleUpdated[id] = true
-	return nil
-}
-
-// UpdateBillingCycleTx delegates to the plain variant — atomicity is the real
-// store's concern; the mock preserves observable behavior. The tx handle is
-// the fakeTxRunner's nil.
-func (m *mockSubs) UpdateBillingCycleTx(ctx context.Context, _ *sql.Tx, tenantID, id string, start, end, next time.Time, anchorDay int) error {
-	return m.UpdateBillingCycle(ctx, tenantID, id, start, end, next, anchorDay)
-}
-
-// fakeTxRunner satisfies billing.TxRunner for unit fixtures: runs fn with a
-// nil tx (the mocks' Tx variants ignore the handle). commitErr, when set, is
-// returned INSTEAD of committing — simulating a tx that fails at the
-// UpdateBillingCycleTx/commit boundary so the atomic-rollback contract can be
-// asserted without Postgres.
-type fakeTxRunner struct {
-	fnErr error // injected: fn's own error passthrough is default behavior
-}
-
-func (r *fakeTxRunner) WithTenantTx(_ context.Context, _ string, fn func(tx *sql.Tx) error) error {
-	if err := fn(nil); err != nil {
-		return err
-	}
-	return r.fnErr
-}
-
-func (m *mockSubs) FireScheduledCancellation(_ context.Context, _, id string, at time.Time) (domain.Subscription, error) {
+// FireScheduledCancellationTx mirrors the store's terminal close: CAS on
+// status=active AND the period snapshot; a loser sees ErrWatermarkMoved.
+func (m *mockSubs) FireScheduledCancellationTx(_ context.Context, _ *sql.Tx, _, id string, expected subscription.PeriodSnapshot, at time.Time) (domain.Subscription, error) {
+	m.closePeriodCalls++
 	s, ok := m.subs[id]
 	if !ok {
 		return domain.Subscription{}, errs.ErrNotFound
 	}
-	if s.Status != domain.SubscriptionActive {
-		return domain.Subscription{}, errs.ErrInvalidState
+	if s.Status != domain.SubscriptionActive || !mockSnapshotMatches(s, expected) {
+		return domain.Subscription{}, subscription.ErrWatermarkMoved
 	}
 	s.Status = domain.SubscriptionCanceled
 	atCopy := at
@@ -1038,6 +1074,10 @@ func (m *mockInvoices) LatestThresholdPeriodEnd(_ context.Context, _, subscripti
 // GetLatestThresholdInvoiceForCycle mirrors the postgres semantics: the
 // newest (by billing_period_end) non-voided threshold invoice whose
 // billing_period_start is inside [periodStart, periodEnd).
+func (m *mockInvoices) GetLatestThresholdInvoiceForCycleTx(ctx context.Context, _ *sql.Tx, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
+	return m.GetLatestThresholdInvoiceForCycle(ctx, tenantID, subscriptionID, periodStart, periodEnd)
+}
+
 func (m *mockInvoices) GetLatestThresholdInvoiceForCycle(_ context.Context, _, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
 	var latest domain.Invoice
 	found := false
@@ -1382,7 +1422,10 @@ func TestBillOnePeriod_HealPathPropagatesAdvanceError(t *testing.T) {
 	ctx := context.Background()
 
 	invoices.createErr = errs.ErrAlreadyExists // invoice already exists → heal path
-	subs.updateBillingCycleErr = fmt.Errorf("watermark write failed")
+	// The first ClosePeriodTx must pass (so the close reaches its insert and
+	// hits the pre-cutover row); only the heal re-drive's CAS fails.
+	subs.closePeriodErr = fmt.Errorf("watermark write failed")
+	subs.closePeriodErrOnCall = 2
 
 	if _, runErrs := engine.RunCycle(ctx, 50); len(runErrs) == 0 {
 		t.Fatal("heal-path advance error must surface in RunCycle errors, not be swallowed")
@@ -4093,24 +4136,85 @@ func TestRunCycle_SegmentAware_NoChanges_FullPeriodLine(t *testing.T) {
 	}
 }
 
-// TestAdvanceWatermark_StaleReadIsNoOp: the engine's cycle-close advance is a
-// CAS on the watermark this tick read; a stale read (another leader already
-// advanced) is a logged no-op, never an error and never a rewind.
-func TestAdvanceWatermark_StaleReadIsNoOp(t *testing.T) {
-	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	fresh := now.Add(30 * 24 * time.Hour)
-	subs := &mockSubs{subs: map[string]domain.Subscription{
-		"sub_1": {ID: "sub_1", TenantID: "t1", Status: domain.SubscriptionActive, NextBillingAt: &fresh},
-	}, cycleUpdated: map[string]bool{}}
-	engine := wireBaseTax(NewEngine(subs, &mockUsage{}, &mockPricing{}, &mockInvoices{}, nil, &mockSettings{}, nil, nil, billingTestClock()))
+// TestBillSubscription_PeriodMoved_RetriesOnce (ADR-115): when the closer's
+// CAS misses because another writer moved the period between this close's
+// read and its write, billSubscription wrote nothing, re-reads ONCE and
+// re-plans against the row it now sees; a second miss hands the sub to the
+// next fetch instead of spinning. The mock's CAS is faithful, so "moved" is
+// produced the real way: the concurrent-resolver hook re-anchors the row
+// right before the engine's CAS (an in_arrears swap truncating the period).
+//
+// Mutation-verify: remove the `if movedRetry { return count, nil }` cap →
+// the always-moving case spins to maxPeriodsPerSubPerCall.
+func TestBillSubscription_PeriodMoved_RetriesOnce(t *testing.T) {
+	periodStart := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	mk := func() (*Engine, *mockSubs, *mockInvoices) {
+		subs := &mockSubs{subs: map[string]domain.Subscription{
+			"sub_1": {
+				ID: "sub_1", TenantID: "t1", CustomerID: "cus_1",
+				Items:  []domain.SubscriptionItem{{ID: "subitem_1", PlanID: "pln_1", Quantity: 1}},
+				Status: domain.SubscriptionActive,
+				// Anniversary, not calendar: a calendar sub truncated to Mar 31
+				// re-aligns its next period to Apr 1 — also due at this clock —
+				// and the retry would legitimately bill two periods.
+				BillingTime:               domain.BillingTimeAnniversary,
+				CurrentBillingPeriodStart: &periodStart,
+				CurrentBillingPeriodEnd:   &periodEnd,
+				NextBillingAt:             &periodEnd,
+			},
+		}, cycleUpdated: map[string]bool{}}
+		pricing := &mockPricing{plans: map[string]domain.Plan{
+			"pln_1": {ID: "pln_1", Currency: "USD", BillingInterval: domain.BillingMonthly, BaseAmountCents: 1000},
+		}}
+		invoices := &mockInvoices{}
+		engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, clock.NewFake(periodEnd.Add(time.Nanosecond))))
+		return engine, subs, invoices
+	}
 
-	stale := now // what a superseded leader read before the newer leader advanced to `fresh`
-	staleSub := subs.subs["sub_1"]
-	staleSub.NextBillingAt = &stale
-	if err := engine.advanceWatermark(context.Background(), staleSub, now, now.Add(15*24*time.Hour), now.Add(15*24*time.Hour), 1); err != nil {
-		t.Fatalf("stale advance must be a no-op, got %v", err)
-	}
-	if got := subs.subs["sub_1"].NextBillingAt; got == nil || !got.Equal(fresh) {
-		t.Fatalf("watermark = %v, want the newer leader's %v untouched", got, fresh)
-	}
+	t.Run("moved once: re-read, then bills the period it now sees", func(t *testing.T) {
+		engine, subs, invoices := mk()
+		truncated := periodEnd.Add(-24 * time.Hour) // a swap pulled the period in — still due
+		subs.beforeCloserTx = func(m *mockSubs) {
+			m.beforeCloserTx = nil // fire once
+			s := m.subs["sub_1"]
+			s.CurrentBillingPeriodEnd = &truncated
+			s.NextBillingAt = &truncated
+			m.subs["sub_1"] = s
+		}
+		n, err := engine.billSubscription(context.Background(), subs.subs["sub_1"])
+		if err != nil {
+			t.Fatalf("billSubscription: %v", err)
+		}
+		if n != 1 || len(invoices.invoices) != 1 {
+			t.Fatalf("generated=%d invoices=%d, want exactly one invoice from the retry (none from the lost attempt)", n, len(invoices.invoices))
+		}
+		if !invoices.invoices[0].BillingPeriodEnd.Equal(truncated) {
+			t.Fatalf("retry billed period ending %v, want the moved period's %v", invoices.invoices[0].BillingPeriodEnd, truncated)
+		}
+		if subs.closePeriodCalls != 2 {
+			t.Fatalf("ClosePeriodTx calls = %d, want 2 (the miss, then the retry)", subs.closePeriodCalls)
+		}
+	})
+
+	t.Run("moved forever: exactly two attempts, then the next fetch decides", func(t *testing.T) {
+		engine, subs, invoices := mk()
+		subs.beforeCloserTx = func(m *mockSubs) {
+			s := m.subs["sub_1"]
+			moved := s.NextBillingAt.Add(-time.Hour) // still due, still moving
+			s.NextBillingAt = &moved
+			s.CurrentBillingPeriodEnd = &moved
+			m.subs["sub_1"] = s
+		}
+		n, err := engine.billSubscription(context.Background(), subs.subs["sub_1"])
+		if err != nil || n != 0 {
+			t.Fatalf("billSubscription = (%d, %v), want (0, nil): a lost race is not an error", n, err)
+		}
+		if subs.closePeriodCalls != 2 {
+			t.Fatalf("ClosePeriodTx calls = %d, want exactly 2 (one bounded retry, no spin)", subs.closePeriodCalls)
+		}
+		if len(invoices.invoices) != 0 {
+			t.Fatalf("a lost race wrote %d invoice(s), want 0", len(invoices.invoices))
+		}
+	})
 }

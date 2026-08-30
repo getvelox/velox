@@ -66,9 +66,9 @@ func TestRunCycleForTenant_BillsDueSubs(t *testing.T) {
 // sub id (the id the handler surfaces; the raw cause is server-logged only).
 func TestRunCycleForTenant_FailingSubDoesNotLoopForever(t *testing.T) {
 	subs := &mockSubs{
-		subs:                  map[string]domain.Subscription{"sub_x": dueSubFixture("sub_x")},
-		cycleUpdated:          make(map[string]bool),
-		updateBillingCycleErr: errors.New("simulated watermark advance failure"),
+		subs:           map[string]domain.Subscription{"sub_x": dueSubFixture("sub_x")},
+		cycleUpdated:   make(map[string]bool),
+		closePeriodErr: errors.New("simulated period close failure"),
 	}
 	engine := tenantRunEngine(subs)
 
@@ -115,9 +115,9 @@ func TestTriggerCycle_ForbidsUnscopedKey(t *testing.T) {
 func TestTriggerCycle_SanitizesErrorDetail(t *testing.T) {
 	const secret = "pq: duplicate key value violates unique constraint idx_secret"
 	subs := &mockSubs{
-		subs:                  map[string]domain.Subscription{"sub_y": dueSubFixture("sub_y")},
-		cycleUpdated:          make(map[string]bool),
-		updateBillingCycleErr: errors.New(secret),
+		subs:           map[string]domain.Subscription{"sub_y": dueSubFixture("sub_y")},
+		cycleUpdated:   make(map[string]bool),
+		closePeriodErr: errors.New(secret),
 	}
 	h := NewHandler(tenantRunEngine(subs), subs)
 

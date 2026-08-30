@@ -23,6 +23,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/recipe"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -113,9 +114,7 @@ func TestLiteLLM_WedgeE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sub: %v", err)
 	}
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-		t.Fatalf("set billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
 	// 3. POST a realistic LiteLLM spend payload through the REAL /spend handler.
 	//    Quantities are scaled to whole-cent amounts at the recipe's

@@ -149,6 +149,7 @@ messages + CHANGELOG.md, not here.
 | [112](112-dunning-exhaustion-settles-two-questions.md) | 2026-08-05 | Accepted | Dunning exhaustion settles two questions, not one |
 | [113](113-nothing-charges-a-written-off-invoice.md) | 2026-08-06 | Accepted | Nothing charges a written-off invoice — recording writers only; recovery runs on normal rails |
 | [114](114-leader-leases-tick-scoped-fencing.md) | 2026-08-30 | Proposed (Accepted at cutover, PR-D) | Leader election is a row, not a session — tick-scoped `leader_leases` with fencing tokens proven in the five claim funnels; pooler-safe by construction; advisory-lock gate + topology prober retired |
+| [115](115-one-closer-for-the-billing-period.md) | 2026-08-30 | Accepted | One closer for the billing period — every period writer (cycle close, threshold fire, plan swap, cancel) proves a (status, period start, watermark) snapshot in the first statement of the transaction that also inserts the invoice; the close re-reads the threshold watermark in-tx; the swap refuses a period a fire already billed past; doctor alarm for usage billed twice |
 
 > ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
 > across every ref). It is a skipped number, not a lost decision.

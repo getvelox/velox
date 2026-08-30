@@ -145,3 +145,19 @@ variants' interaction with cycle close, and the `$0`-threshold guard are a
 separate change (audit cluster P1b) and will be recorded when they ship. This
 ADR covers only the three kernel defects above.
 
+## Amendment 2026-08-30 (ADR-115)
+
+The boundary skip's justification above leans on "the same-tick natural cycle
+scan runs immediately after (scheduler step order: thresholds → cycle close,
+single goroutine)". That ordering no longer carries any correctness: since
+ADR-115 every threshold fire and every cycle close proves the period snapshot
+it read — status, period start, watermark — in the first statement of its own
+transaction, under the subscription row lock, and the close re-reads the
+threshold watermark inside that transaction. A fire and a close from any
+goroutine, any replica, or an operator's `POST /v1/billing/run` can no longer
+both bill the same window; whichever commits second writes nothing. The skip
+stays as what it always also was: the optimization that keeps a
+boundary-observed crossing on the full-fidelity `billOnePeriod` path. The
+fire-once probe likewise stays a probe; the reset=false fire now takes the row
+lock too (a verify-only `ClosePeriodTx`), so two concurrent fires serialize on
+the row before the partial index ever sees the second.

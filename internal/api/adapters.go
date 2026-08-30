@@ -251,6 +251,10 @@ func (a *invoiceWriterAdapter) GetLatestThresholdInvoiceForCycle(ctx context.Con
 	return a.store.GetLatestThresholdInvoiceForCycle(ctx, tenantID, subscriptionID, periodStart, periodEnd)
 }
 
+func (a *invoiceWriterAdapter) GetLatestThresholdInvoiceForCycleTx(ctx context.Context, tx *sql.Tx, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
+	return a.store.GetLatestThresholdInvoiceForCycleTx(ctx, tx, tenantID, subscriptionID, periodStart, periodEnd)
+}
+
 func (a *invoiceWriterAdapter) GetInvoiceForPeriod(ctx context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
 	return a.store.GetInvoiceForPeriod(ctx, tenantID, subscriptionID, periodStart, periodEnd)
 }

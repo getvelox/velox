@@ -20,6 +20,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -47,20 +48,24 @@ func (a *subStoreAdapter) Get(ctx context.Context, tenantID, id string) (domain.
 	return a.store.Get(ctx, tenantID, id)
 }
 
-func (a *subStoreAdapter) AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, start, end, next time.Time, anchorDay int) error {
-	return a.store.AdvanceBillingCycle(ctx, tenantID, id, expectedNext, start, end, next, anchorDay)
+func (a *subStoreAdapter) WithTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error {
+	return a.store.WithTenantTx(ctx, tenantID, fn)
 }
 
-func (a *subStoreAdapter) UpdateBillingCycle(ctx context.Context, tenantID, id string, start, end, next time.Time, anchorDay int) error {
-	return a.store.UpdateBillingCycle(ctx, tenantID, id, start, end, next, anchorDay)
+func (a *subStoreAdapter) ClosePeriodTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected subscription.PeriodSnapshot, start, end, next time.Time, anchorDay int) error {
+	return a.store.ClosePeriodTx(ctx, tx, tenantID, id, expected, start, end, next, anchorDay)
+}
+
+func (a *subStoreAdapter) ClosePeriod(ctx context.Context, tenantID, id string, expected subscription.PeriodSnapshot, start, end, next time.Time, anchorDay int) error {
+	return a.store.ClosePeriod(ctx, tenantID, id, expected, start, end, next, anchorDay)
 }
 
 func (a *subStoreAdapter) ApplyDuePendingItemPlansAtomic(ctx context.Context, tenantID, id string, now time.Time) ([]domain.SubscriptionItem, error) {
 	return a.store.ApplyDuePendingItemPlansAtomic(ctx, tenantID, id, now)
 }
 
-func (a *subStoreAdapter) FireScheduledCancellation(ctx context.Context, tenantID, id string, at time.Time) (domain.Subscription, error) {
-	return a.store.FireScheduledCancellation(ctx, tenantID, id, at)
+func (a *subStoreAdapter) FireScheduledCancellationTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected subscription.PeriodSnapshot, at time.Time) (domain.Subscription, error) {
+	return a.store.FireScheduledCancellationTx(ctx, tx, tenantID, id, expected, at)
 }
 
 func (a *subStoreAdapter) ClearPauseCollection(ctx context.Context, tenantID, id string) (domain.Subscription, error) {
@@ -218,6 +223,10 @@ func (a *invoiceStoreAdapter) GetLatestThresholdInvoiceForCycle(ctx context.Cont
 	return a.store.GetLatestThresholdInvoiceForCycle(ctx, tenantID, subscriptionID, periodStart, periodEnd)
 }
 
+func (a *invoiceStoreAdapter) GetLatestThresholdInvoiceForCycleTx(ctx context.Context, tx *sql.Tx, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
+	return a.store.GetLatestThresholdInvoiceForCycleTx(ctx, tx, tenantID, subscriptionID, periodStart, periodEnd)
+}
+
 func (a *invoiceStoreAdapter) GetInvoiceForPeriod(ctx context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error) {
 	return a.store.GetInvoiceForPeriod(ctx, tenantID, subscriptionID, periodStart, periodEnd)
 }
@@ -315,9 +324,7 @@ func TestFullBillingCycle_E2E(t *testing.T) {
 	}
 
 	// Set billing period
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, nextBilling, 0); err != nil {
-		t.Fatalf("set billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, nextBilling, 0)
 
 	// 7. Ingest usage events
 	for i := 0; i < 5; i++ {
@@ -510,9 +517,7 @@ func TestBillTiming_InAdvance_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create subscription: %v", err)
 	}
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-		t.Fatalf("set billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 	sub.CurrentBillingPeriodStart = &periodStart
 	sub.CurrentBillingPeriodEnd = &periodEnd
 
@@ -765,9 +770,7 @@ func TestBillOnCancel_UnpaidPrebillRelief_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create sub: %v", err)
 		}
-		if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-			t.Fatalf("set billing cycle: %v", err)
-		}
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 		sub.CurrentBillingPeriodStart = &periodStart
 		sub.CurrentBillingPeriodEnd = &periodEnd
 		inv, err := newEngine().BillOnCreate(ctx, sub)
@@ -841,10 +844,6 @@ func TestBillOnCancel_UnpaidPrebillRelief_E2E(t *testing.T) {
 			t.Errorf("credit grants = %d, want 0", n)
 		}
 	})
-}
-
-func (a *subStoreAdapter) UpdateBillingCycleTx(ctx context.Context, tx *sql.Tx, tenantID, id string, start, end, next time.Time, anchorDay int) error {
-	return a.store.UpdateBillingCycleTx(ctx, tx, tenantID, id, start, end, next, anchorDay)
 }
 
 func (a *subStoreAdapter) ActivateAfterTrialWithBill(ctx context.Context, tenantID, id string, at time.Time, billFn func(tx *sql.Tx, activated domain.Subscription) error) (domain.Subscription, error) {

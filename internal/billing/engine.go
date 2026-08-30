@@ -50,6 +50,10 @@ func roundDays(d time.Duration) int {
 // SettingsReader reads tenant settings for invoice configuration.
 type SettingsReader interface {
 	NextInvoiceNumber(ctx context.Context, tenantID string) (string, error)
+	// NextInvoiceNumberTx allocates on the caller's tx. The period closers
+	// (ADR-115) take the number AFTER the row CAS on the same tx, so a lost
+	// race burns no number and a rolled-back invoice leaves no sequence gap.
+	NextInvoiceNumberTx(ctx context.Context, tx *sql.Tx, tenantID string) (string, error)
 	Get(ctx context.Context, tenantID string) (domain.TenantSettings, error)
 }
 
@@ -79,7 +83,6 @@ type Engine struct {
 	dunningResolver    DunningResolver
 	cancelExecutor     ScheduledCancelExecutor
 	auditLogger        AuditWriter
-	txRunner           TxRunner
 	// deferredThresholdNotes dedups the crossed-but-deferred loudness
 	// artifact to once per (sub, period) — see noteThresholdDeferred.
 	deferredThresholdNotes sync.Map
@@ -88,21 +91,6 @@ type Engine struct {
 	// reader, the boot-frozen mode (off|shadow|on), and the parity
 	// counters the corpus CI gate asserts on.
 	intervalSnap IntervalSnapshotter
-}
-
-// TxRunner runs fn inside one tenant-scoped transaction — the coordinator-tx
-// seam for engine writes that must commit across two domain stores atomically
-// (threshold fire + cycle re-anchor). Production wires *postgres.DB (which
-// satisfies this directly) via SetTxRunner; paths that need atomicity FAIL
-// LOUDLY when it is nil rather than degrading to sequential writes.
-type TxRunner interface {
-	WithTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error
-}
-
-// SetTxRunner wires the coordinator-transaction seam (production: the
-// *postgres.DB pool, in router.go).
-func (e *Engine) SetTxRunner(r TxRunner) {
-	e.txRunner = r
 }
 
 // AuditWriter is the narrow audit surface the engine needs. Defined
@@ -475,17 +463,22 @@ type SubscriptionReader interface {
 	// pinned subs for the caller's tenant only — never cross-tenant.
 	GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, limit int) ([]domain.Subscription, error)
 	Get(ctx context.Context, tenantID, id string) (domain.Subscription, error)
-	UpdateBillingCycle(ctx context.Context, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
-	// AdvanceBillingCycle is the cycle-CLOSE variant: moves the watermark only
-	// if next_billing_at still equals expectedNext (the value this tick read),
-	// returning subscription.ErrWatermarkMoved otherwise — a superseded leader
-	// finishing its in-memory close cannot rewind a newer leader's advance.
-	AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
-	// UpdateBillingCycleTx is the in-tx variant — used by fireThreshold's
-	// reset=true arm so the threshold invoice insert and the cycle re-anchor
-	// commit atomically (ADR-066): a crash between the two otherwise strands
-	// the reset forever, because the fire-once probe blocks every retry.
-	UpdateBillingCycleTx(ctx context.Context, tx *sql.Tx, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
+	// WithTenantTx opens a period closer's transaction (ADR-115). The store
+	// that owns the period state machine owns the coordinator tx: the engine
+	// runs ClosePeriodTx / FireScheduledCancellationTx as the FIRST statement,
+	// then the invoice-number allocation and the invoice insert on the same
+	// tx, so a CAS miss rolls back before any invoice exists.
+	WithTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error
+	// ClosePeriodTx is THE period writer: one UPDATE that row-locks the
+	// subscription and proves `expected` (status, period start, watermark),
+	// then re-stamps the period. subscription.ErrWatermarkMoved when the
+	// snapshot is stale — the caller wrote nothing. The reset=false threshold
+	// fire calls it verify-only (same values) to take the lock and prove the
+	// snapshot before inserting.
+	ClosePeriodTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected subscription.PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
+	// ClosePeriod is the own-tx wrapper for the trial-active advance (no
+	// invoice, nothing else to commit alongside).
+	ClosePeriod(ctx context.Context, tenantID, id string, expected subscription.PeriodSnapshot, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
 	// ApplyDuePendingItemPlansAtomic swaps plan_id ← pending_plan_id for every
 	// item on the subscription whose pending_plan_effective_at <= now, in one
 	// statement. Returns the refreshed items (including any that weren't due,
@@ -495,13 +488,15 @@ type SubscriptionReader interface {
 	// existing plan).
 	ApplyDuePendingItemPlansAtomic(ctx context.Context, tenantID, subscriptionID string, now time.Time) ([]domain.SubscriptionItem, error)
 
-	// FireScheduledCancellation transitions a sub with a due cancel_at or
-	// cancel_at_period_end intent to canceled in one statement. Called by
-	// the cycle scan after invoice generation, instead of UpdateBillingCycle,
-	// when the schedule fields say it's time. The `at` argument is the
-	// engine's effectiveNow so canceled_at stays consistent with test-
-	// clock-driven time travel.
-	FireScheduledCancellation(ctx context.Context, tenantID, id string, at time.Time) (domain.Subscription, error)
+	// FireScheduledCancellationTx is the terminal cycle close (ADR-115): on
+	// the closer's tx it flips a sub with a due cancel_at / cancel_at_period_end
+	// intent to canceled, CAS-ing on `expected` as well as status='active',
+	// seals its intervals and enqueues subscription.canceled; the final
+	// invoice is inserted on the same tx. The `at` argument is the engine's
+	// effectiveNow so canceled_at stays consistent with test-clock time
+	// travel. subscription.ErrWatermarkMoved covers both "period moved" and
+	// "already terminated" — the closer's snapshot is stale either way.
+	FireScheduledCancellationTx(ctx context.Context, tx *sql.Tx, tenantID, id string, expected subscription.PeriodSnapshot, at time.Time) (domain.Subscription, error)
 
 	// ActivateAfterTrialWithBill atomically transitions a sub from
 	// 'trialing' to 'active' AND runs billFn (the day-1 in_advance invoice)
@@ -618,6 +613,11 @@ type InvoiceWriter interface {
 	// also HEAL a crash between invoice-create and the $0/credited MarkPaid
 	// (ADR-066). errs.ErrNotFound when the cycle has no threshold invoice.
 	GetLatestThresholdInvoiceForCycle(ctx context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error)
+	// GetLatestThresholdInvoiceForCycleTx is the same read on the closer's tx
+	// (ADR-115): issued after the row-lock CAS it sees every fire that
+	// committed before the lock, so the closer proves the watermark it built
+	// its lines against is still the watermark — or rolls back.
+	GetLatestThresholdInvoiceForCycleTx(ctx context.Context, tx *sql.Tx, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error)
 	// GetInvoiceForPeriod returns the newest non-voided invoice keyed exactly
 	// like idx_invoices_billing_idempotency (subscription, period_start,
 	// period_end) — the row billOnePeriod's ErrAlreadyExists re-entry path
@@ -1109,72 +1109,130 @@ func emitBaseSegmentLine(seg baseSegment, plan domain.Plan, periodStart time.Tim
 	*subtotal += baseFee
 }
 
-// advanceWatermark moves the sub's cycle forward as a CAS on the watermark
-// this tick read (sub.NextBillingAt). A superseded leader — a Postgres
-// failover freed its gate mid-tick, or a frozen process resumed — that
-// finishes an in-memory period close finds the watermark already advanced
-// by the newer leader and does nothing: the invoice idempotency index made
-// the second invoice impossible, this makes the second watermark write
-// impossible (ADR-114 §Consequences; HA-readiness hazard 5).
-func (e *Engine) advanceWatermark(ctx context.Context, sub domain.Subscription, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
-	err := e.subs.AdvanceBillingCycle(ctx, sub.TenantID, sub.ID, sub.NextBillingAt, periodStart, periodEnd, nextBillingAt, anchorDay)
-	if errors.Is(err, subscription.ErrWatermarkMoved) {
-		slog.InfoContext(ctx, "billing watermark already advanced by another leader — skipping this tick's advance",
-			"subscription_id", sub.ID, "tenant_id", sub.TenantID)
-		return nil
-	}
-	return err
+// errPeriodMoved: billOnePeriod wrote NOTHING because its snapshot went stale —
+// another closer (a threshold fire, a plan swap, a cancel, a sibling close)
+// committed between this close's read and its write (ADR-115).
+// billSubscription re-reads once and re-plans; a second miss leaves the sub
+// to the next fetch.
+var errPeriodMoved = errors.New("billing: period moved under this close — nothing written")
+
+// periodCloseOutcome is what commitPeriodClose committed.
+type periodCloseOutcome struct {
+	inv      domain.Invoice       // zero when no invoice was inserted (empty close)
+	canceled *domain.Subscription // set when the scheduled-cancel arm fired
 }
 
-// advanceCycleOrCancel either fires a due scheduled cancel or advances the
-// billing cycle, whichever the sub's current schedule fields require. The
-// two outcomes are mutually exclusive at this point in the flow — a sub
-// that's about to cancel must not also have its cycle advanced, otherwise
-// the next tick would observe a canceled sub with a fresh next_billing_at
-// and either log a confusing skip-not-active or risk a double-cycle bug
-// later. trigger is "scheduled" or "scheduled_at" for telemetry.
-func (e *Engine) advanceCycleOrCancel(ctx context.Context, sub domain.Subscription, periodEnd, nextPeriodStart, nextPeriodEnd, now time.Time) error {
-	if !shouldFireScheduledCancel(sub, periodEnd, now) {
-		return e.advanceWatermark(ctx, sub, nextPeriodStart, nextPeriodEnd, nextPeriodEnd, sub.BillingAnchorDay)
-	}
+// commitPeriodClose is the ONE place a cycle close commits (ADR-115). Order
+// inside the tx:
+//
+//  1. row lock + snapshot proof — FireScheduledCancellationTx when the
+//     schedule says this boundary terminates the sub, ClosePeriodTx
+//     otherwise. The CAS is the FIRST statement, so a closer planning from a
+//     stale snapshot fails here and never reaches an insert; a closer that
+//     blocks on another closer's lock re-evaluates the CAS against the row
+//     that closer committed.
+//  2. threshold-watermark re-read on this tx: the fire the lines were built
+//     against (builtAgainst) must still be the newest fire for the period —
+//     nil vs nil, or the same instant. A reset=false fire that committed
+//     between buildLineItems and this tx does not move the period (the CAS
+//     passes) but has already billed part of the window; this compare is
+//     what catches it.
+//  3. NextInvoiceNumberTx — after the CAS, so a lost race burns no number.
+//  4. CreateInvoiceWithLineItemsTx + emitFinalizeAuditTx (ADR-090 shared fate).
+//
+// Steps 3-4 run only when lines != nil (an empty close advances without an
+// invoice). No network I/O inside: tax ran before, webhook / CommitTax /
+// credits / charge run after. Error contract: subscription.ErrWatermarkMoved
+// → errPeriodMoved (nothing written); errs.ErrAlreadyExists (the cycle
+// index — reachable only for a pre-cutover row whose invoice exists while
+// the sub is still due, since the CAS now runs before the insert) propagates
+// for the heal path; anything else is an error.
+func (e *Engine) commitPeriodClose(ctx context.Context, sub domain.Subscription, expected subscription.PeriodSnapshot,
+	periodStart, periodEnd, nextStart, nextEnd, now time.Time, builtAgainst *time.Time,
+	inv domain.Invoice, lines []domain.InvoiceLineItem) (periodCloseOutcome, error) {
+	var out periodCloseOutcome
+	err := e.subs.WithTenantTx(ctx, sub.TenantID, func(tx *sql.Tx) error {
+		if shouldFireScheduledCancel(sub, periodEnd, now) {
+			canceled, err := e.subs.FireScheduledCancellationTx(ctx, tx, sub.TenantID, sub.ID, expected, now)
+			if err != nil {
+				return err
+			}
+			out.canceled = &canceled
+		} else if err := e.subs.ClosePeriodTx(ctx, tx, sub.TenantID, sub.ID, expected, nextStart, nextEnd, nextEnd, sub.BillingAnchorDay); err != nil {
+			return err
+		}
 
-	canceled, err := e.subs.FireScheduledCancellation(ctx, sub.TenantID, sub.ID, now)
-	if err != nil {
-		// InvalidState here means a concurrent immediate-cancel already won
-		// the race. Treat as a no-op success — the sub is canceled, which is
-		// what we wanted, and the immediate-cancel handler already fired its
-		// own webhook. A surfaced error here would mark the cycle as failed.
-		if errors.Is(err, errs.ErrInvalidState) {
-			slog.Info("scheduled cancel skipped, already canceled",
-				"subscription_id", sub.ID, "tenant_id", sub.TenantID)
+		var current *time.Time
+		wm, err := e.invoices.GetLatestThresholdInvoiceForCycleTx(ctx, tx, sub.TenantID, sub.ID, periodStart, periodEnd)
+		switch {
+		case err == nil:
+			end := wm.BillingPeriodEnd
+			current = &end
+		case !errors.Is(err, errs.ErrNotFound):
+			return fmt.Errorf("re-read threshold watermark: %w", err)
+		}
+		if !sameInstant(current, builtAgainst) {
+			return subscription.ErrWatermarkMoved
+		}
+
+		if lines == nil {
 			return nil
 		}
-		return fmt.Errorf("fire scheduled cancel: %w", err)
+		num, err := e.settings.NextInvoiceNumberTx(ctx, tx, sub.TenantID)
+		if err != nil {
+			return fmt.Errorf("allocate invoice number: %w", err)
+		}
+		inv.InvoiceNumber = num
+		created, err := e.invoices.CreateInvoiceWithLineItemsTx(ctx, tx, sub.TenantID, inv, lines)
+		if err != nil {
+			return err
+		}
+		// The finalize audit row rides the closer tx (ADR-090 shared fate): a
+		// finalized invoice cannot exist without it.
+		if err := e.emitFinalizeAuditTx(ctx, tx, created); err != nil {
+			return err
+		}
+		out.inv = created
+		return nil
+	})
+	if errors.Is(err, subscription.ErrWatermarkMoved) {
+		slog.InfoContext(ctx, "billing period moved under this close — nothing written; re-reading",
+			"subscription_id", sub.ID, "tenant_id", sub.TenantID,
+			"period_start", periodStart, "period_end", periodEnd)
+		return periodCloseOutcome{}, errPeriodMoved
 	}
+	return out, err
+}
 
+// sameInstant compares two optional instants (nil == nil; otherwise Equal).
+func sameInstant(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
+// afterScheduledCancel runs the post-commit legs of the terminal close: the
+// operator log line and the AuditActionCancel row. Operator-side cancel +
+// portal-side cancel both write AuditActionCancel; this is the third path
+// (auto-fire at period end) that previously skipped audit, leaving the
+// subscription Activity timeline showing "Cancellation scheduled" with no
+// terminal event. The canceled_by='schedule' field matches the outbound-
+// webhook shape so a CS rep reading both surfaces sees the same vocabulary.
+// subscription.canceled (canceled_by=schedule) itself was enqueued IN the
+// closer tx by FireScheduledCancellationTx.
+func (e *Engine) afterScheduledCancel(ctx context.Context, sub, canceled domain.Subscription, now time.Time) {
 	slog.Info("scheduled cancel fired",
 		"subscription_id", sub.ID,
 		"tenant_id", sub.TenantID,
 		"canceled_at", now.UTC(),
 	)
-
-	// Audit row for the engine-initiated transition. Operator-side
-	// cancel + portal-side cancel both write AuditActionCancel; this
-	// is the third path (auto-fire at period end) that previously
-	// skipped audit, leaving the subscription Activity timeline
-	// showing "Cancellation scheduled" with no terminal event. The
-	// canceled_by='schedule' field matches the outbound-webhook
-	// shape so a CS rep reading both surfaces sees the same vocabulary.
 	if e.auditLogger != nil {
 		_ = e.auditLogger.Log(ctx, sub.TenantID, domain.AuditActionCancel, "subscription", canceled.ID, canceled.Code, map[string]any{
 			"canceled_by": "schedule",
 			"customer_id": canceled.CustomerID,
 		})
 	}
-
-	// subscription.canceled (canceled_by=schedule) is enqueued IN the
-	// FireScheduledCancellation tx (store-level DispatchTx subset).
-	return nil
 }
 
 // effectiveNow returns the clock time the engine should use for this sub.
@@ -1917,6 +1975,7 @@ const maxPeriodsPerSubPerCall = 10000
 // ADR-028.
 func (e *Engine) billSubscription(ctx context.Context, sub domain.Subscription) (int, error) {
 	count := 0
+	movedRetry := false
 	for i := 0; i < maxPeriodsPerSubPerCall; i++ {
 		// Honour ctx deadline (CatchupTimeout from the worker, request
 		// timeout from the scheduler). Returns the partial count + err.
@@ -1924,9 +1983,10 @@ func (e *Engine) billSubscription(ctx context.Context, sub domain.Subscription) 
 			return count, fmt.Errorf("billing loop ctx done: %w", err)
 		}
 
-		// Refresh sub state. Required because billOnePeriod commits
-		// per-period UpdateBillingCycle in its own tx, and we want
-		// the next iteration to observe the post-advance fields.
+		// Refresh sub state. Required because billOnePeriod commits each
+		// period close in its own tx, and we want the next iteration to
+		// observe the post-advance fields — and, after errPeriodMoved, the
+		// period another closer committed.
 		fresh, err := e.subs.Get(ctx, sub.TenantID, sub.ID)
 		if err != nil {
 			return count, fmt.Errorf("refresh subscription %s: %w", sub.ID, err)
@@ -1974,6 +2034,18 @@ func (e *Engine) billSubscription(ctx context.Context, sub domain.Subscription) 
 		prevNextBilling := sub.NextBillingAt
 
 		invoiced, err := e.billOnePeriod(ctx, sub)
+		if errors.Is(err, errPeriodMoved) {
+			// ADR-115: another closer committed between this close's read and
+			// its write; nothing was written. Re-read once and re-plan — the
+			// loop top's Get observes the new period (typically caught up).
+			// A second miss leaves the sub to the next fetch: a sub two writers
+			// keep fighting over is not this call's to win by spinning.
+			if movedRetry {
+				return count, nil
+			}
+			movedRetry = true
+			continue
+		}
 		if err != nil {
 			return count, err
 		}
@@ -2298,7 +2370,13 @@ func (e *Engine) handleTrialState(ctx context.Context, sub domain.Subscription, 
 			// pre-existing hardcoded `monthly` already approximated.
 			nextBilling := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, domain.BillingMonthly, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
 			slog.Info("skipping billing (trial active)", "subscription_id", sub.ID)
-			return sub, true, e.advanceWatermark(ctx, sub, periodEnd, nextBilling, nextBilling, sub.BillingAnchorDay)
+			// ADR-115: the advance proves the trialing snapshot — EndTrial /
+			// ExtendTrial change status or period, so a stale advance misses.
+			err := e.subs.ClosePeriod(ctx, sub.TenantID, sub.ID, subscription.SnapshotOf(sub), periodEnd, nextBilling, nextBilling, sub.BillingAnchorDay)
+			if errors.Is(err, subscription.ErrWatermarkMoved) {
+				return sub, true, errPeriodMoved
+			}
+			return sub, true, err
 		}
 		// ADR-069: a due cancel schedule means CANCEL FREE — never
 		// activate-and-bill. Pre-route on the snapshot; the activation
@@ -2414,7 +2492,7 @@ func nominalRate(rule domain.RatingRuleVersion) *decimal.Decimal {
 // billOnePeriod (behavior-preserving) to separate the pricing
 // computation from the billing-cycle orchestration; it remains large
 // and is the next candidate for further decomposition.
-func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, now, periodStart, periodEnd time.Time, plans map[string]domain.Plan, invoiceCurrency string, meterAggs map[string]string, usageTotals map[string]decimal.Decimal) ([]domain.InvoiceLineItem, int64, error) {
+func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, now, periodStart, periodEnd time.Time, plans map[string]domain.Plan, invoiceCurrency string, meterAggs map[string]string, usageTotals map[string]decimal.Decimal) ([]domain.InvoiceLineItem, int64, *time.Time, error) {
 	var lineItems []domain.InvoiceLineItem
 	subtotal := int64(0)
 
@@ -2434,8 +2512,8 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	// line would overcharge by one full prepayment. The cycle-close
 	// invoice still bills usage from the just-elapsed period
 	// (in-arrears for usage is always correct) and any in_arrears
-	// base for the just-elapsed period. After this invoice fires,
-	// advanceCycleOrCancel below fires the scheduled cancel.
+	// base for the just-elapsed period. commitPeriodClose then fires the
+	// scheduled cancel in the same tx as this invoice (ADR-115).
 	// (audit finding flagged during the 2026-05-18 cancel-flow walk
 	// through; same bug class would re-appear if hard-pause is ever
 	// re-added — paused subs at pause-activation should likewise
@@ -2443,9 +2521,8 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	terminalCycleClose := shouldFireScheduledCancel(sub, periodEnd, now)
 
 	// Threshold-fired invoice for THIS cycle: when fireThreshold ran
-	// mid-cycle and the cycle was NOT reset (reset_billing_cycle=false —
-	// or reset=true whose UpdateBillingCycle failed after the fire), that
-	// invoice already billed (and typically charged) usage through its
+	// mid-cycle and the cycle was NOT reset (reset_billing_cycle=false),
+	// that invoice already billed (and typically charged) usage through its
 	// billing_period_end PLUS the full in_arrears base fee
 	// (evaluateThresholds → previewWithWindow emits the unprorated base).
 	// Without this watermark the cycle close re-billed both: usage from
@@ -2455,10 +2532,13 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	// thresholds mid-cycle doesn't resurrect the double-bill.
 	// errs.ErrNotFound = no threshold fire = zero behavior change; any
 	// other error aborts this sub's cycle (billing blind here risks a
-	// double charge — feedback_no_silent_fallbacks).
+	// double charge — feedback_no_silent_fallbacks). The instant is
+	// returned to the caller: commitPeriodClose re-reads it on the closer
+	// tx and refuses to commit lines built against a different watermark
+	// (ADR-115 — a fire landing between here and the commit).
 	wm, err := e.loadThresholdWatermark(ctx, sub.TenantID, sub.ID, periodStart, periodEnd)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	thresholdBilledThrough := wm.billedThrough
 
@@ -2472,7 +2552,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	// full-period line.
 	segsByItem, err := e.windowSegments(ctx, sub, periodStart, periodEnd)
 	if err != nil {
-		return nil, 0, fmt.Errorf("resolve segments: %w", err)
+		return nil, 0, nil, fmt.Errorf("resolve segments: %w", err)
 	}
 	// Hydrate any plans referenced only by an interval segment (items
 	// removed mid-period, pre-swap plans not on current items). Plans
@@ -2493,7 +2573,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 			}
 			pl, err := e.pricing.GetPlan(ctx, sub.TenantID, seg.planID)
 			if err != nil {
-				return nil, 0, fmt.Errorf("get segment plan %s: %w", seg.planID, err)
+				return nil, 0, nil, fmt.Errorf("get segment plan %s: %w", seg.planID, err)
 			}
 			plans[seg.planID] = pl
 		}
@@ -2830,7 +2910,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 	for meterID := range meterIDSet {
 		meter, err := e.pricing.GetMeter(ctx, sub.TenantID, meterID)
 		if err != nil {
-			return nil, 0, fmt.Errorf("get meter %s: %w", meterID, err)
+			return nil, 0, nil, fmt.Errorf("get meter %s: %w", meterID, err)
 		}
 
 		// Does this meter price via dimension-match pricing rules (the
@@ -2844,7 +2924,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		// invoice. Meters with no pricing rules keep the single-rule path.
 		pricingRules, err := e.pricing.ListMeterPricingRulesByMeter(ctx, sub.TenantID, meterID)
 		if err != nil {
-			return nil, 0, fmt.Errorf("list pricing rules for meter %s: %w", meterID, err)
+			return nil, 0, nil, fmt.Errorf("list pricing rules for meter %s: %w", meterID, err)
 		}
 		rulesByID := make(map[string]domain.MeterPricingRule, len(pricingRules))
 		for _, r := range pricingRules {
@@ -2874,7 +2954,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 				if !cached {
 					a, err := e.usage.AggregateByPricingRules(ctx, sub.TenantID, sub.CustomerID, meterID, defaultMode, iv.start, iv.end)
 					if err != nil {
-						return nil, 0, fmt.Errorf("aggregate by pricing rules for meter %s [%v, %v): %w", meterID, iv.start, iv.end, err)
+						return nil, 0, nil, fmt.Errorf("aggregate by pricing rules for meter %s [%v, %v): %w", meterID, iv.start, iv.end, err)
 					}
 					aggs = a
 					ruleAggCache[cacheK] = a
@@ -2918,11 +2998,11 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 					}
 					rule, err := e.resolveRatedRule(ctx, sub.TenantID, sub.CustomerID, ratingRuleID, periodStart)
 					if err != nil {
-						return nil, 0, fmt.Errorf("resolve pricing for meter %s rule %s: %w", meterID, ratingRuleID, err)
+						return nil, 0, nil, fmt.Errorf("resolve pricing for meter %s rule %s: %w", meterID, ratingRuleID, err)
 					}
 					amount, err := domain.ComputeAmountCents(rule, qty)
 					if err != nil {
-						return nil, 0, fmt.Errorf("compute amount for meter %s rule %s: %w", meterID, ratingRuleID, err)
+						return nil, 0, nil, fmt.Errorf("compute amount for meter %s rule %s: %w", meterID, ratingRuleID, err)
 					}
 					unitAmount := decimal.NewFromInt(amount).Div(qty).RoundBank(0).IntPart()
 					lineItems = append(lineItems, domain.InvoiceLineItem{
@@ -2963,7 +3043,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 				if !cached {
 					t, err := e.usage.AggregateForBillingPeriodByAgg(ctx, sub.TenantID, sub.CustomerID, meterAggs, iv.start, iv.end)
 					if err != nil {
-						return nil, 0, fmt.Errorf("aggregate usage for segment [%v, %v): %w", iv.start, iv.end, err)
+						return nil, 0, nil, fmt.Errorf("aggregate usage for segment [%v, %v): %w", iv.start, iv.end, err)
 					}
 					totals = t
 					intervalAggCache[key] = t
@@ -2992,11 +3072,11 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 			}
 			rule, err := e.resolveRatedRule(ctx, sub.TenantID, sub.CustomerID, meter.RatingRuleVersionID, periodStart)
 			if err != nil {
-				return nil, 0, fmt.Errorf("resolve pricing for meter %s: %w", meterID, err)
+				return nil, 0, nil, fmt.Errorf("resolve pricing for meter %s: %w", meterID, err)
 			}
 			amount, err := domain.ComputeAmountCents(rule, quantity)
 			if err != nil {
-				return nil, 0, fmt.Errorf("compute amount for meter %s: %w", meterID, err)
+				return nil, 0, nil, fmt.Errorf("compute amount for meter %s: %w", meterID, err)
 			}
 			unitAmount := decimal.NewFromInt(amount).Div(quantity).RoundBank(0).IntPart()
 
@@ -3021,7 +3101,7 @@ func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, no
 		}
 	}
 
-	return lineItems, subtotal, nil
+	return lineItems, subtotal, thresholdBilledThrough, nil
 }
 
 func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bool, error) {
@@ -3120,6 +3200,12 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 		return false, err
 	}
 
+	// ADR-115: the snapshot every write below proves. `sub` here is the
+	// RETURNING row of any trial flip — its period is the one this close
+	// bills — so a threshold fire, plan swap, cancel or sibling close that
+	// commits from here on makes this close's CAS miss and nothing written.
+	expected := subscription.SnapshotOf(sub)
+
 	// Gather pricing inputs for this period (plans, currency, usage).
 	plans, invoiceCurrency, meterAggs, usageTotals, err := e.resolveBillingInputs(ctx, sub, periodStart, periodEnd)
 	if err != nil {
@@ -3127,10 +3213,20 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 	}
 
 	// Build the invoice line items (base fees + usage) for this period.
-	lineItems, subtotal, err := e.buildLineItems(ctx, sub, now, periodStart, periodEnd, plans, invoiceCurrency, meterAggs, usageTotals)
+	// thresholdBilledThrough is the threshold watermark the lines were built
+	// against; commitPeriodClose re-reads it on the closer tx.
+	lineItems, subtotal, thresholdBilledThrough, err := e.buildLineItems(ctx, sub, now, periodStart, periodEnd, plans, invoiceCurrency, meterAggs, usageTotals)
 	if err != nil {
 		return false, err
 	}
+
+	// The period this close opens. Uses domain.NextBillingPeriodEnd (NOT the
+	// legacy interval-only advanceBillingPeriod) so calendar-billing subs
+	// whose anchor day drifted from a prior plan-interval change auto-re-align
+	// to the next calendar boundary instead of carrying the drifted day
+	// forward forever.
+	nextPeriodStart := periodEnd
+	nextPeriodEnd := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, plans[sub.Items[0].PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
 
 	// Skip empty cycle-close invoices — matches BillOnCreate's and
 	// BillFinalOnImmediateCancel's existing zero-subtotal guards and
@@ -3147,15 +3243,19 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 	//     next cycle's invoice may have zero base lines.
 	//   - Pure-trial period closure: nothing to bill yet.
 	//
-	// Still advance the cycle so the period anchor moves forward —
-	// the absence of an invoice doesn't mean the period didn't pass.
-	// No invoice number is consumed (NextInvoiceNumber is monotonic;
-	// burning one on a phantom invoice creates audit gaps).
+	// Still advance the cycle (or fire the scheduled cancel) so the period
+	// anchor moves forward — the absence of an invoice doesn't mean the
+	// period didn't pass. No invoice number is consumed.
 	if subtotal == 0 && len(lineItems) == 0 {
-		nextPeriodStart := periodEnd
-		nextPeriodEnd := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, plans[sub.Items[0].PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
-		if err := e.advanceCycleOrCancel(ctx, sub, periodEnd, nextPeriodStart, nextPeriodEnd, now); err != nil {
+		out, err := e.commitPeriodClose(ctx, sub, expected, periodStart, periodEnd, nextPeriodStart, nextPeriodEnd, now, thresholdBilledThrough, domain.Invoice{}, nil)
+		if errors.Is(err, errPeriodMoved) {
+			return false, err
+		}
+		if err != nil {
 			return false, fmt.Errorf("advance billing cycle (no-op invoice): %w", err)
+		}
+		if out.canceled != nil {
+			e.afterScheduledCancel(ctx, sub, *out.canceled, now)
 		}
 		slog.Info("cycle close skipped — no billable lines",
 			"subscription_id", sub.ID,
@@ -3165,13 +3265,16 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 		return false, nil
 	}
 
-	// Create invoice — pull settings for payment terms + tax, then allocate the
-	// invoice number as a strictly monotonic per-tenant sequence. No fallback:
-	// a collision-prone number is worse than a failed billing tick since the
-	// tick will retry, while a duplicate invoice number corrupts accounting.
-	// `now` was resolved at the top of billSubscription via effectiveNow —
-	// reuse it so invoice timestamps sit on the same timeline as the rest of
-	// this call (matters for test-clock subs where wall-clock ≠ frozen_time).
+	// Create invoice — pull settings for payment terms + tax. The invoice
+	// number is allocated INSIDE the closer tx, after the row CAS, as a
+	// strictly monotonic per-tenant sequence (NextInvoiceNumberTx): a lost
+	// race burns no number, and a rolled-back invoice leaves no gap. No
+	// fallback: a collision-prone number is worse than a failed billing tick
+	// since the tick will retry, while a duplicate invoice number corrupts
+	// accounting. `now` was resolved at the top of billSubscription via
+	// effectiveNow — reuse it so invoice timestamps sit on the same timeline
+	// as the rest of this call (matters for test-clock subs where wall-clock
+	// ≠ frozen_time).
 	netDays := 30
 
 	if e.settings == nil {
@@ -3179,10 +3282,6 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 	}
 	if ts, err := e.settings.Get(ctx, sub.TenantID); err == nil && ts.NetPaymentTerms > 0 {
 		netDays = ts.NetPaymentTerms
-	}
-	invoiceNumber, err := e.settings.NextInvoiceNumber(ctx, sub.TenantID)
-	if err != nil {
-		return false, fmt.Errorf("allocate invoice number: %w", err)
 	}
 
 	// Coupons removed 2026-05-29 (Phase A1). Discount stays at zero;
@@ -3225,23 +3324,23 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 			invoicePeriodStart = periodEnd
 			// Invoice header for an in_advance sub covers the upcoming
 			// period — must match what the sub's next current_period_*
-			// will be set to (computed via NextBillingPeriodEnd below
-			// at cycle close). Diverging here would leave the invoice
-			// header period and the sub's tracked period out of sync.
+			// will be set to (nextPeriodEnd, computed via
+			// NextBillingPeriodEnd above). Diverging here would leave the
+			// invoice header period and the sub's tracked period out of sync.
 			invoicePeriodEnd = domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, plans[it.PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
 			break
 		}
 	}
 
-	// ATOMIC: Create invoice + all line items in a single transaction.
-	// This prevents orphaned invoices with missing line items on partial failure.
-	// The unique index on (tenant_id, subscription_id, billing_period_start, billing_period_end)
-	// provides idempotency — duplicate calls return an error instead of double-billing.
-	inv, err := e.invoices.CreateInvoiceWithLineItemsAudited(ctx, sub.TenantID, domain.Invoice{
+	// ATOMIC (ADR-115): the period CAS, the invoice number, the invoice + all
+	// line items and the finalize audit row commit in ONE transaction, or
+	// none of them do. The unique index on (tenant_id, subscription_id,
+	// billing_period_start, billing_period_end) stays as the schema-level
+	// idempotency seam behind the CAS.
+	invoiceRow := domain.Invoice{
 		CustomerID:      sub.CustomerID,
 		SubscriptionID:  sub.ID,
 		BillingTimezone: e.tenantLocation(ctx, sub.TenantID).String(),
-		InvoiceNumber:   invoiceNumber,
 		Status:          invStatus,
 		PaymentStatus:   domain.PaymentPending,
 		Currency:        invoiceCurrency,
@@ -3269,22 +3368,29 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 		// from the mutable test_clock_id at read time. The manual-invoice path
 		// captures the same signal from the customer's pin (invoice.Service).
 		IsSimulated: sub.TestClockID != "",
-	}, lineItems, e.finalizeAuditEmit(ctx))
+	}
+	out, err := e.commitPeriodClose(ctx, sub, expected, periodStart, periodEnd, nextPeriodStart, nextPeriodEnd, now, thresholdBilledThrough, invoiceRow, lineItems)
+	if errors.Is(err, errPeriodMoved) {
+		return false, err
+	}
 	if err != nil {
 		// Idempotency: if this invoice already exists (UNIQUE violation on the
 		// per-subscription+period constraint), the store returns errs.ErrAlreadyExists.
 		// Match on the sentinel, not err.Error() substrings — translated messages,
 		// wrapped errors, or DB driver changes would silently break substring matches
 		// and cause duplicate charges in multi-worker retries.
+		//
+		// Reachable only for a PRE-ADR-115 row: an invoice a crashed tick
+		// committed while the sub stayed due (the old create-then-advance
+		// shape). A racing closer never lands here now — its CAS misses
+		// before the insert.
 		if errors.Is(err, errs.ErrAlreadyExists) {
 			slog.Info("invoice already exists for billing period (idempotent skip)",
 				"subscription_id", sub.ID,
 				"period_start", periodStart,
 				"period_end", periodEnd,
 			)
-			// The invoice already exists, so two pieces of state can still be
-			// missing (a prior tick crashed mid-flow — create-then-mark and
-			// create-then-advance are separate store writes):
+			// Two pieces of state can still be missing:
 			//
 			// 1. A zero-due MarkPaid (ADR-066): an invoice born $0 or fully
 			//    credited whose MarkPaid never ran. Best-effort — a MarkPaid
@@ -3300,24 +3406,34 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 			} else if !errors.Is(gErr, errs.ErrNotFound) {
 				return false, fmt.Errorf("fetch existing invoice (heal path): %w", gErr)
 			}
-			// 2. The cycle advance. Heal it, and surface a failure
-			// LOUDLY, matching the happy-path advance below. A swallowed error
-			// here strands the watermark: the sub stays due, every subsequent
-			// tick re-hits this skip, and nothing ever alerts. The benign
-			// concurrent-cancel race (ErrInvalidState) is already absorbed to
-			// nil inside advanceCycleOrCancel, so this won't false-positive.
-			nextPeriodStart := periodEnd
-			nextPeriodEnd := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, plans[sub.Items[0].PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
-			if err := e.advanceCycleOrCancel(ctx, sub, periodEnd, nextPeriodStart, nextPeriodEnd, now); err != nil {
+			// 2. The cycle advance. Re-drive it through the same closer (no
+			//    invoice this time) and surface a failure LOUDLY, matching the
+			//    happy path. A swallowed error here strands the watermark: the
+			//    sub stays due, every subsequent tick re-hits this skip, and
+			//    nothing ever alerts.
+			healed, err := e.commitPeriodClose(ctx, sub, expected, periodStart, periodEnd, nextPeriodStart, nextPeriodEnd, now, thresholdBilledThrough, domain.Invoice{}, nil)
+			if errors.Is(err, errPeriodMoved) {
+				return false, err
+			}
+			if err != nil {
 				return false, fmt.Errorf("advance billing cycle (heal path): %w", err)
+			}
+			if healed.canceled != nil {
+				e.afterScheduledCancel(ctx, sub, *healed.canceled, now)
 			}
 			return false, nil
 		}
 		return false, fmt.Errorf("create invoice: %w", err)
 	}
+	inv := out.inv
+	// The period is closed (or the sub terminated) — every leg from here is
+	// post-commit and at-least-once.
+	if out.canceled != nil {
+		e.afterScheduledCancel(ctx, sub, *out.canceled, now)
+	}
 
-	// The finalize AUDIT row already committed inside the create tx above
-	// (finalizeAuditEmit → LogInTx, ADR-090 shared fate): a finalized invoice
+	// The finalize AUDIT row already committed inside the closer tx above
+	// (emitFinalizeAuditTx → LogInTx, ADR-090 shared fate): a finalized invoice
 	// cannot exist without it. Here we fire only the post-commit WEBHOOK — an
 	// external effect that must not ride the DB tx.
 	e.dispatchInvoiceFinalized(ctx, sub, inv)
@@ -3400,6 +3516,13 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 	// (amount_due=0 skips the charge arm), never paid, permanently
 	// "awaiting payment" in the attention queue. Stripe parity:
 	// zero-amount invoices auto-mark paid with no payment attempt.
+	//
+	// ADR-115 crash window, recorded not closed: the period is already
+	// committed, so a crash between here and MarkPaid leaves a finalized,
+	// payment_pending, amount_due<=0 row with no re-driver (the
+	// ErrAlreadyExists heal above needs the sub to still be due). No money
+	// moves; the row sits in the attention queue. Trigger for a state-derived
+	// sweep: the first such row observed.
 	if creditApplyOK && inv.Status == domain.InvoiceFinalized {
 		updatedInv, err := e.invoices.GetInvoice(ctx, sub.TenantID, inv.ID)
 		if err == nil && updatedInv.AmountDueCents <= 0 {
@@ -3413,13 +3536,6 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 				// resolve — close any active run so it isn't left stale (ADR-040
 				// framework: post-commit best-effort idempotent state-correctness).
 				e.resolveDunningRecovered(ctx, sub.TenantID, inv.ID)
-				// Still advance the billing cycle (billing_time-aware
-				// so calendar subs auto-realign on credit-paid cycles too).
-				nextPeriodStart := periodEnd
-				nextPeriodEnd := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, plans[sub.Items[0].PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
-				if err := e.advanceCycleOrCancel(ctx, sub, periodEnd, nextPeriodStart, nextPeriodEnd, now); err != nil {
-					return true, fmt.Errorf("advance billing cycle: %w", err)
-				}
 				return true, nil
 			}
 		}
@@ -3434,19 +3550,6 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 	// pause_collection neuters the financial side without touching the cycle.
 	if creditApplyOK && inv.AmountDueCents > 0 && !collectionPaused {
 		e.collectAfterFinalize(ctx, sub, inv, "cycle close")
-	}
-
-	// Advance billing cycle (or fire scheduled cancel if due). Uses
-	// domain.NextBillingPeriodEnd (NOT the legacy interval-only
-	// advanceBillingPeriod) so calendar-billing subs whose anchor day
-	// drifted from a prior plan-interval change auto-re-align to the
-	// next calendar boundary instead of carrying the drifted day
-	// forward forever.
-	nextPeriodStart := periodEnd
-	nextPeriodEnd := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, plans[sub.Items[0].PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
-
-	if err := e.advanceCycleOrCancel(ctx, sub, periodEnd, nextPeriodStart, nextPeriodEnd, now); err != nil {
-		return false, fmt.Errorf("advance billing cycle: %w", err)
 	}
 
 	slog.Info("invoice generated",

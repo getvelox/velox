@@ -16,6 +16,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -79,9 +80,7 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 		t.Fatalf("create subscription: %v", err)
 	}
 	// Make exactly one period due: next_billing_at = periodEnd.
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-		t.Fatalf("set billing cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
 	// Pin the clock just past period_end so only one period is due.
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
@@ -142,12 +141,22 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 
 // TestManualRunVsSchedulerRace_ExactlyOneInvoice (P3 DoD): the operator-triggered
 // RunCycleForTenant and the wall-clock scheduler's RunCycle racing the SAME due
-// sub+period must still produce exactly one invoice — the tenant-scoped manual
-// path reuses the same idx_invoices_billing_idempotency guard, so mixing the two
-// entry points can't double-bill.
+// sub+period must still produce exactly one invoice. Since ADR-115 the guard is
+// the period CAS at the head of the closer tx, not the invoice index: the loser
+// observes subscription.ErrWatermarkMoved and writes nothing — it never reaches
+// the index. The scheduler legs carry a live billing lease (their fetch is
+// fenced, ADR-114); the manual legs are unfenced on purpose.
+//
+// Repaired 2026-08-30: the ctx carried no lease token, so both RunCycle legs
+// failed their fetch with leader.ErrNoToken and the error was discarded — the
+// test raced two manual runs only. The scheduler errors are asserted empty now,
+// and a hooked subtest pins the loser's exit deterministically.
+//
+// Mutation-verify: WHERE id-only CAS → the loser passes the CAS and hits the
+// cycle index instead: alreadyExists > 0 and moved == 0.
 func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling)
 
 	subStore := subscription.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
@@ -174,13 +183,13 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sub: %v", err)
 	}
-	if err := subStore.UpdateBillingCycle(ctx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-		t.Fatalf("set cycle: %v", err)
-	}
+	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
+	subs := &failableSubAdapter{subStoreAdapter: &subStoreAdapter{subStore}}
+	invs := &failableInvoiceAdapter{invoiceStoreAdapter: &invoiceStoreAdapter{invoiceStore}}
 	engine := billing.NewEngine(
-		&subStoreAdapter{subStore}, &usageStoreAdapter{usage.NewPostgresStore(db)},
-		&pricingStoreAdapter{pricing.NewPostgresStore(db)}, &invoiceStoreAdapter{invoiceStore},
+		subs, &usageStoreAdapter{usage.NewPostgresStore(db)},
+		&pricingStoreAdapter{pricing.NewPostgresStore(db)}, invs,
 		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodEnd.Add(time.Nanosecond)),
 	)
 	engine.SetIntervalReader(subStore)
@@ -192,21 +201,35 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 		start    = make(chan struct{})
 		mu       sync.Mutex
 		totalGen int
+		schedErr []error
 	)
 	// 2 scheduler runs + 2 manual runs, all on the same due sub.
 	for range 2 {
-		wg.Go(func() { <-start; g, _ := engine.RunCycle(ctx, 50); mu.Lock(); totalGen += g; mu.Unlock() })
 		wg.Go(func() {
 			<-start
-			g, _ := engine.RunCycleForTenant(ctx, tenantID, 50)
+			g, errs := engine.RunCycle(ctx, 50)
 			mu.Lock()
 			totalGen += g
+			schedErr = append(schedErr, errs...)
+			mu.Unlock()
+		})
+		wg.Go(func() {
+			<-start
+			g, failures := engine.RunCycleForTenant(ctx, tenantID, 50)
+			mu.Lock()
+			totalGen += g
+			for _, f := range failures {
+				schedErr = append(schedErr, f.Err)
+			}
 			mu.Unlock()
 		})
 	}
 	close(start)
 	wg.Wait()
 
+	if len(schedErr) != 0 {
+		t.Fatalf("racing runs surfaced errors (a lost race is not an error): %v", schedErr)
+	}
 	if totalGen != 1 {
 		t.Fatalf("manual-vs-scheduler race generated %d invoices, want exactly 1", totalGen)
 	}
@@ -217,6 +240,49 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 	if total != 1 {
 		t.Fatalf("DB holds %d invoices after the manual-vs-scheduler race, want 1", total)
 	}
+	if n := invs.alreadyExists.Load(); n != 0 {
+		t.Fatalf("%d closer(s) reached the invoice index — the CAS must refuse a loser before it inserts", n)
+	}
+
+	// Deterministic loser: the manual run's closer tx opens only after the
+	// scheduler's run has committed the same period — its CAS must miss.
+	t.Run("hooked: scheduler commits under the manual run", func(t *testing.T) {
+		sub2, err := subStore.Create(ctx, tenantID, domain.Subscription{
+			Code: "sub-race3", DisplayName: "Race3", CustomerID: cust.ID,
+			Items:  []domain.SubscriptionItem{{PlanID: plan.ID, Quantity: 1}},
+			Status: domain.SubscriptionActive, BillingTime: domain.BillingTimeCalendar, StartedAt: &periodStart,
+			CurrentBillingPeriodStart: &periodStart, CurrentBillingPeriodEnd: bivPE(periodStart),
+		})
+		if err != nil {
+			t.Fatalf("sub2: %v", err)
+		}
+		subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub2.ID, periodStart, periodEnd, periodEnd, 0)
+		movedBefore, existsBefore := subs.moved.Load(), invs.alreadyExists.Load()
+
+		subs.beforeTx = func() {
+			subs.beforeTx = nil
+			if g, errs := engine.RunCycle(ctx, 50); g != 1 || len(errs) != 0 {
+				t.Fatalf("scheduler run under the manual run: gen=%d errs=%v, want 1 and none", g, errs)
+			}
+		}
+		g, failures := engine.RunCycleForTenant(ctx, tenantID, 50)
+		if g != 0 || len(failures) != 0 {
+			t.Fatalf("manual run after losing the CAS: gen=%d failures=%v, want 0 and none", g, failures)
+		}
+		if moved := subs.moved.Load() - movedBefore; moved != 1 {
+			t.Fatalf("loser observed ErrWatermarkMoved %d time(s), want exactly 1", moved)
+		}
+		if n := invs.alreadyExists.Load() - existsBefore; n != 0 {
+			t.Fatalf("loser reached the invoice index %d time(s), want 0", n)
+		}
+		_, total, err := invoiceStore.List(ctx, invoice.ListFilter{TenantID: tenantID})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if total != 2 {
+			t.Fatalf("DB holds %d invoices, want 2 (one per sub)", total)
+		}
+	})
 }
 
 // TestRunCycleForTenant_BillsOnlyCallerLivemode (P3 DoD): a test-mode run must
@@ -254,9 +320,7 @@ func TestRunCycleForTenant_BillsOnlyCallerLivemode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s sub: %v", suffix, err)
 		}
-		if err := subStore.UpdateBillingCycle(modeCtx, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0); err != nil {
-			t.Fatalf("%s cycle: %v", suffix, err)
-		}
+		subscriptiontest.SetBillingCycle(t, modeCtx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 	}
 	mkSub(false, "test")
 	mkSub(true, "live")

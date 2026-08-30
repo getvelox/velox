@@ -745,10 +745,6 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	engine.SetIntervalReader(subStore)
 	engine.SetTestClockReader(testClockStore)
 	engine.SetEventDispatcher(eventDispatcher)
-	// Coordinator-tx seam: fireThreshold's reset=true arm commits the
-	// threshold invoice + cycle re-anchor atomically (ADR-066). The engine
-	// fails loudly on reset fires if this is missing.
-	engine.SetTxRunner(db)
 	// Engine writes audit_log on background-fired lifecycle events
 	// (currently: scheduled-cancellation auto-fire at period end).
 	// Without this, the sub Activity timeline shows "Cancellation

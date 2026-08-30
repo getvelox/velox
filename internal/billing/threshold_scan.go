@@ -14,6 +14,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/errs"
 	"github.com/sagarsuperuser/velox/internal/platform/money"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
+	"github.com/sagarsuperuser/velox/internal/subscription"
 )
 
 // thresholdEval is the decision the scan reaches for one subscription. When
@@ -234,7 +235,10 @@ func (e *Engine) scanOneThreshold(ctx context.Context, sub domain.Subscription) 
 	// (scheduler step order: thresholds before cycle close, one goroutine)
 	// bills the whole elapsed period through the full-fidelity path instead
 	// (prorated segments, item changes, terminal-cancel handling — fireThreshold
-	// has none of those). We deliberately do NOT clamp-and-fire: money-correct,
+	// has none of those). Correctness no longer rests on that ordering: every
+	// fire and every close proves its period snapshot under the row lock
+	// (ADR-115); the skip is an optimization that keeps boundary crossings on
+	// the full-fidelity path. We deliberately do NOT clamp-and-fire: money-correct,
 	// but it would bill exactly the mid-period-swap/scheduled-cancel subs
 	// through the crude path. Accepted semantic: no subscription.threshold_
 	// crossed event for a boundary-observed crossing — the cycle invoice is the
@@ -338,6 +342,26 @@ func (e *Engine) loadThresholdWatermark(ctx context.Context, tenantID, subID str
 }
 
 func (w thresholdWatermark) exists() bool { return w.billedThrough != nil }
+
+// ThresholdBilledThroughTx implements subscription.Biller for the atomic
+// plan swap (ADR-115, fire-vs-swap): on the swap's tx, after its period CAS
+// took the subscription row lock, the instant a threshold fire already billed
+// the sub's CURRENT period through — nil when none fired. The swap refuses to
+// re-anchor the period below that instant; see applyCrossIntervalPlanSwapTx.
+func (e *Engine) ThresholdBilledThroughTx(ctx context.Context, tx *sql.Tx, sub domain.Subscription) (*time.Time, error) {
+	if sub.CurrentBillingPeriodStart == nil || sub.CurrentBillingPeriodEnd == nil {
+		return nil, nil
+	}
+	wm, err := e.invoices.GetLatestThresholdInvoiceForCycleTx(ctx, tx, sub.TenantID, sub.ID, *sub.CurrentBillingPeriodStart, *sub.CurrentBillingPeriodEnd)
+	if errors.Is(err, errs.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup threshold invoice for cycle: %w", err)
+	}
+	end := wm.BillingPeriodEnd
+	return &end, nil
+}
 
 // bucketOnFire reports whether the fire billed this (meter, rating rule
 // version) bucket.
@@ -707,11 +731,6 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 		netDays = ts.NetPaymentTerms
 	}
 
-	invoiceNumber, err := e.settings.NextInvoiceNumber(ctx, sub.TenantID)
-	if err != nil {
-		return false, fmt.Errorf("allocate invoice number: %w", err)
-	}
-
 	dueAt := now.AddDate(0, 0, netDays)
 
 	// Shared finalization gate (tax-pending OR pause-collection → Draft),
@@ -724,15 +743,16 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 
 	// Emit the threshold invoice. The partial unique index on
 	// (tenant, sub, billing_period_start) WHERE billing_reason='threshold'
-	// is the idempotency seam — a re-tick lands on errs.ErrAlreadyExists
-	// and we short-circuit. Note: we use periodStart as the boundary key,
-	// not now, so two ticks fired against the same in-flight cycle dedup
-	// to the same row even though their wall-clock differs.
+	// is the schema-level idempotency seam — a re-tick lands on
+	// errs.ErrAlreadyExists and we short-circuit. Note: we use periodStart as
+	// the boundary key, not now, so two ticks fired against the same
+	// in-flight cycle dedup to the same row even though their wall-clock
+	// differs. The invoice number is allocated inside the fire tx, after the
+	// row CAS (ADR-115), so a lost race burns none.
 	invoiceRow := domain.Invoice{
 		CustomerID:      sub.CustomerID,
 		SubscriptionID:  sub.ID,
 		BillingTimezone: e.tenantLocation(ctx, sub.TenantID).String(),
-		InvoiceNumber:   invoiceNumber,
 		Status:          invStatus,
 		PaymentStatus:   domain.PaymentPending,
 		Currency:        invoiceCurrency,
@@ -760,52 +780,63 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 		IsSimulated: sub.TestClockID != "",
 	}
 
-	// reset_billing_cycle=true: the invoice insert and the cycle re-anchor
-	// commit in ONE transaction (ADR-066). Pre-fix they were two sequential
-	// writes with a logs-and-returns failure arm — a crash or transient error
-	// between them stranded the reset FOREVER: the fire-once probe finds the
-	// committed invoice and skips every later tick, so nothing ever retried
-	// the advance, and the sub silently degraded to reset=false continuation.
-	// Under base proration (fix 4) that degradation under-bills base
-	// permanently: the invoice carries a prorated base while the cycle close
-	// skips all base segments behind the threshold watermark. Atomicity makes
-	// the failure retryable instead: the invoice rolls back with the
-	// re-anchor, the probe stays clear, and the next tick re-fires cleanly.
+	// ONE transaction for every fire (ADR-115, extending ADR-066): the period
+	// CAS is its FIRST statement, then the invoice number, the invoice + lines
+	// and the finalize audit row.
+	//
+	// The CAS proves the snapshot the scan page read — status=active, the
+	// period start and the watermark, exactly what scanOneThreshold gated on —
+	// under the subscription row lock. A cycle close (leader tick or operator
+	// POST /v1/billing/run), a plan swap, a cancel or a sibling fire that
+	// committed since makes it 0 rows: the fire rolls back with nothing
+	// written and the next tick re-evaluates against the new period. Pre-fix
+	// the reset arm re-anchored WHERE id only and the reset=false arm never
+	// touched the row, so a fire in flight across an operator close billed
+	// [periodStart, now) on both invoices and could rewind the watermark.
+	//
+	//   - reset_billing_cycle=true re-anchors the cycle to `now` (recomputing
+	//     the anchor day for the new cadence and routing through
+	//     NextBillingPeriodEnd so a calendar sub re-snaps to the 1st, ADR-055).
+	//     ADR-066: the insert and the re-anchor share fate — a crash or
+	//     transient error between them once stranded the reset FOREVER
+	//     (the fire-once probe found the committed invoice and skipped every
+	//     later tick, silently degrading the sub to reset=false continuation
+	//     and, under base proration, permanently under-billing base).
+	//   - reset_billing_cycle=false writes the row VERIFY-ONLY: the same
+	//     values, so the period does not move, but the UPDATE takes the lock
+	//     and proves the snapshot through the one statement every closer
+	//     shares. (This bumps updated_at; nothing outside the package reads it.)
+	//
 	// External calls (CommitTax, charge) stay post-commit — the tx never
 	// spans network I/O.
+	expected := subscription.SnapshotOf(sub)
 	var inv domain.Invoice
-	if sub.BillingThresholds.ResetBillingCycle {
-		if e.txRunner == nil {
-			// Fail loud, never fall back to the non-atomic two-write shape
-			// (feedback_no_silent_fallbacks). Production wires the pool in
-			// router.go; only a mis-wired harness lands here.
-			return false, fmt.Errorf("tx runner required for reset_billing_cycle threshold fire")
+	err = e.subs.WithTenantTx(ctx, sub.TenantID, func(tx *sql.Tx) error {
+		if sub.BillingThresholds.ResetBillingCycle {
+			loc := e.tenantLocation(ctx, sub.TenantID)
+			interval := plans[sub.Items[0].PlanID].BillingInterval
+			resetAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, interval, loc)
+			nextPeriodEnd := domain.NextBillingPeriodEnd(now, sub.BillingTime, interval, loc, resetAnchorDay)
+			if err := e.subs.ClosePeriodTx(ctx, tx, sub.TenantID, sub.ID, expected, now, nextPeriodEnd, nextPeriodEnd, resetAnchorDay); err != nil {
+				return err
+			}
+		} else if err := e.subs.ClosePeriodTx(ctx, tx, sub.TenantID, sub.ID, expected,
+			*sub.CurrentBillingPeriodStart, *sub.CurrentBillingPeriodEnd, *sub.NextBillingAt, sub.BillingAnchorDay); err != nil {
+			return err
 		}
-		// Reset re-anchors the cycle to `now`, so recompute the billing anchor
-		// day for the new cadence and route through NextBillingPeriodEnd (NOT
-		// the interval-only advanceBillingPeriod) so a calendar sub re-snaps to
-		// the 1st rather than carrying the reset day-of-month (ADR-055).
-		loc := e.tenantLocation(ctx, sub.TenantID)
-		interval := plans[sub.Items[0].PlanID].BillingInterval
-		resetAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, interval, loc)
-		nextPeriodEnd := domain.NextBillingPeriodEnd(now, sub.BillingTime, interval, loc, resetAnchorDay)
-		err = e.txRunner.WithTenantTx(ctx, sub.TenantID, func(tx *sql.Tx) error {
-			created, txErr := e.invoices.CreateInvoiceWithLineItemsTx(ctx, tx, sub.TenantID, invoiceRow, eval.LineItems)
-			if txErr != nil {
-				return txErr
-			}
-			inv = created
-			// The finalize audit row rides the reset tx (ADR-090 shared fate):
-			// it commits with the invoice + cycle advance, or the whole reset
-			// rolls back.
-			if aErr := e.emitFinalizeAuditTx(ctx, tx, created); aErr != nil {
-				return aErr
-			}
-			return e.subs.UpdateBillingCycleTx(ctx, tx, sub.TenantID, sub.ID, now, nextPeriodEnd, nextPeriodEnd, resetAnchorDay)
-		})
-	} else {
-		inv, err = e.invoices.CreateInvoiceWithLineItemsAudited(ctx, sub.TenantID, invoiceRow, eval.LineItems, e.finalizeAuditEmit(ctx))
-	}
+		num, err := e.settings.NextInvoiceNumberTx(ctx, tx, sub.TenantID)
+		if err != nil {
+			return fmt.Errorf("allocate invoice number: %w", err)
+		}
+		invoiceRow.InvoiceNumber = num
+		created, err := e.invoices.CreateInvoiceWithLineItemsTx(ctx, tx, sub.TenantID, invoiceRow, eval.LineItems)
+		if err != nil {
+			return err
+		}
+		inv = created
+		// The finalize audit row rides the fire tx (ADR-090 shared fate).
+		return e.emitFinalizeAuditTx(ctx, tx, created)
+	})
 	if err != nil {
 		if errors.Is(err, errs.ErrAlreadyExists) {
 			slog.Info("threshold invoice already exists for cycle (idempotent skip)",
@@ -814,10 +845,16 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 			)
 			return false, nil
 		}
+		if errors.Is(err, subscription.ErrWatermarkMoved) {
+			slog.InfoContext(ctx, "threshold fire skipped — period moved under the fire; re-evaluated next tick against the new period",
+				"subscription_id", sub.ID, "tenant_id", sub.TenantID,
+				"period_start", periodStart)
+			return false, nil
+		}
 		return false, fmt.Errorf("create threshold invoice: %w", err)
 	}
 
-	// The finalize AUDIT row already committed inside the create tx above (same
+	// The finalize AUDIT row already committed inside the fire tx above (same
 	// finalize-row contract as the cycle path; feeds TTFI + the audit log). Here
 	// only the post-commit WEBHOOK fires.
 	e.dispatchInvoiceFinalized(ctx, sub, inv)
@@ -931,10 +968,9 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 	}
 
 	// NOTE: the reset=true cycle re-anchor already committed atomically with
-	// the invoice insert above — there is deliberately no post-hoc
-	// UpdateBillingCycle arm here (the old two-write shape with its
-	// "let the next tick reconcile" comment was a lie: the fire-once probe
-	// blocked every retry).
+	// the invoice insert above — there is deliberately no post-hoc period
+	// write here (the old two-write shape with its "let the next tick
+	// reconcile" comment was a lie: the fire-once probe blocked every retry).
 
 	slog.Info("threshold-fired invoice generated",
 		"invoice_id", inv.ID,
