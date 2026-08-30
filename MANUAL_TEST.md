@@ -1493,6 +1493,7 @@ The credit-note refund leg: operator retry, async webhook reconciliation, proact
 
 - [x] Valid payload + signature ≤300s → 200, processed. *(walked 2026-08-03 with the C3 signing harness against the real endpoint `/v1/webhooks/stripe/vlx_spc_148bf…`. Probe payload chosen to be side-effect-free BY DESIGN: a stale-`pending` `refund.updated` for CN-000026's already-terminal refund — the monotonic guard makes acceptance a provable no-op. `t=now` → 200 `{"status":"processed"}`; boundary control `t=now−290` (inside `signatureToleranceSec=300`) also 200. Both events persisted to `stripe_webhook_events`; CN still `succeeded`, zero new audit rows — accepted, processed, and honestly mutation-free.)*
 - [x] Replay 5+ min later → rejected (timestamp tolerance). *(walked 2026-08-03: same payload signed VALIDLY over `t=now−360` → 400 `invalid signature`; server log reason verbatim **"timestamp outside tolerance"**. Event not persisted.)*
+- [x] **Verifier is stripe-go's own since 2026-08-30** (`webhook.ValidatePayload`, 5-min `DefaultTolerance`, replacing the hand-rolled check): the three boxes above still hold, but the server-log reasons now read verbatim **"timestamp wasn't within tolerance"** (stale) and **"webhook had no valid signature"** (tampered / wrong secret); `signatureToleranceSec` no longer exists. Behaviour change worth knowing: the tolerance is ONE-SIDED — a signature timestamped in the *future* (host clock behind Stripe) is accepted; the old two-sided check rejected every delivery in that state, a silent total inbound blackout. *(automated: `TestStripeWebhook_SignatureGate` — valid / stale-valid / tampered / +2 min future — through `Routes()` with a real endpoint lookup. Re-walk the two reject boxes to refresh the quoted reasons when convenient.)*
 - [x] Modified payload + original signature → rejected. *(walked 2026-08-03: the accepted probe's exact `Stripe-Signature` header replayed over a body with one field mutated (`"pending"`→`"succeeded"`) → 400; log reason verbatim **"signature mismatch"**. The two rejects carry DIFFERENT logged reasons, so each guard demonstrably fired for its own cause rather than one guard swallowing both. Parity: 300s tolerance matches Stripe's own receiver guidance — AT PARITY.)*
 
 ## FLOW W2: Outbound secret rotation (72h grace)
@@ -2106,5 +2107,5 @@ The wedge integration. Validates the adapter accepts LiteLLM's `StandardLoggingP
 
 ## Webhook signature fails
 - Wrong `whsec_…` after `stripe listen` restart (CLI rotates per run).
-- Clock skew >5 min → rejected (FLOW W1).
+- Signature older than 5 min → rejected (FLOW W1). A host clock *behind* Stripe does not reject (one-sided tolerance since 2026-08-30).
 - Wrong webhook URL — must be `/v1/webhooks/stripe/<vlx_spc_…>`.

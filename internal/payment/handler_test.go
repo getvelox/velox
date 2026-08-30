@@ -18,44 +18,48 @@ import (
 	"github.com/sagarsuperuser/velox/internal/tenantstripe"
 )
 
-func TestVerifyStripeSignature_Valid(t *testing.T) {
-	secret := "whsec_test_secret_123"
-	payload := []byte(`{"id":"evt_123","type":"payment_intent.succeeded"}`)
-	ts := fmt.Sprintf("%d", time.Now().Unix())
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(ts + "." + string(payload)))
-	sig := hex.EncodeToString(mac.Sum(nil))
-
-	header := fmt.Sprintf("t=%s,v1=%s", ts, sig)
-
-	err := verifyStripeSignature(payload, header, secret)
-	if err != nil {
-		t.Fatalf("valid signature should pass: %v", err)
+// TestStripeWebhook_SignatureGate pins the handler's signature gate as WIRED —
+// through Routes() with a real endpoint lookup — rather than testing the
+// verifier in isolation (the verifier is stripe-go's webhook.ValidatePayload
+// since 2026-08-30). Four cases: a valid signature is accepted; a validly
+// signed but STALE timestamp is rejected; a tampered body under a valid
+// header is rejected; and a timestamp slightly in the FUTURE is accepted —
+// the one-sided tolerance that replaced the hand-rolled two-sided check
+// (which rejected every delivery when the host clock ran >5 min behind
+// Stripe).
+func TestStripeWebhook_SignatureGate(t *testing.T) {
+	secret := "whsec_gate_test"
+	newHandler := func() *Handler {
+		invoices := newMockInvoiceUpdaterH()
+		stripeAdapter := NewStripe(nil, invoices, newMockWebhookStoreHandler(), nil)
+		resolver := &stubResolver{rows: map[string]tenantstripe.EndpointLookup{
+			"vlx_spc_gate": {ID: "vlx_spc_gate", TenantID: "t1", Livemode: true, WebhookSecret: secret},
+		}}
+		return NewHandler(stripeAdapter, resolver)
 	}
-}
-
-func TestVerifyStripeSignature_Invalid(t *testing.T) {
-	secret := "whsec_test"
-	payload := []byte(`{"id":"evt_123"}`)
-
-	tests := []struct {
-		name   string
-		header string
-	}{
-		{"empty header", ""},
-		{"missing v1", "t=12345"},
-		{"wrong signature", fmt.Sprintf("t=%d,v1=deadbeef", time.Now().Unix())},
-		{"expired timestamp", fmt.Sprintf("t=%d,v1=deadbeef", time.Now().Unix()-600)},
+	body := []byte(`{"id":"evt_gate_1","type":"charge.refunded","created":1700000000,"livemode":true,"data":{"object":{}}}`)
+	post := func(t *testing.T, body []byte, header string) int {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/stripe/vlx_spc_gate", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Stripe-Signature", header)
+		rec := httptest.NewRecorder()
+		newHandler().Routes().ServeHTTP(rec, req)
+		return rec.Code
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := verifyStripeSignature(payload, tt.header, secret)
-			if err == nil {
-				t.Fatal("expected error")
-			}
-		})
+	if code := post(t, body, signStripePayloadAt(body, secret, time.Now())); code == http.StatusBadRequest {
+		t.Fatalf("valid signature must not be rejected as invalid signature, got %d", code)
+	}
+	if code := post(t, body, signStripePayloadAt(body, secret, time.Now().Add(-10*time.Minute))); code != http.StatusBadRequest {
+		t.Fatalf("stale (10 min old) but validly signed payload must be rejected, got %d", code)
+	}
+	tampered := []byte(strings.Replace(string(body), `"charge.refunded"`, `"charge.succeeded"`, 1))
+	if code := post(t, tampered, signStripePayloadAt(body, secret, time.Now())); code != http.StatusBadRequest {
+		t.Fatalf("tampered body under a valid header must be rejected, got %d", code)
+	}
+	if code := post(t, body, signStripePayloadAt(body, secret, time.Now().Add(2*time.Minute))); code == http.StatusBadRequest {
+		t.Fatalf("a timestamp 2 min in the future (host clock behind Stripe) must be accepted — one-sided tolerance, got %d", code)
 	}
 }
 
@@ -423,7 +427,14 @@ func TestWebhookHandler_TransientFailureRedelivers(t *testing.T) {
 
 // signStripePayload produces a valid Stripe-Signature header for payload+secret.
 func signStripePayload(payload []byte, secret string) string {
-	ts := fmt.Sprintf("%d", time.Now().Unix())
+	return signStripePayloadAt(payload, secret, time.Now())
+}
+
+// signStripePayloadAt signs payload with the given timestamp — the shape
+// Stripe's own webhook.ComputeSignature produces (HMAC-SHA256 over
+// "<unix ts>.<payload>").
+func signStripePayloadAt(payload []byte, secret string, at time.Time) string {
+	ts := fmt.Sprintf("%d", at.Unix())
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(ts + "." + string(payload)))
 	return fmt.Sprintf("t=%s,v1=%s", ts, hex.EncodeToString(mac.Sum(nil)))
