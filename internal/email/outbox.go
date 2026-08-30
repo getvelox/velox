@@ -106,6 +106,14 @@ func ClaimLease(batchSize int) time.Duration {
 // re-attempted against a known-dead inbox every slot). ProcessBatch DLQs
 // these immediately.
 func IsPermanentSendError(err error) bool {
+	// Classification statement, not a second guard: an email_type this
+	// binary does not know is RETRYABLE (rolling-deploy skew — a newer
+	// replica will claim it), so it must never reach the SMTP-bounce text
+	// scan below, which could misread a future type name containing a
+	// 55x token as a permanent bounce.
+	if errors.Is(err, ErrUnknownEmailType) {
+		return false
+	}
 	if errors.Is(err, ErrRecipientSuppressed) || errors.Is(err, ErrPayloadDecode) {
 		return true
 	}
@@ -116,6 +124,17 @@ func IsPermanentSendError(err error) bool {
 // ErrPayloadDecode marks a row whose payload cannot be decoded — it will
 // fail identically on every attempt.
 var ErrPayloadDecode = errors.New("email outbox: payload decode failed")
+
+// ErrUnknownEmailType marks a row whose email_type has no dispatcher case
+// in THIS binary — not necessarily in the fleet. During a rolling deploy an
+// old replica can claim a row a newer producer enqueued (email_outbox.
+// email_type deliberately has no CHECK constraint, so a new type needs no
+// migration). The row is retryable: it rides the ordinary backoff so a
+// replica that knows the type delivers it, and the attempt cap still lands
+// a type NO binary knows in the DLQ. Before 2026-08-30 this was
+// ErrPayloadDecode — permanent — and the row was dead on first claim
+// (ha-readiness hazard 2).
+var ErrUnknownEmailType = errors.New("email outbox: unknown email_type")
 
 // ErrEmailObsolete marks an action-required row whose invoice settled (or
 // was torn down) while the row sat queued. ProcessBatch marks it 'skipped'
