@@ -2,6 +2,8 @@ package webhook_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -19,7 +21,7 @@ import (
 // is never true, so the orphan stranded forever.
 func TestListPendingDeliveries_ClaimsNullRetryOrphan(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookDelivery), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Webhook NullRetry Orphan")

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"net"
 	"strings"
 	"sync"
@@ -22,7 +24,7 @@ import (
 // If someone hand-tunes one constant, this fails before production
 // double-sends do.
 func TestP5_LeaseInvariantChain(t *testing.T) {
-	d := email.NewDispatcher(nil, nil, email.DispatcherConfig{})
+	d := email.NewDispatcher(nil, nil, email.DispatcherConfig{}, leader.AlwaysLead{})
 	cfg := d.Config()
 	if got := time.Duration(cfg.BatchSize) * email.PerRowBudget; got > cfg.BatchTimeout {
 		t.Errorf("BatchSize×PerRowBudget (%v) > BatchTimeout (%v) — rows can be cancelled mid-send", got, cfg.BatchTimeout)
@@ -41,7 +43,7 @@ func TestP5_LeaseInvariantChain(t *testing.T) {
 // dispatched assertion fails.
 func TestP5_MarkSurvivesBatchCtxDeath(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "P5 Mark Detach")
 	store := email.NewOutboxStore(db)
 
@@ -77,7 +79,7 @@ func TestP5_MarkSurvivesBatchCtxDeath(t *testing.T) {
 // wastes 15 cycles and pounds dead inboxes.
 func TestP5_PermanentErrorsDLQImmediately(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "P5 Permanent DLQ")
 	store := email.NewOutboxStore(db)
 
@@ -102,7 +104,7 @@ func TestP5_PermanentErrorsDLQImmediately(t *testing.T) {
 // instead of cycling lease-long forever).
 func TestP5_PanicRowDoesNotStrandBatch(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "P5 Panic Poison")
 	store := email.NewOutboxStore(db)
 
@@ -141,7 +143,7 @@ func TestP5_PanicRowDoesNotStrandBatch(t *testing.T) {
 // LOCKED + leased).
 func TestP5_ConcurrentClaimersDisjoint(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "P5 Disjoint Claims")
 	store := email.NewOutboxStore(db)
 

@@ -2,6 +2,8 @@ package email
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +55,7 @@ func skewMakeDue(t *testing.T, db *postgres.DB, id string) {
 // permanent list — the row goes 'failed' on the first claim and this fails.
 func TestEmailOutbox_UnknownType_StaysPendingThenNewerHandlerDelivers(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "Skew Pending")
 	store := NewOutboxStore(db)
 
@@ -62,7 +64,7 @@ func TestEmailOutbox_UnknownType_StaysPendingThenNewerHandlerDelivers(t *testing
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	old := NewDispatcher(store, &recordingDeliverer{}, DispatcherConfig{})
+	old := NewDispatcher(store, &recordingDeliverer{}, DispatcherConfig{}, leader.AlwaysLead{})
 	n, err := store.ProcessBatch(ctx, 5, old.handle)
 	if err != nil {
 		t.Fatalf("old binary batch: %v", err)
@@ -93,7 +95,7 @@ func TestEmailOutbox_UnknownType_StaysPendingThenNewerHandlerDelivers(t *testing
 // ends in the dead-letter queue — at the attempt cap, not on first sight.
 func TestEmailOutbox_UnknownType_DLQAfterCap(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "Skew DLQ")
 	store := NewOutboxStore(db)
 
@@ -101,7 +103,7 @@ func TestEmailOutbox_UnknownType_DLQAfterCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	old := NewDispatcher(store, &recordingDeliverer{}, DispatcherConfig{})
+	old := NewDispatcher(store, &recordingDeliverer{}, DispatcherConfig{}, leader.AlwaysLead{})
 	for i := 1; i <= MaxOutboxAttempts; i++ {
 		skewMakeDue(t, db, id)
 		if _, err := store.ProcessBatch(ctx, 5, old.handle); err != nil {

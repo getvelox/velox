@@ -21,6 +21,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/config"
 	"github.com/sagarsuperuser/velox/internal/email"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"github.com/sagarsuperuser/velox/internal/platform/migrate"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/platform/telemetry"
@@ -142,15 +143,26 @@ func serve() {
 
 	db := postgres.NewDB(appPool, cfg.DB.QueryTimeout)
 
-	// Refuse to start behind a transaction-mode pooler: session advisory
-	// locks (billing/dunning/outbox/webhook leader gates) silently strand
-	// there — the first Release lands on the wrong server session, the
-	// lock never frees, and every replica skips every tick forever. A
-	// week of missing invoices with zero errors; a boot failure instead.
-	if err := db.VerifyAdvisoryLockTopology(context.Background()); err != nil {
-		slog.Error("connection topology check failed", "error", err)
-		os.Exit(1)
-	}
+	// Leader gate (ADR-114): every singleton loop — billing, dunning, the
+	// two outbox dispatchers, webhook delivery retry — takes one tick at a
+	// time through leader_leases, on a token the role's claim funnel
+	// re-checks in SQL. Every statement is self-contained, so the gate is
+	// safe behind a transaction-mode pooler (the old session advisory
+	// locks were not, which is why boot used to probe the topology).
+	gate := leader.New(appPool, func(role leader.Role, reason string) {
+		mw.RecordLeaderLeaseLost(string(role), reason)
+	})
+	mw.RegisterLeaderStatus(func(ctx context.Context) ([]mw.LeaderStatusRow, error) {
+		rows, err := leader.Status(ctx, appPool)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]mw.LeaderStatusRow, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, mw.LeaderStatusRow{Role: string(r.Role), Held: r.Held, HasTicked: r.HasTicked, LastTickAgeSeconds: r.LastTickAgeS, Paused: r.Paused})
+		}
+		return out, nil
+	})
 
 	// ADR-101 Phase 1: reconstruct billing_intervals for items that predate
 	// the dual-write (idempotent — items with rows are skipped, so this is
@@ -215,10 +227,7 @@ func serve() {
 	// in the future stays paused indefinitely.
 	scheduler.SetPauseResumer(server.SubscriptionSvc)
 	scheduler.SetPaymentReconciler(server.PaymentReconciler)
-	// Leader gating: each replica tries the billing / dunning advisory locks
-	// per tick; the winner runs the work, the losers skip. On crash the TCP
-	// session drops and Postgres auto-releases — no zombie locks.
-	scheduler.SetLocker(billing.NewPostgresLocker(db), postgres.LockKeyBillingScheduler, postgres.LockKeyDunningScheduler)
+	scheduler.SetGate(gate)
 
 	// Wire scheduler health tracking so /health/ready can detect stalled schedulers
 	api.SetSchedulerInterval(billingInterval)
@@ -283,7 +292,7 @@ func serve() {
 	}()
 	go func() {
 		defer workers.Done()
-		server.WebhookOutSvc.StartRetryWorker(ctx, 30*time.Second)
+		server.WebhookOutSvc.StartRetryWorker(ctx, 30*time.Second, gate)
 	}()
 
 	// Test-clock catchup worker. Started AFTER the queue is wired
@@ -302,25 +311,22 @@ func serve() {
 
 	// Outbox dispatchers (always-on per ADR-040). Webhook outbox drains
 	// webhook_outbox → Service.Dispatch; email outbox drains email_outbox
-	// → *email.Sender. The dispatchers gate each tick on a cluster-wide
-	// advisory lock (postgres.LockKeyOutboxDispatcher / LockKeyEmailDispatcher)
-	// so multi-replica deploys stay safe — only one replica drains at a
-	// time. Operators who need to pause delivery can hold the lock from
-	// an external psql session; restart isn't required.
+	// → *email.Sender. Each tick is one leader lease (ADR-114) so multi-
+	// replica deploys drain from one replica at a time. Operators pause a
+	// role with `SELECT leader_pause('webhook_outbox', 'oncall', 'why')` (docs/ops/
+	// runbook-leader-leases.md); restart isn't required.
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		dispatcher := webhook.NewDispatcher(server.OutboxStore, server.WebhookOutSvc, webhook.DispatcherConfig{})
-		dispatcher.SetLocker(server.OutboxStore)
+		dispatcher := webhook.NewDispatcher(server.OutboxStore, server.WebhookOutSvc, webhook.DispatcherConfig{}, gate)
 		dispatcher.Start(ctx)
 	}()
 
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		dispatcher := email.NewDispatcher(server.EmailOutboxStore, server.EmailSender, email.DispatcherConfig{})
+		dispatcher := email.NewDispatcher(server.EmailOutboxStore, server.EmailSender, email.DispatcherConfig{}, gate)
 		dispatcher.SetSettledChecker(server.EmailSettledChecker)
-		dispatcher.SetLocker(server.EmailOutboxStore)
 		dispatcher.Start(ctx)
 	}()
 

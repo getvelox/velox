@@ -1,17 +1,20 @@
 // Package scheduler hosts the standard tick-loop runner used by every
-// ticker-driven background worker in Velox. There are exactly four, and
+// ticker-driven singleton worker in Velox. There are exactly five, and
 // `grep -rn "scheduler.Run("` is the authoritative list: billing (1h prod /
-// 5m local), webhook_outbox (2s), email_outbox (5s), webhook_retry (30s).
-// The test-clock catchup worker is queue-driven, not ticker-driven, so it
-// does not use this runner.
+// 5m local), dunning (same interval), webhook_outbox (2s), email_outbox (5s),
+// webhook_delivery (30s). The test-clock catchup worker is queue-driven, not
+// ticker-driven, so it does not use this runner.
 //
-// Before this helper, every worker hand-rolled the same select-on-
-// ticker loop. Five copies started drifting (some logged a heartbeat,
-// some didn't; none had panic recovery, so a panic mid-tick would
-// silently kill the goroutine and the ticker would buffer forever).
-// This package consolidates the shape so each worker is ~3 lines and
-// shares one place to wire panic recovery, heartbeat logging, and
-// future hooks (status registry, prometheus counters).
+// Every loop is leader-gated (ADR-114): a tick runs only when this replica
+// leads the role for that tick, on a ctx carrying the lease token the
+// role's claim funnel proves. The gate is a required parameter — a loop
+// cannot forget it — and the runner polls at min(interval, leader.MaxPoll)
+// so a dead leader's role runs elsewhere within LeaseTTL + MaxPoll.
+//
+// Before this helper, every worker hand-rolled the same select-on-ticker
+// loop; copies drifted (heartbeat logging, no panic recovery). This package
+// consolidates the shape so each worker is ~3 lines and shares one place
+// for panic recovery, heartbeat logging and the leader gate.
 package scheduler
 
 import (
@@ -19,66 +22,73 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"time"
+
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 )
 
-// heartbeatThreshold marks the boundary between "slow" workers (that
-// log a heartbeat at INFO every tick) and "fast" workers (where INFO
-// per tick would be log-volume noise — they emit at DEBUG instead).
-//
-// 1 minute keeps billing / billing-alerts / webhook-retry visible in
-// `tail -f` for an operator running locally; sub-minute workers
-// (email outbox 5s, webhook outbox 2s) stay quiet and rely on the
-// per-dispatch logs they already emit when work happens.
+// heartbeatThreshold marks the boundary between "slow" roles (that log at
+// INFO when they lead a tick) and "fast" roles (DEBUG — INFO per tick would
+// be log-volume noise).
 const heartbeatThreshold = 1 * time.Minute
 
-// WorkFunc is the per-tick body. It must be safe to call repeatedly
-// and return cleanly on ctx cancellation. Errors are the WorkFunc's
-// to log — the runner does not attempt to interpret return values
-// because each worker has its own outcome shape (count + []error,
-// just error, just nothing).
+// WorkFunc is the per-tick body. It must be safe to call repeatedly and
+// return cleanly on ctx cancellation — the ctx is cancelled with cause
+// leader.ErrLeaseLost if the lease cannot be kept. Errors are the
+// WorkFunc's to log.
 type WorkFunc func(ctx context.Context)
 
-// Run drives a standard tick loop until ctx is cancelled. Every tick:
+// Run drives a leader-gated tick loop for role until ctx is cancelled.
 //
-//  1. Logs a heartbeat at INFO (interval >= 1 minute) or DEBUG
-//     (sub-minute), so a `tail -f` shows visible pulse for slow
-//     workers without flooding for fast ones.
-//
-//  2. Calls workFn inside a panic-recovering wrapper. A panic during
-//     a single tick logs at ERROR with the recovered value plus a
-//     full stack and continues to the next tick — without this, a
-//     panic would kill the goroutine silently while the ticker
-//     channel kept buffering.
-//
-// On ctx.Done the runner logs "stopped" and returns. Boot/teardown
-// log lines are emitted by the caller before/after Run so each
-// worker can choose its phrasing ("dispatcher started", "evaluator
-// started", etc.) and include any worker-specific metadata
-// (batch size, target queue) the runner doesn't know about.
-func Run(ctx context.Context, name string, interval time.Duration, workFn WorkFunc) {
-	ticker := time.NewTicker(interval)
+// Every poll (min(interval, leader.MaxPoll)): onPoll fires if non-nil
+// (used by the billing loop to stamp this replica's liveness for
+// /health/ready — followers stamp too, which is today's contract); then
+// gate.Lead tries to take one tick of the role. Not due / held elsewhere /
+// paused → nothing happens. Led → workFn runs inside a panic-recovering
+// wrapper on the led ctx; a panic logs at ERROR with the stack and the
+// lease is still released (the gate defers it). A gate error logs at
+// ERROR once per poll — the existing per-tick posture, no rate limiter.
+func Run(ctx context.Context, role leader.Role, interval time.Duration, gate leader.Gate, workFn WorkFunc, onPoll func()) {
+	if gate == nil {
+		slog.Error("scheduler: no leader gate wired — refusing to run an ungated singleton loop", "role", role)
+		return
+	}
+	poll := interval
+	if poll > leader.MaxPoll {
+		poll = leader.MaxPoll
+	}
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
-	heartbeat := slog.LevelInfo
+	level := slog.LevelInfo
 	if interval < heartbeatThreshold {
-		heartbeat = slog.LevelDebug
+		level = slog.LevelDebug
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("scheduler stopped", "worker", name)
+			slog.Info("scheduler stopped", "worker", role)
 			return
 		case <-ticker.C:
-			slog.Log(ctx, heartbeat, "scheduler tick", "worker", name)
-			runOneTick(ctx, name, workFn)
+			if onPoll != nil {
+				onPoll()
+			}
+			start := time.Now()
+			led, err := gate.Lead(ctx, role, interval, func(c context.Context) { runOneTick(c, string(role), workFn) })
+			if err != nil {
+				slog.Error("scheduler: leader gate error", "worker", role, "error", err)
+				continue
+			}
+			if led {
+				slog.Log(ctx, level, "scheduler tick led", "worker", role, "took", time.Since(start).Round(time.Millisecond).String())
+			}
 		}
 	}
 }
 
-// runOneTick wraps a single workFn invocation in a recover() so a
-// panic doesn't kill the runner goroutine. Logs the recovered value
-// + a stack at ERROR; the caller's next tick fires normally.
+// runOneTick wraps a single workFn invocation in a recover() so a panic
+// doesn't kill the runner goroutine. Logs the recovered value + a stack at
+// ERROR; the caller's next tick fires normally.
 func runOneTick(ctx context.Context, name string, workFn WorkFunc) {
 	defer func() {
 		if r := recover(); r != nil {

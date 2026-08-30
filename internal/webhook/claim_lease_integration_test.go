@@ -2,6 +2,8 @@ package webhook_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +22,7 @@ import (
 // nothing — the claimed row is invisible to a concurrent worker.
 func TestListPendingDeliveries_LeasesClaimedRows(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookDelivery), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Webhook Claim Lease")
@@ -102,7 +104,7 @@ func setDuePast(t *testing.T, db *postgres.DB, deliveryID string) {
 // from double-delivering a webhook.
 func TestListPendingDeliveries_ConcurrentClaimersDisjoint(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 20*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookDelivery), 20*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Webhook Disjoint Claims")

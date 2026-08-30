@@ -24,24 +24,41 @@ func TestLease_ConstantsLeaveNoElectionGap(t *testing.T) {
 	}
 }
 
-func TestFence_TokenRoundTripAndMissingTokenFailsLoud(t *testing.T) {
-	if _, _, err := Fence(context.Background()); !errors.Is(err, ErrNoToken) {
+// TestFence_PinnedToRole: a funnel proves the token for ITS role. A bare
+// ctx fails loud (ErrNoToken); a ctx led for another role fails loud too
+// (ErrWrongRole) — a billing tick reaching a dunning funnel is a wiring
+// bug and must not pass on the strength of the wrong lease; token 0 never
+// passes. Tests may attach several roles to one ctx (leadertest).
+func TestFence_PinnedToRole(t *testing.T) {
+	if _, err := Fence(context.Background(), RoleBilling); !errors.Is(err, ErrNoToken) {
 		t.Fatalf("bare ctx: want ErrNoToken, got %v", err)
 	}
 	ctx := WithToken(context.Background(), RoleBilling, 42)
-	role, token, err := Fence(ctx)
-	if err != nil || role != RoleBilling || token != 42 {
-		t.Fatalf("Fence = (%s, %d, %v)", role, token, err)
+	if token, err := Fence(ctx, RoleBilling); err != nil || token != 42 {
+		t.Fatalf("Fence(billing) = (%d, %v)", token, err)
 	}
-	if _, _, err := Fence(WithToken(context.Background(), RoleBilling, 0)); !errors.Is(err, ErrNoToken) {
-		t.Fatalf("token 0 must not pass the fence, got %v", err)
+	if _, err := Fence(ctx, RoleDunning); !errors.Is(err, ErrWrongRole) {
+		t.Fatalf("billing token at a dunning funnel: want ErrWrongRole, got %v", err)
+	}
+	if _, err := Fence(WithToken(context.Background(), RoleBilling, 0), RoleBilling); err == nil {
+		t.Fatal("token 0 must not pass the fence")
+	}
+	both := WithToken(ctx, RoleDunning, 7)
+	if token, err := Fence(both, RoleDunning); err != nil || token != 7 {
+		t.Fatalf("second role: (%d, %v)", token, err)
+	}
+	if token, err := Fence(both, RoleBilling); err != nil || token != 42 {
+		t.Fatalf("first role must survive adding a second: (%d, %v)", token, err)
+	}
+	if _, err := Fence(ctx, RoleDunning); !errors.Is(err, ErrWrongRole) {
+		t.Fatal("WithToken must not mutate the parent ctx's token set")
 	}
 }
 
 func TestDoubles(t *testing.T) {
 	ran := false
 	led, err := AlwaysLead{}.Lead(context.Background(), RoleDunning, time.Minute, func(ctx context.Context) {
-		if _, tok, err := Fence(ctx); err != nil || tok != 1 {
+		if tok, err := Fence(ctx, RoleDunning); err != nil || tok != 1 {
 			t.Errorf("AlwaysLead must hand work a fenced ctx, got %v", err)
 		}
 		ran = true

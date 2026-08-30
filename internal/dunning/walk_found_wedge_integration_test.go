@@ -2,6 +2,8 @@ package dunning_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -42,7 +44,7 @@ import (
 // not by a WHERE clause — this test pins the property, not the mechanism.
 func TestListDueRuns_LivemodeIsolation(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleDunning)
 	tenantID := testutil.CreateTestTenant(t, db, "DueRuns Mode Isolation")
 
 	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{
@@ -123,7 +125,7 @@ func TestListDueRuns_LivemodeIsolation(t *testing.T) {
 // such runs forever.
 func TestProcessDueRuns_TerminalInvoiceResolvesWithoutPolicy(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleDunning)
 	tenantID := testutil.CreateTestTenant(t, db, "Terminal Without Policy")
 
 	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{

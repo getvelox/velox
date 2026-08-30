@@ -3,6 +3,8 @@ package billing_test
 import (
 	"context"
 	"database/sql"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -224,7 +226,7 @@ func (a *invoiceStoreAdapter) GetInvoiceForPeriod(ctx context.Context, tenantID,
 // tenant → customer → meter → rating rule → plan → subscription → usage → billing engine → invoice
 func TestFullBillingCycle_E2E(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling, leader.RoleDunning)
 
 	// Stores
 	customerStore := customer.NewPostgresStore(db)
@@ -464,7 +466,7 @@ func TestFullBillingCycle_E2E(t *testing.T) {
 // counterpart.
 func TestBillTiming_InAdvance_E2E(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling, leader.RoleDunning)
 
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)

@@ -71,6 +71,9 @@ var (
 	// ErrNoToken is returned by Fence when a leader-only store method is
 	// reached outside a led tick — no query runs, no silent unfenced fallback.
 	ErrNoToken = errors.New("leader: ctx carries no lease token — leader-only store method reached outside a led tick")
+	// ErrWrongRole is returned by Fence when the ctx was led for a
+	// different role than the funnel belongs to.
+	ErrWrongRole = errors.New("leader: ctx lease token is for a different role")
 )
 
 // Gate is what scheduler.Run takes: one attempt to run ONE tick of role.
@@ -85,25 +88,39 @@ type Gate interface {
 
 type tokenKey struct{}
 
-type tokenVal struct {
-	role  Role
-	token int64
-}
+// tokens is what a led ctx carries: role → fence token. Production ctxs
+// hold exactly one entry (Manager.Lead); leadertest may attach several so
+// an end-to-end test can drive two roles' funnels on one ctx.
+type tokens map[Role]int64
 
-// WithToken stamps a led tick's (role, token) onto ctx. Only the manager (and
-// the test doubles) mint tokens.
+// WithToken returns ctx carrying the fence token for role (added to any
+// tokens the parent already carries).
 func WithToken(ctx context.Context, role Role, token int64) context.Context {
-	return context.WithValue(ctx, tokenKey{}, tokenVal{role: role, token: token})
+	next := tokens{}
+	if prev, ok := ctx.Value(tokenKey{}).(tokens); ok {
+		for r, t := range prev {
+			next[r] = t
+		}
+	}
+	next[role] = token
+	return context.WithValue(ctx, tokenKey{}, next)
 }
 
-// Fence returns the (role, token) a leader-only store method must prove in
-// its claim statement, or ErrNoToken.
-func Fence(ctx context.Context) (Role, int64, error) {
-	v, ok := ctx.Value(tokenKey{}).(tokenVal)
-	if !ok || v.token <= 0 {
-		return "", 0, ErrNoToken
+// Fence returns the token a leader-only store method must prove for want
+// in its claim statement. ErrNoToken when the ctx was never led;
+// ErrWrongRole when it was led for a different role — a billing tick
+// reaching a dunning funnel is a wiring bug, not a follower, and must not
+// pass on the strength of the wrong lease.
+func Fence(ctx context.Context, want Role) (int64, error) {
+	v, ok := ctx.Value(tokenKey{}).(tokens)
+	if !ok || len(v) == 0 {
+		return 0, ErrNoToken
 	}
-	return v.role, v.token, nil
+	token, ok := v[want]
+	if !ok || token <= 0 {
+		return 0, fmt.Errorf("%w: want %s", ErrWrongRole, want)
+	}
+	return token, nil
 }
 
 // holderID is minted once per process: hostname:pid:8hex. Containers are

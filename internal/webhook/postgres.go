@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"strings"
 	"time"
 
@@ -759,16 +760,13 @@ var ErrStaleDeliveryMark = errors.New("webhook: stale delivery mark (row no long
 // row's status, the lease (retryClaimLease — sized to the claim batch, P5) expires and another worker
 // re-claims it. The window must exceed the per-attempt HTTP timeout (10s) by a
 // wide margin so an in-flight delivery is never re-claimed underneath itself.
-// TryRetryLock leader-gates the retry worker tick (LockKeyWebhookRetry).
-func (s *PostgresStore) TryRetryLock(ctx context.Context) (DispatchLock, bool, error) {
-	lock, ok, err := s.db.TryAdvisoryLock(ctx, postgres.LockKeyWebhookRetry)
-	if err != nil || !ok {
-		return nil, ok, err
-	}
-	return lock, true, nil
-}
 
 func (s *PostgresStore) ListPendingDeliveries(ctx context.Context, limit int) ([]domain.WebhookDelivery, error) {
+	// Leader-only funnel (ADR-114): see subscription.GetDueBilling.
+	token, err := leader.Fence(ctx, leader.RoleWebhookDelivery)
+	if err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -789,6 +787,7 @@ func (s *PostgresStore) ListPendingDeliveries(ctx context.Context, limit int) ([
 			-- is never true, so it would otherwise strand forever). Sibling pattern:
 			-- invoice tax-retry claim.
 			WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+			  AND leader_fence($3, $4)
 			ORDER BY next_retry_at ASC NULLS FIRST
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
@@ -796,7 +795,7 @@ func (s *PostgresStore) ListPendingDeliveries(ctx context.Context, limit int) ([
 		RETURNING id, tenant_id, livemode, webhook_endpoint_id, webhook_event_id, status,
 			COALESCE(http_status_code, 0), COALESCE(response_body,''), COALESCE(error_message,''),
 			attempt_count, next_retry_at, created_at, completed_at
-	`, int(retryClaimLease(limit).Seconds()), limit)
+	`, int(retryClaimLease(limit).Seconds()), limit, string(leader.RoleWebhookDelivery), token)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"sync"
 	"testing"
 	"time"
@@ -100,7 +102,7 @@ func TestOutbox_Enqueue_TxAtomicity(t *testing.T) {
 // row transitions to 'dispatched', attempts=1, dispatched_at populated.
 func TestOutbox_ProcessBatch_Success(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Outbox Success")
@@ -141,7 +143,7 @@ func TestOutbox_ProcessBatch_Success(t *testing.T) {
 // MUST NOT re-claim the row.
 func TestOutbox_ProcessBatch_RetryBackoff(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 15*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery), 15*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Outbox Retry")
@@ -195,7 +197,7 @@ func TestOutbox_ProcessBatch_RetryBackoff(t *testing.T) {
 // exactly what the dead-letter-queue contract promises.
 func TestOutbox_ProcessBatch_DLQ(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 30*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery), 30*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Outbox DLQ")
@@ -286,10 +288,12 @@ func TestOutbox_Counts(t *testing.T) {
 // posture named all three drainers as pinned by concurrent-claimer tests,
 // but only the email outbox and the webhook RETRY claim had one — this
 // drainer's claim was held by convention. Two dispatchers racing the same
-// due set must attempt each row exactly once: a dual-leader window (a
-// failover releases the session advisory lock while the old leader's tick
-// is still running) would otherwise mint the same webhook event twice
-// under two different ids — a semantic duplicate consumers cannot dedupe.
+// due set must attempt each row exactly once: a dual-leader window (before
+// ADR-114, a failover released the session advisory lock while the old
+// leader's tick was still running; today the lease fence closes that window
+// at the claim, and this test still pins the row lease beneath it) would
+// otherwise mint the same webhook event twice under two different ids — a
+// semantic duplicate consumers cannot dedupe.
 //
 // What this pins is the LEASE: the 50ms handler sleep keeps the winner's
 // rows claimed-but-unmarked while the sibling claims, and the sibling must
@@ -304,7 +308,7 @@ func TestOutbox_Counts(t *testing.T) {
 // the sibling test's mutation, not this one's.
 func TestOutbox_ProcessBatch_ConcurrentClaimersDisjoint(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx, cancel := context.WithTimeout(postgres.WithLivemode(context.Background(), false), 20*time.Second)
+	ctx, cancel := context.WithTimeout(leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery), 20*time.Second)
 	defer cancel()
 
 	tenantID := testutil.CreateTestTenant(t, db, "Outbox Disjoint Claims")
@@ -361,7 +365,7 @@ func TestOutbox_ProcessBatch_ConcurrentClaimersDisjoint(t *testing.T) {
 // rows → same) — red either way.
 func TestOutbox_ProcessBatch_SkipsRowsLockedBySibling(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleWebhookOutbox, leader.RoleWebhookDelivery)
 
 	tenantID := testutil.CreateTestTenant(t, db, "Outbox Skip Locked")
 	store := webhook.NewOutboxStore(db)

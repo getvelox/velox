@@ -3,6 +3,8 @@ package billing_test
 import (
 	"context"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,7 +48,7 @@ import (
 func TestLiteLLM_WedgeE2E(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	// livemode=false test partition; tenant bound below for the handler path.
-	baseCtx := postgres.WithLivemode(context.Background(), false)
+	baseCtx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling, leader.RoleDunning)
 
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)

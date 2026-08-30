@@ -74,14 +74,14 @@ endpoints are exempt from rate limiting and audit logging.
   and outbox dispatchers (the workers that drain the queued
   side-effect tables — outbound webhooks and emails) are
   leader-elected: only one replica runs each job at a time, guarded
-  by Postgres advisory locks (`internal/billing/lock_adapter.go`)
-  and SKIP-LOCKED row claims (rows another worker already holds are
+  by per-tick leases in `leader_leases` (`internal/platform/leader`,
+  ADR-114) and SKIP-LOCKED row claims (rows another worker already holds are
   skipped, not waited on), so replicas coexist without
   double-billing or double-sending. "Safe"
   is not "fully supported": a few surfaces still assume one process
   (the dashboard's live webhook-event tail only shows events dispatched
   by the replica serving the stream; the password-reset send cap
-  becomes per-replica), and Postgres-failover edge cases are unhandled.
+  becomes per-replica).
   The complete verified list — what breaks at N=2, what's already safe,
   and the scoped build plan — is
   [docs/dev/ha-readiness-2026-07-06.md](../docs/dev/ha-readiness-2026-07-06.md).

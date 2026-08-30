@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"log/slog"
 	"time"
 
@@ -152,6 +153,11 @@ type OutboxHandler func(ctx context.Context, row OutboxRow) error
 // Callers should set a sensible query timeout on ctx so a stuck handler
 // can't hold locks indefinitely.
 func (s *OutboxStore) ProcessBatch(ctx context.Context, limit int, handler OutboxHandler) (int, error) {
+	// Leader-only funnel (ADR-114): see subscription.GetDueBilling.
+	token, err := leader.Fence(ctx, leader.RoleWebhookOutbox)
+	if err != nil {
+		return 0, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -178,13 +184,14 @@ func (s *OutboxStore) ProcessBatch(ctx context.Context, limit int, handler Outbo
 		WHERE id IN (
 			SELECT id FROM webhook_outbox
 			WHERE status = 'pending' AND next_attempt_at <= now()
+			  AND leader_fence($3, $4)
 			ORDER BY next_attempt_at
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, tenant_id, livemode, event_type, payload, status, attempts,
 		          next_attempt_at, COALESCE(last_error,''), created_at, dispatched_at
-	`, int(outboxClaimLease(limit).Seconds()), limit)
+	`, int(outboxClaimLease(limit).Seconds()), limit, string(leader.RoleWebhookOutbox), token)
 	if err != nil {
 		return 0, fmt.Errorf("outbox: claim: %w", err)
 	}
@@ -307,18 +314,6 @@ func (s *OutboxStore) attemptRow(ctx context.Context, row OutboxRow, handler Out
 	if err := mtx.Commit(); err != nil {
 		slog.Error("webhook outbox: commit retry mark", "outbox_id", row.ID, "error", err)
 	}
-}
-
-// TryDispatcherLock tries to acquire the cluster-wide advisory lock that
-// gates the outbox dispatcher tick. Returns (lock, true, nil) on success;
-// caller defers lock.Release. Returns (nil, false, nil) if another replica
-// holds it. Implements webhook.DispatchLocker.
-func (s *OutboxStore) TryDispatcherLock(ctx context.Context) (DispatchLock, bool, error) {
-	lock, ok, err := s.db.TryAdvisoryLock(ctx, postgres.LockKeyOutboxDispatcher)
-	if err != nil || !ok {
-		return nil, ok, err
-	}
-	return lock, true, nil
 }
 
 // PendingCount returns the current number of rows awaiting dispatch. Intended

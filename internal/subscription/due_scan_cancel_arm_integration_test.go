@@ -2,6 +2,8 @@ package subscription_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -28,7 +30,7 @@ import (
 func TestDueScans_CancelArm_Scoping(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	store := subscription.NewPostgresStore(db)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling)
 
 	const tenantID = "vlx_ten_cancelarm"
 	const clockID = "vlx_tclk_cancelarm"

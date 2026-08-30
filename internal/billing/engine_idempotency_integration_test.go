@@ -2,6 +2,8 @@ package billing_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -28,7 +30,7 @@ import (
 // TestConcurrentBilling_ExactlyOneInvoice.)
 func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	db := testutil.SetupTestDB(t) // skips on -short
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling, leader.RoleDunning)
 
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)

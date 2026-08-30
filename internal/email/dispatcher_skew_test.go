@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"testing"
 )
 
@@ -14,7 +15,7 @@ import (
 func TestDispatcherUnknownType_IsRetryable(t *testing.T) {
 	ctx := context.Background()
 	sender := &recordingDeliverer{}
-	d := NewDispatcher(nil, sender, DispatcherConfig{})
+	d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 
 	err := d.handle(ctx, rowOf("future_type_from_a_newer_release"))
 	if !errors.Is(err, ErrUnknownEmailType) {
@@ -53,7 +54,7 @@ func TestDispatcherEveryDeclaredTypeDispatches(t *testing.T) {
 	}
 	for _, typ := range all {
 		sender := &recordingDeliverer{}
-		d := NewDispatcher(nil, sender, DispatcherConfig{})
+		d := NewDispatcher(nil, sender, DispatcherConfig{}, leader.AlwaysLead{})
 		d.SetSettledChecker(&recordingChecker{state: ""}) // invoice live: action-required types deliver
 		if err := d.handle(ctx, rowOf(typ)); err != nil {
 			t.Errorf("%s: handle returned %v — a declared type with no dispatcher case", typ, err)

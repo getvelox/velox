@@ -2,6 +2,8 @@ package billing_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ import (
 // cancel_credit_atomic_integration_test.go).
 func TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleBilling, leader.RoleDunning)
 
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)

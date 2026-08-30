@@ -2,6 +2,8 @@ package dunning_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ import (
 // dunning is driven by the catchup counterpart ListDueRunsForClock instead.
 func TestListDueRuns_ExcludesSimulatedInvoiceRun(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleDunning)
 	tenantID := testutil.CreateTestTenant(t, db, "DueRuns Sim Gate")
 
 	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{ExternalID: "cus_due", DisplayName: "Due"})

@@ -219,7 +219,7 @@ Fair question, and the honest answer has three parts.
 
 **What we have actually measured, and what we haven't.** On AWS, in one AZ, on the live-mode path with 200 customers and every event reconciled against the database: on `db.m7g.2xlarge` (32 GB) the ingest API held **1,000 events/sec at p99 8.2 ms across five 10-minute repeats** and 5,000 ev/s at p99 51 ms until the table's index working set (~60M rows, 30 GB) outgrew the instance — a capacity cliff stated with its numbers; on `db.m7g.4xlarge` (64 GB), after fixing the hot row that run found ([#818](https://github.com/getvelox/velox/issues/818)), it held **12,000 ev/s at batch 10 (1,200 requests/s) at p99 22.6 ms** and **15,000 ev/s at batch 100 at p99 43.8 ms**, each 4 of 5 ten-minute repeats; a third, instrumented run then caught the tail stalls live (WAL segment creation when RDS's recycled-segment pool runs dry) and, with the pool sized as the runbook now says, ran 12,000 ev/s **5 of 5** with a worst 10-second p99 of 52 ms. The runs also found the per-customer usage summary that scans linearly ([#819](https://github.com/getvelox/velox/issues/819)) and state it beside the numbers. [`docs/benchmarks/sustained-throughput.md`](docs/benchmarks/sustained-throughput.md) carries the method, the gates, the evidence files, the closed-loop ceilings and pgbench denominators — and a plain list of what was *not* tested (steady traffic only, 10-minute windows, single AZ); the whole thing reproduces with one command from `scripts/bench-rig/`.
 
-**The ladder, which stays boring for a long time.** Before Velox needs a new dependency: use the batch endpoint (one commit amortises the write cost across up to 1,000 events), add replicas (multi-node leader election via Postgres advisory locks already ships), partition `usage_events` by month, set a retention window on raw events, and move analytics to a read replica. Each rung is ordinary Postgres operations. A columnar store only earns its place when you want arbitrary slicing over years of raw events, or sustained ingest well past the figure above — and at that point it belongs beside Velox as a read-side sidecar, not underneath it. Money never leaves Postgres.
+**The ladder, which stays boring for a long time.** Before Velox needs a new dependency: use the batch endpoint (one commit amortises the write cost across up to 1,000 events), add replicas (multi-replica leader leases already ship), partition `usage_events` by month, set a retention window on raw events, and move analytics to a read replica. Each rung is ordinary Postgres operations. A columnar store only earns its place when you want arbitrary slicing over years of raw events, or sustained ingest well past the figure above — and at that point it belongs beside Velox as a read-side sidecar, not underneath it. Money never leaves Postgres.
 
 **And if you already run Kafka, keep it.** Velox does not want to own your transport. Point a consumer at the batch ingest endpoint and your existing pipeline feeds it directly — the same shape teams already use to avoid duplicating a metering stack they consider core. Velox is deliberately the last mile: rating, invoicing, credits, dunning, collection.
 
@@ -290,8 +290,11 @@ adding tenants: [`docs/api-keys.md`](docs/api-keys.md).
 
 July–August 2026: prepaid commits + drawdown, provider cost tables with
 in-app per-customer margin, team invites (ADR-081), ambiguous-charge safety
-(ADR-105–108), bad-debt semantics (ADR-110–113), and a 28-check
-money-invariant sweep in CI. Dated detail: [`CHANGELOG.md`](CHANGELOG.md).
+(ADR-105–108), bad-debt semantics (ADR-110–113), a 28-check
+money-invariant sweep in CI, and multi-replica leader leases — every
+background job takes a per-tick lease that every claim re-checks, so a
+dead replica is replaced in seconds and a transaction-mode pooler is
+safe (ADR-114). Dated detail: [`CHANGELOG.md`](CHANGELOG.md).
 
 ### Explicitly deferred (on hold pending design partner)
 

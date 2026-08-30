@@ -2,6 +2,8 @@ package email_test
 
 import (
 	"context"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 
 	"github.com/sagarsuperuser/velox/internal/email"
@@ -16,7 +18,7 @@ import (
 // pending-only claim predicate excludes it).
 func TestProcessBatch_ObsoleteRowMarksSkipped(t *testing.T) {
 	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
+	ctx := leadertest.Token(t, testutil.AdminPool(t), postgres.WithLivemode(context.Background(), false), leader.RoleEmailOutbox)
 	tenantID := testutil.CreateTestTenant(t, db, "Skip Obsolete")
 	store := email.NewOutboxStore(db)
 

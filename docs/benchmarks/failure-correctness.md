@@ -137,6 +137,16 @@ Two things worth stating about that number rather than leaving implied:
 
 ## 5. How fast a dead leader is replaced
 
+> **Superseded 2026-08-30 (ADR-114).** Leadership moved from a session
+> advisory lock to a per-tick lease row on the database clock (10 s TTL,
+> renewed every 3 s, polled at least every 5 s). Both rows below collapse
+> into one bound that no longer depends on the network honouring a
+> keepalive: **any** dead leader — process, host, partition, VM pause —
+> is replaced within **LeaseTTL + MaxPoll = 15 s**, and the old holder
+> stops itself after 6 s without an acknowledged renew. The measured
+> numbers for the lease shape land with PR-E of that arc; until then the
+> figures below describe the retired mechanism, kept for the record.
+
 Singleton work — jobs only one replica may run at a time — is gated by a
 Postgres advisory lock (an application-defined lock the server holds for the
 session). Two failure modes, measured separately, because they behave nothing

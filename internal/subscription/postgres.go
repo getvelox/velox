@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
 	"strings"
 	"time"
 
@@ -1136,6 +1137,13 @@ func (s *PostgresStore) transitionInTx(ctx context.Context, tx *sql.Tx, id strin
 }
 
 func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, limit int) ([]domain.Subscription, error) {
+	// Leader-only funnel (ADR-114): the claim proves the caller's lease token
+	// in its own snapshot. Outside a led tick this fails loud — never an
+	// unfenced fallback.
+	token, err := leader.Fence(ctx, leader.RoleBilling)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
 		return nil, err
@@ -1170,9 +1178,10 @@ func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, lim
 		  AND s.test_clock_id IS NULL
 		  AND (s.next_billing_at <= $2
 		       OR (s.status = 'active' AND s.cancel_at IS NOT NULL AND s.cancel_at <= $2))
+		  AND leader_fence($4, $5)
 		ORDER BY s.next_billing_at ASC LIMIT $3
 		FOR UPDATE OF s SKIP LOCKED
-	`, postgres.Livemode(ctx), before, limit)
+	`, postgres.Livemode(ctx), before, limit, string(leader.RoleBilling), token)
 	if err != nil {
 		return nil, err
 	}
