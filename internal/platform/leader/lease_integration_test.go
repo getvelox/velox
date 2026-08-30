@@ -80,8 +80,12 @@ func TestLease_RolesMatchCheckConstraint(t *testing.T) {
 }
 
 // TestLease_TwoManagersContend: two managers, many goroutines, one role that
-// is always due (interval 0): exactly one leads per round and the token
-// strictly increases.
+// is always due (interval 0). The property is mutual exclusion — at no
+// instant do two goroutines hold the role — plus progress (someone leads
+// every round) and a strictly increasing token. It is NOT "exactly one
+// leader per round": a goroutine scheduled after the winner released its
+// 30 ms hold leads legitimately and sequentially (seen on a loaded CI runner
+// 2026-08-30); counting that as a violation was the test lying.
 func TestLease_TwoManagersContend(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	admin := testutil.AdminPool(t)
@@ -89,6 +93,7 @@ func TestLease_TwoManagersContend(t *testing.T) {
 	a, b := leader.New(db.Pool, nil), leader.New(db.Pool, nil)
 
 	var lastToken int64
+	var inFlight atomic.Int64 // holders at this instant — must never exceed 1
 	for round := 0; round < 10; round++ {
 		var led atomic.Int64
 		var wg sync.WaitGroup
@@ -101,6 +106,10 @@ func TestLease_TwoManagersContend(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				ok, err := m.Lead(context.Background(), leader.RoleWebhookOutbox, 0, func(ctx context.Context) {
+					if n := inFlight.Add(1); n > 1 {
+						t.Errorf("%d holders at once — the lease let two ticks overlap", n)
+					}
+					defer inFlight.Add(-1)
 					tok, ferr := leader.Fence(ctx, leader.RoleWebhookOutbox)
 					if ferr != nil {
 						t.Errorf("led work without a token: %v", ferr)
@@ -120,8 +129,8 @@ func TestLease_TwoManagersContend(t *testing.T) {
 			}()
 		}
 		wg.Wait()
-		if led.Load() != 1 {
-			t.Fatalf("round %d: %d leaders, want exactly 1", round, led.Load())
+		if led.Load() < 1 {
+			t.Fatalf("round %d: nobody led an always-due role", round)
 		}
 	}
 }
