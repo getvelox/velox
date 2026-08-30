@@ -119,6 +119,56 @@ jobs:
           file: coverage.out
         continue-on-error: true
 
+  # The same integration suite with the APP pool behind PgBouncer in
+  # TRANSACTION mode (ADR-114 PR-E). Since the leader-lease cutover every
+  # statement Velox issues is meant to be self-contained; this job is what
+  # makes that a checked property instead of a claim. Anything that assumes
+  # a session — SET without LOCAL, a session advisory lock, a prepared
+  # statement reused across transactions — passes on the direct-connection
+  # job above and fails here. Admin/migration traffic stays direct, as
+  # production migrations do (docs/ops/postgres-requirements.md).
+  test-pgbouncer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: velox
+          POSTGRES_USER: velox
+          POSTGRES_PASSWORD: velox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.7'
+
+      - name: Create test database and app user
+        run: |
+          PGPASSWORD=velox psql -h localhost -U velox -d velox \
+            -c "CREATE ROLE velox_app WITH LOGIN PASSWORD 'velox_app';" \
+            -c "CREATE DATABASE velox_test OWNER velox;"
+          PGPASSWORD=velox psql -h localhost -U velox -d velox_test -c "
+            CREATE EXTENSION IF NOT EXISTS pgcrypto;
+            CREATE ROLE velox_test_app WITH LOGIN PASSWORD 'velox_test_app';
+            GRANT ALL PRIVILEGES ON DATABASE velox_test TO velox_test_app;
+            GRANT ALL ON SCHEMA public TO velox_test_app;
+            ALTER DEFAULT PRIVILEGES FOR ROLE velox IN SCHEMA public GRANT ALL ON TABLES TO velox_test_app;
+            ALTER DEFAULT PRIVILEGES FOR ROLE velox IN SCHEMA public GRANT ALL ON SEQUENCES TO velox_test_app;
+          "
+
+      - name: Integration Tests through PgBouncer (transaction mode)
+        run: PGB_MODE=ci scripts/pgbouncer-test.sh
+
   # Golden path: the README quickstart + scripts/demo.sh, executed for real.
   # This is the whole wedge chain in one run — recipe → test-clock customer →
   # LiteLLM-shaped token ingest → provider cost rates → simulated month →

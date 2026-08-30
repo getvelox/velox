@@ -1,6 +1,6 @@
 # ADR-114: Leader election is a row, not a session — tick-scoped leases with fencing tokens
 
-**Status:** Accepted (2026-08-30) — cutover shipped in PR-D of this arc; PR-E (PgBouncer transaction-mode CI job, re-measured failover numbers) follows
+**Status:** Accepted (2026-08-30) — cutover shipped in PR-D of this arc; PR-E added the PgBouncer transaction-mode CI job and the measured failover numbers (SIGKILL 9.5 s, severed link 9 s — `docs/benchmarks/failure-correctness.md` §5)
 **Date:** 2026-08-30
 **Amends:** ADR-006 (background scheduler; the leader gate it assumed), ADR-072 (transport lease model — unchanged, now composed with a leader fence), ADR-073 (boot contract — `VerifyAdvisoryLockTopology` retired)
 **Plan of record:** [docs/dev/ha-readiness-2026-07-06.md](../dev/ha-readiness-2026-07-06.md) (2026-08-30 header) · velox-ops `ha-program-2026-08-30.md`
