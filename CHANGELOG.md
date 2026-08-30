@@ -27,6 +27,8 @@ frozen; breaking changes land on MINOR until `1.0.0`.
 
 ### Fixed
 
+- **Stripe webhook signatures are verified by stripe-go's own `webhook.ValidatePayload` (2026-08-30).** The hand-rolled verifier it replaces checked the timestamp in BOTH directions, so a host clock running more than five minutes *behind* Stripe rejected every inbound delivery as `invalid signature` — a silent total blackout (Stripe retries for up to three days, then drops). Stripe's library, already a dependency, is one-sided: only signatures older than five minutes are rejected, which is the reference behaviour. −65 lines, no new dependency; server-log reasons on a reject now read `timestamp wasn't within tolerance` / `webhook had no valid signature` (MANUAL_TEST FLOW W1 updated). Velox's *outbound* `Velox-Signature` signing is untouched.
+
 - **A single API key could not exceed ~570 requests/s on any hardware (#818).** Every request rewrote `api_keys.last_used_at` on the same row; the row lock was the ceiling. It is now written at most once per key per minute, exactly-once under a concurrent burst. Verified on the rig: 6,000 ev/s at batch 10 went from "not held" to p99 18 ms; 12,000 ev/s (1,200 req/s) sustained at p99 22.6 ms.
 - **The manual tax provider silently misapportioned when given a negative line amount** (line taxes did not sum to the total; one line negative). It now returns an error; the only caller already prevents the input (#556).
 - **A billing leader whose host vanished could hold the scheduler lock for over two hours.** TCP keepalives on the advisory-lock connection; a severed link now releases in ~95 s (measured with `scripts/partition-drill.sh`).

@@ -2,20 +2,15 @@ package payment
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stripe/stripe-go/v82/webhook"
 
 	"github.com/sagarsuperuser/velox/internal/api/respond"
 	"github.com/sagarsuperuser/velox/internal/auth"
@@ -25,10 +20,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/tenantstripe"
 )
 
-const (
-	maxWebhookBodySize    = 65536 // 64KB
-	signatureToleranceSec = 300   // 5 minutes
-)
+const maxWebhookBodySize = 65536 // 64KB
 
 // EndpointResolver is the narrow surface the webhook handler needs from
 // tenantstripe.Service. Exists so the handler can be tested without a DB.
@@ -110,8 +102,14 @@ func (h *Handler) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Signature check is stripe-go's own (webhook.ValidatePayload, 5-minute
+	// DefaultTolerance). Its tolerance is ONE-SIDED: only signatures OLDER than
+	// the window are rejected. The hand-rolled check this replaced was
+	// two-sided, so a host clock running >5 min behind Stripe rejected every
+	// delivery — a silent total inbound blackout (Stripe retries ≤3 days, then
+	// drops). Stripe's reference semantics are the contract.
 	sigHeader := r.Header.Get("Stripe-Signature")
-	if err := verifyStripeSignature(body, sigHeader, lookup.WebhookSecret); err != nil {
+	if err := webhook.ValidatePayload(body, sigHeader, lookup.WebhookSecret); err != nil {
 		slog.WarnContext(r.Context(), "stripe webhook signature verification failed",
 			"endpoint_id", endpointID,
 			"tenant_id", lookup.TenantID,
@@ -277,62 +275,4 @@ func endpointAuthoritativeEvent(eventType string) bool {
 	default:
 		return false
 	}
-}
-
-// verifyStripeSignature verifies the Stripe-Signature header using HMAC-SHA256.
-// Stripe signature format: t=timestamp,v1=signature
-func verifyStripeSignature(payload []byte, sigHeader, secret string) error {
-	if sigHeader == "" {
-		return fmt.Errorf("missing Stripe-Signature header")
-	}
-
-	var timestamp string
-	var signatures []string
-
-	for _, part := range strings.Split(sigHeader, ",") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		switch kv[0] {
-		case "t":
-			timestamp = kv[1]
-		case "v1":
-			signatures = append(signatures, kv[1])
-		}
-	}
-
-	if timestamp == "" || len(signatures) == 0 {
-		return fmt.Errorf("invalid signature format")
-	}
-
-	// Check timestamp tolerance
-	ts, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid timestamp")
-	}
-	if abs(time.Now().Unix()-ts) > signatureToleranceSec {
-		return fmt.Errorf("timestamp outside tolerance")
-	}
-
-	// Compute expected signature: HMAC-SHA256(timestamp + "." + payload)
-	signedPayload := timestamp + "." + string(payload)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(signedPayload))
-	expected := hex.EncodeToString(mac.Sum(nil))
-
-	for _, sig := range signatures {
-		if hmac.Equal([]byte(sig), []byte(expected)) {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("signature mismatch")
-}
-
-func abs(n int64) int64 {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
