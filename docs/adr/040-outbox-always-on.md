@@ -15,6 +15,26 @@ Producers persist an event/email intent inside the business-op
 transaction; a background dispatcher drains the queue with retry +
 DLQ.
 
+> **Amendment (2026-08-30): email is post-commit; webhooks are in-tx.**
+> The paragraph above is true of `webhook_outbox` — every producer
+> enqueues inside the business transaction (`invoice/postgres.go`,
+> `subscription/postgres.go`, `credit/postgres.go`). It has never been
+> true of `email_outbox`: all ten `OutboxSender` sites enqueue via
+> `OutboxStore.EnqueueStandalone`, which opens its own transaction
+> AFTER the business transaction commits; the in-tx primitive
+> `Enqueue(ctx, tx, …)` has no production caller besides
+> `EnqueueStandalone` itself. The email outbox is therefore a durable
+> at-least-once delivery queue *from the moment its row commits*, and
+> the commit→enqueue gap (a process death or database failover between
+> the two commits) loses the email with the state standing — the
+> exactly-once gates on the money path then suppress every later
+> attempt. Under the N ≥ 2 production posture that gap is hit by routine
+> failovers, so the money emails (payment receipt, payment failed,
+> dunning warning, dunning escalation) move into the state-transition
+> transaction in the next PR of the 2026-08-30 HA program; account-plane
+> and operator-initiated sends stay post-commit (the operator receives
+> the enqueue error synchronously).
+
 At migration time, both outboxes shipped behind boot env flags
 (`VELOX_WEBHOOK_OUTBOX_ENABLED=true` and `VELOX_EMAIL_OUTBOX_ENABLED
 =true`) so operators could roll back to the legacy direct-dispatch

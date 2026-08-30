@@ -15,8 +15,11 @@ type DispatcherConfig struct {
 	Interval time.Duration
 	// BatchSize bounds how many rows are claimed per tick. Default 25 if zero.
 	BatchSize int
-	// BatchTimeout bounds how long a single batch is allowed to run before its
-	// tx is cancelled (releasing row locks). Default 30s if zero.
+	// BatchTimeout bounds how long a single batch may run. Defaults to
+	// BatchSize × the per-row budget if zero. No row locks are held across
+	// the batch — the claim transaction commits immediately and the claim
+	// LEASE owns exclusion (ADR-072); the timeout bounds the tick so leased
+	// rows become re-claimable on schedule.
 	BatchTimeout time.Duration
 }
 
@@ -72,12 +75,12 @@ func (d *Dispatcher) SetLocker(locker DispatchLocker) {
 	d.locker = locker
 }
 
-// Start runs the dispatcher loop until ctx is cancelled. Intended to be
-// launched as a goroutine from cmd/velox during boot, alongside the existing
-// webhook retry worker.
 // Config exposes the resolved configuration for the invariant test.
 func (d *Dispatcher) Config() DispatcherConfig { return d.cfg }
 
+// Start runs the dispatcher loop until ctx is cancelled. Intended to be
+// launched as a goroutine from cmd/velox during boot, alongside the existing
+// webhook retry worker.
 func (d *Dispatcher) Start(ctx context.Context) {
 	slog.Info("webhook outbox dispatcher started",
 		"interval", d.cfg.Interval.String(),
@@ -87,8 +90,8 @@ func (d *Dispatcher) Start(ctx context.Context) {
 }
 
 // tick drains one batch. Errors are logged and swallowed — the next tick will
-// retry. A per-tick timeout ensures a stuck handler can't hold row locks
-// indefinitely if the dispatcher ctx is long-lived.
+// retry. The per-tick timeout bounds a tick so leased rows are re-claimable
+// on schedule (no row locks are held across a batch post-ADR-072).
 func (d *Dispatcher) tick(ctx context.Context) {
 	batchCtx, cancel := context.WithTimeout(ctx, d.cfg.BatchTimeout)
 	defer cancel()

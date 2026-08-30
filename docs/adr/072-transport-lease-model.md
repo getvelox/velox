@@ -84,7 +84,8 @@ round-trips), then commit all marks together. Two consequences:
 - **Deferred from P5's Closes list (recorded per the amend-decisions
   rule): `outbox_sender.go` raw tokens at rest.** Password-reset and
   member-invite emails store their single-use token URLs in
-  `email_outbox.payload` jsonb until dispatch (+30-day retention). The
+  `email_outbox.payload` jsonb until dispatch (and after: see the
+  2026-08-30 amendment — no retention window exists). The
   fix is payload-field encryption (the customer-PII encryptor is the
   natural tool) — deferred as a named backlog item rather than rushed
   into this transport rewrite; mitigations today: tokens are single-use,
@@ -126,3 +127,20 @@ until the 5 s ctx expires) while the race test stays green; dropping the
 lease stamp from the claim UPDATE turns the race test red (rows attempted
 twice) while the sibling test stays green — each mechanism has exactly one
 test that fails for it.
+
+## Amendment 2026-08-30 — no 30-day retention exists
+
+The residual above said dispatched `email_outbox` rows carry a "+30-day
+retention". Nothing implements one: the only 30-day figure in the code is
+`ListByCustomer`'s read window (`internal/email/outbox.go`), not a
+deletion. Dispatched rows persist indefinitely — and must, because they
+are the invoice-email delivery record (the invoice timeline's
+`ListByInvoice` has no age bound; the Postmark bounce/delivery webhook
+correlates on the row id). So the token-URL exposure is unbounded in time
+and the fix is a post-dispatch scrub of secret-bearing payload fields, not
+row deletion; the mitigations listed (single-use tokens, 1 h reset expiry)
+stand. `webhook_outbox` dispatched rows are pure transport intent —
+`webhook_events`/`webhook_deliveries` are the replayable record — and are
+safe to prune at any age; Velox does not do so automatically (register:
+outbox-pruner, trigger recorded in velox-ops).
+

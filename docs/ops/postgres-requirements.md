@@ -177,9 +177,10 @@ production):
 |---|---|---|
 | `usage_events` | Per-customer event ingestion (the metering substrate). Can hit 10M+ rows/month at scale. | Partition by month or archive >12mo to cold storage. Velox doesn't auto-prune. |
 | `audit_log` | Operator + system actions. ~100s/day per tenant. | Retain ≥7y for SOC 2; archive older to compliance storage. |
-| `email_outbox` | Per outbound email (invoices, dunning, receipts). Archive `dispatched` rows. | Prune `dispatched` >90d via cron. |
-| `webhook_outbox` | Per outbound webhook. Same shape as email_outbox. | Prune `dispatched` >90d. |
-| `webhook_events` (Stripe inbound) | Per Stripe webhook event observed. | Retain ≥90d for reconciler + audit; longer if needed for replay. |
+| `email_outbox` | One row per outbound email (invoice, receipt, dunning, setup link). Growth is per email, not per usage event. | **Do not prune.** Dispatched rows are the delivery record: the invoice timeline (`ListByInvoice`, no age bound), the customer Sent-emails panel, and the Postmark delivery/bounce webhook all read them. |
+| `webhook_outbox` | One row per outbound webhook *intent* — transport only; `webhook_events` + `webhook_deliveries` are the replayable record. | `status='dispatched'` rows are safe to delete at any age. Velox does not do it automatically (register: outbox-pruner). Never delete `failed` rows — the runbook re-drives them. |
+| `webhook_events`, `webhook_deliveries` | Velox's OUTBOUND event log and per-attempt delivery history (replay, timelines, endpoint stats). | Retain; financial-adjacent evidence. No pruner. |
+| `stripe_webhook_events` (Stripe inbound) | Per Stripe webhook event observed (dedup key `tenant_id, livemode, stripe_event_id`). | Retain ≥90d for reconciler + audit; longer if needed for replay. |
 | `invoice_dunning_events` | Per dunning lifecycle event. | Retain with the invoice (financial). |
 | `invoices`, `invoice_line_items` | Per cycle + per addon line. | **Never prune** — financial. |
 | `credit_notes`, `credit_note_line_items` | Per refund/adjustment. | **Never prune** — financial. |

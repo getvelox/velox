@@ -153,7 +153,7 @@ Token roles are disjoint, so each `{model, token_type}` is exactly one rule at e
 - **Invoicing & collection** — PDF invoices · hosted invoice page with secure tokens · branded emails · dunning with a circuit breaker · invoice preview (`Invoice.upcoming` parity)
 - **Spend controls** — hard-cap thresholds (on spend or on usage quantity) that can finalize an invoice mid-cycle
 - **Credits & refunds** — event-sourced credit ledger · credit notes (the formal "we owe you" document) with refunds
-- **Reliability & observability** — idempotency keys (retrying a request can never double-charge) · transactional outbox (outbound events commit in the same database transaction as the change that caused them, then a dispatcher delivers) · webhook signing with a 72h dual-signing rotation grace (during the window, both the old and the new secret sign every delivery) · a live webhook event tail with per-attempt delivery timelines · test clocks that simulate months of billing in seconds
+- **Reliability & observability** — idempotency keys (retrying a request can never double-charge) · transactional outbox (outbound webhook events commit in the same database transaction as the change that caused them, then a dispatcher delivers; customer emails are queued post-commit and delivered at-least-once from the queue) · webhook signing with a 72h dual-signing rotation grace (during the window, both the old and the new secret sign every delivery) · a live webhook event tail with per-attempt delivery timelines · test clocks that simulate months of billing in seconds
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full ship log.
 
