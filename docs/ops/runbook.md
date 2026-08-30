@@ -47,6 +47,7 @@ alerting tier — what should page someone vs. what's informational.
 | `velox_invoice_pending_tax_reversals` | any row older than 24h | A voided `stripe_tax` invoice whose committed tax transaction has no confirmed reversal; the #310 sweep re-drives it — same tier-2 |
 | `velox_creditnote_pending_issue_drafts` | sustained growth over days | Clawback drafts not issuing. NOTE: drafts deferred behind an in-flight source payment (ADR-059) sit here legitimately and do NOT appear in error logs — the reconciler's eligibility scan skips them by design until the source settles. Alert on growth/age, not presence. If this gauge and `velox_parked_invoices` move together, the drafts are waiting on parked invoices: resolve those (write them off) and these drain on the next reconciler pass. |
 | `velox_parked_invoices{mode}` | > 0, sustained | An invoice whose charge attempt could not be identified with the provider (ADR-107). It is deliberately unchargeable — no sweep, no dunning retry and no operator "Collect payment" will touch it, which is what makes a double charge unreachable. **It will not resolve on its own and needs a human.** Find the attempt in Stripe by customer + amount + approximate time: if it succeeded, its webhook settles the invoice (no action); if nothing was charged, mark the invoice uncollectible — the only action the invoice page offers, and the one that releases its deferred clawback draft and closes its dunning run. Alert on presence, not growth: at zero customers the expected value is zero, and each one is a real invoice a real customer cannot pay. |
+| `velox_http_requests_total{method="POST",path="/v1/integrations/litellm/spend",status="503"}` | any increase | LiteLLM spend batches were refused for retry (usage store unreachable). If LiteLLM's proxy log shows `Generic API Logger Error sending batch`, its retries were exhausted — run §8 |
 | `velox_auto_charge_retries_total{result="failed"}` | growing rapidly | Many invoices stuck in retry |
 | `velox_audit_write_errors_total{outcome="row_lost"}` | rate > 0/s | **Evidence PERMANENTLY LOST.** The mutation committed and its audit row did not, and nothing retries it. Irrecoverable — the row cannot be reconstructed. Treat as a compliance incident: capture the tenant from the ERROR LOG (the metric deliberately carries no tenant label — see below), and identify the affected mutations by their absence. |
 | `velox_audit_write_errors_total{outcome="mutation_refused"}` | rate > 0/s | **Nothing is missing.** The audit write failed INSIDE the business transaction, so ADR-090's shared fate rolled the mutation back with it. This is an availability problem, not an evidence problem — the customer got an error, and the log is intact. Investigate the DB, not the audit trail. |
@@ -333,6 +334,23 @@ path to 6379, and that the managed Redis is up; the replica starts on the
 next attempt. Redis going down AFTER boot is a different situation: general
 and hosted-invoice requests 429 (fail closed), ingest and `/v1/auth` keep
 working (fail open) — restore Redis, no restart needed.
+### 8. LiteLLM spend gap after an outage
+
+**Symptom**: the `…/litellm/spend` 503 counter rose during a Postgres
+failover or a rolling restart, and LiteLLM's proxy log shows
+`Generic API Logger Error sending batch` (its `max_retries` were spent) —
+or LiteLLM was never configured with retries (`docs/integrations/litellm.md`).
+
+**What was lost**: every LLM call LiteLLM flushed in that window. Velox's
+spend view will be short against LiteLLM's spend page for the period.
+
+**Fix**: replay LiteLLM's spend logs for the window to
+`POST /v1/integrations/litellm/spend`. Every row is idempotency-keyed
+(`<litellm_call_id>:input|output|cache_read`), so a replay of a window that
+was partly recorded is a pure gap-fill — rows already held come back as
+`deduplicated`, never double-counted. Hard deadline: the period must not be
+finalized yet; a replay landing in a finalized period increments
+`velox_usage_late_event_total` and needs a manual credit/debit.
 
 ## After a large backfill, expect a few minutes of elevated write I/O
 

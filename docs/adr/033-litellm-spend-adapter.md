@@ -73,6 +73,21 @@ The handler returns 200 with `{accepted, skipped, errors[]}` even when some rows
 > hard deadline at period finalize. Full analysis:
 > `docs/dev/ha-readiness-2026-07-06.md` ("Downtime = money?").
 
+> **Amendment (2026-08-30): a store failure is a 503, not a 200 with
+> `errors[]`.** The status code answers one question — did Velox reach a
+> verdict on the batch? Per-row verdicts (unmapped customer or meter,
+> validation failure, duplicate) stay 200 + `errors[]`/`deduplicated`. A
+> non-verdict — the usage store unreachable or unable to commit (managed-
+> Postgres failover, a replica losing its pool mid-rolling-restart) — aborts
+> the batch fail-fast with `503 api_error/ingest_unavailable` so a
+> retry-configured LiteLLM re-sends it. Previously the persist edge wrapped
+> *every* lookup error, including a dead database, as "customer not found"
+> and returned 200; LiteLLM treats any 2xx as delivered and clears its queue,
+> so every completion in the outage window was silently lost. Whole-batch
+> retry is safe by construction: rows are idempotency-keyed and the store
+> dedups on `(tenant_id, livemode, idempotency_key)`. Pair it with
+> `max_retries: 4` in the callback config (`docs/integrations/litellm.md`).
+
 ### What's NOT in scope (deferred)
 
 - **Cost-table fallback**: when LiteLLM doesn't emit cost (custom model, older proxy version), Velox could fall back to a built-in cost table by model name. Deferred — most operators run a recent LiteLLM with cost tracking enabled; building a cost table is multi-day work for a niche case.

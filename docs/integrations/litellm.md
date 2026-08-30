@@ -45,6 +45,16 @@ callback_settings:
     endpoint: "https://<your-velox-host>/v1/integrations/litellm/spend"
     headers:
       Authorization: Bearer vlx_secret_test_…
+    # Retry on 5xx / transport errors. LiteLLM defaults to max_retries 0
+    # and, via YAML, a 0s delay — it drops the batch on the first failed
+    # send. Velox answers 503 when its usage store is unreachable (a
+    # managed-Postgres failover, a replica mid-rolling-restart); 5+10+20+40s
+    # of retries covers both. Replays are safe: every row is
+    # idempotency-keyed, so an already-recorded row comes back as
+    # `deduplicated`, never double-counted.
+    max_retries: 4
+    retry_delay: 5
+    timeout: 10
 ```
 
 The older env-var form (`success_callback: ["generic"]` +
@@ -119,7 +129,7 @@ You should see one or more `tokens` events per LiteLLM call (up to three when pr
 }
 ```
 
-`skipped` covers non-token-bearing calls (image generation, moderation) and zero-token failed completions. `errors[]` lists per-row reasons. Once the request body decodes (a malformed body is a 400), the handler never returns 5xx: everything else — including per-row persist failures during a DB outage — surfaces as `errors[]` entries in a 200 envelope. (A full DB outage also tends to die earlier, at API-key auth, as a 401.) Monitor `errors[]`, not the status code.
+`skipped` covers non-token-bearing calls (image generation, moderation) and zero-token failed completions. `errors[]` lists per-row reasons — verdicts Velox reached on that row (an unmapped `user`, a missing meter, a payload that failed validation); they never make the batch fail, so monitor `errors[]`. The status code answers a different question — *could Velox record the batch at all?* A malformed body is 400. `503 authentication_unavailable` (API-key store unreachable) or `503 ingest_unavailable` (usage store unreachable or unable to commit) means the batch was **not** recorded and must be retried whole; rows that did commit before the abort replay as `deduplicated`. Configure `max_retries` as above so LiteLLM does the retrying.
 
 ## Caveats
 

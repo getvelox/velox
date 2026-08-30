@@ -111,17 +111,23 @@ type SpendRowError struct {
 //     suffixes the key per token type)
 //  5. Tally accepted / skipped / errors; return 200 with envelope
 //
-// The handler NEVER returns 5xx once past decode: per-row persist
-// failures — including a fully-down DB reached past auth — surface as
-// errors[] entries with a 200 envelope, so callers MUST monitor
-// errors[] (a full DB outage also tends to die earlier, at API-key
-// auth, as a 401 per ADR-026). Rationale for no-5xx: a 5xx would make
-// a retry-configured LiteLLM re-send the whole batch (dedup catches
-// it, but wasted work) — and at stock config LiteLLM retries NOTHING
-// anyway (max_retries=0, queue cleared on any send error; verified
-// against LiteLLM source 2026-07-06). Recovery for dropped batches is
-// operator replay of LiteLLM's spend logs — idempotency keys make it
-// a pure gap-fill. See docs/dev/ha-readiness-2026-07-06.md.
+// The status code answers ONE question: did Velox reach a verdict on
+// this batch? Per-row verdicts — a customer or meter the operator has
+// not mapped, a payload that fails validation, a row the store already
+// holds — stay 200 with errors[] / deduplicated, so one misconfigured
+// call never fails the batch and never makes LiteLLM retry it. A
+// NON-verdict — the usage store could not be reached or could not
+// commit (managed-Postgres failover, a replica losing its pool during
+// a rolling restart, a stalled connection) — aborts the batch fail-fast
+// with 503 api_error/ingest_unavailable so LiteLLM's retry (configure
+// max_retries > 0; docs/integrations/litellm.md) re-sends it. Before
+// 2026-08-30 this path returned 200 with the failure filed as a
+// customer-not-found row; LiteLLM's generic logger treats any 2xx as
+// delivered and clears its queue, so every completion in the outage
+// window was silently lost (ADR-033 amendment 2026-08-30). Whole-batch
+// retry is safe by construction: every row is idempotency-keyed and the
+// store dedups on (tenant_id, livemode, idempotency_key), so rows
+// committed before the abort come back as deduplicated.
 func (h *Handler) spend(w http.ResponseWriter, r *http.Request) {
 	tenantID := auth.TenantID(r.Context())
 
@@ -160,6 +166,18 @@ func (h *Handler) spend(w http.ResponseWriter, r *http.Request) {
 				// counting it as accepted told an operator reconciling
 				// spend that a replay had recorded fresh usage.
 				resp.Deduplicated++
+			case errors.Is(err, errIngestUnavailable):
+				// Non-verdict: abort the whole batch for client retry.
+				// The raw error is logged, never sent to the caller (ADR-026).
+				slog.ErrorContext(r.Context(), "litellm spend: usage store unavailable — batch aborted for client retry",
+					"tenant_id", tenantID,
+					"accepted", resp.Accepted,
+					"deduplicated", resp.Deduplicated,
+					"error", err,
+				)
+				respond.Error(w, r, http.StatusServiceUnavailable, "api_error", "ingest_unavailable",
+					"usage store temporarily unavailable — retry the whole batch; rows already recorded replay as deduplicated")
+				return
 			default:
 				resp.Errors = append(resp.Errors, SpendRowError{
 					ID:    payload.ID,
@@ -182,18 +200,29 @@ func (h *Handler) spend(w http.ResponseWriter, r *http.Request) {
 }
 
 // persist resolves an ExternalIngest (external IDs) to the internal
-// shape and calls the existing usage Ingest path. Errors that look
-// like operator misconfiguration (customer / meter not found) are
-// wrapped in the partial-failure path; storage errors propagate as
-// 5xx via FromError → respond.InternalError.
+// shape and calls the existing usage Ingest path. It classifies every
+// error into a VERDICT (returned as a per-row error: operator
+// misconfiguration such as an unmapped customer or meter, a validation
+// failure, or a duplicate) or a NON-VERDICT (wrapped in
+// errIngestUnavailable: the store could not be reached or could not
+// commit). Both lookup stores return errs.ErrNotFound only on
+// sql.ErrNoRows and the raw driver error otherwise, which is what makes
+// this split honest — a BeginTx failure used to be reported as
+// "customer not found".
 func (h *Handler) persist(ctx context.Context, tenantID string, ing ExternalIngest) error {
 	cust, err := h.customers.GetByExternalID(ctx, tenantID, ing.ExternalCustomerID)
 	if err != nil {
-		return fmt.Errorf("customer %q not found (set user=<external_customer_id> on the LiteLLM call)", ing.ExternalCustomerID)
+		if errors.Is(err, errs.ErrNotFound) {
+			return fmt.Errorf("customer %q not found (set user=<external_customer_id> on the LiteLLM call)", ing.ExternalCustomerID)
+		}
+		return fmt.Errorf("%w: customer lookup: %w", errIngestUnavailable, err)
 	}
 	meter, err := h.meters.GetMeterByKey(ctx, tenantID, ing.MeterKey)
 	if err != nil {
-		return fmt.Errorf("meter %q not found (create it via the recipe or POST /v1/meters)", ing.MeterKey)
+		if errors.Is(err, errs.ErrNotFound) {
+			return fmt.Errorf("meter %q not found (create it via the recipe or POST /v1/meters)", ing.MeterKey)
+		}
+		return fmt.Errorf("%w: meter lookup: %w", errIngestUnavailable, err)
 	}
 
 	input := usage.IngestInput{
@@ -222,10 +251,23 @@ func (h *Handler) persist(ctx context.Context, tenantID string, ing ExternalInge
 		if errors.Is(err, errs.ErrDuplicateKey) || errors.Is(err, errs.ErrAlreadyExists) {
 			return errDuplicateRow
 		}
-		return err
+		// Verdicts on the row itself stay per-row: a bad payload must
+		// never 503, or LiteLLM retries it until max_retries is spent.
+		// Classified on Kind sentinels only — a DomainError's Code is not
+		// a verdict signal (a future infra error carrying a code would be
+		// misfiled as per-row).
+		if errors.Is(err, errs.ErrValidation) || errors.Is(err, errs.ErrNotFound) {
+			return err
+		}
+		return fmt.Errorf("%w: ingest: %w", errIngestUnavailable, err)
 	}
 	return nil
 }
+
+// errIngestUnavailable marks a NON-verdict: the usage store could not be
+// reached or could not commit. spend aborts the batch with 503 so the
+// client retries it; never returned to the caller as text.
+var errIngestUnavailable = errors.New("litellm: usage store unavailable")
 
 // errDuplicateRow marks a row the store already held. It is a successful
 // outcome, not a failure — it just must not be counted as newly recorded,
