@@ -108,3 +108,21 @@ failure-mark after a sibling's success (mutation: guard removed →
 fails); handler-owns-mark (outbox row dispatched atomically, replayed
 tick re-claims nothing, exactly one event). Pre-existing claim-lease +
 NULL-branch regression suites stay green.
+
+**Amendment 2026-08-30 — the webhook-outbox drainer's claim is now pinned
+too.** The 2026-07-03 locks above cover the email outbox and the webhook
+retry worker; `webhook.OutboxStore.ProcessBatch` (the `webhook_outbox`
+drainer) had no concurrent-claimer test — its `FOR UPDATE SKIP LOCKED` +
+lease claim was held by convention. Two real-Postgres tests in
+`internal/webhook/outbox_integration_test.go` close that:
+`TestOutbox_ProcessBatch_SkipsRowsLockedBySibling` (a sibling transaction
+holds row locks on half the due set; the claim must neither block nor
+take those rows, and must take exactly them after release) and
+`TestOutbox_ProcessBatch_ConcurrentClaimersDisjoint` (two dispatchers race
+the same 10 rows; every row attempted exactly once). Mutation matrix
+against the real store: deleting `FOR UPDATE SKIP LOCKED`, or keeping
+`FOR UPDATE` without `SKIP LOCKED`, turns the sibling test red (claim blocks
+until the 5 s ctx expires) while the race test stays green; dropping the
+lease stamp from the claim UPDATE turns the race test red (rows attempted
+twice) while the sibling test stays green — each mechanism has exactly one
+test that fails for it.
