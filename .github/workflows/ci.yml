@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
 
       - name: Build
         run: go build ./...
@@ -145,7 +145,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
 
       - name: Create app role (mirrors deploy/compose/postgres-init.sh)
         run: |
@@ -192,7 +192,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
 
       - uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
@@ -294,7 +294,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
 
       - uses: actions/setup-node@v6
         with:

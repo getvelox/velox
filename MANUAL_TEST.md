@@ -111,7 +111,7 @@ A flow MAY carry an "Automated coverage: N / M" tally where it aids triage (keep
 
 ### Prerequisites
 
-- Go 1.25+, Docker & Compose, Node.js 22+, [Stripe CLI](https://stripe.com/docs/stripe-cli)
+- Go 1.26+, Docker & Compose, Node.js 22+, [Stripe CLI](https://stripe.com/docs/stripe-cli)
 - A Stripe test account (keys go in the dashboard per-tenant, not env vars)
 
 ### First-time config

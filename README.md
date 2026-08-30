@@ -5,7 +5,7 @@
 **The open-source billing engine for AI and usage-heavy SaaS — runs in your own VPC.**
 
 [![CI](https://github.com/getvelox/velox/actions/workflows/ci.yml/badge.svg)](https://github.com/getvelox/velox/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Release](https://img.shields.io/github/v/tag/getvelox/velox?label=release)](CHANGELOG.md)
 
@@ -41,7 +41,7 @@ Three things happened there that most billing stacks can't do:
 
 ## Quick start
 
-Prereqs: Docker, Go 1.25+, Node 22+ (dashboard), `jq` (demo script).
+Prereqs: Docker, Go 1.26+, Node 22+ (dashboard), `jq` (demo script).
 
 ```bash
 git clone https://github.com/getvelox/velox.git && cd velox
@@ -307,7 +307,7 @@ These are paused — not killed. They land when a real customer names the specif
 
 ## Tech stack
 
-**Backend** — Go 1.25, chi/v5 router, PostgreSQL 16 with RLS, `shopspring/decimal` for money, `signintech/gopdf` for invoices, Prometheus metrics.
+**Backend** — Go 1.26, chi/v5 router, PostgreSQL 16 with RLS, `shopspring/decimal` for money, `signintech/gopdf` for invoices, Prometheus metrics.
 
 **Frontend** — React 19, TypeScript, Vite, TailwindCSS, shadcn/ui, Lucide icons.
 
