@@ -295,7 +295,7 @@ money-invariant sweep in CI. Dated detail: [`CHANGELOG.md`](CHANGELOG.md).
 
 ### Explicitly deferred (on hold pending design partner)
 
-- Helm chart + Terraform AWS module + multi-replica HA
+- Helm chart + Terraform AWS module (multi-replica HA itself is no longer deferred — as of 2026-08-30 N ≥ 2 behind a load balancer is the supported production posture and the engine is being built for it; see [`docs/dev/ha-readiness-2026-07-06.md`](docs/dev/ha-readiness-2026-07-06.md))
 - Stripe Billing migration tool (`velox-import`)
 - SOC 2 / GDPR-deletion / audit-log retention enterprise-readiness docs
 - RBAC / role enforcement (invites shipped with every member holding full access; role-scoped permissions land when a design partner names the split; SSO direction predetermined — embedded OIDC/SAML in-process, never a SaaS auth vendor)
