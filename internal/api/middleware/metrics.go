@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -221,11 +222,12 @@ func Metrics() func(http.Handler) http.Handler {
 			next.ServeHTTP(ww, r)
 
 			status := strconv.Itoa(ww.Status())
-			path := sanitizePath(r.URL.Path)
+			path := routeLabel(r)
+			method := methodLabel(r.Method)
 			duration := time.Since(start).Seconds()
 
-			httpRequestsTotal.WithLabelValues(r.Method, path, status).Inc()
-			httpRequestDuration.WithLabelValues(r.Method, path, status).Observe(duration)
+			httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+			httpRequestDuration.WithLabelValues(method, path, status).Observe(duration)
 		})
 	}
 }
@@ -308,8 +310,49 @@ func RecordScheduledCleanup(table string, rows int) {
 	scheduledCleanupRows.WithLabelValues(table).Add(float64(rows))
 }
 
-// sanitizePath normalizes paths to prevent high-cardinality metric labels.
-// Replaces dynamic segments (IDs) with placeholders.
+// unmatchedRoute is the path label for any request chi did not route to a
+// registered pattern (404/405 at the root, unknown verbs). One constant, so
+// a scanner walking /wp-admin, /.env, /phpmyadmin... creates ONE series, not
+// one per probe. Same word audit_detector.go uses for the same situation.
+const unmatchedRoute = "unmatched"
+
+// routeLabel returns the chi ROUTE PATTERN for the request (e.g.
+// /v1/customers/{id}) — a closed set: registered patterns, one "prefix/*"
+// per Mount, and unmatchedRoute. It must be read synchronously after
+// next.ServeHTTP, while the *chi.Context is still checked out (chi puts it
+// back to the pool only after the mux handler returns); router.go's
+// requestLogger and audit_detector.go already read it this way.
+//
+// Why not the raw path: client_golang never evicts vec children, so every
+// distinct label value is ~2 KB of heap for the life of the process. The
+// previous sanitizePath heuristic (rewrite vlx_-prefixed or >20-char
+// segments) left every other client-chosen path — every 404 probe — as its
+// own series: attacker-controlled memory growth, measured at 900 probes →
+// 900 series.
+func routeLabel(r *http.Request) string {
+	if rctx := chi.RouteContext(r.Context()); rctx != nil {
+		if p := rctx.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return unmatchedRoute
+}
+
+// methodLabel bounds the method axis to the verbs chi routes plus "other";
+// the method is client-chosen text and was the second unbounded label.
+func methodLabel(m string) string {
+	switch m {
+	case http.MethodConnect, http.MethodDelete, http.MethodGet, http.MethodHead,
+		http.MethodOptions, http.MethodPatch, http.MethodPost, http.MethodPut, http.MethodTrace:
+		return m
+	}
+	return "other"
+}
+
+// sanitizePath normalizes a raw URL path by replacing ID-shaped segments with
+// :id. It is used by tracing.go for span names — otelhttp names spans BEFORE
+// routing, so the route pattern is not available there. It is NOT used for
+// metric labels any more (see routeLabel).
 func sanitizePath(path string) string {
 	// Common patterns: /v1/customers/vlx_cus_abc123 → /v1/customers/:id
 	parts := splitPath(path)
