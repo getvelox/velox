@@ -266,3 +266,22 @@ partner's outbox volume makes the drainers a measured bottleneck, or a third
 outbox-shaped table is needed (the obligation backbone above). Then River is the
 first option evaluated, not the last — and it needs no pgx-native migration.
 
+## Amendment 2026-08-30 — promote-on-detect SHIPPED (the 2026-07-06 hazard)
+
+The 2026-07-06 amendment recorded that the credit-note tax-reversal sweep's
+structural branch *detects* marker-less orphans but does not *promote*
+them, so its 24h window bounded the obligation: a >24h provider outage
+coinciding with the compound failure (reversal failed AND marker write
+failed) silently over-remitted. Under the N ≥ 2 production posture that
+compound failure is routine (a replica SIGKILLed between the two
+post-commit writes), so the trigger fired. Shipped: on a failed re-drive,
+`RetryPendingCreditNoteTaxReversal` sets `tax_reversal_pending=true` on a
+marker-less row — one local Postgres write — moving it onto the unbounded
+marker branch; the 24h window now bounds detection latency only. Also
+closed: a provider returning *no* reversal transaction for a tax-bearing
+invoice used to clear the marker and count as reversed (which would have
+undone the promotion); it is now a failure. Refuted alternative: removing
+the window (no terminal stamp exists on the CN side, so the structural
+scan would churn every pre-feature CN forever). The invoice-side half was
+already unbounded per ADR-111.
+

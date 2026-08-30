@@ -620,13 +620,23 @@ func (s *Service) RetryPendingCreditNoteTaxReversal(ctx context.Context, batch i
 		})
 		if err != nil {
 			errsOut = append(errsOut, fmt.Errorf("re-drive tax reversal for credit note %s: %w", cn.ID, err))
+			s.promoteOrphan(ctx, cn, &errsOut)
 			continue
 		}
-		if res != nil && res.TransactionID != "" {
-			if err := s.store.SetTaxTransaction(ctx, cn.TenantID, cn.ID, res.TransactionID); err != nil {
-				errsOut = append(errsOut, fmt.Errorf("persist reversal tx for %s: %w", cn.ID, err))
-				continue
-			}
+		if res == nil || res.TransactionID == "" {
+			// A tax-bearing invoice (the gate above already excluded the
+			// no-transaction and zero-tax shapes) whose provider returned no
+			// reversal transaction has NOT been reversed — typically the
+			// engine resolving no provider for the tenant. Treat it as a
+			// failure: never clear the marker, never count it, promote it so
+			// it survives the 24h detection window (HA-13, 2026-08-30).
+			errsOut = append(errsOut, fmt.Errorf("re-drive tax reversal for credit note %s: provider returned no reversal transaction", cn.ID))
+			s.promoteOrphan(ctx, cn, &errsOut)
+			continue
+		}
+		if err := s.store.SetTaxTransaction(ctx, cn.TenantID, cn.ID, res.TransactionID); err != nil {
+			errsOut = append(errsOut, fmt.Errorf("persist reversal tx for %s: %w", cn.ID, err))
+			continue
 		}
 		// Only write when the marker is actually set. This used to run
 		// unconditionally, and rows reached here via the SECOND arm of
@@ -649,6 +659,24 @@ func (s *Service) RetryPendingCreditNoteTaxReversal(ctx context.Context, batch i
 		reversed++
 	}
 	return reversed, errsOut
+}
+
+// promoteOrphan moves a marker-less orphan (issued CN, no reversal stamped,
+// marker false — the compound-failure shape where both the inline reversal
+// and its marker write failed) onto the UNBOUNDED marker branch on its first
+// failed re-drive. Without this, the structural branch's 24h freshness
+// window bounded the OBLIGATION, not just detection: a >24h provider outage
+// coinciding with the compound failure aged the row out and the tenant
+// over-remitted forever (ADR-062 amendment 2026-07-06; the $46.69 class).
+// Never rewrites a true marker — the real store bumps updated_at on every
+// write, and a needless write would refresh the row's own window.
+func (s *Service) promoteOrphan(ctx context.Context, cn domain.CreditNote, errsOut *[]error) {
+	if cn.TaxReversalPending {
+		return
+	}
+	if err := s.store.SetTaxReversalPending(ctx, cn.TenantID, cn.ID, true); err != nil {
+		*errsOut = append(*errsOut, fmt.Errorf("promote marker-less orphan %s to tax_reversal_pending: %w", cn.ID, err))
+	}
 }
 
 // buildCreditNote runs the tax-breakout, three-channel allocation, refund cap,
@@ -1632,7 +1660,10 @@ func (s *Service) runPostIssueExternalLegs(ctx context.Context, tenantID, id str
 				// Even if this fast-path marker write fails, the sweep still
 				// recovers the reversal: RetryPendingCreditNoteTaxReversal also
 				// derives eligibility structurally (issued CN, no reversal stamped,
-				// tax-bearing source), so this is not a lost-recovery window.
+				// tax-bearing source) and PROMOTES the row onto the unbounded
+				// marker branch on its first failed re-drive — so the 24h window
+				// bounds detection latency (one healthy leader tick), never the
+				// obligation.
 				slog.ErrorContext(ctx, "failed to set tax_reversal_pending marker; sweep recovers structurally regardless",
 					"credit_note_id", cn.ID, "error", merr)
 			}

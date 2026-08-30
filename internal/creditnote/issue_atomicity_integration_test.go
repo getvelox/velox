@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/sagarsuperuser/velox/internal/tax"
 	"testing"
 	"time"
 
@@ -228,5 +229,99 @@ func TestListPendingCreditNoteTaxReversal_FindsMarkerlessOrphan(t *testing.T) {
 	}
 	if found[done.ID] {
 		t.Error("a CN that already stamped its reversal must NOT be eligible")
+	}
+}
+
+// failingReverser is the always-failing provider for the HA-13 proof.
+type failingReverser struct{}
+
+func (failingReverser) ReverseTax(_ context.Context, _ string, _ tax.ReversalRequest) (*tax.ReversalResult, error) {
+	return nil, errors.New("stripe: 503 service unavailable")
+}
+
+// TestCreditNoteTaxReversal_PromotedOrphanOutlivesTheWindow is the
+// real-Postgres proof of HA-13 (2026-08-30): a marker-less orphan whose first
+// re-drive fails is promoted onto the marker branch, and — unlike the
+// structural branch — that branch has no 24h freshness window, so the row is
+// still eligible after being backdated a day. Before the promote, a >24h
+// provider outage coinciding with the compound failure silently aged the
+// obligation out. Mutation-verify: skip promoteOrphan → the backdated row
+// is not returned.
+func TestCreditNoteTaxReversal_PromotedOrphanOutlivesTheWindow(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "CN Reversal Promote")
+
+	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{
+		ExternalID: "cus_promote", DisplayName: "Promote",
+	})
+	if err != nil {
+		t.Fatalf("create customer: %v", err)
+	}
+	invStore := invoice.NewPostgresStore(db)
+	now := time.Now().UTC()
+	issuedAt := now
+	inv, err := invStore.Create(ctx, tenantID, domain.Invoice{
+		CustomerID: cust.ID, InvoiceNumber: "INV-PROMOTE",
+		Status: domain.InvoicePaid, PaymentStatus: domain.PaymentSucceeded,
+		Currency: "USD", SubtotalCents: 10000,
+		TaxFacts:         domain.TaxFacts{TaxAmountCents: 1000, TaxProvider: "stripe_tax"},
+		TotalAmountCents: 11000, AmountPaidCents: 11000,
+		BillingPeriodStart: now.Add(-30 * 24 * time.Hour), BillingPeriodEnd: now,
+		IssuedAt: &issuedAt,
+	})
+	if err != nil {
+		t.Fatalf("create invoice: %v", err)
+	}
+	if err := invStore.SetTaxTransaction(ctx, tenantID, inv.ID, "tx_upstream_promote"); err != nil {
+		t.Fatalf("stamp tax tx: %v", err)
+	}
+	store := creditnote.NewPostgresStore(db)
+	orphan, err := store.Create(ctx, tenantID, domain.CreditNote{
+		InvoiceID: inv.ID, CustomerID: cust.ID, CreditNoteNumber: "CN-PROMOTE",
+		Status: domain.CreditNoteIssued, Reason: "fraudulent",
+		SubtotalCents: 5000, TaxAmountCents: 500, TotalCents: 5500,
+		Currency: "USD", RefundStatus: domain.RefundNone,
+	})
+	if err != nil {
+		t.Fatalf("create orphan: %v", err)
+	}
+
+	svc := creditnote.NewService(store, invStore, nil, nil)
+	svc.SetTaxReverser(failingReverser{})
+	n, sweepErrs := svc.RetryPendingCreditNoteTaxReversal(ctx, 50)
+	if n != 0 || len(sweepErrs) != 1 {
+		t.Fatalf("first sweep: reversed=%d errs=%v — want 0 and exactly the re-drive error", n, sweepErrs)
+	}
+	got, err := store.Get(ctx, tenantID, orphan.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.TaxReversalPending {
+		t.Fatal("orphan was not promoted onto the marker branch by its failed re-drive")
+	}
+
+	// A day passes with the provider still down: the structural window is
+	// long gone — the marker branch must still carry the row.
+	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE credit_notes SET updated_at = now() - interval '25 hours' WHERE id = $1`, orphan.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	pending, err := store.ListPendingCreditNoteTaxReversal(ctx, 50, false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	found := false
+	for _, cn := range pending {
+		found = found || cn.ID == orphan.ID
+	}
+	if !found {
+		t.Fatal("promoted orphan fell out of the sweep after 25h — the obligation, not just detection, was bounded by the window")
 	}
 }

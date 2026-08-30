@@ -913,10 +913,11 @@ func (s *PostgresStore) SetTaxReversalPending(ctx context.Context, tenantID, id 
 // (b) is the backstop for the compound failure where BOTH ReverseTax AND the
 // marker write fail in the same Issue(): the orphan (issued, no tx id, marker
 // false) would otherwise be invisible to every sweep — a permanent silent
-// over-remit. (b) is bounded to a 24h freshness window (anti-churn + no
-// first-deploy re-reversal burst over pre-feature CNs, matching #310); a
-// transient failure resolves in seconds-to-minutes, well inside it. The marker
-// branch is unbounded (a known owed reversal is never aged out). Re-reversal is
+// over-remit. (b) is bounded to a 24h freshness window (anti-churn, matching
+// #310) and is DETECTION-ONLY: the sweep promotes any (b) row whose re-drive
+// fails onto the marker branch, which is unbounded (a known owed reversal is
+// never aged out) — so the window bounds how long an orphan can go unnoticed
+// (one healthy leader tick), not whether it is ever reversed. Re-reversal is
 // Stripe-idempotent via the per-CN velox_tax_rev_<cn.ID> reference, so any
 // overlap between (a) and (b), or with the inline attempt, dedups to one.
 func (s *PostgresStore) ListPendingCreditNoteTaxReversal(ctx context.Context, batch int, livemode bool) ([]domain.CreditNote, error) {

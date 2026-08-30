@@ -27,6 +27,9 @@ type memStore struct {
 	// sweep never converges. This fake cannot model updated_at, so the
 	// write count is the faithful stand-in.
 	setPendingCalls int
+	// setPendingErr, when set, makes SetTaxReversalPending fail — the
+	// promote-write-fails path of the reversal sweep.
+	setPendingErr error
 }
 
 func newMemStore() *memStore {
@@ -364,6 +367,9 @@ func (m *memStore) UpdateAllocationTx(ctx context.Context, _ *sql.Tx, tenantID, 
 
 func (m *memStore) SetTaxReversalPending(_ context.Context, tenantID, id string, pending bool) error {
 	m.setPendingCalls++
+	if m.setPendingErr != nil {
+		return m.setPendingErr
+	}
 	cn, ok := m.notes[id]
 	if !ok || cn.TenantID != tenantID {
 		return errs.ErrNotFound
