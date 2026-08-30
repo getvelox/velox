@@ -2,6 +2,7 @@ package email
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -135,9 +136,13 @@ func NewOutboxSender(store *OutboxStore) *OutboxSender {
 // Sender.SetSuppressionChecker so both code paths gate identically.
 func (s *OutboxSender) SetSuppressionChecker(c RecipientSuppressionChecker) { s.suppression = c }
 
-func (s *OutboxSender) enqueue(ctx context.Context, tenantID, emailType string, msg outboxMessage) error {
+// preparePayload runs the shared half of every enqueue — the argument
+// guards, the suppression gate and the tag-driven payload derivation —
+// so the post-commit path (enqueue) and the in-tx path (enqueueTx)
+// cannot drift apart.
+func (s *OutboxSender) preparePayload(ctx context.Context, tenantID, emailType string, msg outboxMessage) (map[string]any, error) {
 	if tenantID == "" {
-		return fmt.Errorf("email outbox sender: tenant_id required for %s", emailType)
+		return nil, fmt.Errorf("email outbox sender: tenant_id required for %s", emailType)
 	}
 	// Suppression gate. Bounced/complained recipients never get an
 	// outbox row written — the dispatcher would just retry-bounce-DLQ
@@ -152,7 +157,7 @@ func (s *OutboxSender) enqueue(ctx context.Context, tenantID, emailType string, 
 		} else if suppressed {
 			slog.Info("email outbox: recipient suppressed — skipping enqueue",
 				"tenant_id", tenantID, "to", msg.To, "email_type", emailType, "reason", reason)
-			return ErrRecipientSuppressed
+			return nil, ErrRecipientSuppressed
 		}
 	}
 	// Marshal-then-unmarshal-to-map: drives the wire payload off the
@@ -166,11 +171,11 @@ func (s *OutboxSender) enqueue(ctx context.Context, tenantID, emailType string, 
 	// feedback_no_silent_fallbacks + feedback_audit_overlapping_flows.
 	payloadBytes, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("marshal outbox payload: %w", err)
+		return nil, fmt.Errorf("marshal outbox payload: %w", err)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return fmt.Errorf("unmarshal outbox payload: %w", err)
+		return nil, fmt.Errorf("unmarshal outbox payload: %w", err)
 	}
 	// ctx must carry livemode (set by caller's auth middleware or, for
 	// system-initiated emails fired from background workers, derived
@@ -180,7 +185,29 @@ func (s *OutboxSender) enqueue(ctx context.Context, tenantID, emailType string, 
 	// land on test-mode rows and the dispatcher routes them correctly.
 	// Pre-fix this used context.Background() and every email_outbox row
 	// got stamped livemode=true regardless of the actual mode.
+	return payload, nil
+}
+
+func (s *OutboxSender) enqueue(ctx context.Context, tenantID, emailType string, msg outboxMessage) error {
+	payload, err := s.preparePayload(ctx, tenantID, emailType, msg)
+	if err != nil {
+		return err
+	}
 	_, err = s.store.EnqueueStandalone(ctx, tenantID, emailType, payload)
+	return err
+}
+
+// enqueueTx is enqueue on the caller's transaction (ADR-040 amendment): a
+// money email rides the state-transition tx, so a process death or failover
+// between "state committed" and "email row committed" cannot lose the email
+// with the state standing. The caller wraps this in a SAVEPOINT — an email
+// failure must never veto the money write.
+func (s *OutboxSender) enqueueTx(ctx context.Context, tx *sql.Tx, tenantID, emailType string, msg outboxMessage) error {
+	payload, err := s.preparePayload(ctx, tenantID, emailType, msg)
+	if err != nil {
+		return err
+	}
+	_, err = s.store.Enqueue(ctx, tx, tenantID, emailType, payload)
 	return err
 }
 
@@ -226,9 +253,38 @@ func (s *OutboxSender) SendDunningWarning(ctx context.Context, tenantID, to stri
 	})
 }
 
+// SendDunningWarningTx is SendDunningWarning on the caller's transaction —
+// the dunning reschedule and its warning email commit together (ADR-040).
+func (s *OutboxSender) SendDunningWarningTx(ctx context.Context, tx *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, attemptNumber, maxAttempts int, nextRetryDate, failureReason, publicToken string) error {
+	return s.enqueueTx(ctx, tx, tenantID, TypeDunningWarning, outboxMessage{
+		To:            to,
+		Cc:            cc,
+		CustomerName:  customerName,
+		InvoiceNumber: invoiceNumber,
+		AttemptNumber: attemptNumber,
+		MaxAttempts:   maxAttempts,
+		NextRetryDate: nextRetryDate,
+		FailureReason: failureReason,
+		PublicToken:   publicToken,
+	})
+}
+
 // SendDunningEscalation enqueues a dunning-escalation email. Satisfies dunning.EmailNotifier.
 func (s *OutboxSender) SendDunningEscalation(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error {
 	return s.enqueue(ctx, tenantID, TypeDunningEscalation, outboxMessage{
+		To:                to,
+		Cc:                cc,
+		CustomerName:      customerName,
+		InvoiceNumber:     invoiceNumber,
+		EscalationOutcome: outcome,
+		PublicToken:       publicToken,
+	})
+}
+
+// SendDunningEscalationTx is SendDunningEscalation on the caller's
+// transaction (ADR-040) — the escalation write and its email commit together.
+func (s *OutboxSender) SendDunningEscalationTx(ctx context.Context, tx *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, outcome domain.DunningEscalationOutcome, publicToken string) error {
+	return s.enqueueTx(ctx, tx, tenantID, TypeDunningEscalation, outboxMessage{
 		To:                to,
 		Cc:                cc,
 		CustomerName:      customerName,

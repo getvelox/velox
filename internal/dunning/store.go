@@ -38,7 +38,7 @@ type Store interface {
 	// persist and the transient-skip rewind) use it so a concurrent card-settle
 	// webhook resolve landing during the up-to-15s charge window is never clobbered
 	// back to active — preserving the exactly-once dunning.resolved contract.
-	UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int) (bool, error)
+	UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error)
 	ListDueRuns(ctx context.Context, tenantID string, dueBefore time.Time, limit int) ([]domain.InvoiceDunningRun, error)
 
 	// ListDueRunsForClock is the catchup-path counterpart to ListDueRuns.

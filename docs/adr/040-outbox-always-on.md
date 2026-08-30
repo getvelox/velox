@@ -29,11 +29,14 @@ DLQ.
 > the two commits) loses the email with the state standing — the
 > exactly-once gates on the money path then suppress every later
 > attempt. Under the N ≥ 2 production posture that gap is hit by routine
-> failovers, so the money emails (payment receipt, payment failed,
-> dunning warning, dunning escalation) move into the state-transition
-> transaction in the next PR of the 2026-08-30 HA program; account-plane
-> and operator-initiated sends stay post-commit (the operator receives
-> the enqueue error synchronously).
+> failovers, so the money emails move into the state-transition
+> transaction. **Shipped 2026-08-31 for the dunning pair** (warning +
+> escalation): `UpdateRunIfActive` takes a `then` hook that runs the
+> outbox enqueue inside the state transaction, under a SAVEPOINT — an
+> email-side failure logs loud and skips the email, never the money
+> write. Payment receipt + payment failed ride the settle path and move
+> in their own PR; account-plane and operator-initiated sends stay
+> post-commit (the operator receives the enqueue error synchronously).
 
 At migration time, both outboxes shipped behind boot env flags
 (`VELOX_WEBHOOK_OUTBOX_ENABLED=true` and `VELOX_EMAIL_OUTBOX_ENABLED
