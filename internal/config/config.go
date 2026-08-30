@@ -29,6 +29,14 @@ type Config struct {
 	// cmd/velox/main.go). Optional elsewhere: limiters fail open.
 	RedisURL string
 
+	// ShutdownDrainDelay is how long a replica keeps its listener open AFTER
+	// flipping /health/ready to 503 'draining' on SIGTERM, so a health-check
+	// driven load balancer stops routing to it before in-flight requests are
+	// drained. Env SHUTDOWN_DRAIN_DELAY (Go duration). Default 5s outside
+	// local, 0 in local. Part of the published 90s shutdown budget
+	// (cmd/velox/main.go).
+	ShutdownDrainDelay time.Duration
+
 	// Bootstrap
 	BootstrapToken string
 }
@@ -74,6 +82,11 @@ func Load() (Config, error) {
 		RedisURL:       strings.TrimSpace(os.Getenv("REDIS_URL")),
 		BootstrapToken: strings.TrimSpace(os.Getenv("VELOX_BOOTSTRAP_TOKEN")),
 	}
+	drain, err := loadShutdownDrainDelay(env)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ShutdownDrainDelay = drain
 
 	if warnings := cfg.Validate(); len(warnings) > 0 {
 		for _, w := range warnings {
@@ -267,4 +280,23 @@ func boolEnv(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+// loadShutdownDrainDelay parses SHUTDOWN_DRAIN_DELAY: unset → 5s outside
+// local (a health-check-driven balancer needs a few probe intervals to
+// notice the 503), 0 in local (nothing to drain from). A value that does
+// not parse is a configuration error, not a silent default.
+func loadShutdownDrainDelay(env string) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("SHUTDOWN_DRAIN_DELAY"))
+	if raw == "" {
+		if env == "local" {
+			return 0, nil
+		}
+		return 5 * time.Second, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("SHUTDOWN_DRAIN_DELAY=%q is not a valid non-negative duration (e.g. 5s)", raw)
+	}
+	return d, nil
 }

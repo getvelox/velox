@@ -265,6 +265,9 @@ sees Advancing badge stuck.
   monthly sub can require dozens of billing-engine sweeps.
 - Billing-engine error mid-catchup; sub flipped to
   `internal_failure`.
+- A deploy abandoned an in-flight advance (shutdown waits 30s for it,
+  then exits); the clock stays `advancing` and resumes automatically on
+  the next boot's recovery — wait for the new replica, no action needed.
 
 **Diagnose**:
 ```sql

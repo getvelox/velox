@@ -282,3 +282,32 @@ func TestLoad_AppEnvIsCaseNormalised(t *testing.T) {
 		t.Fatalf("' Production ' must normalise to production and hit the fatal check, got: %v", err)
 	}
 }
+
+// SHUTDOWN_DRAIN_DELAY: unset defaults by environment, values parse as Go
+// durations, junk is a load error rather than a silent default.
+func TestLoad_ShutdownDrainDelay(t *testing.T) {
+	cases := []struct {
+		env, raw string
+		want     time.Duration
+		wantErr  bool
+	}{
+		{"local", "", 0, false},
+		{"staging", "", 5 * time.Second, false},
+		{"production", "", 5 * time.Second, false},
+		{"production", "250ms", 250 * time.Millisecond, false},
+		{"production", "0", 0, false},
+		{"production", "junk", 0, true},
+		{"production", "-1s", 0, true},
+	}
+	for _, c := range cases {
+		t.Setenv("SHUTDOWN_DRAIN_DELAY", c.raw)
+		got, err := loadShutdownDrainDelay(c.env)
+		if (err != nil) != c.wantErr {
+			t.Errorf("env=%s raw=%q: err=%v wantErr=%v", c.env, c.raw, err, c.wantErr)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("env=%s raw=%q: got %v want %v", c.env, c.raw, got, c.want)
+		}
+	}
+}

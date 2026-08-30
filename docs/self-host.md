@@ -76,7 +76,9 @@ This deployment shape is a **single-VM, single-instance** install:
   still assume one process (SSE live tail, per-process throttles) — the
   full list, with evidence, lives in
   [docs/dev/ha-readiness-2026-07-06.md](dev/ha-readiness-2026-07-06.md).
-- LB: none.
+- LB: none. (Shutdown: SIGTERM → readiness 503 `draining` → three bounded
+  stages, 90s worst case; give the process 120s of grace — see
+  [deploy/README.md](../deploy/README.md) "Rolling deploys and shutdown".)
 
 This is appropriate for: development, evaluation, single-tenant
 self-hosting where ~minutes of downtime per deploy/restart is acceptable.
