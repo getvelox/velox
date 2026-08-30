@@ -369,11 +369,13 @@ func serve() {
 	// mid-write), so cancellation does not reach it; Stop waits up to
 	// shutdownCatchupWait for the in-flight advance — typical advances
 	// finish in seconds — then abandons it. An abandoned advance leaves the
-	// clock 'advancing' and resumes from durable state on the next boot's
-	// RecoverInFlight; nothing is lost, only delayed. (Was CatchupTimeout =
-	// 10 min, which blew every orchestrator grace period.)
+	// clock 'advancing'; RecoverInFlight runs once per replica BOOT, so in
+	// a rolling deploy (new replica already up) nothing resumes it until
+	// some replica restarts — hazard 7 in the HA register, fix = program
+	// ha-9. (Was CatchupTimeout = 10 min, which blew every orchestrator
+	// grace period.)
 	if !catchupWorker.Stop(shutdownCatchupWait) {
-		slog.Warn("test-clock catchup worker still busy — abandoning the in-flight advance; it resumes on the next boot")
+		slog.Warn("test-clock catchup worker still busy — abandoning the in-flight advance; the clock stays 'advancing' until a replica restarts (docs/ops/runbook.md, test clocks)")
 	}
 
 	// Stage 3 (≤ 30s): scheduler + dispatchers. Their ticks run on ctx
