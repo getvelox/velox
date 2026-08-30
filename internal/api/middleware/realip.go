@@ -12,6 +12,9 @@ import (
 // Blank/invalid entries are skipped. Empty input yields an empty slice, which
 // means "trust no proxy" — forwarding headers are then never honored.
 func ParseTrustedProxies(spec string) []*net.IPNet {
+	if strings.EqualFold(strings.TrimSpace(spec), "none") {
+		return nil // explicit "no proxy in front" — trust nothing, no warning
+	}
 	var nets []*net.IPNet
 	for _, raw := range strings.Split(spec, ",") {
 		raw = strings.TrimSpace(raw)

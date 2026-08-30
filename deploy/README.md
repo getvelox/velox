@@ -72,8 +72,8 @@ Behind a load balancer or ingress set **`TRUST_PROXY`** to the proxy's
 CIDR(s). Without it every request's client address is the balancer's, so
 the per-IP limits on the public pay pages (60/min) and on `/v1/auth`
 (100/min) become one bucket shared by every customer and every operator of
-the install. Production will refuse to boot without it once the guard lands
-(HA register sweep 2026-08-30, S3); set it now.
+the install. **Production refuses to boot without it**; set `TRUST_PROXY=none`
+only when replicas accept client connections directly (no proxy).
 
 ## Scaling
 

@@ -232,6 +232,19 @@ func IsUniqueViolation(err error) bool {
 	return false
 }
 
+// IsExclusionViolation reports whether err is a Postgres EXCLUDE-constraint
+// violation (SQLSTATE 23P01) — the signature of two writers reconstructing
+// the same range, e.g. two replicas running the boot-time billing_intervals
+// backfill on one partition; the second committer sees this after the first
+// commits, and the table is already correct.
+func IsExclusionViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23P01"
+	}
+	return false
+}
+
 // UniqueViolationConstraint returns the constraint name if err is a Postgres
 // unique-violation (SQLSTATE 23505), otherwise "". Use this to disambiguate
 // multiple unique constraints on the same table — e.g. subscriptions has

@@ -69,3 +69,14 @@ func TestParseTrustedProxies(t *testing.T) {
 		t.Fatalf("parsed %d nets, want 2 (CIDR + bare IP; blank/bogus skipped)", len(nets))
 	}
 }
+
+func TestParseTrustedProxies_NoneMeansNoProxy(t *testing.T) {
+	for _, spec := range []string{"none", " NONE ", "None"} {
+		if got := ParseTrustedProxies(spec); got != nil {
+			t.Fatalf("ParseTrustedProxies(%q) = %v, want nil", spec, got)
+		}
+	}
+	if got := ParseTrustedProxies("10.0.0.0/8"); len(got) != 1 {
+		t.Fatalf("a CIDR must still parse, got %v", got)
+	}
+}

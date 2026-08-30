@@ -81,10 +81,11 @@ func TestValidate_ValidConfig(t *testing.T) {
 	t.Setenv("VELOX_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	cfg := Config{
-		Port:     "8080",
-		Env:      "production",
-		RedisURL: "redis://localhost:6379",
-		DB:       DBConfig{MaxOpenConns: 20, MaxIdleConns: 5, QueryTimeout: 5 * time.Second},
+		Port:       "8080",
+		Env:        "production",
+		RedisURL:   "redis://localhost:6379",
+		TrustProxy: "none",
+		DB:         DBConfig{MaxOpenConns: 20, MaxIdleConns: 5, QueryTimeout: 5 * time.Second},
 	}
 	warnings := cfg.Validate()
 	if len(warnings) > 0 {
@@ -245,6 +246,7 @@ func TestLoad_ProductionWithRedisURLLoads(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("VELOX_ENCRYPTION_KEY", strings.Repeat("ab", 32))
 	t.Setenv("REDIS_URL", "redis://redis:6379")
+	t.Setenv("TRUST_PROXY", "none")
 
 	if _, err := Load(); err != nil {
 		t.Fatalf("production with REDIS_URL set must load: %v", err)
@@ -308,6 +310,28 @@ func TestLoad_ShutdownDrainDelay(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("env=%s raw=%q: got %v want %v", c.env, c.raw, got, c.want)
+		}
+	}
+}
+
+// TestLoad_ProductionRequiresTrustProxy: sweep-2026-08-30 S3. Behind a
+// balancer with TRUST_PROXY unset, every per-IP bucket is one bucket for the
+// whole install; production refuses to boot. "none" is the explicit "no
+// proxy in front" declaration and passes.
+func TestLoad_ProductionRequiresTrustProxy(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test:test@localhost/test")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("VELOX_ENCRYPTION_KEY", strings.Repeat("ab", 32))
+	t.Setenv("REDIS_URL", "redis://localhost:6379")
+
+	t.Setenv("TRUST_PROXY", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TRUST_PROXY") {
+		t.Fatalf("production with TRUST_PROXY unset must refuse to boot naming TRUST_PROXY, got: %v", err)
+	}
+	for _, ok := range []string{"none", "10.0.0.0/8,127.0.0.1"} {
+		t.Setenv("TRUST_PROXY", ok)
+		if _, err := Load(); err != nil {
+			t.Fatalf("TRUST_PROXY=%q must boot, got: %v", ok, err)
 		}
 	}
 }

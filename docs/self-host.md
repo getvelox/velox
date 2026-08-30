@@ -169,7 +169,7 @@ Optional:
 |---|---|---|
 | `RUN_MIGRATIONS_ON_BOOT` | `false` | Run migrations on startup (racing replicas serialize on an advisory lock and skip already-applied work) |
 | `APP_ENV` | `local` | `local`/`staging`/`production`. Gates the cookie `Secure` flag and the fail-closed boot checks — `staging`/`production` refuse to start without a valid `APP_DATABASE_URL` (see Postgres above) and refuse a `VELOX_BOOTSTRAP_TOKEN` under 16 chars |
-| `TRUST_PROXY` | _(unset)_ | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For`/`X-Real-IP` are trusted for client-IP resolution (rate limiting, audit logs). Unset = headers ignored, direct TCP peer used |
+| `TRUST_PROXY` | _(unset)_ — **required in production** | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For`/`X-Real-IP` are trusted for client-IP resolution (rate limiting, audit logs). Unset = headers ignored, direct TCP peer used `none` declares there is no proxy. Production refuses to boot with it unset (every per-IP limit would be one bucket behind a balancer). |
 | `DASHBOARD_BASE_URL` | _(unset)_ | Canonical dashboard origin for password-reset links. **Unset disables password-reset emails** — the origin is never derived from request headers (host-header poisoning). Set to e.g. `http://localhost:5173` in dev |
 | `SMTP_HOST` / `SMTP_PORT` | _(unset)_ | Outbound email relay. Unset → emails are not sent (`ErrSMTPNotConfigured`). The compose path points these at mailpit (`localhost:1025`) |
 

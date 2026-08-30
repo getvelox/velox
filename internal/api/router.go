@@ -1329,9 +1329,15 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	// (enumeration bypass) or pin a victim's IP. TRUST_PROXY is a comma-list of
 	// CIDRs / IPs (e.g. "10.0.0.0/8,127.0.0.1"); unset → trust nothing and key
 	// rate limits on the raw TCP peer.
-	trustedProxies := mw.ParseTrustedProxies(os.Getenv("TRUST_PROXY"))
-	if len(trustedProxies) == 0 {
-		slog.Info("TRUST_PROXY not set — X-Forwarded-For/X-Real-IP ignored; rate limiting keys on the direct TCP peer. Set TRUST_PROXY to your load balancer's CIDR if Velox runs behind a proxy.")
+	trustProxy := os.Getenv("TRUST_PROXY")
+	trustedProxies := mw.ParseTrustedProxies(trustProxy)
+	switch {
+	case strings.EqualFold(strings.TrimSpace(trustProxy), "none"):
+		slog.Info("TRUST_PROXY=none — no proxy in front; rate limiting keys on the direct TCP peer")
+	case len(trustedProxies) == 0:
+		// Production refuses to boot in this state (config.validateFatal);
+		// local/staging get the warning.
+		slog.Warn("TRUST_PROXY not set — X-Forwarded-For/X-Real-IP ignored; rate limiting keys on the direct TCP peer. Behind a balancer that is ONE bucket for everyone: set TRUST_PROXY to the balancer's CIDR, or TRUST_PROXY=none if there is no proxy.")
 	}
 	r.Use(mw.TrustedRealIP(trustedProxies))
 	corsEnv := os.Getenv("CORS_ALLOWED_ORIGINS")
