@@ -357,7 +357,7 @@ func TestAuditCoverage_IdempotentReplayIsNotAnUncoveredMutation(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Use(AuditCoverage(func(string, string) bool { return false }))
-	r.Use(Idempotency(db))
+	r.Use(Idempotency(db, nil))
 	r.Post("/v1/invoices", func(w http.ResponseWriter, req *http.Request) {
 		handlerCalls.Add(1)
 		// A REAL audit row — the emission self-marks the request (Logger.Log).

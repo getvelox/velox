@@ -66,7 +66,15 @@ const (
 //   - Same key + different (method, path, body) → 422 idempotency_error
 //     (protects against client bugs that recycle a key across operations —
 //     e.g., retrying POST /invoices with a changed amount under the old key).
-func Idempotency(db *postgres.DB) func(http.Handler) http.Handler {
+//
+// releaseServerErrors (nil = never) names the requests whose 5xx must NOT
+// pin the key: routes whose handlers are single-transaction writers with
+// DB-level dedup (`ON CONFLICT … DO NOTHING` per event), so re-execution
+// after a failure is exactly what the client is told to do ("non-2xx means
+// not recorded — retry; replays are dedup-safe"). For everything else a 5xx
+// stays cached on purpose — the first call may have committed a side effect
+// (a Stripe charge) the client cannot observe, and a re-run would double it.
+func Idempotency(db *postgres.DB, releaseServerErrors func(*http.Request) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != "POST" && r.Method != "PUT" && r.Method != "PATCH" {
@@ -175,6 +183,14 @@ func Idempotency(db *postgres.DB) func(http.Handler) http.Handler {
 			// reservation instead, freeing the key for a clean retry.
 			if recorder.statusCode == http.StatusConflict ||
 				recorder.statusCode == http.StatusUnprocessableEntity {
+				releaseKey(bgCtx, db, tenantID, key)
+				return
+			}
+			// Ingest-only (ha-11, 2026-08-31): a 5xx on a dedup-safe ingest
+			// route is released, not pinned — pinning it for the 24 h TTL
+			// turned "retry with the same key" into 24 h of replayed failure
+			// and unrecorded usage.
+			if recorder.statusCode >= 500 && releaseServerErrors != nil && releaseServerErrors(r) {
 				releaseKey(bgCtx, db, tenantID, key)
 				return
 			}

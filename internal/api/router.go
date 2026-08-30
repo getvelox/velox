@@ -1548,7 +1548,11 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 		// After auth so tenant ID is available for the bucket key. Ingest
 		// paths ride their own (much larger) bucket — see ingestLimiter.
 		r.Use(mw.SplitRateLimit(isIngestPath, ingestLimiter, rateLimiter))
-		r.Use(mw.Idempotency(db))
+		// Ingest routes (isIngestPath): a 5xx releases the Idempotency-Key
+		// instead of pinning it — ingest is a single-tx writer with DB-level
+		// per-event dedup, so the documented contract is "non-2xx means not
+		// recorded — retry with the SAME key" (HA register work item 11).
+		r.Use(mw.Idempotency(db, isIngestPath))
 		// No audit middleware here. Audit rows are EMITTED by the code that
 		// owns the mutation, inside its transaction (audit.Logger.LogInTx), and
 		// every mutating route declares where its evidence comes from in the

@@ -10,6 +10,18 @@ contract.
 ```
 POST   /v1/usage-events                 — ingest with dimensions + decimal value
 POST   /v1/usage-events/batch           — batch ingest, up to 1000 per call
+
+**Ingest retry contract.** A non-2xx response means *nothing was recorded* —
+retry the same request. Replays are dedup-safe: every event's
+`idempotency_key` lands in the database as `ON CONFLICT DO NOTHING`, and a
+batch commits all-or-nothing, so sending twice can never double-count. For
+at-least-once pipelines an `idempotency_key` per event is strongly
+recommended. When you send an `Idempotency-Key` HTTP header, a 5xx never
+pins it on ingest routes — retry with the SAME key and the write re-executes
+(elsewhere a 5xx response is replayed on purpose). Events that arrive more
+than 24 h late may land in an already-finalized period: they are stored,
+never silently billed, and counted on `velox_usage_late_event_total`
+(runbook: manual credit/debit).
 POST   /v1/meters/{id}/pricing-rules    — add a dimension-matched pricing rule
 GET    /v1/customers/{id}/usage         — period aggregation, grouped by dimension
 

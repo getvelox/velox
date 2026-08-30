@@ -30,7 +30,7 @@ func TestIdempotency_Caches5xx(t *testing.T) {
 		calls.Add(1)
 		http.Error(w, `{"error":"upstream timeout"}`, http.StatusInternalServerError)
 	})
-	handler := Idempotency(db)(inner)
+	handler := Idempotency(db, nil)(inner)
 
 	// First call: handler runs, returns 500.
 	rec1 := invokeWithKey(t, handler, tenantID, "idem-5xx", `{"amount":100}`)
@@ -91,7 +91,7 @@ func TestIdempotency_Caches4xx_ExceptConflictAndUnprocessable(t *testing.T) {
 				calls.Add(1)
 				http.Error(w, `{"error":"x"}`, tc.status)
 			})
-			handler := Idempotency(db)(inner)
+			handler := Idempotency(db, nil)(inner)
 
 			_ = invokeWithKey(t, handler, tenantID, tc.key, `{}`)
 			rec2 := invokeWithKey(t, handler, tenantID, tc.key, `{}`)
@@ -122,7 +122,7 @@ func TestIdempotency_FingerprintMismatchStill422(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"id":"new"}`))
 	})
-	handler := Idempotency(db)(inner)
+	handler := Idempotency(db, nil)(inner)
 
 	// First body: succeeds, cached.
 	rec1 := invokeWithKey(t, handler, tenantID, "idem-fp", `{"amount":100}`)
@@ -162,7 +162,7 @@ func TestIdempotency_ConcurrentSameKey_RunsOnce(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"id":"granted"}`))
 	})
-	handler := Idempotency(db)(inner)
+	handler := Idempotency(db, nil)(inner)
 
 	const n = 2
 	var (
@@ -264,7 +264,7 @@ func TestIdempotency_OrphanedReservation_AnswersUnresolved(t *testing.T) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusCreated)
 	})
-	handler := Idempotency(db)(inner)
+	handler := Idempotency(db, nil)(inner)
 
 	start := time.Now()
 	rec := invokeWithKey(t, handler, tenantID, "idem-orphan", `{"amount":100}`)
@@ -280,5 +280,49 @@ func TestIdempotency_OrphanedReservation_AnswersUnresolved(t *testing.T) {
 	}
 	if took > 2*time.Second {
 		t.Fatalf("the answer must be immediate, not the 5 s poll: took %s", took)
+	}
+}
+
+// TestIdempotency_IngestServerError_ReleasedForRetry is HA work item 11: on
+// routes the release predicate names (the dedup-safe ingest surface), a 5xx
+// must release the reservation so the client's documented move — retry with
+// the SAME key — re-executes the write instead of replaying the failure for
+// the 24 h TTL. Everywhere else the 5xx stays cached (the Stripe-charge
+// class), pinned by TestIdempotency_Caches5xx above. Mutation check:
+// neutralize the release branch → the retry replays the 500.
+func TestIdempotency_IngestServerError_ReleasedForRetry(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	tenantID := testutil.CreateTestTenant(t, db, "Idempotency Ingest 5xx")
+
+	var calls atomic.Int64
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, `{"error":"storage blip"}`, http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	handler := Idempotency(db, func(*http.Request) bool { return true })(inner)
+
+	rec1 := invokeWithKey(t, handler, tenantID, "idem-ingest-5xx", `{"events":[1]}`)
+	if rec1.Code != http.StatusInternalServerError {
+		t.Fatalf("first call: got %d, want 500", rec1.Code)
+	}
+	// The release runs on a background ctx after the response; poll briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	rec2code := 0
+	for {
+		rec2 := invokeWithKey(t, handler, tenantID, "idem-ingest-5xx", `{"events":[1]}`)
+		rec2code = rec2.Code
+		if rec2code == http.StatusCreated || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if rec2code != http.StatusCreated {
+		t.Fatalf("retry with the same key: got %d, want 201 (the pinned 500 must have been released and re-executed)", rec2code)
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("handler ran %d time(s), want >= 2 — the retry must re-execute", calls.Load())
 	}
 }
