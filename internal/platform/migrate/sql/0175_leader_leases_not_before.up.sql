@@ -1,4 +1,4 @@
--- 0176: separate cadence from observability on leader_leases (sweep 2026-08-30 S5).
+-- 0175: separate cadence from observability on leader_leases (sweep 2026-08-30 S5).
 --
 -- Until now a tick that LOST its lease (heartbeat timeout, takeover, pause)
 -- was released by stamping last_tick_ended_at = now() - interval + cooldown so
@@ -7,7 +7,6 @@
 -- "the last COMPLETED tick", so an abandoned tick read as a completion by the
 -- holder that abandoned it. The cooldown now lives in its own column.
 --
--- 0175 is claimed by ADR-118 (test-clock catch-up role) on another branch.
 ALTER TABLE leader_leases ADD COLUMN not_before TIMESTAMPTZ; -- cooldown after a lost tick; NULL = none
 COMMENT ON COLUMN leader_leases.not_before IS 'Acquire refuses until this instant (set after a lost tick, cleared by a completed one). Cadence only — never a completion.';
 

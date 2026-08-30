@@ -1,4 +1,4 @@
--- 0176 down: drop the cooldown column; the view cannot lose columns via
+-- 0175 down: drop the cooldown column; the view cannot lose columns via
 -- CREATE OR REPLACE, so recreate it as 0174 defined it (grant preserved
 -- explicitly — DROP VIEW discards ACLs).
 DROP VIEW IF EXISTS leader_status;

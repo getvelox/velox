@@ -274,7 +274,7 @@ func TestLease_HeartbeatTimeoutAbandons(t *testing.T) {
 	// observability columns stay untouched (nothing has ever completed here)
 	// and only the cadence column holds the role back — for min(interval,
 	// 60 s). Mutation check: make the lost outcome stamp last_tick_* again
-	// (the pre-0176 release) → the first assertion fails.
+	// (the pre-0175 release) → the first assertion fails.
 	var holder sql.NullString
 	var ended, notBefore sql.NullTime
 	if err := admin.QueryRowContext(context.Background(), `SELECT last_tick_holder, last_tick_ended_at, not_before FROM leader_leases WHERE role='email_outbox'`).Scan(&holder, &ended, &notBefore); err != nil {
