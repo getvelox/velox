@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/sagarsuperuser/velox/internal/subscription"
 	"sync"
 	"testing"
 	"time"
@@ -409,6 +410,21 @@ func (m *mockSubs) Get(_ context.Context, _, id string) (domain.Subscription, er
 		return domain.Subscription{}, fmt.Errorf("not found")
 	}
 	return s, nil
+}
+
+func (m *mockSubs) AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, start, end, next time.Time, anchorDay int) error {
+	s, ok := m.subs[id]
+	if !ok {
+		return fmt.Errorf("not found")
+	}
+	// CAS on the watermark, mirroring the real store.
+	switch {
+	case expectedNext == nil && s.NextBillingAt != nil, expectedNext != nil && s.NextBillingAt == nil:
+		return subscription.ErrWatermarkMoved
+	case expectedNext != nil && !expectedNext.Equal(*s.NextBillingAt):
+		return subscription.ErrWatermarkMoved
+	}
+	return m.UpdateBillingCycle(ctx, tenantID, id, start, end, next, anchorDay)
 }
 
 func (m *mockSubs) UpdateBillingCycle(_ context.Context, _, id string, start, end, next time.Time, anchorDay int) error {
@@ -4074,5 +4090,27 @@ func TestRunCycle_SegmentAware_NoChanges_FullPeriodLine(t *testing.T) {
 	}
 	if baseLineCount != 1 {
 		t.Errorf("expected 1 base-fee line (no segments), got %d", baseLineCount)
+	}
+}
+
+// TestAdvanceWatermark_StaleReadIsNoOp: the engine's cycle-close advance is a
+// CAS on the watermark this tick read; a stale read (another leader already
+// advanced) is a logged no-op, never an error and never a rewind.
+func TestAdvanceWatermark_StaleReadIsNoOp(t *testing.T) {
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	fresh := now.Add(30 * 24 * time.Hour)
+	subs := &mockSubs{subs: map[string]domain.Subscription{
+		"sub_1": {ID: "sub_1", TenantID: "t1", Status: domain.SubscriptionActive, NextBillingAt: &fresh},
+	}, cycleUpdated: map[string]bool{}}
+	engine := wireBaseTax(NewEngine(subs, &mockUsage{}, &mockPricing{}, &mockInvoices{}, nil, &mockSettings{}, nil, nil, billingTestClock()))
+
+	stale := now // what a superseded leader read before the newer leader advanced to `fresh`
+	staleSub := subs.subs["sub_1"]
+	staleSub.NextBillingAt = &stale
+	if err := engine.advanceWatermark(context.Background(), staleSub, now, now.Add(15*24*time.Hour), now.Add(15*24*time.Hour), 1); err != nil {
+		t.Fatalf("stale advance must be a no-op, got %v", err)
+	}
+	if got := subs.subs["sub_1"].NextBillingAt; got == nil || !got.Equal(fresh) {
+		t.Fatalf("watermark = %v, want the newer leader's %v untouched", got, fresh)
 	}
 }

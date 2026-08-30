@@ -678,17 +678,29 @@ func (s *PostgresStore) ClearPauseCollection(ctx context.Context, tenantID, id s
 
 	now := clock.Now(ctx)
 	var sub domain.Subscription
+	// CAS: only a row that IS paused changes. Two clearers racing on the same
+	// row (dual-leader window) serialize on the row lock; the second
+	// re-evaluates the predicate against the cleared row and gets 0 rows —
+	// so only the winner announces the resume (hazard 5 root fix, 2026-08-30).
 	err = scanSubRow(tx.QueryRowContext(ctx, `
 		UPDATE subscriptions
 		SET pause_collection_behavior = NULL,
 		    pause_collection_resumes_at = NULL,
 		    updated_at = $1
 		WHERE id = $2
+		  AND pause_collection_behavior IS NOT NULL
 		RETURNING `+subCols,
 		now, id,
 	), &sub)
 	if err == sql.ErrNoRows {
-		return domain.Subscription{}, errs.ErrNotFound
+		var exists bool
+		if e := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE id = $1)`, id).Scan(&exists); e != nil {
+			return domain.Subscription{}, e
+		}
+		if !exists {
+			return domain.Subscription{}, errs.ErrNotFound
+		}
+		return domain.Subscription{}, ErrNotPaused
 	}
 	if err != nil {
 		return domain.Subscription{}, err
@@ -1421,6 +1433,43 @@ func (s *PostgresStore) UpdateBillingCycle(ctx context.Context, tenantID, id str
 
 	if err := s.UpdateBillingCycleTx(ctx, tx, tenantID, id, periodStart, periodEnd, nextBillingAt, anchorDay); err != nil {
 		return err
+	}
+	return tx.Commit()
+}
+
+// AdvanceBillingCycle is the cycle-CLOSE variant of UpdateBillingCycle: it
+// moves the watermark only if next_billing_at still equals the value the
+// caller read (expectedNext; NULL-safe). A leader that was superseded
+// mid-tick — a failover window, a resumed frozen process — and finishes its
+// in-memory period close therefore cannot rewind a watermark a newer leader
+// already advanced: 0 rows → ErrWatermarkMoved (ErrNotFound if the row is
+// gone). The plan-swap and threshold-reset paths keep UpdateBillingCycle(Tx):
+// they legitimately move the watermark backward to truncate a period.
+func (s *PostgresStore) AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return err
+	}
+	defer postgres.Rollback(tx)
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE subscriptions SET current_billing_period_start = $1, current_billing_period_end = $2,
+			next_billing_at = $3, billing_anchor_day = $4, updated_at = $5
+		WHERE id = $6
+		  AND next_billing_at IS NOT DISTINCT FROM $7
+	`, periodStart, periodEnd, nextBillingAt, anchorDay, clock.Now(ctx), id, expectedNext)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		var exists bool
+		if e := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM subscriptions WHERE id = $1)`, id).Scan(&exists); e != nil {
+			return e
+		}
+		if !exists {
+			return errs.ErrNotFound
+		}
+		return ErrWatermarkMoved
 	}
 	return tx.Commit()
 }

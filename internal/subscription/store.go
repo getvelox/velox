@@ -3,6 +3,7 @@ package subscription
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -14,6 +15,19 @@ type SubPlanCurrency struct {
 	SubCode  string
 	Currency string
 }
+
+// ErrNotPaused is returned by ClearPauseCollection when the row exists but
+// carries no pause — the clear changed nothing, so nothing that announces a
+// resume may fire. Sentinel, not a DomainError: the operator path treats it
+// as an idempotent no-op, the schedule paths skip the row.
+var ErrNotPaused = errors.New("subscription: collection is not paused")
+
+// ErrWatermarkMoved is returned by AdvanceBillingCycle when next_billing_at
+// no longer equals the value the caller read: another leader already advanced
+// the cycle. The write is a benign no-op for the caller — the invoice
+// idempotency index already made the second invoice impossible; this makes
+// the second WATERMARK write impossible too (ADR-114 §Consequences).
+var ErrWatermarkMoved = errors.New("subscription: billing watermark already advanced")
 
 type Store interface {
 	// CustomerSubPlanCurrencies backs the ADR-100 customer currency pin:
@@ -109,8 +123,12 @@ type Store interface {
 	// the other is supported. Service layer enforces behavior whitelist.
 	SetPauseCollection(ctx context.Context, tenantID, id string, pc domain.PauseCollection) (domain.Subscription, error)
 
-	// ClearPauseCollection nulls the pause_collection_* columns. Idempotent
-	// — clearing an already-cleared row returns the unchanged subscription.
+	// ClearPauseCollection nulls the pause_collection_* columns as a CAS: it
+	// changes the row only if a pause is set and returns ErrNotPaused
+	// otherwise (ErrNotFound if the row does not exist). Callers that fire
+	// `subscription.collection_resumed` must fire it only on success — two
+	// leaders (a failover window, a resumed stale process) clearing the same
+	// pause used to each fire the event (HA-readiness hazard 5).
 	ClearPauseCollection(ctx context.Context, tenantID, id string) (domain.Subscription, error)
 
 	// SetBillingThresholds writes the (amount_gte, reset_cycle, item_thresholds)

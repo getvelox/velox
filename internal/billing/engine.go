@@ -26,6 +26,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/money"
 	"github.com/sagarsuperuser/velox/internal/platform/telemetry"
+	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/tax"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -475,6 +476,11 @@ type SubscriptionReader interface {
 	GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, limit int) ([]domain.Subscription, error)
 	Get(ctx context.Context, tenantID, id string) (domain.Subscription, error)
 	UpdateBillingCycle(ctx context.Context, tenantID, id string, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
+	// AdvanceBillingCycle is the cycle-CLOSE variant: moves the watermark only
+	// if next_billing_at still equals expectedNext (the value this tick read),
+	// returning subscription.ErrWatermarkMoved otherwise — a superseded leader
+	// finishing its in-memory close cannot rewind a newer leader's advance.
+	AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error
 	// UpdateBillingCycleTx is the in-tx variant — used by fireThreshold's
 	// reset=true arm so the threshold invoice insert and the cycle re-anchor
 	// commit atomically (ADR-066): a crash between the two otherwise strands
@@ -1103,6 +1109,23 @@ func emitBaseSegmentLine(seg baseSegment, plan domain.Plan, periodStart time.Tim
 	*subtotal += baseFee
 }
 
+// advanceWatermark moves the sub's cycle forward as a CAS on the watermark
+// this tick read (sub.NextBillingAt). A superseded leader — a Postgres
+// failover freed its gate mid-tick, or a frozen process resumed — that
+// finishes an in-memory period close finds the watermark already advanced
+// by the newer leader and does nothing: the invoice idempotency index made
+// the second invoice impossible, this makes the second watermark write
+// impossible (ADR-114 §Consequences; HA-readiness hazard 5).
+func (e *Engine) advanceWatermark(ctx context.Context, sub domain.Subscription, periodStart, periodEnd, nextBillingAt time.Time, anchorDay int) error {
+	err := e.subs.AdvanceBillingCycle(ctx, sub.TenantID, sub.ID, sub.NextBillingAt, periodStart, periodEnd, nextBillingAt, anchorDay)
+	if errors.Is(err, subscription.ErrWatermarkMoved) {
+		slog.InfoContext(ctx, "billing watermark already advanced by another leader — skipping this tick's advance",
+			"subscription_id", sub.ID, "tenant_id", sub.TenantID)
+		return nil
+	}
+	return err
+}
+
 // advanceCycleOrCancel either fires a due scheduled cancel or advances the
 // billing cycle, whichever the sub's current schedule fields require. The
 // two outcomes are mutually exclusive at this point in the flow — a sub
@@ -1112,7 +1135,7 @@ func emitBaseSegmentLine(seg baseSegment, plan domain.Plan, periodStart time.Tim
 // later. trigger is "scheduled" or "scheduled_at" for telemetry.
 func (e *Engine) advanceCycleOrCancel(ctx context.Context, sub domain.Subscription, periodEnd, nextPeriodStart, nextPeriodEnd, now time.Time) error {
 	if !shouldFireScheduledCancel(sub, periodEnd, now) {
-		return e.subs.UpdateBillingCycle(ctx, sub.TenantID, sub.ID, nextPeriodStart, nextPeriodEnd, nextPeriodEnd, sub.BillingAnchorDay)
+		return e.advanceWatermark(ctx, sub, nextPeriodStart, nextPeriodEnd, nextPeriodEnd, sub.BillingAnchorDay)
 	}
 
 	canceled, err := e.subs.FireScheduledCancellation(ctx, sub.TenantID, sub.ID, now)
@@ -2275,7 +2298,7 @@ func (e *Engine) handleTrialState(ctx context.Context, sub domain.Subscription, 
 			// pre-existing hardcoded `monthly` already approximated.
 			nextBilling := domain.NextBillingPeriodEnd(periodEnd, sub.BillingTime, domain.BillingMonthly, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
 			slog.Info("skipping billing (trial active)", "subscription_id", sub.ID)
-			return sub, true, e.subs.UpdateBillingCycle(ctx, sub.TenantID, sub.ID, periodEnd, nextBilling, nextBilling, sub.BillingAnchorDay)
+			return sub, true, e.advanceWatermark(ctx, sub, periodEnd, nextBilling, nextBilling, sub.BillingAnchorDay)
 		}
 		// ADR-069: a due cancel schedule means CANCEL FREE — never
 		// activate-and-bill. Pre-route on the snapshot; the activation

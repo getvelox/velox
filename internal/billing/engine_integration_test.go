@@ -45,6 +45,10 @@ func (a *subStoreAdapter) Get(ctx context.Context, tenantID, id string) (domain.
 	return a.store.Get(ctx, tenantID, id)
 }
 
+func (a *subStoreAdapter) AdvanceBillingCycle(ctx context.Context, tenantID, id string, expectedNext *time.Time, start, end, next time.Time, anchorDay int) error {
+	return a.store.AdvanceBillingCycle(ctx, tenantID, id, expectedNext, start, end, next, anchorDay)
+}
+
 func (a *subStoreAdapter) UpdateBillingCycle(ctx context.Context, tenantID, id string, start, end, next time.Time, anchorDay int) error {
 	return a.store.UpdateBillingCycle(ctx, tenantID, id, start, end, next, anchorDay)
 }
