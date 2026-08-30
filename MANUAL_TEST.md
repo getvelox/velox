@@ -747,6 +747,7 @@ whole cents — only the RATE gains precision.
 - [x] POST with `Idempotency-Key: test-123` → 201. *(manual 2026-07-20: POST /v1/customers with a fresh key → 201.)*
 - [x] Same body + key → same response, 1 row. *(manual 2026-07-20: replay returned the SAME customer id, and exactly 1 row exists; the replay also self-declares to the audit-coverage detector so it never reads as an uncovered mutation.)*
 - [x] Same key + different body → **422 `idempotency_error`** (Stripe-parity, message verbatim: "Keys for idempotent requests can only be used with the same parameters they were first used with."). The 409 this box used to claim is the SEPARATE `conflict_idempotency` response — same key while the FIRST request is still in flight → 409, client retries. *(manual 2026-07-20: 422 observed with the exact message; the 409 in-flight leg is code-verified in middleware/idempotency.go — two distinct statuses for two distinct situations, richer than the old claim.)*
+- [x] A key whose first request died mid-flight (reservation pending > 5 min) → **409 `conflict_idempotency_unresolved`** immediately (no 5 s poll), handler not re-run, message tells the caller to fetch the resource and retry with a NEW key only if absent. *(automated: `TestIdempotency_OrphanedReservation_AnswersUnresolved`, 2026-08-30 sweep S2)*
 
 ## FLOW B6: Subscription lifecycle
 

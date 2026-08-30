@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,6 +41,19 @@ const statusPending = 0
 const (
 	idempotencyPollInterval = 25 * time.Millisecond
 	idempotencyPollTimeout  = 5 * time.Second
+
+	// idempotencyOrphanAfter: a reservation still pending this long after it
+	// was taken has no live owner — the longest handler this middleware wraps
+	// is the 5-minute export group (router.go), everything else 30 s. The
+	// owner died (OOM, SIGKILL, node loss) or panicked (Recoverer is mounted
+	// outside this middleware) between reserving and finalizing, so the
+	// reservation would otherwise sit at status 0 for its 24 h TTL while every
+	// retry, on any replica, polls 5 s and is told "please retry" (sweep
+	// 2026-08-30 S2). Whether the side effect committed is genuinely unknown
+	// here (the handler's transaction may have committed before the kill), so
+	// the reservation is NOT released for re-execution; the client is told
+	// the truth and how to find out.
+	idempotencyOrphanAfter = 5 * time.Minute
 )
 
 // Idempotency returns middleware that caches responses for POST/PUT/PATCH
@@ -187,6 +201,7 @@ type cachedResponse struct {
 	StatusCode  int
 	Body        []byte
 	Fingerprint []byte
+	CreatedAt   time.Time // when the key was reserved — a pending row's age
 }
 
 // reserveKey atomically claims the idempotency key by inserting a pending row
@@ -307,10 +322,10 @@ func readKey(ctx context.Context, db *postgres.DB, tenantID, key string) (c cach
 	defer postgres.Rollback(tx)
 
 	err = tx.QueryRowContext(ctx,
-		`SELECT status_code, response_body, request_fingerprint FROM idempotency_keys
+		`SELECT status_code, response_body, request_fingerprint, created_at FROM idempotency_keys
 		WHERE tenant_id = $1 AND key = $2 AND expires_at > now()`,
 		tenantID, key,
-	).Scan(&c.StatusCode, &c.Body, &c.Fingerprint)
+	).Scan(&c.StatusCode, &c.Body, &c.Fingerprint, &c.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return cachedResponse{}, false, false, nil
 	}
@@ -376,6 +391,14 @@ func replayExistingKey(w http.ResponseWriter, ctx context.Context, db *postgres.
 		if !found {
 			ErrorJSON(w, http.StatusConflict, "conflict_idempotency",
 				"A concurrent request with this idempotency key did not complete. Please retry.")
+			return
+		}
+		// Still pending — but with no owner alive? A reservation older than
+		// any route budget was orphaned by a dead or panicked owner. Say so
+		// at once: the outcome is unknown and polling cannot resolve it.
+		if age := time.Since(c.CreatedAt); age > idempotencyOrphanAfter {
+			ErrorJSON(w, http.StatusConflict, "conflict_idempotency_unresolved",
+				fmt.Sprintf("A request with this idempotency key started %s ago and never recorded an outcome — the replica handling it may have died mid-request. Whether its side effect committed is unknown: fetch the resource to check, then retry with a NEW idempotency key only if it does not exist.", age.Round(time.Minute)))
 			return
 		}
 		// Still pending. Wait for the owner to finalize, bounded by the poll

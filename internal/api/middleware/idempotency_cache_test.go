@@ -231,3 +231,54 @@ func invokeWithKey(t *testing.T, h http.Handler, tenantID, key, body string) *ht
 	h.ServeHTTP(rec, req)
 	return rec
 }
+
+// TestIdempotency_OrphanedReservation_AnswersUnresolved is sweep-2026-08-30
+// S2: a reservation whose owner died mid-request (status 0, older than any
+// route budget) must not make every retry poll 5 s and hear "please retry"
+// for 24 h. It answers at once with a distinct code that says the outcome is
+// unknown and how to find out; the handler never runs (the side effect may
+// already have committed). Mutation check: drop the age branch in
+// replayExistingKey → 5 s poll + the generic conflict_idempotency → fails.
+func TestIdempotency_OrphanedReservation_AnswersUnresolved(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	tenantID := testutil.CreateTestTenant(t, db, "Idempotency Orphan")
+
+	// Same livemode as invokeWithKey's request (false): the row's livemode is
+	// stamped by the trigger from the transaction's GUC.
+	seedCtx := postgres.WithLivemode(context.Background(), false)
+	tx, err := db.BeginTx(seedCtx, postgres.TxTenant, tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(seedCtx,
+		`INSERT INTO idempotency_keys (key, tenant_id, http_method, http_path, request_fingerprint, status_code, response_body, created_at)
+		 VALUES ('idem-orphan', $1, 'POST', '/v1/invoices', '\x'::bytea, 0, ''::bytea, now() - interval '10 minutes')`, tenantID); err != nil {
+		t.Fatalf("seed orphaned reservation: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int64
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	})
+	handler := Idempotency(db)(inner)
+
+	start := time.Now()
+	rec := invokeWithKey(t, handler, tenantID, "idem-orphan", `{"amount":100}`)
+	took := time.Since(start)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("orphaned reservation: got %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "conflict_idempotency_unresolved") {
+		t.Fatalf("orphaned reservation must answer conflict_idempotency_unresolved, got: %s", rec.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("handler must not re-run on an orphaned reservation (outcome unknown), ran %d times", calls.Load())
+	}
+	if took > 2*time.Second {
+		t.Fatalf("the answer must be immediate, not the 5 s poll: took %s", took)
+	}
+}
