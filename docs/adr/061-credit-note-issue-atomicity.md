@@ -209,7 +209,9 @@ recorded ways (per `feedback_amend_decisions_when_course_changes`):
    abstraction for single-step idempotent jobs) and AGAINST River-for-now (its
    `InsertTx` needs a pgx-native `pgx.Tx`; Velox is on `database/sql`, so its in-tx
    enqueue wouldn't compose with our coordinator `*sql.Tx` without migrating the
-   whole data layer — 60 files / 385 query sites / the RLS core). At low/mid scale
+   whole data layer — 60 files / 385 query sites / the RLS core — *premise false
+   since River v0.10.0; corrected in ADR-062's 2026-08-30 Amendment, decision
+   unchanged*). At low/mid scale
    the four sweeps are correct and the consolidation is a *maintainability* win,
    not a correctness need, so the **build is trigger-gated** (≥~6 async effects, a
    non-notification obligation a reconciler can't cover, or a worker-process

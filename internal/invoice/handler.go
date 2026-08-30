@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/sagarsuperuser/velox/internal/api/generated"
 	"github.com/sagarsuperuser/velox/internal/api/middleware"
 	"github.com/sagarsuperuser/velox/internal/api/respond"
 	"github.com/sagarsuperuser/velox/internal/api/timefilter"
@@ -190,19 +191,23 @@ var validRefundReasons = map[string]bool{
 
 // getInvoiceServer is the slice of generated.ServerInterface that this
 // handler currently implements — the single OpenAPI operation
-// `getInvoice` (GET /v1/invoices/{id}). As more operations migrate
-// onto the typed surface, this assertion will broaden until the
-// handler conforms to the full generated.ServerInterface and the chi
-// mount can swap to the generated route helper. The compile-time
-// `var _` below catches any drift between the spec's signature and the
-// handler's implementation as a build error rather than a runtime
-// 404 — same trick Stripe-go and gh-cli use when they conform to
-// generated SDK interfaces.
+// `getInvoice` (GET /v1/invoices/{id}). Two compile-time assertions
+// keep the spec, the generated interface, and the handler aligned: the
+// handler satisfies this slice, AND generated.ServerInterface (rebuilt
+// from api/openapi.yaml by `make gen`) still carries this exact method
+// signature — so renaming or re-typing the operation in the spec fails
+// the build here instead of surfacing as a runtime 404. The naive form
+// `var _ generated.ServerInterface = (*Handler)(nil)` cannot be used:
+// the handler implements one of ~60 generated operations. As more
+// operations migrate onto the typed surface, this slice broadens.
 type getInvoiceServer interface {
 	GetInvoice(w http.ResponseWriter, r *http.Request, id string)
 }
 
-var _ getInvoiceServer = (*Handler)(nil)
+var (
+	_ getInvoiceServer = (*Handler)(nil)                // handler ⊇ slice
+	_ getInvoiceServer = generated.ServerInterface(nil) // generated ⊇ slice
+)
 
 type Handler struct {
 	svc             *Service
@@ -476,8 +481,8 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 // GetInvoice is the OpenAPI-typed handler for `GET /v1/invoices/{id}`.
 // Signature matches generated.ServerInterface so the spec, the handler,
-// and the router stay aligned at compile time — see the
-// `var _ generated.GetInvoiceServer = (*Handler)(nil)` assertion below.
+// and the router stay aligned at compile time — see the two
+// `getInvoiceServer` assertions above (handler ⊇ slice; generated ⊇ slice).
 //
 // The chi route still calls h.get (which extracts the id via chi.URLParam
 // and delegates here), keeping the routing layer unchanged for now. As
