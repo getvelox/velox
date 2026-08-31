@@ -173,7 +173,7 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	}
 
 	// First failure for pi_a → first notification for this PI.
-	inv, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined")
+	inv, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil)
 	if err != nil {
 		t.Fatalf("first failure: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	}
 
 	// Duplicate delivery of the SAME PI → not a fresh notification.
-	_, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined")
+	_, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil)
 	if err != nil {
 		t.Fatalf("duplicate failure: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	}
 
 	// A later retry fails on a fresh PI → a genuinely new event.
-	_, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_b", "card declined again")
+	_, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_b", "card declined again", nil)
 	if err != nil {
 		t.Fatalf("retry failure: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	if _, err := store.MarkPaid(ctx, tenantID, invID, "pi_b", now); err != nil {
 		t.Fatalf("mark paid: %v", err)
 	}
-	stale, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_stale", "late decline")
+	stale, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_stale", "late decline", nil)
 	if err != nil {
 		t.Fatalf("stale failure: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		invID := seedFinalizedInvoice(t, db, store, ctx, tenantID)
 
 		// First failure for pi_a → one payment.failed enqueued in the same tx.
-		if _, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined"); err != nil || !first {
+		if _, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil); err != nil || !first {
 			t.Fatalf("first failure: first=%v err=%v", first, err)
 		}
 		if want := []string{domain.EventPaymentFailed}; !reflect.DeepEqual(rec.events, want) {
@@ -248,7 +248,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		}
 
 		// Same-PI redelivery → no second enqueue.
-		if _, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined"); err != nil || dup {
+		if _, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil); err != nil || dup {
 			t.Fatalf("duplicate failure: dup=%v err=%v", dup, err)
 		}
 		if len(rec.events) != 1 {
@@ -256,7 +256,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		}
 
 		// A retry's failure on a fresh PI is a genuinely new event → fires again.
-		if _, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_b", "declined again"); err != nil || !retry {
+		if _, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_b", "declined again", nil); err != nil || !retry {
 			t.Fatalf("retry failure: retry=%v err=%v", retry, err)
 		}
 		if len(rec.events) != 2 {
@@ -269,7 +269,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 			t.Fatalf("mark paid: %v", err)
 		}
 		preStale := len(rec.events)
-		if _, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_stale", "late decline"); err != nil || staleFirst {
+		if _, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_stale", "late decline", nil); err != nil || staleFirst {
 			t.Fatalf("stale failure: first=%v err=%v", staleFirst, err)
 		}
 		// preStale includes the invoice.paid enqueue from MarkPaid.
@@ -284,7 +284,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		store.SetOutboxEnqueuer(&failingOutbox{failOn: domain.EventPaymentFailed})
 		invID := seedFinalizedInvoice(t, db, store, ctx, tenantID)
 
-		if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_x", "declined"); err == nil {
+		if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_x", "declined", nil); err == nil {
 			t.Fatal("a failed in-tx enqueue must surface an error")
 		}
 		after, err := store.Get(ctx, tenantID, invID)
@@ -362,7 +362,7 @@ func TestMarkPaidCardSettlement_EnqueuesPaymentSucceededInTx(t *testing.T) {
 		store.SetOutboxEnqueuer(rec)
 		invID := seedFinalizedInvoice(t, db, store, ctx, tenantID)
 
-		_, transitioned, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, invID, "pi_card", now)
+		_, transitioned, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, invID, "pi_card", now, nil)
 		if err != nil {
 			t.Fatalf("MarkPaidCardSettlementTransition: %v", err)
 		}
@@ -375,7 +375,7 @@ func TestMarkPaidCardSettlement_EnqueuesPaymentSucceededInTx(t *testing.T) {
 		}
 
 		// Duplicate (already paid) → no new enqueues.
-		_, transitioned2, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, invID, "pi_card2", now.Add(time.Minute))
+		_, transitioned2, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, invID, "pi_card2", now.Add(time.Minute), nil)
 		if err != nil {
 			t.Fatalf("duplicate MarkPaidCardSettlementTransition: %v", err)
 		}
@@ -417,7 +417,7 @@ func TestMarkPaidCardSettlement_RollsBackPaidFlipIfEventEnqueueFails(t *testing.
 	invID := seedFinalizedInvoice(t, db, store, ctx, tenantID)
 	now := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	if _, _, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, invID, "pi_card", now); err == nil {
+	if _, _, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, invID, "pi_card", now, nil); err == nil {
 		t.Fatal("expected an error when the in-tx payment.succeeded enqueue fails")
 	}
 

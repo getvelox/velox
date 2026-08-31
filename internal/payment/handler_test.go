@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -537,11 +538,19 @@ func (m *mockInvoiceUpdaterHandler) MarkPaidReportingTransition(_ context.Contex
 	return domain.Invoice{ID: id, TenantID: inv.tenantID, Status: domain.InvoicePaid}, !alreadyPaid, nil
 }
 
-func (m *mockInvoiceUpdaterHandler) MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id, piID string, paidAt time.Time) (domain.Invoice, bool, error) {
-	return m.MarkPaidReportingTransition(ctx, tenantID, id, piID, paidAt)
+// The hook is INVOKED when the transition is won, exactly as the real store
+// does inside its transaction (nil tx: these fakes have none). A fake that
+// accepted the hook and dropped it would make every settlement-email
+// assertion in this package read zero and pass forever.
+func (m *mockInvoiceUpdaterHandler) MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id, piID string, paidAt time.Time, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
+	inv, transitioned, err := m.MarkPaidReportingTransition(ctx, tenantID, id, piID, paidAt)
+	if err == nil && transitioned && then != nil {
+		_ = then(nil, inv)
+	}
+	return inv, transitioned, err
 }
 
-func (m *mockInvoiceUpdaterHandler) MarkPaymentFailedReportingTransition(_ context.Context, _, id, piID, errMsg string) (domain.Invoice, bool, error) {
+func (m *mockInvoiceUpdaterHandler) MarkPaymentFailedReportingTransition(_ context.Context, _, id, piID, errMsg string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	inv, ok := m.invoices[id]
 	if !ok {
 		return domain.Invoice{}, false, fmt.Errorf("not found")

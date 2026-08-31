@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -418,7 +419,7 @@ func (d sequencedDunningResolver) ResolveByInvoice(ctx context.Context, _, _ str
 	return nil
 }
 
-func TestSettleSucceeded_ReceiptEnqueueFirstPostCommit_AndDetachedFromCancel(t *testing.T) {
+func TestSettleSucceeded_ReceiptRidesSettleTx_AndDetachedFromCancel(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = domain.Invoice{
 		ID: "inv_1", TenantID: "t1", CustomerID: "cus_1", InvoiceNumber: "VLX-1",
@@ -445,11 +446,11 @@ func TestSettleSucceeded_ReceiptEnqueueFirstPostCommit_AndDetachedFromCancel(t *
 
 	want := []string{"receipt_enqueue", "dunning_resolve", "card_fetch"}
 	if len(seq.seq) != len(want) {
-		t.Fatalf("post-commit call sequence: got %v, want %v", seq.seq, want)
+		t.Fatalf("settle call sequence: got %v, want %v", seq.seq, want)
 	}
 	for i, name := range want {
 		if seq.seq[i] != name {
-			t.Fatalf("post-commit call sequence: got %v, want %v — the receipt enqueue (unrecoverable) must run before every network call", seq.seq, want)
+			t.Fatalf("settle call sequence: got %v, want %v — the receipt enqueue (unrecoverable) must run before every network call", seq.seq, want)
 		}
 	}
 	for name, err := range seq.ctxErrs {
@@ -459,11 +460,11 @@ func TestSettleSucceeded_ReceiptEnqueueFirstPostCommit_AndDetachedFromCancel(t *
 	}
 }
 
-// TestSettleFailed_EmailEnqueueBeforeDunningStart pins the failed-path twin:
+// TestSettleFailed_NoticeRidesFailStampTx_BeforeDunningStart pins the failed-path twin:
 // the payment-failed email enqueue (no reconciler) runs before the dunning
 // start (recovered by the dunning_backfill sweep), and suppression skips ONLY
 // the email — dunning still runs.
-func TestSettleFailed_EmailEnqueueBeforeDunningStart(t *testing.T) {
+func TestSettleFailed_NoticeRidesFailStampTx_BeforeDunningStart(t *testing.T) {
 	run := func(suppress bool) (seq *callSequencer, dunning *mockDunningStarter) {
 		invoices := newMockInvoiceUpdater()
 		invoices.invoices["inv_1"] = domain.Invoice{
@@ -540,4 +541,20 @@ func TestStopCollection_ExpiresSessionsBeforeCancelingPI(t *testing.T) {
 	noPI := finalizedPendingInvoice()
 	noPI.StripePaymentIntentID = ""
 	s.StopCollection(context.Background(), "t1", noPI)
+}
+
+func (r *recordingReceiptEmail) SendPaymentReceiptTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, name, num string, amt int64, cur, tok string) error {
+	return r.SendPaymentReceipt(ctx, tenantID, to, cc, name, num, amt, cur, tok)
+}
+
+func (r *recordingFailedEmail) SendPaymentFailedTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, name, num, reason, tok string) error {
+	return r.SendPaymentFailed(ctx, tenantID, to, cc, name, num, reason, tok)
+}
+
+func (r sequencedReceiptEmail) SendPaymentReceiptTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, name, num string, amt int64, cur, tok string) error {
+	return r.SendPaymentReceipt(ctx, tenantID, to, cc, name, num, amt, cur, tok)
+}
+
+func (r sequencedFailedEmail) SendPaymentFailedTx(ctx context.Context, _ *sql.Tx, tenantID, to string, cc []string, name, num, reason, tok string) error {
+	return r.SendPaymentFailed(ctx, tenantID, to, cc, name, num, reason, tok)
 }

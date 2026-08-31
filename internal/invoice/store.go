@@ -56,7 +56,7 @@ type Store interface {
 	// concurrent at-least-once redelivery of the same
 	// payment_intent.payment_failed doesn't double-notify. PI-keyed because
 	// failure is non-terminal (one fresh failure per dunning retry).
-	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string) (domain.Invoice, bool, error)
+	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error)
 	// MarkPaid flips status='paid', payment_status='succeeded',
 	// amount_paid=amount_due, amount_due=0 in one transaction. Used by
 	// the engine's zero-amount auto-pay path, the billing threshold

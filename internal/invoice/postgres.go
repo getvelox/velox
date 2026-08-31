@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -851,7 +852,10 @@ func (s *PostgresStore) UpdatePayment(ctx context.Context, tenantID, id string, 
 // succeeded) is left untouched and returns false — the authoritative form of
 // SettleFailed's stale-snapshot guard, so a stale failure can never flip a paid
 // invoice back to failed.
-func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string) (domain.Invoice, bool, error) {
+// then (nil = none) runs INSIDE this transaction, after the failed-stamp and
+// its payment.failed enqueue, only when THIS call is the first report for this
+// PaymentIntent, under a SAVEPOINT (ADR-040 amendment — see the paid twin).
+func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return domain.Invoice{}, false, err
@@ -931,6 +935,25 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 		domain.ChargeAttemptFailed, lastPaymentError, inv.AmountDueCents); err != nil {
 		return domain.Invoice{}, false, err
 	}
+	// The money email rides THIS transaction (ADR-040 amendment): enqueued
+	// beside the events above, gated on the same transition, inside a
+	// SAVEPOINT so an email-side failure is logged and skipped while the
+	// settlement still commits. Never the reverse — a receipt must not be
+	// able to un-settle a payment.
+	if then != nil && firstForThisPI {
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT settle_email"); err != nil {
+			return domain.Invoice{}, false, err
+		}
+		if herr := then(tx, inv); herr != nil {
+			if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT settle_email"); rerr != nil {
+				return domain.Invoice{}, false, rerr
+			}
+			slog.ErrorContext(ctx, "settlement email enqueue failed inside the settle transaction — settlement committed, email skipped",
+				"invoice_id", id, "tenant_id", tenantID, "error", herr)
+		} else if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT settle_email"); err != nil {
+			return domain.Invoice{}, false, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.Invoice{}, false, err
 	}
@@ -957,7 +980,7 @@ func (s *PostgresStore) MarkPaid(ctx context.Context, tenantID, id string, strip
 // catch — fires them once, not twice. invoice.paid itself is already
 // once-only (enqueued inside this tx, after the no-op branch returns).
 func (s *PostgresStore) MarkPaidReportingTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, bool, error) {
-	return s.markPaidReportingTransition(ctx, tenantID, id, stripePaymentIntentID, paidAt, false)
+	return s.markPaidReportingTransition(ctx, tenantID, id, stripePaymentIntentID, paidAt, false, nil)
 }
 
 // MarkPaidCardSettlementTransition is MarkPaidReportingTransition for the CARD
@@ -969,8 +992,16 @@ func (s *PostgresStore) MarkPaidReportingTransition(ctx context.Context, tenantI
 // calling MarkPaidReportingTransition and emit only invoice.paid (they never
 // fired payment.succeeded). ADR-040 transactional outbox; see the durability-
 // tiering note in payment/settlement.go.
-func (s *PostgresStore) MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, bool, error) {
-	return s.markPaidReportingTransition(ctx, tenantID, id, stripePaymentIntentID, paidAt, true)
+// then (nil = none) runs INSIDE this transition's transaction, after the
+// paid-flip and its payment.succeeded enqueue, only when THIS call won the
+// transition — and under a SAVEPOINT, so an email-side failure is logged and
+// skipped while the money write still commits (ADR-040's amendment: the
+// receipt used to be enqueued after this tx committed, and a process death or
+// failover in that gap lost the receipt for good — the transition gate then
+// suppresses every later attempt). It receives the freshly-written row
+// because the receipt's amount is the amount actually booked here.
+func (s *PostgresStore) MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
+	return s.markPaidReportingTransition(ctx, tenantID, id, stripePaymentIntentID, paidAt, true, then)
 }
 
 // markPaidReportingTransition is the shared core. cardSettlement=true also
@@ -978,7 +1009,7 @@ func (s *PostgresStore) MarkPaidCardSettlementTransition(ctx context.Context, te
 // transition, so exactly-once). Both event enqueues live inside this one tx, so
 // they are atomic with finalized/uncollectible→paid: tx rolls back → no events;
 // commits → the dispatcher delivers.
-func (s *PostgresStore) markPaidReportingTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time, cardSettlement bool) (domain.Invoice, bool, error) {
+func (s *PostgresStore) markPaidReportingTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time, cardSettlement bool, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return domain.Invoice{}, false, err
@@ -1163,6 +1194,25 @@ func (s *PostgresStore) markPaidReportingTransition(ctx context.Context, tenantI
 	if err := upsertChargeAttemptTx(ctx, tx, tenantID, inv.ID, stripePaymentIntentID,
 		domain.ChargeAttemptSucceeded, "", inv.AmountPaidCents); err != nil {
 		return domain.Invoice{}, false, err
+	}
+	// The money email rides THIS transaction (ADR-040 amendment): enqueued
+	// beside the events above, gated on the same transition, inside a
+	// SAVEPOINT so an email-side failure is logged and skipped while the
+	// settlement still commits. Never the reverse — a receipt must not be
+	// able to un-settle a payment.
+	if then != nil {
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT settle_email"); err != nil {
+			return domain.Invoice{}, false, err
+		}
+		if herr := then(tx, inv); herr != nil {
+			if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT settle_email"); rerr != nil {
+				return domain.Invoice{}, false, rerr
+			}
+			slog.ErrorContext(ctx, "settlement email enqueue failed inside the settle transaction — settlement committed, email skipped",
+				"invoice_id", id, "tenant_id", tenantID, "error", herr)
+		} else if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT settle_email"); err != nil {
+			return domain.Invoice{}, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.Invoice{}, false, err

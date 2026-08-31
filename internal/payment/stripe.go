@@ -71,6 +71,10 @@ type CardFetcher interface {
 // the enqueue/brand lookup runs against the right tenant_settings row.
 type EmailReceipt interface {
 	SendPaymentReceipt(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber string, amountCents int64, currency, publicToken string) error
+	// SendPaymentReceiptTx enqueues on the settle transaction so the receipt
+	// commits with the paid-flip (ADR-040 amendment) — the settle path uses
+	// this one; the post-commit variant remains for non-transactional callers.
+	SendPaymentReceiptTx(ctx context.Context, tx *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, amountCents int64, currency, publicToken string) error
 }
 
 // CustomerEmailResolver resolves customer contact info for email notifications.
@@ -85,6 +89,8 @@ type CustomerEmailResolver interface {
 // signature as dunning.EmailNotifier so OutboxSender satisfies both.
 type EmailPaymentFailed interface {
 	SendPaymentFailed(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, reason, publicToken string) error
+	// SendPaymentFailedTx enqueues on the settle transaction (ADR-040 amendment).
+	SendPaymentFailedTx(ctx context.Context, tx *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber, reason, publicToken string) error
 }
 
 type Stripe struct {
@@ -249,7 +255,7 @@ type InvoiceUpdater interface {
 	// paid-flip, so that event (the only one bearing the Stripe payment_intent_id)
 	// is crash-safe instead of fire-and-forget post-commit. SettleSucceeded uses
 	// this; non-card settlement paths keep MarkPaidReportingTransition.
-	MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, bool, error)
+	MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error)
 	// MarkPaymentFailedReportingTransition records a failure and reports
 	// whether THIS call is the first to fire the failure-notification set
 	// (payment.failed event + customer email + dunning) for this
@@ -259,7 +265,7 @@ type InvoiceUpdater interface {
 	// failure is non-terminal — one fresh failure per dunning retry — and
 	// because the synchronous charge path stamps payment_status='failed'
 	// before deferring the notifications here.
-	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string) (domain.Invoice, bool, error)
+	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error)
 	// SetPaymentCard stamps the card brand + last4 used to settle
 	// an invoice. Optional — empty values render no sub-line in
 	// the timeline. Called by handlePaymentSucceeded after MarkPaid

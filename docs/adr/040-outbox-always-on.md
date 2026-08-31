@@ -30,13 +30,21 @@ DLQ.
 > exactly-once gates on the money path then suppress every later
 > attempt. Under the N ≥ 2 production posture that gap is hit by routine
 > failovers, so the money emails move into the state-transition
-> transaction. **Shipped 2026-08-31 for the dunning pair** (warning +
-> escalation): `UpdateRunIfActive` takes a `then` hook that runs the
-> outbox enqueue inside the state transaction, under a SAVEPOINT — an
-> email-side failure logs loud and skips the email, never the money
-> write. Payment receipt + payment failed ride the settle path and move
-> in their own PR; account-plane and operator-initiated sends stay
-> post-commit (the operator receives the enqueue error synchronously).
+> transaction. **Shipped 2026-08-31, both halves.** Dunning pair
+> (warning + escalation): `UpdateRunIfActive` takes a `then` hook that
+> runs the outbox enqueue inside the state transaction, under a
+> SAVEPOINT — an email-side failure logs loud and skips the email, never
+> the money write. Settle pair (payment receipt + payment failed): the
+> same shape on `MarkPaidCardSettlementTransition` and
+> `MarkPaymentFailedReportingTransition`, gated on the transition each
+> already reports, so a duplicate settle re-fires nothing; the hook is
+> handed the freshly-written row because the receipt's amount is what
+> that transaction booked. Because the settle tx now carries a
+> customer-visible effect, the cancel-detach (`context.WithoutCancel`)
+> moved AHEAD of it — a webhook client hanging up mid-settle must not
+> abort a transaction that owes the customer a receipt. Account-plane and
+> operator-initiated sends stay post-commit (the operator receives the
+> enqueue error synchronously).
 
 At migration time, both outboxes shipped behind boot env flags
 (`VELOX_WEBHOOK_OUTBOX_ENABLED=true` and `VELOX_EMAIL_OUTBOX_ENABLED
