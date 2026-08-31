@@ -33,7 +33,17 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 35, not 20: measured 2026-08-31 across 12 runs, this job takes 7-10
+    # minutes normally — but a slow runner stretches everything uniformly
+    # (~3.35x observed across unrelated packages, 323s -> 1060s of package
+    # time for identical code), which pushes 9 minutes past a 20-minute cap.
+    # Both jobs were cancelled that way on the same day, each costing a
+    # diagnosis and a re-run of green code. The cap is here to bound a HANG —
+    # which would sit forever regardless — not to police runner variance, so
+    # it buys headroom above the observed variance instead of tracking the
+    # median. If a job ever legitimately approaches 35 minutes, split the
+    # suite rather than raising this again.
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:16-alpine
@@ -129,7 +139,17 @@ jobs:
   # production migrations do (docs/ops/postgres-requirements.md).
   test-pgbouncer:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 35, not 20: measured 2026-08-31 across 12 runs, this job takes 7-10
+    # minutes normally — but a slow runner stretches everything uniformly
+    # (~3.35x observed across unrelated packages, 323s -> 1060s of package
+    # time for identical code), which pushes 9 minutes past a 20-minute cap.
+    # Both jobs were cancelled that way on the same day, each costing a
+    # diagnosis and a re-run of green code. The cap is here to bound a HANG —
+    # which would sit forever regardless — not to police runner variance, so
+    # it buys headroom above the observed variance instead of tracking the
+    # median. If a job ever legitimately approaches 35 minutes, split the
+    # suite rather than raising this again.
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:16-alpine
