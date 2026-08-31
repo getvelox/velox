@@ -257,11 +257,17 @@ func (m *memStore) CreateDelivery(ctx context.Context, tenantID string, d domain
 	return d, nil
 }
 
-func (m *memStore) UpdateDelivery(_ context.Context, _ string, d domain.WebhookDelivery) (domain.WebhookDelivery, error) {
+// UpdateDelivery mirrors the REAL store's full predicate — status guard AND
+// attempt-count CAS — rather than writing unconditionally: a fake that always
+// applies would keep every stale-attempter test green forever.
+func (m *memStore) UpdateDelivery(_ context.Context, _ string, d domain.WebhookDelivery, expectedAttempts int) (domain.WebhookDelivery, error) {
 	m.dmu.Lock()
 	defer m.dmu.Unlock()
 	for i, existing := range m.deliveries {
 		if existing.ID == d.ID {
+			if existing.Status != domain.DeliveryPending || existing.AttemptCount != expectedAttempts {
+				return domain.WebhookDelivery{}, ErrStaleDeliveryMark
+			}
 			m.deliveries[i] = d
 			return d, nil
 		}
