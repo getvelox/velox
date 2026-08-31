@@ -299,7 +299,7 @@ func (m *memStore) UpdatePayment(_ context.Context, tenantID, id string, ps doma
 	return inv, nil
 }
 
-func (m *memStore) MarkPaymentFailedReportingTransition(_ context.Context, tenantID, id, piID, errMsg string) (domain.Invoice, bool, error) {
+func (m *memStore) MarkPaymentFailedReportingTransition(_ context.Context, tenantID, id, piID, errMsg string, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	inv, ok := m.invoices[id]
 	if !ok || inv.TenantID != tenantID {
 		return domain.Invoice{}, false, errs.ErrNotFound

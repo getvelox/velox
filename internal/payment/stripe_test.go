@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -187,15 +188,24 @@ func (m *mockInvoiceUpdater) MarkPaidReportingTransition(_ context.Context, _, i
 // MarkPaidCardSettlementTransition mirrors the store's card path: same paid-flip
 // as MarkPaidReportingTransition PLUS an in-tx payment.succeeded enqueue, gated on
 // the transition. We record the enqueue count so tests can assert exactly-once.
-func (m *mockInvoiceUpdater) MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePI string, paidAt time.Time) (domain.Invoice, bool, error) {
+// The hook is INVOKED when the transition is won, exactly as the real store
+// does inside its transaction (nil tx: these fakes have none). A fake that
+// accepted the hook and dropped it would make every settlement-email
+// assertion in this package read zero and pass forever.
+func (m *mockInvoiceUpdater) MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePI string, paidAt time.Time, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	inv, transitioned, err := m.MarkPaidReportingTransition(ctx, tenantID, id, stripePI, paidAt)
 	if err == nil && transitioned {
 		m.cardEventEnqueues++
+		if then != nil {
+			if herr := then(nil, inv); herr != nil {
+				return inv, transitioned, nil // non-vetoing, like the store's SAVEPOINT
+			}
+		}
 	}
 	return inv, transitioned, err
 }
 
-func (m *mockInvoiceUpdater) MarkPaymentFailedReportingTransition(_ context.Context, _, id, piID, errMsg string) (domain.Invoice, bool, error) {
+func (m *mockInvoiceUpdater) MarkPaymentFailedReportingTransition(_ context.Context, _, id, piID, errMsg string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	inv, ok := m.invoices[id]
 	if !ok {
 		return domain.Invoice{}, false, errs.ErrNotFound
@@ -223,6 +233,11 @@ func (m *mockInvoiceUpdater) MarkPaymentFailedReportingTransition(_ context.Cont
 	// post-commit-fires it).
 	if first {
 		m.failedEventEnqueues++
+	}
+	if first && then != nil {
+		// Mirror the store: the hook runs inside the transition when this call
+		// is the first report for this PaymentIntent.
+		_ = then(nil, inv)
 	}
 	return inv, first, nil
 }
@@ -808,7 +823,7 @@ func (t *transientMarkPaidInvoices) MarkPaidReportingTransition(_ context.Contex
 // MarkPaidCardSettlementTransition must ALSO fail transiently — SettleSucceeded
 // now calls this variant, so the override has to be here too (else the embedded
 // mock's success path would run).
-func (t *transientMarkPaidInvoices) MarkPaidCardSettlementTransition(_ context.Context, _, _ string, _ string, _ time.Time) (domain.Invoice, bool, error) {
+func (t *transientMarkPaidInvoices) MarkPaidCardSettlementTransition(_ context.Context, _, _ string, _ string, _ time.Time, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
 	return domain.Invoice{}, false, fmt.Errorf("connection reset by peer")
 }
 

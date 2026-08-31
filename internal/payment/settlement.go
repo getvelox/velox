@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"fmt"
@@ -107,7 +108,20 @@ func (s *Stripe) SettleSucceeded(ctx context.Context, tenantID string, inv domai
 	// SELECT … FOR UPDATE serializes those two, and exactly one gets
 	// transitioned=true — the once-only gate for both the in-tx events and the
 	// post-commit best-effort side-effects below (receipt email, card stamp).
-	fresh, transitioned, err := s.invoices.MarkPaidCardSettlementTransition(ctx, tenantID, inv.ID, paymentIntentID, now)
+	// Detach from the caller's cancellation BEFORE the settle tx, not after
+	// it. Since ADR-040's amendment the receipt rides that tx, so the unit
+	// that must survive a client disconnect now STARTS at the transition — a
+	// webhook client hanging up mid-settle would otherwise abort a
+	// transaction that carries a customer-visible effect. WithoutCancel keeps
+	// the ctx VALUES (tenant binding, simulated clock, livemode) and drops
+	// only the cancel signal; every call below is individually bounded.
+	ctx = context.WithoutCancel(ctx)
+	// Resolve the recipient BEFORE the settle transaction: the hook below runs
+	// inside it, and a customer lookup there would hold the invoice row lock
+	// across another query. A duplicate settle (transition lost) pays for one
+	// wasted read — the trade for never holding the money lock on a lookup.
+	receiptTx := s.buildReceiptHook(ctx, tenantID, inv, capturedCents)
+	fresh, transitioned, err := s.invoices.MarkPaidCardSettlementTransition(ctx, tenantID, inv.ID, paymentIntentID, now, receiptTx)
 	if err != nil {
 		if errors.Is(err, errs.ErrInvalidState) {
 			// Non-payable target (voided; the void's session-expire leg
@@ -139,11 +153,6 @@ func (s *Stripe) SettleSucceeded(ctx context.Context, tenantID string, inv domai
 	// the caller's cancellation: this ctx is usually a webhook REQUEST ctx,
 	// and a client disconnect / server drain mid-block would kill the
 	// remaining enqueues even though the payment is already booked — no
-	// crash required. WithoutCancel keeps the ctx VALUES (tenant binding,
-	// simulated clock, livemode) and drops only the cancel signal; every
-	// call below is individually bounded (DB query timeout / Stripe client
-	// timeout), so nothing can hang unbounded.
-	ctx = context.WithoutCancel(ctx)
 
 	// DURABILITY TIERING. The consistency-critical events — invoice.paid AND
 	// payment.succeeded — are BOTH enqueued INSIDE
@@ -196,16 +205,6 @@ func (s *Stripe) SettleSucceeded(ctx context.Context, tenantID string, inv domai
 	// does not fail the caller — the payment already committed, and returning
 	// an error would make the webhook re-fire the whole event (re-MarkPaid +
 	// double-firing the customer-facing event).
-	if s.emailReceipt != nil && s.customerEmail != nil {
-		email, name, cc, err := s.customerEmail.GetCustomerEmail(ctx, tenantID, inv.CustomerID)
-		if err != nil || email == "" {
-			slog.Warn("skip payment receipt email — cannot resolve customer email",
-				"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", err)
-		} else if err := s.emailReceipt.SendPaymentReceipt(ctx, tenantID, email, cc, name, inv.InvoiceNumber, receiptAmountCents(capturedCents, fresh), inv.Currency, inv.PublicToken); err != nil {
-			slog.Error("failed to enqueue payment receipt email",
-				"invoice_id", inv.ID, "email", email, "error", err)
-		}
-	}
 
 	slog.Info("payment succeeded",
 		"invoice_id", inv.ID,
@@ -339,7 +338,16 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 	// below stays post-commit best-effort by design — folding it in-tx would
 	// drag customer-email resolution + the suppression-list read under the
 	// invoice row lock (same reasoning as the receipt email on the paid path).
-	_, firstForThisPI, err := s.invoices.MarkPaymentFailedReportingTransition(ctx, tenantID, inv.ID, paymentIntentID, failureMsg)
+	// Detached before the tx for the same reason as the paid twin: the
+	// decline notice rides the fail-stamp's transaction now.
+	ctx = context.WithoutCancel(ctx)
+	// Same shape as the paid twin: recipient resolved before the tx, the
+	// notice enqueued inside it, gated on firstForThisPI by the store.
+	var failedTx func(tx *sql.Tx, fresh domain.Invoice) error
+	if !suppressCustomerEmail {
+		failedTx = s.buildPaymentFailedHook(ctx, tenantID, inv, failureMsg)
+	}
+	_, firstForThisPI, err := s.invoices.MarkPaymentFailedReportingTransition(ctx, tenantID, inv.ID, paymentIntentID, failureMsg, failedTx)
 	if err != nil {
 		return fmt.Errorf("update payment status: %w", err)
 	}
@@ -365,7 +373,6 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 	// the dunning_backfill sweep. Pre-fix the email sat below
 	// startDunningWithRetry's ~600ms-per-attempt retry loop — a seconds-
 	// wide unrecoverable window behind a fully-recoverable step.
-	ctx = context.WithoutCancel(ctx)
 
 	// Enqueue the payment-failed email. As with the receipt path, this is a
 	// fast outbox INSERT and the dispatcher owns delivery retry; failure logs
@@ -373,18 +380,6 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 	// suppressCustomerEmail skips ONLY this block — dunning below runs
 	// regardless (the suppression is about duplicate customer comms, not
 	// collections).
-	if !suppressCustomerEmail && s.emailPaymentFailed != nil {
-		if s.customerEmail == nil {
-			slog.Error("payment failed email — customer email resolver not wired",
-				"invoice_id", inv.ID)
-		} else if email, name, cc, err := s.customerEmail.GetCustomerEmail(ctx, tenantID, inv.CustomerID); err != nil || email == "" {
-			slog.Warn("skip payment failed email — cannot resolve customer email",
-				"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", err)
-		} else if err := s.emailPaymentFailed.SendPaymentFailed(ctx, tenantID, email, cc, name, inv.InvoiceNumber, failureMsg, inv.PublicToken); err != nil {
-			slog.Error("failed to enqueue payment failed email",
-				"invoice_id", inv.ID, "email", email, "error", err)
-		}
-	}
 
 	// Auto-start dunning for failed payments. failureAt is the simulated
 	// cycle-close instant — the moment in the invoice's own time domain when
@@ -590,4 +585,50 @@ func anchorFromEventPayload(event domain.StripeWebhookEvent) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// buildReceiptHook resolves the recipient (plain reads, before the settle
+// transaction opens) and returns the hook that enqueues the payment receipt on
+// that transaction — so the paid-flip and the receipt commit together
+// (ADR-040 amendment; before it a failover between the two lost the receipt
+// with the payment standing, and the transition gate suppressed every retry).
+// nil when there is nothing to send: no sender wired, or no resolvable
+// recipient. The amount comes from the row the transition actually wrote.
+func (s *Stripe) buildReceiptHook(ctx context.Context, tenantID string, inv domain.Invoice, capturedCents int64) func(tx *sql.Tx, fresh domain.Invoice) error {
+	if s.emailReceipt == nil || s.customerEmail == nil {
+		return nil
+	}
+	email, name, cc, err := s.customerEmail.GetCustomerEmail(ctx, tenantID, inv.CustomerID)
+	if err != nil || email == "" {
+		slog.Warn("skip payment receipt email — cannot resolve customer email",
+			"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", err)
+		return nil
+	}
+	return func(tx *sql.Tx, fresh domain.Invoice) error {
+		return s.emailReceipt.SendPaymentReceiptTx(ctx, tx, tenantID, email, cc, name,
+			inv.InvoiceNumber, receiptAmountCents(capturedCents, fresh), inv.Currency, inv.PublicToken)
+	}
+}
+
+// buildPaymentFailedHook is the decline-notice counterpart of
+// buildReceiptHook. Callers pass nil when the notice is suppressed
+// (suppressCustomerEmail) — dunning still runs; only this email is skipped.
+func (s *Stripe) buildPaymentFailedHook(ctx context.Context, tenantID string, inv domain.Invoice, failureMsg string) func(tx *sql.Tx, fresh domain.Invoice) error {
+	if s.emailPaymentFailed == nil {
+		return nil
+	}
+	if s.customerEmail == nil {
+		slog.Error("payment failed email — customer email resolver not wired", "invoice_id", inv.ID)
+		return nil
+	}
+	email, name, cc, err := s.customerEmail.GetCustomerEmail(ctx, tenantID, inv.CustomerID)
+	if err != nil || email == "" {
+		slog.Warn("skip payment failed email — cannot resolve customer email",
+			"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", err)
+		return nil
+	}
+	return func(tx *sql.Tx, _ domain.Invoice) error {
+		return s.emailPaymentFailed.SendPaymentFailedTx(ctx, tx, tenantID, email, cc, name,
+			inv.InvoiceNumber, failureMsg, inv.PublicToken)
+	}
 }

@@ -37,7 +37,7 @@ func TestTerminalTransitions_ClearAutoChargePending(t *testing.T) {
 
 	t.Run("card settle clears it (every MarkPaid variant converges here)", func(t *testing.T) {
 		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-ACP-SETTLE")
-		if _, _, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, inv.ID, "pi_acp_settle", time.Now().UTC()); err != nil {
+		if _, _, err := store.MarkPaidCardSettlementTransition(ctx, tenantID, inv.ID, "pi_acp_settle", time.Now().UTC(), nil); err != nil {
 			t.Fatalf("settle: %v", err)
 		}
 		if acp(inv.ID) {

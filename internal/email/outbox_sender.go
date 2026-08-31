@@ -294,6 +294,33 @@ func (s *OutboxSender) SendDunningEscalationTx(ctx context.Context, tx *sql.Tx, 
 	})
 }
 
+// SendPaymentReceiptTx is SendPaymentReceipt on the caller's transaction —
+// the paid-flip and its receipt commit together (ADR-040 amendment).
+func (s *OutboxSender) SendPaymentReceiptTx(ctx context.Context, tx *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber string, amountCents int64, currency, publicToken string) error {
+	return s.enqueueTx(ctx, tx, tenantID, TypePaymentReceipt, outboxMessage{
+		To:            to,
+		Cc:            cc,
+		CustomerName:  customerName,
+		InvoiceNumber: invoiceNumber,
+		AmountCents:   amountCents,
+		Currency:      currency,
+		PublicToken:   publicToken,
+	})
+}
+
+// SendPaymentFailedTx is SendPaymentFailed on the caller's transaction — the
+// failed-stamp and its notice commit together (ADR-040 amendment).
+func (s *OutboxSender) SendPaymentFailedTx(ctx context.Context, tx *sql.Tx, tenantID, to string, cc []string, customerName, invoiceNumber, reason, publicToken string) error {
+	return s.enqueueTx(ctx, tx, tenantID, TypePaymentFailed, outboxMessage{
+		To:            to,
+		Cc:            cc,
+		CustomerName:  customerName,
+		InvoiceNumber: invoiceNumber,
+		FailureReason: reason,
+		PublicToken:   publicToken,
+	})
+}
+
 // SendPaymentFailed enqueues a payment-failed email. Satisfies dunning.EmailNotifier.
 func (s *OutboxSender) SendPaymentFailed(ctx context.Context, tenantID, to string, cc []string, customerName, invoiceNumber, reason, publicToken string) error {
 	return s.enqueue(ctx, tenantID, TypePaymentFailed, outboxMessage{
