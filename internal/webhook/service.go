@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	mw "github.com/sagarsuperuser/velox/internal/api/middleware"
@@ -61,7 +62,14 @@ const maxRetries = 5
 const (
 	birthLeaseWindow  = 120 * time.Second
 	perRetryRowBudget = 13 * time.Second
-	retryLeaseMargin  = 60 * time.Second
+
+	// retryConcurrency bounds how many claimed deliveries are attempted at
+	// once. Four keeps a background worker to a small share of the shared DB
+	// pool (each row holds a connection only for two short queries, never
+	// across its HTTP call) while cutting the worst-case tick from
+	// 10x13s=130s to 3x13s=39s.
+	retryConcurrency = 4
+	retryLeaseMargin = 60 * time.Second
 )
 
 func retryClaimLease(batch int) time.Duration {
@@ -915,95 +923,126 @@ func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list pending deliveries: %w", err)
 	}
-
 	if len(deliveries) == 0 {
 		return nil
 	}
-
 	slog.Info("retrying webhook deliveries", "count", len(deliveries))
 
+	// Rows are attempted CONCURRENTLY, bounded by retryConcurrency. They are
+	// independent (different endpoints, each already claimed by the lease) and
+	// each spends nearly all of its budget inside one HTTP call. Sequentially
+	// a batch cost the SUM of its slowest members: one tenant whose endpoint
+	// is dead fills the batch and pushes the tick toward 10 x
+	// perRetryRowBudget (~130s), with every other tenant's retries waiting
+	// behind it — cross-tenant head-of-line blocking.
+	//
+	// Bounded, not unbounded: this is a background worker on the SHARED DB
+	// pool (DB_MAX_OPEN_CONNS, default 20). A row holds a connection only for
+	// its two short queries (endpoint + event read, outcome write), never
+	// across the HTTP call, so retryConcurrency in flight costs a handful of
+	// transient connections — while the wall-clock ceiling drops to
+	// ceil(batch/retryConcurrency) x perRetryRowBudget. The claim lease
+	// (retryClaimLease) is sized for the sequential worst case, so it stays a
+	// safe over-estimate.
+	sem := make(chan struct{}, retryConcurrency)
+	var wg sync.WaitGroup
 	for _, d := range deliveries {
-		// ListPendingDeliveries runs in TxBypass (cross-tenant), so we tag
-		// the per-delivery ctx with the row's livemode. Every downstream
-		// store call opens its own TxTenant and needs this to route the
-		// delivery back to the same mode partition. The per-row budget is
-		// ENFORCED, not estimated (verifier catch): the retryClaimLease
-		// arithmetic assumes ≤perRetryRowBudget per row, and the DB reads
-		// here were otherwise unbounded — a degraded DB would break the
-		// lease math and double-POST under a live worker.
-		rowCtx, rowCancel := context.WithTimeout(ctx, perRetryRowBudget)
-		dCtx := postgres.WithLivemode(rowCtx, d.Livemode)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d domain.WebhookDelivery) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.retryOne(ctx, d)
+		}(d)
+	}
+	wg.Wait()
+	return nil
+}
 
-		ep, err := s.store.GetEndpoint(dCtx, d.TenantID, d.WebhookEndpointID)
-		if err != nil {
-			if errors.Is(err, errs.ErrNotFound) {
-				// Endpoint soft-deleted (GetEndpoint filters deleted_at):
-				// the delivery can never succeed, and the !Active resolver
-				// below is unreachable for it — without a terminal mark
-				// here the row is re-claimed at every lease expiry forever,
-				// occupying claim slots and spamming this log. Mirror of
-				// the event-missing resolver just below (the skip branch
-				// must also end the row's wait).
-				now := time.Now().UTC()
-				d.Status = domain.DeliveryFailed
-				d.ErrorMessage = "endpoint deleted"
-				d.CompletedAt = &now
-				d.NextRetryAt = nil
-				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
-					slog.Warn("webhook: endpoint-deleted mark not applied", "delivery_id", d.ID, "error", err)
-				}
-				slog.Error("endpoint not found for retry — delivery resolved failed", "delivery_id", d.ID, "endpoint_id", d.WebhookEndpointID)
-				rowCancel()
-				continue
-			}
-			slog.Error("get endpoint for retry", "delivery_id", d.ID, "error", err)
-			rowCancel()
-			continue
-		}
-		if !ep.Active {
-			// Endpoint was disabled; mark delivery as failed.
+// retryOne runs one claimed delivery: resolve its endpoint and event, then
+// attempt it. Every early return either resolves the row or deliberately
+// leaves it for a later tick (see each branch). Bounded by perRetryRowBudget,
+// so no single endpoint can hold a concurrency slot longer than the lease
+// arithmetic assumes.
+func (s *Service) retryOne(ctx context.Context, d domain.WebhookDelivery) {
+	// ListPendingDeliveries runs in TxBypass (cross-tenant), so we tag
+	// the per-delivery ctx with the row's livemode. Every downstream
+	// store call opens its own TxTenant and needs this to route the
+	// delivery back to the same mode partition. The per-row budget is
+	// ENFORCED, not estimated (verifier catch): the retryClaimLease
+	// arithmetic assumes ≤perRetryRowBudget per row, and the DB reads
+	// here were otherwise unbounded — a degraded DB would break the
+	// lease math and double-POST under a live worker.
+	rowCtx, rowCancel := context.WithTimeout(ctx, perRetryRowBudget)
+	dCtx := postgres.WithLivemode(rowCtx, d.Livemode)
+
+	ep, err := s.store.GetEndpoint(dCtx, d.TenantID, d.WebhookEndpointID)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			// Endpoint soft-deleted (GetEndpoint filters deleted_at):
+			// the delivery can never succeed, and the !Active resolver
+			// below is unreachable for it — without a terminal mark
+			// here the row is re-claimed at every lease expiry forever,
+			// occupying claim slots and spamming this log. Mirror of
+			// the event-missing resolver just below (the skip branch
+			// must also end the row's wait).
 			now := time.Now().UTC()
 			d.Status = domain.DeliveryFailed
-			d.ErrorMessage = "endpoint disabled"
+			d.ErrorMessage = "endpoint deleted"
 			d.CompletedAt = &now
 			d.NextRetryAt = nil
 			if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
-				slog.Warn("webhook: endpoint-disabled mark not applied", "delivery_id", d.ID, "error", err)
+				slog.Warn("webhook: endpoint-deleted mark not applied", "delivery_id", d.ID, "error", err)
 			}
+			slog.Error("endpoint not found for retry — delivery resolved failed", "delivery_id", d.ID, "endpoint_id", d.WebhookEndpointID)
 			rowCancel()
-			continue
+			return
 		}
-
-		// Point-lookup the event directly. The previous ListEvents+scan
-		// clamped to the newest ~100 rows, so older pending deliveries
-		// (whose event had aged out of that window) were stranded forever.
-		event, err := s.store.GetEvent(dCtx, d.TenantID, d.WebhookEventID)
-		if err != nil {
-			if errors.Is(err, errs.ErrNotFound) {
-				// Event genuinely deleted — the delivery can never succeed.
-				// Mark it failed so it stops cycling through the retry pool.
-				now := time.Now().UTC()
-				d.Status = domain.DeliveryFailed
-				d.ErrorMessage = "event not found"
-				d.CompletedAt = &now
-				d.NextRetryAt = nil
-				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
-					slog.Warn("webhook: event-missing mark not applied", "delivery_id", d.ID, "error", err)
-				}
-				slog.Error("event not found for retry", "delivery_id", d.ID, "event_id", d.WebhookEventID)
-				rowCancel()
-				continue
-			}
-			slog.Error("get event for retry", "delivery_id", d.ID, "event_id", d.WebhookEventID, "error", err)
-			rowCancel()
-			continue
-		}
-
-		s.attemptDelivery(dCtx, d, ep, event)
+		slog.Error("get endpoint for retry", "delivery_id", d.ID, "error", err)
 		rowCancel()
+		return
+	}
+	if !ep.Active {
+		// Endpoint was disabled; mark delivery as failed.
+		now := time.Now().UTC()
+		d.Status = domain.DeliveryFailed
+		d.ErrorMessage = "endpoint disabled"
+		d.CompletedAt = &now
+		d.NextRetryAt = nil
+		if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
+			slog.Warn("webhook: endpoint-disabled mark not applied", "delivery_id", d.ID, "error", err)
+		}
+		rowCancel()
+		return
 	}
 
-	return nil
+	// Point-lookup the event directly. The previous ListEvents+scan
+	// clamped to the newest ~100 rows, so older pending deliveries
+	// (whose event had aged out of that window) were stranded forever.
+	event, err := s.store.GetEvent(dCtx, d.TenantID, d.WebhookEventID)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			// Event genuinely deleted — the delivery can never succeed.
+			// Mark it failed so it stops cycling through the retry pool.
+			now := time.Now().UTC()
+			d.Status = domain.DeliveryFailed
+			d.ErrorMessage = "event not found"
+			d.CompletedAt = &now
+			d.NextRetryAt = nil
+			if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
+				slog.Warn("webhook: event-missing mark not applied", "delivery_id", d.ID, "error", err)
+			}
+			slog.Error("event not found for retry", "delivery_id", d.ID, "event_id", d.WebhookEventID)
+			rowCancel()
+			return
+		}
+		slog.Error("get event for retry", "delivery_id", d.ID, "event_id", d.WebhookEventID, "error", err)
+		rowCancel()
+		return
+	}
+
+	s.attemptDelivery(dCtx, d, ep, event)
+	rowCancel()
 }
 
 // attemptDelivery POSTs one existing delivery row (first attempt from
