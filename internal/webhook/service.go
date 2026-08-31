@@ -626,7 +626,8 @@ func (s *Service) scheduleRetryOrFail(ctx context.Context, tenantID string, d do
 		)
 	}
 
-	if _, err := s.store.UpdateDelivery(ctx, tenantID, d); err != nil {
+	// expected = the count this attempt READ; the ++ above is ours to prove.
+	if _, err := s.store.UpdateDelivery(ctx, tenantID, d, d.AttemptCount-1); err != nil {
 		slog.Warn("webhook: retry/fail mark not applied", "delivery_id", d.ID, "error", err)
 	}
 }
@@ -948,7 +949,7 @@ func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 				d.ErrorMessage = "endpoint deleted"
 				d.CompletedAt = &now
 				d.NextRetryAt = nil
-				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d); err != nil {
+				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
 					slog.Warn("webhook: endpoint-deleted mark not applied", "delivery_id", d.ID, "error", err)
 				}
 				slog.Error("endpoint not found for retry — delivery resolved failed", "delivery_id", d.ID, "endpoint_id", d.WebhookEndpointID)
@@ -966,7 +967,7 @@ func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 			d.ErrorMessage = "endpoint disabled"
 			d.CompletedAt = &now
 			d.NextRetryAt = nil
-			if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d); err != nil {
+			if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
 				slog.Warn("webhook: endpoint-disabled mark not applied", "delivery_id", d.ID, "error", err)
 			}
 			rowCancel()
@@ -986,7 +987,7 @@ func (s *Service) RetryPendingDeliveries(ctx context.Context) error {
 				d.ErrorMessage = "event not found"
 				d.CompletedAt = &now
 				d.NextRetryAt = nil
-				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d); err != nil {
+				if _, err := s.store.UpdateDelivery(dCtx, d.TenantID, d, d.AttemptCount); err != nil {
 					slog.Warn("webhook: event-missing mark not applied", "delivery_id", d.ID, "error", err)
 				}
 				slog.Error("event not found for retry", "delivery_id", d.ID, "event_id", d.WebhookEventID)
@@ -1050,7 +1051,8 @@ func (s *Service) attemptDelivery(ctx context.Context, d domain.WebhookDelivery,
 		d.Status = domain.DeliverySucceeded
 		d.CompletedAt = &now
 		d.NextRetryAt = nil
-		if _, err := s.store.UpdateDelivery(ctx, d.TenantID, d); err != nil {
+		// expected = the count this attempt READ; the ++ above is ours to prove.
+		if _, err := s.store.UpdateDelivery(ctx, d.TenantID, d, d.AttemptCount-1); err != nil {
 			// A stale mark (lease expired, a sibling already resolved the
 			// row) is dropped by the CAS — logged, never applied. Any
 			// other error is a real mark loss: the POST landed but the

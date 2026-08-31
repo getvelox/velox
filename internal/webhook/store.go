@@ -60,7 +60,13 @@ type Store interface {
 
 	// Deliveries
 	CreateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery) (domain.WebhookDelivery, error)
-	UpdateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery) (domain.WebhookDelivery, error)
+	// UpdateDelivery writes the delivery's outcome. expectedAttempts is the
+	// attempt_count the caller derived d from: the row must still carry it, or
+	// the write is refused with ErrStaleDeliveryMark and NOTHING is written.
+	// Without it the count was a read-modify-write — two attempters that both
+	// read N both wrote N+1, so one real POST vanished from the record and a
+	// delivery could out-run maxRetries.
+	UpdateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery, expectedAttempts int) (domain.WebhookDelivery, error)
 	ListDeliveries(ctx context.Context, tenantID, eventID string) ([]domain.WebhookDelivery, error)
 	GetDelivery(ctx context.Context, tenantID, id string) (domain.WebhookDelivery, error)
 	// ListDeliveriesByEndpoint is the endpoint drill-down query: every

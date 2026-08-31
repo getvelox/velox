@@ -712,7 +712,7 @@ func (s *PostgresStore) CreateDelivery(ctx context.Context, tenantID string, d d
 	return d, nil
 }
 
-func (s *PostgresStore) UpdateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery) (domain.WebhookDelivery, error) {
+func (s *PostgresStore) UpdateDelivery(ctx context.Context, tenantID string, d domain.WebhookDelivery, expectedAttempts int) (domain.WebhookDelivery, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return domain.WebhookDelivery{}, err
@@ -729,10 +729,10 @@ func (s *PostgresStore) UpdateDelivery(ctx context.Context, tenantID string, d d
 		UPDATE webhook_deliveries SET status=$1, http_status_code=$2,
 			response_body=$3, error_message=$4, attempt_count=$5, completed_at=$6,
 			next_retry_at=$7
-		WHERE id=$8 AND status='pending'`,
+		WHERE id=$8 AND status='pending' AND attempt_count=$9`,
 		d.Status, d.HTTPStatusCode, postgres.NullableString(d.ResponseBody),
 		postgres.NullableString(d.ErrorMessage), d.AttemptCount, postgres.NullableTime(d.CompletedAt),
-		postgres.NullableTime(d.NextRetryAt), d.ID)
+		postgres.NullableTime(d.NextRetryAt), d.ID, expectedAttempts)
 	if err != nil {
 		return domain.WebhookDelivery{}, err
 	}

@@ -119,7 +119,7 @@ func TestP5_UpdateDeliveryCAS_StaleMarkDropped(t *testing.T) {
 	success.Status = domain.DeliverySucceeded
 	success.CompletedAt = &now
 	success.NextRetryAt = nil
-	if _, err := store.UpdateDelivery(ctx, tenantID, success); err != nil {
+	if _, err := store.UpdateDelivery(ctx, tenantID, success, 0); err != nil {
 		t.Fatalf("success mark: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestP5_UpdateDeliveryCAS_StaleMarkDropped(t *testing.T) {
 	stale.Status = domain.DeliveryPending
 	stale.NextRetryAt = &later
 	stale.ErrorMessage = "HTTP 500 (stale)"
-	if _, err := store.UpdateDelivery(ctx, tenantID, stale); !errors.Is(err, ErrStaleDeliveryMark) {
+	if _, err := store.UpdateDelivery(ctx, tenantID, stale, 0); !errors.Is(err, ErrStaleDeliveryMark) {
 		t.Fatalf("stale mark: err=%v, want ErrStaleDeliveryMark", err)
 	}
 
