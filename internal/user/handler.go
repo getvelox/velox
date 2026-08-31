@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -51,17 +50,6 @@ type Handler struct {
 	dashboardBaseURL string      // canonical dashboard origin for reset links; never from request headers. empty => reset emails disabled
 	smtpConfigured   bool        // SMTP wired at boot (email.Sender.IsConfigured); drives the email_delivery hint
 	auditLogger      AuditRecorder
-	resetLimiter     ResetSendLimiter
-}
-
-// ResetSendLimiter bounds password-reset EMAILS per target address,
-// cluster-wide. Satisfied by *middleware.RateLimiter (Redis GCRA — the
-// same budget across every replica, which the old per-process map was not:
-// at N replicas the documented 3/hour cap silently became 3N/hour, HA
-// register hazard 9). Fail-open by design: a Redis blip must not block
-// password resets — the per-IP limiter on /v1/auth remains the floor.
-type ResetSendLimiter interface {
-	AllowKey(ctx context.Context, key string) (int, time.Time, bool)
 }
 
 // AuditRecorder is the narrow audit surface the auth handler needs — kept here
@@ -141,13 +129,6 @@ func NewHandler(users *Service, sessions SessionService, cookie session.CookieCo
 		dashboardBaseURL: strings.TrimRight(strings.TrimSpace(dashboardBaseURL), "/"),
 		smtpConfigured:   smtpConfigured,
 	}
-}
-
-// SetResetSendLimiter wires the cluster-wide per-address reset-send cap
-// (3/hour via the shared Redis GCRA). nil disables the per-address cap —
-// the per-IP limiter still applies.
-func (h *Handler) SetResetSendLimiter(l ResetSendLimiter) {
-	h.resetLimiter = l
 }
 
 // Routes returns the dashboard auth surface. Mount under /v1/auth.
@@ -386,24 +367,21 @@ func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per-address send throttle (P12): the per-IP limiter on /v1/auth
-	// doesn't stop one caller flooding a single victim's inbox. Over
-	// the cap we skip issuance + send entirely but return the SAME
-	// generic 200 — the fixed response is the enumeration defence.
-	// The budget lives in Redis (ha-14 PR-B) so it is ONE cap across
-	// every replica; the old per-process map degraded 3/hour → 3N/hour.
-	if h.resetLimiter != nil && !allowResetSend(r.Context(), h.resetLimiter, req.Email) {
-		slog.Warn("password reset throttled — send skipped", "reason", "per-address cap")
-		// Throttled: no token issued, nothing mutated, nothing to audit.
-		audit.MarkSkip(r.Context())
-		respond.JSON(w, r, http.StatusOK, map[string]string{
-			"message": "if that email is registered, a reset link has been sent",
-		})
-		return
-	}
-
 	plaintext, tenantID, targetUserID, err := h.users.IssueResetToken(r.Context(), req.Email)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrResetSendCapped):
+		// Per-account send cap (store-enforced): no token was issued, so no
+		// email goes out. Deliberately NO early return and no bespoke body —
+		// it falls through to the one shared response every outcome uses.
+		//
+		// That matters more here than it did for the old per-address budget:
+		// this cap is keyed on the ACCOUNT, so an address with no account can
+		// never be capped. A distinguishable "you're throttled" reply would
+		// therefore be a reliable account-existence oracle — four requests
+		// and an attacker knows. WARN, not ERROR: hitting a 3-per-hour cap is
+		// routine, and error-level noise here would read as a system failure.
+		slog.Warn("password reset throttled — send skipped", "reason", "per-account cap")
+	case err != nil:
 		slog.Error("password reset issue failed", "err", err)
 		// Generic response — don't expose internal failures
 	}
@@ -565,12 +543,4 @@ func (h *Handler) buildResetLink(token string) (string, bool) {
 		return "", false
 	}
 	return h.dashboardBaseURL + "/reset-password?token=" + token, true
-}
-
-// allowResetSend asks the shared limiter for the address's send budget.
-// The key is the normalized address; the limiter namespaces it under its
-// own name ("pwreset_addr"), so this cannot collide with the IP buckets.
-func allowResetSend(ctx context.Context, l ResetSendLimiter, email string) bool {
-	_, _, ok := l.AllowKey(ctx, strings.ToLower(strings.TrimSpace(email)))
-	return ok
 }

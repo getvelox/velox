@@ -1164,12 +1164,6 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	// per-tenant audit_log. This is the DASHBOARD (session) auth handler —
 	// distinct from authH (the API-key handler) wired above.
 	dashboardAuthH.SetAuditLogger(auditLogger)
-	// Cluster-wide per-address reset-send cap (3/hour, HA register hazard 9
-	// / ha-14 PR-B): the budget lives in the shared Redis so N replicas
-	// enforce ONE cap, not N. Fail-open on a Redis blip by construction
-	// (this limiter never calls SetFailClosed) — resets must not be blocked
-	// by infrastructure; the per-IP /v1/auth limiter stays the floor.
-	dashboardAuthH.SetResetSendLimiter(mw.NewRateLimiter(rdb, "pwreset_addr", 3, time.Hour))
 
 	// Team membership: invite / accept / remove (minimal — no RBAC; every
 	// member gets the full owner permission set until roles land). Invite

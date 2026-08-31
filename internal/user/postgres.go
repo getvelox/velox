@@ -203,6 +203,25 @@ func (s *PostgresStore) CreateResetToken(ctx context.Context, userID, tokenHash 
 	}
 	defer postgres.Rollback(tx)
 
+	// Per-account send cap, decided inside this transaction. The user row is
+	// locked FIRST so two concurrent requests for one account cannot both
+	// read "2 sent" and both insert — the count and the insert are one
+	// decision. Rows in password_reset_tokens are the durable record of what
+	// was sent, so this cap is cluster-wide and needs no external store.
+	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+		return domain.PasswordResetToken{}, fmt.Errorf("lock user for reset cap: %w", err)
+	}
+	var sent int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM password_reset_tokens
+		WHERE user_id = $1 AND created_at > now() - $2::interval
+	`, userID, ResetSendWindow.String()).Scan(&sent); err != nil {
+		return domain.PasswordResetToken{}, fmt.Errorf("count recent reset tokens: %w", err)
+	}
+	if sent >= ResetSendsPerWindow {
+		return domain.PasswordResetToken{}, ErrResetSendCapped
+	}
+
 	var t domain.PasswordResetToken
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)

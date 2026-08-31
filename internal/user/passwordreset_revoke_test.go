@@ -30,6 +30,10 @@ type fakeUserStore struct {
 	// reset tests rely on.
 	loginUser *domain.User
 	tenants   []domain.UserTenant
+	// createTokenErr, when set, is returned by CreateResetToken — the real
+	// store returns ErrResetSendCapped there once the account is over its
+	// per-window send budget.
+	createTokenErr error
 }
 
 func (f *fakeUserStore) Create(ctx context.Context, email, passwordHash string) (domain.User, error) {
@@ -61,6 +65,9 @@ func (f *fakeUserStore) TenantsForUser(ctx context.Context, userID string) ([]do
 	return f.tenants, nil
 }
 func (f *fakeUserStore) CreateResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) (domain.PasswordResetToken, error) {
+	if f.createTokenErr != nil {
+		return domain.PasswordResetToken{}, f.createTokenErr
+	}
 	return domain.PasswordResetToken{}, nil
 }
 func (f *fakeUserStore) ConsumeResetToken(ctx context.Context, tokenHash string) (string, error) {
