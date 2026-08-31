@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -9,6 +10,31 @@ import (
 
 // Store is the persistence boundary for user accounts, the user↔tenant
 // join, and password reset tokens. ADR-011.
+// ErrResetSendCapped means this account has already been sent
+// ResetSendsPerWindow reset links inside ResetSendWindow, so no token was
+// issued. It is not an error the caller surfaces: the endpoint's response is
+// fixed either way (the fixed body is the account-enumeration defence).
+var ErrResetSendCapped = errors.New("user: password-reset send cap reached for this account")
+
+const (
+	// ResetSendsPerWindow / ResetSendWindow bound how many reset EMAILS one
+	// account can be sent. The per-IP limiter on /v1/auth slows credential
+	// stuffing but does nothing against one caller pointing many requests at
+	// a single victim's address, each inside the IP budget — flooding their
+	// inbox and burning SMTP quota.
+	//
+	// The budget is derived from password_reset_tokens itself: the rows ARE
+	// the record of what was sent, so the cap is cluster-wide by
+	// construction, survives restarts, and needs no Redis. It replaced a
+	// Redis bucket (ha-14 PR-B) that silently vanished wherever Redis was
+	// unreachable — verified 2026-08-31: 8 consecutive sends, 0 refusals —
+	// and before that an in-process map that degraded to 3xN per hour at N
+	// replicas. Keyed on the ACCOUNT rather than the typed string, so it
+	// counts what was actually delivered.
+	ResetSendsPerWindow = 3
+	ResetSendWindow     = time.Hour
+)
+
 type Store interface {
 	// Create inserts a user. Returns ErrEmailTaken if the email is
 	// already in the table (citext unique violation).
@@ -35,9 +61,12 @@ type Store interface {
 	// 1:1 user:tenant; the shape supports growth.
 	TenantsForUser(ctx context.Context, userID string) ([]domain.UserTenant, error)
 
-	// CreateResetToken inserts a row whose token_hash matches the
+	// CreateResetToken enforces the per-account send cap and inserts a row
+	// whose token_hash matches the
 	// caller-provided hash. Plaintext token never enters the DB.
 	CreateResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) (domain.PasswordResetToken, error)
+	// Over the cap it returns ErrResetSendCapped and writes nothing — the
+	// caller sends no email and answers with the same fixed generic body.
 
 	// ConsumeResetToken atomically looks up the token by hash, asserts
 	// it isn't used or expired, and stamps used_at. Returns the token's

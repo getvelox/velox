@@ -86,7 +86,7 @@ var markSkipCallers = map[string]markSkipCaller{
 	"internal/recipe/service.go":                 {1, "recipe re-apply that installs nothing"},
 	"internal/tenant/settings.go":                {1, "settings save that changed no field"},
 	"internal/usage/handler.go":                  {1, "duplicate usage ingest — idempotency key already exists, no event row written"},
-	"internal/user/handler.go":                   {4, "logout with NO cookie; logout with a stale cookie (both revoke nothing); unknown-email password reset; THROTTLED password reset (the last two are fixed-200 enumeration defences)"},
+	"internal/user/handler.go":                   {3, "logout with NO cookie; logout with a stale cookie (both revoke nothing); a password reset that issued no token — unknown address OR an account over its send cap, which share ONE fixed-200 path (that fixedness is the enumeration defence)"},
 	"internal/api/adapters.go":                   {2, "hosted-invoice payment-session reuse — a second Pay click returns the same Stripe session, no new claim row"},
 	"internal/api/middleware/idempotency.go":     {1, "idempotency replay — the cached response of a request whose original DID emit"},
 	"internal/creditnote/handler.go":             {1, "credit-note issue that defers"},
