@@ -56,6 +56,6 @@ func TestIngest_LateEventCounted(t *testing.T) {
 		t.Fatalf("backfill ingest: %v", err)
 	}
 	if got := backfillCount() - baseBackfill; got != 0 {
-		t.Errorf("backfill events are the documented-safe path and must not count, got +%v", got)
+		t.Errorf("backfill events are deliberate operator posts and must not count, got +%v", got)
 	}
 }

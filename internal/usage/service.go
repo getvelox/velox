@@ -116,10 +116,12 @@ func (s *Service) Ingest(ctx context.Context, tenantID string, input IngestInput
 // path. The row is tagged origin='backfill'.
 //
 // Billing semantics: backfilled events participate in aggregation for any
-// period whose [start, end) contains the event's timestamp. Finalized
-// invoices are immutable (they reference billed_entries, not live
-// aggregations), so backfill into closed periods is safe — it changes the
-// audit ledger without rewriting history.
+// period whose [start, end) contains the event's timestamp, and only while
+// that period is still open. A finalized invoice keeps the quantities and
+// amounts it copied into its line items at close, and nothing re-aggregates
+// a closed period — so a backfill into one is recorded but never billed
+// (the same stored-but-unbilled outcome as a late live event; see
+// lateUsageEvents). History is not rewritten; revenue is not recovered.
 func (s *Service) Backfill(ctx context.Context, tenantID string, input IngestInput) (domain.UsageEvent, error) {
 	if input.Timestamp == nil {
 		return domain.UsageEvent{}, errs.Required("timestamp")
@@ -240,7 +242,8 @@ func (s *Service) ingestAudited(ctx context.Context, tenantID string, input Inge
 // subscription lookup this hot path deliberately avoids, and the true-up
 // policy itself is a deferred DP decision — but the OPERATOR VISIBILITY is
 // not deferred: this counter + a WARN make the late stream observable.
-// Backfill-origin events are excluded (documented-safe intentional path).
+// Backfill-origin events are excluded: an operator posting history on
+// purpose is not the silent leak this counter exists to surface.
 var lateUsageEvents *prometheus.CounterVec
 
 func init() {
@@ -313,16 +316,17 @@ func (s *Service) prepare(ctx context.Context, tenantID string, input IngestInpu
 	// KNOWN BEHAVIOR (no lower bound on live timestamps): an event whose
 	// timestamp falls inside an ALREADY-FINALIZED billing period is
 	// accepted and stored, but the cycle that closed that period won't be
-	// re-billed (finalized invoices reference billed entries, not live
-	// aggregations) — so it is effectively unbilled. This is deliberate:
-	// late-arriving events are industry-standard (Stripe Meter Events,
-	// Lago, Orb all accept out-of-order events), so a hard reject would
-	// break legitimate retries / stream pipelines. Intentional historical
-	// posting into closed periods goes through Backfill (origin='backfill',
-	// documented safe). Deferred decision (no design partner yet): whether
-	// to true-up closed periods or reject past a window — both need a
-	// billing-policy call, not a silent per-event subscription lookup on
-	// this hot path. The late-event COUNTER half shipped 2026-07-10 (see
+	// re-billed (a finalized invoice keeps the amounts it copied into its
+	// line items at close; nothing re-aggregates) — so it is effectively
+	// unbilled. This is deliberate: late-arriving events are
+	// industry-standard (Stripe Meter Events, Lago, Orb all accept
+	// out-of-order events), so a hard reject would break legitimate
+	// retries / stream pipelines. Intentional historical posting into
+	// closed periods goes through Backfill (origin='backfill'), which is
+	// recorded and equally unbilled — but deliberate, not silent. Deferred
+	// decision (no design partner yet): whether to true-up closed periods
+	// or reject past a window — both need a billing-policy call, not a
+	// silent per-event subscription lookup on this hot path. The late-event COUNTER half shipped 2026-07-10 (see
 	// lateUsageEvents above): >24h-late live events are counted + WARNed
 	// so the stream is observable while the policy stays deferred.
 	if origin != domain.UsageOriginBackfill && ts.Before(now.Add(-24*time.Hour)) {

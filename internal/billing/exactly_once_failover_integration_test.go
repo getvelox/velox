@@ -307,7 +307,7 @@ func runKilledLeaderTrial(t *testing.T, killAfter int) {
 	assertDoctorClean(t)
 }
 
-// assertDoctorClean runs all 27 money-invariant checks after a failover.
+// assertDoctorClean runs every money-invariant check after a failover.
 //
 // The invoice counts above prove nothing was double-billed or lost. They say
 // nothing about whether the crash left some OTHER invariant broken — a line
