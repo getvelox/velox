@@ -67,7 +67,7 @@ Every call in the script is checked — it fails loudly at the first API mismatc
 
 Testing **outbound webhooks** locally needs no tunnel: `python3 scripts/dev/webhook-sink.py` runs a receiver on `localhost:9099` that logs every delivery with its `Velox-Signature` header, so you can verify the HMAC offline. Paths under `/fail` return 500 to exercise the retry ladder. (Localhost delivery is allowed in development, refused in production.)
 
-Self-host for real: single-VM Docker Compose — see [`docs/self-host.md`](docs/self-host.md). Helm/Terraform/multi-replica HA land when a design partner names which Kubernetes flavour they actually run; pre-emptively shipping three deployment shapes produced surface nobody was running.
+Self-host for real: single-VM Docker Compose — see [`docs/self-host.md`](docs/self-host.md). Running two or more replicas behind a load balancer is supported (background jobs take leader leases — ADR-114); what's deferred is the packaging: Helm/Terraform land when a design partner names which Kubernetes flavour they actually run, because pre-emptively shipping three deployment shapes produced surface nobody was running.
 
 ---
 
@@ -190,17 +190,17 @@ It's built around three market truths that Stripe Billing structurally cannot se
 |--------------------------|-----------|----------------|-------------|-------------------|-------------------|
 | OSS / self-host          | ✅        | ❌             | ✅          | ❌                | ✅                |
 | AI-native pricing        | ✅        | ❌             | ⚠️ generic  | ⚠️ closed source  | ⚠️ metering-first |
-| Full billing engine      | ✅        | ✅             | ✅          | ✅                | ⚠️ emerging       |
+| Full billing engine      | ✅        | ✅             | ✅          | ✅                | ✅ beta           |
 | Stripe-grade primitives  | ✅        | ✅             | ⚠️          | ✅                | ⚠️                |
 | Prepaid commits + drawdown | ✅      | ❌             | ⚠️ wallets  | ✅                | ❌                |
-| Per-customer margin (COGS) | ✅ in-app | ❌           | ❌          | ❌ warehouse join | ❌                |
+| Per-customer margin (COGS) | ✅ in-app | ❌           | ❌          | ❌ warehouse join | ⚠️ cost, no margin |
 | Pricing                  | OSS       | 0.5% of GMV    | OSS / cloud | sales-gated       | OSS / cloud       |
 | Licence                  | MIT       | proprietary    | AGPL-3.0    | proprietary       | Apache-2.0        |
-| Dunning without paying³  | ✅        | ✅             | ❌          | ✅                | n/a               |
+| Dunning without paying³  | ✅        | ✅             | ❌          | ✅                | ⚠️ Stripe Invoicing |
 | Data sovereignty         | ✅        | ❌             | ⚠️          | ❌                | ✅                |
 
 ¹ Metronome was acquired by Stripe (Jan 2026) — still SaaS-only, so your billing data lives on Stripe's servers either way.
-² OpenMeter ([acquired by Kong](https://konghq.com/blog/news/kong-acquires-openmeter), Sep 2025) is expanding from metering into billing — closing the engine gap, but not the self-host-with-Stripe-grade-depth one.
+² OpenMeter ([acquired by Kong](https://konghq.com/blog/news/kong-acquires-openmeter), Sep 2025) now runs a full invoice lifecycle (billing is marked beta) and ships LLM cost tables with a per-feature, per-customer cost query — cost, not margin: nothing subtracts it from revenue. The difference is shape. It runs on Kafka + ClickHouse + Postgres, and it has no dunning of its own: collection is handed to Stripe Invoicing (Stripe's percentage fee applies) or to a custom-invoicing integration you build. Checked against the OpenMeter source on 2026-09-28.
 ³ Open-core self-hosting isn't automatically free of gates. Lago's self-hosted edition checks a `LAGO_LICENSE` key against their licence server, and a 30-entry `PREMIUM_INTEGRATIONS` list decides what's enabled — `auto_dunning` is on it, alongside SSO, RBAC, progressive billing and every accounting/CRM integration ([source](https://github.com/getlago/lago-api/blob/main/app/models/organization.rb)). Velox has no licence key and gates nothing; the honest caveat is that some of what Lago gates (SSO, RBAC, revenue recognition) Velox simply doesn't have — see [What Velox is not](#what-velox-is-not).
 
 **Verified as of 2026-08-17.** On the pricing row: neither Orb nor Metronome publishes an annual list price. Orb's three tiers all read "Custom pricing" behind Contact Sales ([pricing](https://www.withorb.com/pricing)); Metronome publishes a Starter rate — 0.8% of billing volume plus $0.04 per 1k ingest events — and gates its Custom tier behind sales ([pricing](https://metronome.com/pricing)). Competitor pricing, licensing and ownership all move; re-check any cell you plan to lean on.
@@ -266,7 +266,7 @@ Velox moves money, so correctness is the product, not a feature. The disciplines
   - Tenant isolation is Postgres RLS, proven by tests that fail if a query escapes its tenant.
   - Exactly-once auto-charge is a compare-and-swap claim that holds through a dual-leader failover.
   - A new cross-domain import fails the architecture test until justified in an allowlist; `time.Now()` on a clock-pinned entity (one whose time comes from a test clock, not the wall clock) fails a lint.
-  - A **money-invariant doctor** (`cmd/velox-doctor`) sweeps the whole database for 28 states no legal writer can produce — it runs in CI after every integration pass, and inside a 13-month billing soak that closes a subscription month thirteen times through the real server and demands a clean sweep after every close.
+  - A **money-invariant doctor** (`cmd/velox-doctor`) sweeps the whole database for 29 states no legal writer can produce — it runs in CI after every integration pass, and inside a 13-month billing soak that closes a subscription month thirteen times through the real server and demands a clean sweep after every close.
   - The rule behind all of these: if a mistake can recur, a machine catches the next one.
 - **Failure modes are measured, not asserted.** "Crash-safe" and "idempotent" are the two easiest things in billing to claim and the two hardest to check, so both are published as runs with a negative control rather than as design notes — see [Benchmarks](#benchmarks). Where the money math has more cases than anyone can enumerate by hand, the tests generate them: billing dates ([`internal/domain/billing_dates_property_test.go`](internal/domain/billing_dates_property_test.go)), pricing ([`internal/domain/pricing_property_test.go`](internal/domain/pricing_property_test.go)), proration ([`internal/subscription/proration_property_test.go`](internal/subscription/proration_property_test.go)), tax apportionment ([`internal/tax/apportionment_property_test.go`](internal/tax/apportionment_property_test.go)), and the credit waterfall ([`internal/credit/waterfall_property_integration_test.go`](internal/credit/waterfall_property_integration_test.go)). And the operational paths that only ever fail in production are drilled on purpose: [`scripts/partition-drill.sh`](scripts/partition-drill.sh) severs a real network link and measures how long a dead leader's lock stays stranded, [`scripts/restore-drill.sh`](scripts/restore-drill.sh) runs the whole backup → restore → row-count-validate loop against an ephemeral Postgres, and [`scripts/migration-safety-test.sh`](scripts/migration-safety-test.sh) replays the migration set against a populated database to catch the lock a migration would take at scale.
 - **The database is never mocked.** Every test that touches a database touches real Postgres — ~104k lines of Go test code against ~102k of production Go — so a green suite means migrations, RLS, and the money math work end-to-end, including concurrent-claimer collision tests and mutation-verified assertions (break the logic on purpose; the test must fail).
@@ -290,7 +290,7 @@ adding tenants: [`docs/api-keys.md`](docs/api-keys.md).
 
 July–August 2026: prepaid commits + drawdown, provider cost tables with
 in-app per-customer margin, team invites (ADR-081), ambiguous-charge safety
-(ADR-105–108), bad-debt semantics (ADR-110–113), a 28-check
+(ADR-105–108), bad-debt semantics (ADR-110–113), a 29-check
 money-invariant sweep in CI, and multi-replica leader leases — every
 background job takes a per-tick lease that every claim re-checks, so a
 dead replica is replaced in seconds and a transaction-mode pooler is
