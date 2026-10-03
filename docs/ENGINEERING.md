@@ -159,7 +159,7 @@ affect. One is fixed and re-measured; one is open.
 
 ---
 
-Deeper: [`docs/adr/`](adr/) (112 decision records, including the ones that were
+Deeper: [`docs/adr/`](adr/) (114 decision records, including the ones that were
 reversed) · [architecture](../README.md#architecture) · [the invariants machines
 enforce](../README.md#engineering) · [self-hosting](self-host.md) ·
 [Postgres requirements](ops/postgres-requirements.md)

@@ -339,7 +339,7 @@ A passing run reports:
 - Stripe account name + ID returned from step 1 verify (proof the key works
   and is scoped to the intended account)
 - Webhook event count from step 5 (≥4 events expected for the happy path)
-- Final invoice status from step 4 (`paid` for happy, `open` after recovery
+- Final invoice status from step 4 (`paid` for happy, and `paid` after recovery
   in the dunning path)
 - Refund webhook landed within 30 seconds (step 7)
 

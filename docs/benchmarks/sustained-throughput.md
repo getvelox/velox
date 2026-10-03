@@ -68,6 +68,12 @@ it. The run chapters in
 - **"Sustained" means 5 × 10 minutes** with a cool-down between repeats, and a
   configuration is reported at the repeat count that passed (4/5 is written
   4/5, not rounded up).
+- **A single latency is a median; a range is min–max.** For a sustained row,
+  a single p50 or p99 (the 47.3 ms at a glance, the 35.8 ms p50 in a run table)
+  is the median across the passing repeats. A range (41.6–49.3 ms) is the lowest
+  and highest value among those same repeats. Failed repeats are in neither
+  (`measure.sh`). A "worst 10-s p99" is a different statistic: the single worst
+  10-second window.
 - **Every throughput figure has a denominator.** `pgbench` on the same
   database and row shape (`db-ceiling.sh`) gives the database's own commit
   floor, so "Velox does N" is always beside "the database alone does M".

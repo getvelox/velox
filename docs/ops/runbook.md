@@ -266,7 +266,7 @@ SELECT outcome, count(*) FROM (
 
 ### 5. Stale `payment_status='unknown'` invoices
 
-**Symptom**: Invoices stuck at `payment_unconfirmed` for hours.
+**Symptom**: Invoices show the `payment_unconfirmed` attention reason for hours. Their `payment_status` is `unknown`.
 
 **Why**:
 - Stripe webhook delivery delayed or lost.

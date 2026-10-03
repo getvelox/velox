@@ -158,7 +158,8 @@ HSTS protections are on.
 
 Once data matters, follow
 [`docs/ops/backup-considerations.md`](../../docs/ops/backup-considerations.md)
-for a `pg_basebackup` + WAL-archive recipe and a tested restore drill.
+for the backup strategy, the `pg_dump` scripts (`scripts/backup.sh`,
+`scripts/restore.sh`) and a tested restore drill (`scripts/restore-drill.sh`).
 
 ## Troubleshooting
 

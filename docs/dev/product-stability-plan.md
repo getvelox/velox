@@ -63,7 +63,7 @@ New code is the largest defect source. The standing gates:
   to knock findings down — measured useless here). Cap at ~5 finders.
 - **Same-PR doc rule**: CHANGELOG + the matching MANUAL_TEST flow + ADR (+
   ADR index row) + README ship with the change. A doc that lies is a defect.
-- **Pre-push gate**: gofmt · go vet · `go test ./... -short` ·
+- **Pre-push gate**: gofmt · go vet · `go test ./... -race -short -count=1` ·
   golangci-lint (its `unused` finding = deleted-test alarm) · `make gen`
   (BOTH halves — `npm run gen` alone lets the Go types drift) · `tsc -b`
   (never `--noEmit`, it is a no-op here) · FE tests.
