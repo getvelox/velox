@@ -1,12 +1,12 @@
 # Consuming Velox webhooks
 
-Velox is a usage-based billing engine; a webhook is how it tells your
-service that billing state changed — an invoice paid, a subscription
+Velox is a usage-based billing engine. A webhook is how it tells your
+service that billing state changed: an invoice paid, a subscription
 canceled, a credit balance depleted. This page is for the engineer
-building or operating a receiving endpoint — no prior Velox knowledge
-assumed — and covers everything a receiver needs: the delivery envelope, signature
-verification (with copy-paste verifiers), the retry ladder, the delivery
-contract, endpoint management, and the full event catalog.
+building or operating a receiving endpoint, and assumes no prior Velox
+knowledge. It covers everything a receiver needs: the delivery envelope,
+signature verification (with copy-paste verifiers), the retry ladder, the
+delivery contract, endpoint management, and the full event catalog.
 
 Endpoints are managed at `POST/GET/PATCH/DELETE /v1/webhook-endpoints/endpoints`
 (see [`api/openapi.yaml`](../api/openapi.yaml)) or in the dashboard under
@@ -56,10 +56,8 @@ Node:
 const crypto = require("crypto");
 
 function verifyVeloxSignature(rawBody, header, secret, toleranceSec = 300) {
-  const parts = Object.fromEntries(
-    header.split(",").map(kv => kv.split("=")),
-  ); // NOTE: naive parse — with two v1= entries, collect them all instead:
   const t = header.match(/(?:^|,)t=(\d+)/)?.[1];
+  // Collect every v1= entry: there are two during a secret rotation.
   const sigs = [...header.matchAll(/v1=([0-9a-f]+)/g)].map(m => m[1]);
   if (!t || sigs.length === 0) return false;
   if (Math.abs(Date.now() / 1000 - Number(t)) > toleranceSec) return false;
@@ -124,10 +122,11 @@ manually (`POST /v1/webhook-endpoints/events/{id}/replay`).
   `.canceled` / `.trial_ended`), and the credit balance events
   (`credit.balance_low` / `_depleted` / `_recovered`) are written to the
   outbox (the pending-deliveries table a background sender drains)
-  **inside the same database transaction as the state change** —
-  if the business operation commits, the event exists; a crash cannot
+  **inside the same database transaction as the state change**.
+  If the business operation commits, the event exists, and a crash cannot
   drop it. Remaining notification events enqueue immediately after their
-  transaction commits (best-effort; a crash in that window can drop one).
+  transaction commits. That step is best-effort: a crash in that window
+  can drop one.
 - **Delivery is at-least-once.** Dedupe on the envelope `id`.
 - **Ordering is not guaranteed** across events. Don't infer state from
   arrival order; read the payload (or re-fetch the resource).
@@ -141,11 +140,14 @@ manually (`POST /v1/webhook-endpoints/events/{id}/replay`).
 
 The canonical list lives in code at
 `internal/domain/webhook_outbound.go` (`KnownWebhookEventTypes`) and is
-what endpoint validation enforces. Two Velox terms used below:
-**dunning** is the automated follow-up on a failed payment (escalating
-reminders and retries until the invoice settles or is written off);
-a **tenant** is one business account in Velox — the vendor doing the
-billing, as distinct from its customers. Summary:
+what endpoint validation enforces. The table uses two Velox terms:
+
+- **Dunning** is the automated follow-up on a failed payment: escalating
+  reminders and retries until the invoice settles or is written off.
+- A **tenant** is one business account in Velox. It is the vendor doing
+  the billing, as distinct from its customers.
+
+Summary:
 
 | Event | Fires when |
 |---|---|
