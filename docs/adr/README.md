@@ -4,6 +4,8 @@ This directory holds Velox's Architecture Decision Records (ADRs) —
 short docs capturing one architectural decision each. Format follows
 [Michael Nygard's 2011 convention](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions):
 Title / Date / Status / Context / Decision / Alternatives / Consequences.
+New ADRs also open with a short **Summary**, so a reader learns the
+current rule without reading the whole record.
 
 ADRs are written when a decision is **worth re-litigating later** —
 either because reasonable alternatives exist, because the constraints
@@ -19,13 +21,13 @@ messages + CHANGELOG.md, not here.
   the historical context is the whole point.
 - **Status** is one of: `Proposed`, `Accepted`, `Superseded by ADR-XXX`,
   `Deprecated`. Amendments to an accepted ADR are noted in the status
-  line (e.g. `Accepted (amended YYYY-MM-DD — short reason)`).
+  line (e.g. `Accepted (amended YYYY-MM-DD)`); the reason goes in the
+  amendment section, and the Summary is updated to the current rule.
 - **Date** is when the ADR was first written. Amendment dates go in
   the status line and inline section headers.
 - **Multi-platform claims** ("Stripe-parity", "industry standard")
   must quote verified source lines from at least 2-4 reference
-  platforms (per `feedback_verify_stripe_parity_claims` in
-  `~/.claude/.../memory/`). Single-platform spot-checks aren't research.
+  platforms. Single-platform spot-checks aren't research.
 - New ADRs start from [TEMPLATE.md](TEMPLATE.md).
 - **Deferred work** an ADR deliberately scopes out — with a written revisit
   trigger in its *Consequences* — gets a thin pointer row in

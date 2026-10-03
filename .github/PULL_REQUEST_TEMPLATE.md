@@ -17,5 +17,8 @@
 
 <!-- Invoices, payments, credits, dunning, subscriptions, or tax?
      Per docs/dev/money-path-robustness-playbook.md §2, list the state's
-     site-set here: every writer, effect-firer, gated reader, and crash
-     point your change touches. Delete this section otherwise. -->
+     site-set here: every code site that can write or react to the state
+     you change. That is every writer, every effect-firer (code that sends
+     an email, webhook or Stripe call on the change), every gated reader
+     (code that branches on the state), and every crash point your change
+     touches. Delete this section otherwise. -->

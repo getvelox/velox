@@ -1,0 +1,7 @@
+# writing-style.md rule 2: chains of dashes are the usual cause of long sentences.
+extends: occurrence
+message: "More than one em dash in a sentence. Split the sentence or use a list."
+level: warning
+scope: sentence
+max: 1
+token: "—"

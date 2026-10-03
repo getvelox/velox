@@ -1,0 +1,17 @@
+# writing-style.md rule 5: global English.
+extends: existence
+message: "'%s' is an idiom. Say it plainly for readers whose first language is not English."
+level: warning
+ignorecase: true
+tokens:
+  - bolted on
+  - gold-plat\w*
+  - hairball
+  - zoo of
+  - self-select\w*
+  - footgun\w*
+  - belt-and-suspenders
+  - in as many words
+  - rounded away
+  - with a shrug
+  - at 3 ?am
