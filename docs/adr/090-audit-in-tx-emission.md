@@ -4,6 +4,10 @@ Date: 2026-07-13
 Status: Accepted
 Relates: ADR-089 (fail-closed retirement — the interim step this supersedes structurally), ADR-030 (wall-clock audit timestamps — unchanged; the sim axis is a SECOND axis, not a replacement), ADR-029 (ctx effective-now binding — extended to carry the clock id), ADR-086 (sim-data lifecycle — amended: sim-axis columns + surfacing ship now)
 
+## Summary
+
+The target rule is that an audit row is written inside the caller's business transaction with `audit.Logger.LogInTx`, so a change and its row commit or roll back together. This replaces an HTTP catch-all that guessed rows from the URL path and missed background writers. Every mutating route is declared in `internal/api/audit_routes.go` as emitting its own row or exempt with a reason; a CI test fails on undeclared or stale entries, and a runtime observer counts any undeclared 2xx mutation that wrote no row. Migration is partial: engine invoice finalize, credit grants and routes whose registry note names `LogInTx` are in-tx, but most HTTP routes (including operator invoice finalize) and six `internal/billing` background sites, pinned in `internal/arch/audit_background_writers_test.go`, write after commit, so a failed write loses the row. Inbound Stripe webhook settlement writes none. Bulk CSV exports are audited before the first byte streams, fail closed; paginated list reads are not.
+
 ## Context
 
 The 2026-07-13 audit-subsystem e2e audit (68 verified findings, 3-judge

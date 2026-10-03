@@ -7,6 +7,19 @@
 (a written-off invoice closes self-service payment),
 [ADR-111](111-a-write-off-has-no-tax-leg.md) (a write-off has no tax leg)
 
+## Summary
+
+When dunning (automatic retries of a failed payment) runs out of retries, two
+independent settings now decide what happens: `final_subscription_action`
+(`none`, `pause`, `cancel`) and `final_invoice_action` (`none`,
+`mark_uncollectible`). They replace the single `final_action` enum, which
+could not express cancel plus write-off. Three of its four values also left
+the unpaid invoice open forever without telling the operator. The default
+stays `(pause, none)`, because a write-off is an accounting decision the
+platform should not make unasked, and the policy form now says the invoice
+stays open. Automatic void is refused, and every entry point rejects the old
+`final_action` key by name.
+
 ## Context
 
 When a dunning run exhausted its retries, one column decided everything:

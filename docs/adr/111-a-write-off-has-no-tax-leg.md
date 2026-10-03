@@ -12,6 +12,18 @@
 (written-off invoices close self-service payment), [ADR-107](107-unknown-is-terminal-until-a-human.md)
 (parked invoices), ADR-108 (parked search-and-adopt)
 
+## Summary
+
+Writing an invoice off as bad debt (`MarkUncollectible`) no longer reverses
+its tax with the tax provider. Void and credit notes still reverse tax,
+because they change what was sold. A write-off only records that collection
+failed. Reversing on write-off was also unsafe: a written-off invoice can
+still settle as `paid` when a later provider search finds the charge
+succeeded, and nothing re-reports the reversed tax. The tenant may now pay
+more tax than they owe until they claim bad-debt relief themselves, so the
+invoice CSV export adds `tax_provider` and `tax_transaction_id`. Invoices
+written off before this change keep their reversal.
+
 ## Context
 
 `MarkUncollectible` reverses the invoice's tax with the provider. Void and

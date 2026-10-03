@@ -8,6 +8,10 @@ problem. ADR-106's charge-intent ledger is **parked, not deleted** — see
 **Builds on:** ADR-105 (`charge_attempt_seq` as the idempotency-key seed, shipped
 in #678 and unaffected by this decision), ADR-049 (payment reconciler).
 
+## Summary
+
+When a Stripe charge ends with an unclear result and no PaymentIntent id, Velox no longer marks the invoice `failed`. That used to make the invoice claimable again under a new idempotency key (`charge_attempt_seq`), so a retry could charge the customer twice. Now the invoice is parked at `payment_status='unknown'`, which no charge path accepts, and `TestUnknownPaymentIsUnchargeableByEveryClaimPath` fails the build if one ever does. That exclusion is the whole safeguard: the write that records `unknown` also bumps `charge_attempt_seq`, so the original attempt cannot be replayed (amendment of 2026-08-01). The parked state is logged as CRITICAL once, the reconciler sweep skips parked rows, and the invoice resolves when a webhook names the PaymentIntent or when Stripe search finds it (ADR-108). An empty search result writes nothing. The only manual exit is `MarkUncollectible`, which leaves `unknown` in place, so a charge that later succeeds still marks the invoice paid.
+
 ## Context
 
 A Stripe charge can create a PaymentIntent that Velox never learns the name of:

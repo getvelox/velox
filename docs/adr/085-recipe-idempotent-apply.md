@@ -3,6 +3,10 @@
 **Date:** 2026-07-08
 **Status:** Accepted
 
+## Summary
+
+Applying a recipe (`POST /v1/recipes/{key}/instantiate`) creates objects once and never removes them. There is no uninstall. The badge (a `recipe_instances` row) is checked before any write, so a repeat apply returns the existing row unchanged (same id, HTTP 201) and creates nothing. Amended 2026-07-26: the badge is unique per tenant, recipe and mode (test or live), so applying in test mode no longer counts as applying in live mode. A first apply always creates a new plan with a free code (`<code>_2` if the code is taken), so an existing plan is never reused or changed. An existing meter is reused only if its aggregation matches the recipe. An existing rating rule is reused only if its money fields match (amended 2026-07-26). On any mismatch the whole apply is refused and rolled back. Rules are reused at their current version and never republished, so an apply can never change what a live subscription pays.
+
 ## Context
 
 ADR-083 (2026-07-07) gated recipe **adoption** on conformance: `Instantiate` adopted an existing plan by `code` or meter by `key`, and refused (409) if the adopted object's money-affecting config diverged from what the recipe declared. That closed the silent-substitution bug, but the design panel that produced it kept spawning containment machinery on top of the underlying shape — plan conformance diff, provenance stamps (deferred), a `Force` flag reserved-but-unwired, a `DELETE /v1/recipes/instances/{id}` uninstall that only dropped the index row while the entities it named stayed live, and `seed_sample_data` scaffolding (`RecipeSampleData`/`SampleCustomer`/`SampleSubscription`, `CreatedObjects.CustomerIDs`/`SubscriptionIDs`) that was fully parsed and validated but had zero writers — nobody ever called it. Per `feedback_complexity_accretion_smell`: when a design keeps growing containment around a self-made bug class (adopt-by-key → conformance-diff → deferred provenance → force-flag escape hatch), the shape itself is wrong, not under-defended.

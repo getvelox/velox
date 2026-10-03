@@ -10,6 +10,10 @@ register entry.
 narrative/forensic display split), ADR-102 (dual-stamped charge-attempt
 facts), ADR-103 (one payment owner).
 
+## Summary
+
+The invoice page shows one timeline and drops its separate "Real-time activity" card. Every row is placed on the entity's own calendar, which for an entity pinned to a test clock is that clock's simulated time. A row that also happened in the real world shows the real moment underneath as a `Recorded` line, only in test mode. Emails store their cause's simulated instant (`sim_effective_at` and `test_clock_id` in `email_outbox`, migration 0163) at enqueue. So handlers must bind the clock before enqueuing, and `internal/arch/email_enqueue_binding_test.go` enforces this. An email without that stamp is never backfilled and shows at its real send time. Amended 2026-07-29: every row created by an insert (emails, charge attempts, credit notes, dunning events) shows both dates when they differ. Lifecycle rows such as created, finalized and void get their real time from the invoice's audit entries. Rows at the same simulated instant follow their real order only when every row in that group has a recorded time. Otherwise they follow a fixed cause-before-effect order, so an email always comes after the money event it announces.
+
 ## Context
 
 The invoice page answered "which calendar is this row on?" with a

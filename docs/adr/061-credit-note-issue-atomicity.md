@@ -8,6 +8,10 @@ Original status: Accepted (design-only) — 2026-06-24, build deferred to a name
 trigger. The course changed (the user prioritised the end-to-end long-term fix
 over deferral) and it shipped.
 
+## Summary
+
+`creditnote.Service.Issue()` commits the `draft` to `issued` status change and the internal money effect in one database transaction: a credit grant for a paid invoice, or an `amount_due` reduction for an unpaid one. If the effect fails, both roll back and the note stays `draft`, so a customer is never shown a credit they did not receive. The external effects (Stripe refund, tax reversal at the provider) run after commit with idempotency keys. Amended 2026-06-25: tax reversal does not use `webhook_outbox`, because its rows would reach customer endpoints. A scheduler sweep, `RetryPendingCreditNoteTaxReversal`, retries failed reversals with the same key.
+
 ## Context
 
 The liveness audit (2026-06-23) found a sink in `creditnote.Service.Issue()`:

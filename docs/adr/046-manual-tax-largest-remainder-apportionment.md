@@ -6,6 +6,10 @@
 reconciliation in `internal/tax/manual.go` (introduced `401d990`, both
 the exclusive and inclusive paths).
 
+## Summary
+
+The manual tax provider (`ManualProvider`) computes an invoice's tax once, on the subtotal, and then splits that total across the line items. Each line gets the whole-cent floor of its exact share, and the leftover cents go to the lines with the largest fractional remainders, with ties going to the lowest index. The old code put the whole rounding difference on the last line, which could tax a larger line less than a smaller one. Now line taxes sum to the invoice tax and each line is within 1¢ of its exact share. Rounding is half-to-even, as in the rest of the money path, and a per-tenant line-level rounding setting is deferred.
+
 ## Context
 
 The `ManualProvider` applies one flat tenant rate to every line item.

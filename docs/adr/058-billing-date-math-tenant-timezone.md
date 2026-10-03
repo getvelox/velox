@@ -4,6 +4,10 @@
 - Date: 2026-06-09
 - Relates: ADR-042 (integer day-ratio proration), ADR-030 (simulated time / clock-pinned), the period-creation + proration paths
 
+## Summary
+
+All month and year billing advances are computed in the tenant timezone. That covers period boundaries, renewal dates and the full-cycle day count used to prorate. Before this ADR, `AddDate` ran on UTC or host-local times, so tenants outside UTC got boundaries a day or more off and small over- or undercharges on mid-cycle changes. The ADR also fixed a separate bug in calendar billing: an anchor on the 29th to 31st skipped February. The fix snaps to the 1st of the month before advancing. The original fix sent every advance through one helper, `domain.addIntervalIn`. Day-based adds such as trial end and due dates do not need the timezone, so they skip it, and with no tenant timezone configured the math uses UTC. ADR-055 (2026-06-18) overturned this ADR's claim that `Jan 31 + 1 month = Mar 3` was acceptable. Anniversary monthly and yearly subscriptions now store a `billing_anchor_day` and clamp a 29th to 31st (or Feb 29) anchor to the month's last day, then return to the anchor day in longer months. They still compute in the tenant timezone, but through `advanceAnchored`, so `addIntervalIn` now handles only calendar billing and rows with no stored anchor day. Invoices and the subscription period-range displays show the inclusive last covered day, derived at read time from the stored `[start, end)` boundary. Event dates such as Renews and Cancels stay on the exclusive boundary.
+
 ## Context
 
 Subscription period boundaries and the proration denominator are computed with `time.Time.AddDate` (advance one month/year). `AddDate` is **timezone-sensitive**: it operates on the *wall-clock calendar date* in the value's `Location`. Two facts made this silently wrong:

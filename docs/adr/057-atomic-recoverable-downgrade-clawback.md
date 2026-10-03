@@ -3,6 +3,10 @@
 **Date:** 2026-06-20
 **Status:** Accepted
 
+## Summary
+
+A downgrade, item removal or quantity decrease against a paid invoice gives unused prepayment back as a clawback credit note. On the atomic path, that note is now created as a `draft` with `issue_pending=true` inside the item-change transaction, so a create failure rolls the item change back. The non-atomic fallback still creates and issues the note inline. The note is issued after commit, and `RetryPendingClawbackIssue` re-issues any pending draft on the scheduler tick. The in_advance mid-period cancel credit uses the same pattern, but only when every funding source is paid; there, a draft-create failure rolls back the whole cancel. If any source is unpaid, the whole cancel credit stays on the older post-commit path. Amended 2026-06-25: ADR-061 made `Issue()` atomic, so a failure partway through issuing is now safe to retry.
+
 ## Context
 
 Hands-on testing of the subscription RemoveItem flow (2026-06-20) confirmed a money gap the atomic-proration work (ADR-030, ADR-056) had left open on the **credit** side.

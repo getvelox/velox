@@ -1,12 +1,20 @@
 # Billing Thresholds — Technical Design
 
-> **Status:** Shipped — see [`CHANGELOG.md`](../CHANGELOG.md) for the merged commits and migration `0056_subscription_billing_thresholds`.
-> **Last revised:** 2026-04-26
-> **Related:** `docs/design-create-preview.md` (sibling — same composition, same wire conventions), `docs/design-multi-dim-meters.md` (multi-dim dependency — `usage.AggregateByPricingRules`)
+> **Design document, last revised 2026-04-26** (the pre-build RFC; shipped with migration `0056_subscription_billing_thresholds`). The body below is kept as written and is not the current design.
 >
-> The text below is preserved as the design-time RFC. The implementation is live in `main`; refer to `internal/billing/threshold_scan.go` and `internal/subscription/` for the current behaviour.
+> **Current design:** [ADR-065](adr/065-threshold-scan-boundary-fire-once-drain.md) (scan kernel: boundary-skip, fire-once probe, full drain), [ADR-066](adr/066-threshold-money-semantics.md) (money semantics: prorated reset base, atomic fire-then-reset), [ADR-115](adr/115-one-closer-for-the-billing-period.md) (a threshold fire and the cycle close cannot both bill one period), and [ADR-029](adr/029-fully-disjoint-test-clock-flows.md) section 2 (the threshold scan skips test-clock subscriptions; they are scanned when the clock is advanced). Code: `internal/billing/threshold_scan.go`, `internal/subscription/`.
 >
-> **2026-08-23 amendment (ship-drift, verified against code):** the shipped surface diverges from the RFC body in six places. Validation failures return **`422 validation_error`**, not 400. `reset_billing_cycle` **defaults `false`** when omitted (Stripe's keep-anchor default; the body's `true` was verified wrong in the 2026-07-10 design review). Only **negative** `usage_gte` is rejected — zero is accepted. The planned base-fee-only PATCH-time rejection was **not shipped** (live validation checks item membership, duplicates, and decimal parse). The once-fired guard is the **partial unique index alone**, surfacing `errs.ErrAlreadyExists` on a retried tick — there is no invoice source-key column, and Postgres's `ON CONFLICT DO NOTHING` returns no row. The scheduler tick has grown to reconcilers → auto-charge retry → dunning enrollment → threshold scan → cycle scan. (Also: `amount_gte` is integer cents — the currency's **minor** unit; the body's "major-unit-cents" contradicts itself.)
+> **Where the body is out of date** (verified against code 2026-08-23):
+>
+> 1. Validation failures return **`422 validation_error`**, not 400.
+> 2. `reset_billing_cycle` **defaults `false`** when omitted (Stripe's keep-anchor default; the body's `true` was found wrong in the 2026-07-10 design review).
+> 3. Only **negative** `usage_gte` is rejected; zero is accepted.
+> 4. The planned base-fee-only PATCH-time rejection was **not shipped** (validation checks item membership, duplicates, and decimal parse).
+> 5. The once-fired guard is the **partial unique index alone**, surfacing `errs.ErrAlreadyExists` on a retried tick. There is no invoice source-key column, and `ON CONFLICT DO NOTHING` returns no row.
+> 6. The scheduler tick is now reconcilers → auto-charge retry → dunning enrollment → threshold scan → cycle scan.
+> 7. `amount_gte` is integer cents in the currency's **minor** unit; the body's "major-unit-cents" contradicts itself.
+>
+> Related design docs: `docs/design-create-preview.md` (same wire conventions), `docs/design-multi-dim-meters.md` (`usage.AggregateByPricingRules`).
 
 ## Motivation
 

@@ -5,6 +5,10 @@
 **Implemented**: 2026-05-08 (single session, six phases)
 **Supersedes**: amends ADR-028 (deferred-decoupling section — now resolved)
 
+## Summary
+
+Every time-driven scheduler job (auto-charge retry, tax retry, threshold scan, dunning, credit expiry) is split into two separate flows. The wall-clock cron query excludes entities attached to a test clock. A per-clock variant (`*ForClock`) processes those entities only when an operator clicks Advance, through `testclock.CatchupWorker`. Each entity is processed by exactly one flow, so the cron can no longer charge a test-clock invoice, and simulated time moves only on Advance. The tax-commit reconciler (`RetryPendingTaxCommit`) also excludes test-clock invoices but has no per-clock variant, because those invoices are test-mode only. Amended 2026-06-13: the invoice-reminder job was removed.
+
 ## Context
 
 ADR-028 made the wall-clock cron and the operator-Advance catchup

@@ -3,6 +3,10 @@
 **Date:** 2026-06-17
 **Status:** Accepted
 
+## Summary
+
+Invoice and usage screens show the per-unit price at full decimal precision, so a sub-cent rate no longer prints as `$0.00`. Only line amounts and totals round to whole cents. The backend computes the displayed price, and the frontend never works it out from amount ÷ quantity. Amended 2026-07-07: flat usage invoice lines show the configured rate the customer was billed, with any customer override applied. That rate is stored when the line is built, in `nominal_unit_amount_decimal`. All other lines, and lines built before this change (there is no backfill), show the effective rate, `amount_cents ÷ quantity`, worked out on read. One function, `DisplayUnitAmountDecimal`, picks between the two, and the dashboard, the hosted page and the PDF all use it. Amended 2026-07-08: the customer Activity panel and the public cost dashboard follow the same rule. Their twin function, `DisplayUnitAmountDecimalFor`, computes the value from the live rating rule and stores nothing. Amended 2026-08-09: each usage line stores its meter's unit (`meter_unit`), and invoice lines for token meters show the rate per million tokens: "$3.00 / 1M tokens" on the dashboard and hosted page, "$3.00 / 1M" on the PDF. Credit-note lines are not yet covered.
+
 ## Context
 
 A usage invoice line for a sub-cent rate rendered **Unit Price $0.00** while the **Amount** was correct (e.g. 1,000 units billed $3.00 — a $0.003/unit rate). The line amount is computed from the full-precision decimal rate (ADR-045) and is exact; but the invoice line stores the per-unit price only as `unit_amount_cents` (int64 whole cents), **back-derived** from the rounded amount: `round(300 ÷ 1000) = round(0.3) = 0`. Both the dashboard and the PDF then print that `0` at two decimals → `$0.00`. The result looks internally inconsistent (1,000 × $0.00 ≠ $3.00) and is wrong for the AI-token / usage case Velox targets, where sub-cent rates are the norm.

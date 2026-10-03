@@ -6,6 +6,19 @@ across Metronome/Lago/Stripe/AI-infra with adversarial quote-verification,
 then a 6-lens adversarial design panel; this ADR records the decisions, the
 design doc holds the full evidence and census).
 
+## Summary
+
+A prepaid commit is credit a customer buys on a manual invoice and then draws
+down. Velox grants it as a `customer_credit_ledger` block with
+`grant_kind='commit'` in the same transaction that finalizes the invoice, so
+the credit is spendable from the day the invoice is issued. Voiding the
+invoice retires the unused balance, but uncollectible, dunning pause and
+cancel do not. Customer credit never pays a commit invoice, credit notes are
+blocked on it, and drawdown spends promotional credit first. Amended
+2026-08-04: the attention dashboard flags an unpaid commit invoice whose
+credit is still live (`commit_exposure`), and holding credit until payment
+stays deferred until a self-serve or auto-top-up build exists.
+
 ## Decision
 
 Ship the prepaid-commit primitive on the existing credit-block ledger:

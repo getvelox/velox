@@ -14,6 +14,22 @@ params in the key" rejected-alternative is corrected to describe what ships.
 ledger — the pattern this is the second instance of), ADR-102 (charge attempt
 facts), ADR-105 (attempt-counter key seed).
 
+## Summary
+
+This ADR proposed a `charge_intents` table that records each charge attempt,
+with its exact Stripe idempotency key and request parameters, before Velox calls
+`CreatePaymentIntent`. The reason: after a timeout or a crash, Stripe can hold a
+PaymentIntent that Velox never learned about, and a later retry could open a
+second one and charge the customer twice. A recovery sweep would replay the
+stored request, and Stripe would return the original PaymentIntent. Replay is
+only safe while Stripe still keeps the key, so the design stops replaying after
+12 hours and leaves the invoice for review instead. It is not implemented on
+`main`: ADR-107 prevents the double charge more simply by leaving the invoice
+for a human, and ADR-108 finds the lost PaymentIntent in the common case by
+searching Stripe. Resume it at the first such invoice that a webhook never
+resolved, or at production cutover. Build it on top of ADR-107, and only after
+ADR-108's search has had a chance to resolve the case.
+
 ## Context
 
 ADR-105 fixed *which* idempotency key we send. One residual survived it, and no

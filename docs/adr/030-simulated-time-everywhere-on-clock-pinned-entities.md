@@ -5,6 +5,22 @@
 **Implemented**: 2026-05-08
 **Supersedes**: closes the deferred-decoupling section ADR-029 left open for non-load-bearing timestamps
 
+## Summary
+
+Every billing timestamp on an entity pinned to a test clock (a simulated
+clock the operator advances) uses the clock's simulated time, as Stripe's
+test clocks do. Each service entry point binds that time into ctx once with
+clock.BindEffectiveNow, and services, Postgres stores and PDF or email
+rendering read it with clock.Now(ctx), never time.Now(). A timestamp stays
+on wall-clock only if it would still fire at that real instant without any
+clock advance: audit-log created_at (with sim_effective_at and
+test_clock_id alongside), scheduler ticks, outbox and retry scheduling,
+webhook and email delivery, operator config writes, usage_events.timestamp
+and Stripe's own payment objects. The payment state-sync reconciler sweeps
+on wall time but stamps outcomes at simulated time. Read paths use the
+is_simulated flag persisted at create from the entity's test_clock_id, not
+the ctx binding. Credit notes follow their invoice's clock.
+
 ## Context
 
 After ADR-029 shipped catchup correctness for the six load-bearing
