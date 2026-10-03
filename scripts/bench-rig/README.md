@@ -125,7 +125,7 @@ segment creation under `WALWriteLock` when the recycled-segment pool (the
 ready-made WAL files Postgres keeps for reuse — old segments recycled
 at checkpoint instead of deleted) ran dry
 (RDS default `min_wal_size` = 192 MB) — `docs/benchmarks/sustained-throughput.md`
-§ third run, and the runbook entry "On RDS, set `min_wal_size`".
+§ third run, and the runbook entry "On RDS, size the WAL segment pool" (`docs/ops/runbook.md`).
 
 ## Why the calibration comes first
 

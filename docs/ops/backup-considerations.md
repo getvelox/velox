@@ -81,8 +81,9 @@ and you can restore to any second within retention.
 ### Acceptable alternative: nightly logical dump
 
 A logical dump exports the data itself, via SQL, rather than copying
-database files. Run `pg_dump --format=custom` nightly + WAL archive
-for replay between dumps. Velox's schema is small enough (a few dozen
+database files. Run `pg_dump --format=custom` nightly (`scripts/backup.sh`
+does this). WAL cannot be replayed onto a logical dump, so you lose writes
+made since the last dump. Velox's schema is small enough (a few dozen
 tables); a full dump completes quickly even at scale.
 
 ### Not recommended
@@ -257,8 +258,8 @@ A backup you've never restored is hope, not a backup.
 
 On managed Postgres the division of labor changes. The provider's native
 snapshots + point-in-time recovery are your PRIMARY mechanism: turn them on
-and set retention — they beat anything a dump script offers. The WAL-archive
-recipe under "Backup strategy" above does not apply (managed services don't
+and set retention — they beat anything a dump script offers. Self-managed
+PITR tools such as pgbackrest or WAL-G do not apply (managed services don't
 expose that access). What this repo's tooling still gives you there, and why
 you still run the drill quarterly:
 

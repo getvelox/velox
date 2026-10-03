@@ -55,6 +55,7 @@ misconfiguration is therefore easy to see, and it does not stop startup:
 | `SMTP_HOST` | `SMTP NOT CONFIGURED — …` | Every send returns `ErrSMTPNotConfigured`, dispatcher retries → DLQ. No stdout fallback. |
 | `HOSTED_INVOICE_BASE_URL` | `HOSTED_INVOICE_BASE_URL NOT SET — …` | Invoice / receipt / dunning / payment-failed emails render with **no link** in the CTA button. |
 | `CUSTOMER_PORTAL_URL` | *(no dedicated boot warning)* | Not a customer email variable — it is the SPA base for the Stripe payment-method-setup return URL. Unset → the return URL silently defaults to `http://localhost:5173`. |
+| `DASHBOARD_BASE_URL` | `DASHBOARD_BASE_URL NOT SET — …` | Password-reset emails are not sent. Team invites fail because the accept link cannot be built. |
 | `PAYMENT_UPDATE_URL` | `PAYMENT_UPDATE_URL NOT SET — …` | Payment-update-request emails (no-PM-at-finalize, charge-failure) skipped at send time. |
 
 ("No-PM-at-finalize" above = an invoice reached finalization with no
@@ -198,9 +199,9 @@ Postgres and Redis. Bring it up with:
 docker compose up -d mailpit
 ```
 
-Then point Velox at it, setting all five URL/SMTP vars together. If you
-leave any of HOSTED_INVOICE_BASE_URL / CUSTOMER_PORTAL_URL /
-PAYMENT_UPDATE_URL unset, the matching email links stay blank:
+Then point Velox at it, setting all the vars below together. If you
+leave any of the URL vars unset, the matching email links stay blank
+or the email is not sent:
 
 ```bash
 SMTP_HOST=localhost
@@ -212,6 +213,7 @@ SMTP_TLS=none
 HOSTED_INVOICE_BASE_URL=http://localhost:5173
 CUSTOMER_PORTAL_URL=http://localhost:5173
 PAYMENT_UPDATE_URL=http://localhost:5173/update-payment
+DASHBOARD_BASE_URL=http://localhost:5173
 ```
 
 View captured email at <http://localhost:8025>. Nothing leaves your
@@ -232,7 +234,7 @@ travel in plaintext.
 | `SMTP_FROM` not verified at ESP | `550 not authorized` | Verify the sender domain or use a verified address |
 | ESP in sandbox/sandbox-restricted | `554 recipient not verified` | Move ESP out of sandbox (SES) or verify recipient |
 | Firewall blocks 587 outbound | Connect timeout | Switch to port 465 + `SMTP_TLS=implicit` |
-| ESP rate-limited the relay | `421 throttled` | Check ESP dashboard; lower outbox dispatcher concurrency |
+| ESP rate-limited the relay | `421 throttled` | Check ESP dashboard; raise the sending limit at the ESP |
 
 ## Verifying your configuration
 
@@ -306,9 +308,9 @@ A [tenant](../README.md#glossary) is one business that uses a Velox
 install to bill its own customers. If a single tenant sends >10k
 emails/hour:
 
-- **Lower the email-outbox dispatcher concurrency.** Velox runs one
-  dispatcher worker today. High concurrency against rate-limited
-  relays causes throttling.
+- **Check your ESP rate limit.** Velox runs one email dispatcher. It
+  sends at most 5 emails every 5 seconds (60 a minute), and this is
+  not configurable. Above that rate, emails queue in `email_outbox`.
 - **Spread across providers.** Some tenants use one ESP for
   transactional billing emails and another for marketing, with
   separate sending domains.

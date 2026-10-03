@@ -61,8 +61,8 @@ DATABASE_URL="postgres://velox:velox@localhost:5432/velox?sslmode=disable" RUN_M
 
 ## Testing
 ```bash
-go test ./... -short          # unit tests only
-go test -p 1 ./... -short=false  # includes integration tests (needs postgres)
+go test ./... -race -short -count=1          # unit tests only (what CI runs)
+go test -p 1 ./... -count=1 -short=false  # includes integration tests (needs postgres)
 ```
 
 ## Concurrent sessions

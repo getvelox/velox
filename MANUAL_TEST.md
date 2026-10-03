@@ -98,7 +98,7 @@ A flow MAY carry an "Automated coverage: N / M" tally where it aids triage (keep
    - **Observable / UI / live-external** (real Stripe, webhook, email, PDF) → `[~]` manual live verification — an automated test would only mock the externals that matter.
 3. **Pragmatism cap.** Don't automate a near-duplicate of an already-proven pattern. Past the core money invariants, product work outranks more internal-coverage tests at this stage.
 
-**Every flow gets a bug-dig.** While verifying, read the real e2e code path adversarially (error handling, race windows, partial-failure recovery, missing guards) and report findings *separately* from "the test passes." A meaningful uncovered path → add it to the doc + cover it; a low-probability gap → note and defer. For money/state-machine flows, run the bug-dig against the **[Money-Path Robustness Playbook](docs/dev/money-path-robustness-playbook.md)** review lens (§4) — the 9 failure classes and the per-class questions that independently re-derive each invariant.
+**Every flow gets a bug-dig.** While verifying, read the real e2e code path adversarially (error handling, race windows, partial-failure recovery, missing guards) and report findings *separately* from "the test passes." A meaningful uncovered path → add it to the doc + cover it; a low-probability gap → note and defer. For money/state-machine flows, run the bug-dig against the **[Money-Path Robustness Playbook](docs/dev/money-path-robustness-playbook.md)** review lens (§4) — the 10 failure classes (A to J) and the per-class questions that independently re-derive each invariant (§4 has questions for A to I; J has none yet).
 
 **Craft:**
 

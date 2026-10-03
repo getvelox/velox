@@ -45,6 +45,7 @@ Headers:
 ## Verifying signatures
 
 The signature is `HMAC-SHA256(secret, "<t>.<raw body>")`, hex-encoded.
+The key is the full secret string, `whsec_` prefix included, used as UTF-8 bytes. Do not strip the prefix or decode it.
 Verify against the **raw request bytes** — do not re-serialize the JSON.
 During the 72-hour rotation grace window the header carries **two** `v1=`
 entries (old + new secret, the Stripe multi-signature convention): accept

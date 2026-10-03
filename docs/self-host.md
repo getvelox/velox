@@ -165,13 +165,13 @@ For your own VM:
   In `local` it derives `velox_app:velox_app` from `DATABASE_URL` and warns
   instead, since a single-tenant dev box often uses one superuser URL.
 - Backups: take a `pg_dump` snapshot on whatever cadence your data loss
-  tolerance allows. Stripe's webhook outbox and Velox's audit log are the
+  tolerance allows. Velox's outbound webhook outbox and audit log are the
   two surfaces where lost rows are most expensive. A consistent snapshot
   covers both.
 
 ## Migrations
 
-`RUN_MIGRATIONS_ON_BOOT=true` (default for `make dev`) runs forward
+`RUN_MIGRATIONS_ON_BOOT=true` (set in `.env.example`, which `make dev` loads as `.env`; the compose stack also sets it) runs forward
 migrations on startup. Migrations are versioned and idempotent
 ([`internal/platform/migrate/sql/`](../internal/platform/migrate/sql/)).
 Down-migrations exist for development reversal, but production rollbacks
