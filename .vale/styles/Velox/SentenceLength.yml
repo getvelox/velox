@@ -1,0 +1,8 @@
+# writing-style.md rule 2: one idea per sentence.
+extends: occurrence
+message: "This sentence has more than 35 words. Split it into shorter sentences."
+level: warning
+scope: sentence
+ignorecase: false
+max: 35
+token: \b(\w+)\b

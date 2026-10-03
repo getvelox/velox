@@ -361,6 +361,26 @@ jobs:
           args: --offline --no-progress --include-fragments '**/*.md'
           fail: true
 
+  # Prose lint against docs/dev/writing-style.md (rules in .vale/styles/Velox).
+  # Advisory: it annotates only lines the PR adds and never fails the run, so
+  # older docs are not flagged until someone edits them. Run `vale <file>`
+  # locally for the same check.
+  doc-style:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Lint added prose with Vale
+        uses: vale-cli/vale-action@518a9136acc6e6668ce7c00d367051e0941e87ff # v3.0.0
+        with:
+          version: 3.24.0
+          filter_mode: added
+
   codegen-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15

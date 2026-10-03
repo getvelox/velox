@@ -1,0 +1,10 @@
+# writing-style.md rule 6: let the evidence make the point.
+extends: existence
+message: "'%s' sounds defensive. State the fact; the evidence makes the point."
+level: suggestion
+ignorecase: true
+tokens:
+  - honestly
+  - to be honest
+  - not pretending
+  - instead of pretending

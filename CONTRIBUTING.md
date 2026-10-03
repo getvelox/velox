@@ -105,6 +105,7 @@ Fork PRs get the identical CI run — no secrets are involved in any gate.
    gets a `CHANGELOG.md` entry, and any UI-visible behavior change updates
    the matching flow in `MANUAL_TEST.md` (the repo's hand-run walkthrough
    scripts). This is a hard house rule — the bar is "the doc doesn't lie."
+   For how to write docs, see the [writing style guide](docs/dev/writing-style.md).
 5. Submit a PR with a clear description of what and why
 
 **Touching money or a state machine** (invoices, payments, credits, dunning
