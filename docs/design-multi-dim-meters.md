@@ -1,12 +1,14 @@
 # Multi-Dimensional Meters — Technical Design
 
-> **Status:** Shipped 2026-04-25 — see [`CHANGELOG.md`](../CHANGELOG.md) for the merged commits.
-> **Last revised:** 2026-04-25
-> **Related:** Architecture Decision Records ADR-002 (per-domain packages), ADR-003 (RLS — Postgres row-level security), ADR-005 (integer cents)
+> **Design document from 2026-04-25** (the proposal as reviewed before building). It is not kept current.
 >
-> The text below is preserved as the design-time RFC (the proposal as it stood when reviewed, before building). The implementation is live in `main`; refer to the package-level docs in `internal/usage/` and `internal/billing/` for the current behaviour.
-
-> **Note (2026-06-01):** ADR-044 replaced the `operation` + boolean `cached` dimensions shown in examples below with a single `token_type` enum (input, output, cache_read, cache_write_5m, cache_write_1h). The mechanism (one meter, N dimension-matched rules, priority+claim) is unchanged; only the example dimension names are dated. See ADR-044 for the canonical shape.
+> **Current design:** [ADR-044](adr/044-canonical-ai-token-metering-model.md) (canonical `tokens` meter + `token_type` dimension), [ADR-045](adr/045-decimal-per-unit-pricing-rates.md) (decimal per-unit rates; cycle billing prices multi-dim meters), and [ADR-070](adr/070-price-change-semantics.md) (a rule is priced at the version of its `rule_key` in force when the period opened), plus the package docs in `internal/usage/` and `internal/billing/`.
+>
+> **Known out of date in the body below:**
+>
+> 1. The examples' `operation` + boolean `cached` dimensions were replaced by ADR-044's single `token_type` enum (input, output, cache_read, cache_write_5m, cache_write_1h). The mechanism (one meter, N dimension-matched rules, priority+claim) is unchanged.
+> 2. A matched rule is not priced at a stored rating-rule version. Its `rule_key` is looked up as of the period start (ADR-070), so a newly published rate applies from the next period.
+> 3. Until ADR-045 (2026-06-01), only the preview and the threshold scan priced multi-dim meters; the cycle close billed them at $0. It now emits one line per claimed rule.
 
 This page is the technical design for multi-dimensional metering: one usage meter that carries many differently-priced slices of usage, distinguished by dimension labels such as model or operation. It is written for engineers building on or evaluating Velox's pricing engine.
 

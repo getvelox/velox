@@ -3,6 +3,10 @@
 **Date:** 2026-06-22
 **Status:** Accepted
 
+## Summary
+
+A payment is in flight when its invoice's `payment_status` is `processing` or `unknown`, so the captured amount is not yet known. While a payment is in flight, `Void`, `MarkUncollectible` and `RecordOfflinePayment` reject the invoice with a 409, and every check uses one predicate, `IsInFlight()`. There is one exception, added by ADR-107. A parked invoice is `unknown` with no PaymentIntent id, so its payment can never be identified. It may still be written off with `MarkUncollectible`. Dunning's manual resolve now voids only through `invoice.Service.Void`, so it gets the same check, and it cancels the PaymentIntent only after the void succeeds. The automatic clawback (crediting unused service after a cancel or downgrade) cannot return an error to a person. While the payment is in flight, it keeps its credit note as a draft. A scheduled job issues the draft once the payment settles. If the invoice is instead voided or written off, the draft is voided, because an invoice that collected nothing has nothing to give back. Without these rules, Velox could leave captured money on a voided invoice, record too small a paid amount, or reverse tax on a completed sale. Simply skipping the clawback would instead over-charge the customer.
+
 ## Context
 
 An end-to-end audit asked: *which paths mutate an invoice while its payment is "in flight"?* — where **in flight** = `payment_status ∈ {processing, unknown}`: the charge is open at the provider (processing — e.g. off-session SCA `requires_action`) or its outcome is genuinely ambiguous (unknown — a 5xx/timeout that may or may not have captured). In both, **the captured amount is not yet known.** The audit found two distinct classes of bug, neither guarded.

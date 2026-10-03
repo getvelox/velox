@@ -1,8 +1,12 @@
 # ADR-115: One closer for the billing period
 
 **Status:** Accepted (2026-08-30)
-**Supersedes:** the watermark compare-and-swap of ADR-114 PR-B (`AdvanceBillingCycle`) and the never-shipped monotonic guard ADR-114 §Scope named; extends ADR-066's fire+re-anchor atomicity to every period writer.
+**Supersedes:** the watermark compare-and-swap of ADR-114 PR-B (`AdvanceBillingCycle`) and the never-shipped monotonic guard [ADR-114, "Fencing boundary"](114-leader-leases-tick-scoped-fencing.md#fencing-boundary-the-five-claim-funnels) named; extends ADR-066's fire+re-anchor atomicity to every period writer.
 **Related:** ADR-065 (threshold scan boundary / fire-once), ADR-066 (threshold watermark protocol), ADR-114 (leader leases; `POST /v1/billing/run` stays unfenced).
+
+## Summary
+
+Every invoice that bills a subscription's billing period, and every write that moves that period, commits in one transaction whose first statement is a compare-and-swap `UPDATE` (`subscription.ClosePeriodTx`, or `FireScheduledCancellationTx` when a scheduled cancellation fires at the close). That `UPDATE` locks the row and checks that `status`, `current_billing_period_start` and `next_billing_at` still match what the writer read; a writer that lost the race writes nothing and gets `ErrWatermarkMoved`. A threshold invoice that does not reset the period runs the same `UPDATE` with unchanged values, only to take the lock and check. The cycle close also re-reads the threshold watermark inside its transaction and rolls back if a threshold invoice billed part of the window since it built its lines. Before this, two such writers could plan from the same period and both commit, billing usage twice. A plan swap may now return 409 `subscription_period_moved`, and operators should set `idle_in_transaction_session_timeout = '30s'` on `velox_app`.
 
 ## Context
 
@@ -18,7 +22,7 @@ plan from the same period and both commit.
 
 The concrete defect (sweep 2026-08-30, S1): the leader's threshold-scan fire
 and a cycle close are two unserialized period writers. An operator drain
-(`RunCycleForTenant`, deliberately unfenced per ADR-114 §97) or the leader
+(`RunCycleForTenant`, deliberately unfenced per [ADR-114, "Fencing boundary"](114-leader-leases-tick-scoped-fencing.md#fencing-boundary-the-five-claim-funnels)) or the leader
 itself can close the period while the fire is in flight. Usage in
 `[P0, t1)` then lands on both the threshold invoice and the cycle invoice,
 and in one order the reset arm's `UPDATE … WHERE id` rewinds the watermark
@@ -106,7 +110,7 @@ settings stores.
   makes billing due one interval after `last_tick_ended_at`, and the operator
   drain is a synchronous `invoices_generated` contract; fencing it would
   either queue the operator behind the tick or turn the response into a
-  promise. ADR-114 §97 stands: operator paths are unfenced, and the row CAS
+  promise. [ADR-114, "Fencing boundary"](114-leader-leases-tick-scoped-fencing.md#fencing-boundary-the-five-claim-funnels) stands: operator paths are unfenced, and the row CAS
   — not the lease — is the split-brain guard. The tests hold a live billing
   lease on BOTH writers to prove it.
 - **Fold the threshold fire into the cycle close** (a "pure reset").

@@ -4,6 +4,10 @@
 - Date: 2026-06-07
 - Relates: ADR-001 (PaymentIntent-only Stripe), ADR-036 (dunning campaigns), ADR-030 (clock-pinned sim-time on financial writes)
 
+## Summary
+
+Every terminal Stripe PaymentIntent outcome settles through one idempotent primitive: `SettleSucceeded` (mark paid, fire `payment.succeeded`, send a receipt) or `SettleFailed` (mark failed, fire `payment.failed`, start dunning, send a failure email unless the flow suppresses it). Before this, about ten code paths wrote these states with different side effects, so a failure found by the reconciler started no dunning and sent nothing. Three callers find the outcome and pass it in: the webhook, the synchronous charge response when its status is `succeeded`, and the reconciler for stale `unknown` or `processing` invoices. Invoices that settle without a charge ($0 or fully covered by credits) and out-of-band manual payments stay on their own paths and send no receipt. Amended 2026-07-31: if a lost response leaves no PaymentIntent id, the invoice is parked in `unknown` and no charge path retries it. ADR-107 and ADR-108 cover how it is resolved: a provider search first, and an operator write-off otherwise.
+
 ## Context
 
 A payment reaching a **terminal state** (`succeeded` / `failed`) is written in ~10 places across four packages, and each fires a *different subset* of the consequences:

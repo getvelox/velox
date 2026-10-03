@@ -16,6 +16,10 @@ login-security posture and the concrete MFA design; the brute-force-throttle
 reasoning below still stands.
 Relates: ADR-011 (homegrown email+password auth — the login this protects), ADR-014 (SSO stays homegrown/embedded, no SaaS auth vendor — same self-host constraint), ADR-093 (CSRF gate — sibling pre-auth hardening)
 
+## Summary
+
+This ADR records the target design for protecting the dashboard login against password guessing. v1 ships none of it, so the per-IP `/v1/auth` rate limiter is the only brute-force control today. The old lockout was removed because it split its count across Redis and memory, let anyone who knew an operator's email lock them out, and stored plaintext emails in Redis; an interim Postgres throttle (PR #497) and the `users.locked_until` column were removed too. In the target design the failed-login count lives in Postgres, blocks apply only to an IP and account together, and a bare account is never locked. A counter only catches guessing, so MFA and a breached-password check are what stop credential stuffing; ADR-095 now governs when each ships, simplifies the key to `(IP × account)`, and drops the graduated ladder, aggregate detection and CAPTCHA. Bcrypt overload from login floods is a separate problem, best fixed at the edge or reverse proxy.
+
 ## Context
 
 The dashboard operator login (email+password → httpOnly cookie, ADR-011) shipped

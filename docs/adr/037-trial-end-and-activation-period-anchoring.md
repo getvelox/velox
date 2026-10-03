@@ -3,6 +3,10 @@
 **Date:** 2026-05-18
 **Status:** Accepted (amended 2026-05-18 — invoice-shape verification for `in_advance` + metered usage; hard-pause API removed in PR-8 with corrected industry framing)
 
+## Summary
+
+Subscription period math now goes through two shared helpers, `firstPeriodAfterTrial` and `firstPeriodForActivate`. `Create`, `Activate`, `EndTrial` and `ExtendTrial` all compute the first billing period with them. Before this, each entry point did its own period math, and the differences caused unbilled days and wrong first cycles. Monthly calendar billing starts a short first period at trial end or activation that runs to the next month start. Monthly anniversary billing runs one full month from that point. Yearly plans always use anniversary billing, whatever `billing_time` says. All items on a subscription must share one billing interval. An early `EndTrial` cuts the trial short to now and re-anchors the period in one atomic update, and `ExtendTrial` re-anchors on the new trial end. The expired-trial jobs switch a trial to `active` when `trial_end_at` passes, without waiting for the next cycle close. In the same step they bill the `in_advance` first paid period. Amended 2026-05-18, twice. First, an `in_advance` plan with metered usage gets one combined invoice at each cycle close: the next period's base fee in advance plus the elapsed period's usage in arrears. Second, the pause and resume API and the `paused` status were removed.
+
 ## Context
 
 A 2026-05-18 deep audit of every time-aware subscription flow surfaced a

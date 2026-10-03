@@ -4,6 +4,10 @@
 - Date: 2026-06-06
 - Supersedes/relates: ADR-039 (credits = the discount primitive), ADR-042 (integer proration math), the cancel/prebill-relief work (#22)
 
+## Summary
+
+A clawback credits a customer for unused time on a paid, taxed `in_advance` charge after a downgrade, a mid-cycle cancel, or a plan swap. Velox issues each clawback as a credit note (`creditnote.Service.CreateAndIssueAdjustment`), not as a bare net grant to the credit ledger. The credit note adds the gross amount the customer paid to their balance and reverses the matching output tax against the invoice that was paid. A net-only grant left the customer short by the tax, and the tenant over-reported tax. Amended 2026-06-15: a period can be funded by several invoices (the base invoice plus any mid-period upgrade invoice), so clawbacks find the full set with `invoice.FindFundingInvoicesForPeriod` and issue one credit note per invoice, each reversing tax against its own invoice. Cancel and swap split one authoritative unused total across those invoices rather than recomputing it per invoice. A plan downgrade takes the credit from the newest invoice first, and quantity or item changes split it proportionally, each piece capped at what that invoice can still be credited. Voiding or marking an invoice uncollectible reverses only the tax that its credit notes have not already reversed, because only credit notes reverse tax.
+
 ## Context
 
 When Velox claws back part of an **already-paid, taxed `in_advance`** charge — a mid-cycle **plan downgrade**, a **mid-cycle cancel** of a paid prebill, or a **plan swap** — it credits the customer for the unused time. Today all three paths grant a **bare net (tax-exclusive) amount** to the customer credit ledger and reverse **no** output tax:

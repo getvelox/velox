@@ -3,6 +3,10 @@
 **Date:** 2026-05-16
 **Status:** Accepted
 
+## Summary
+
+ADR-029 runs every time-driven billing step in order inside one test-clock Advance. Even so, records written during that pass were stamped with the advance's end time (`frozen_time`), so timelines piled up at the end. Dunning retries (retrying a failed payment) were also scheduled past the end time, so only the first due retry fired. Now each record carries the simulated time its event happened. The engine passes that time explicitly: cycle billing uses `sub.NextBillingAt`, each dunning retry uses `run.NextActionAt`, and the dunning and credit stores accept a caller-supplied `CreatedAt`. When none is given, they fall back to `clock.Now(ctx)`, so the wall-clock operator paths are unchanged. The dunning step re-queries for due runs until none are left, stopping at a 50-iteration safety cap or when a pass makes no progress. On a definite charge failure, `ChargeInvoice` now starts dunning inline instead of waiting for the `payment_intent.payment_failed` webhook, which arrives after the dunning step has exited. Ambiguous failures still go to the reconciler. Starting dunning from both paths is safe because migration 0085 allows one dunning run per invoice, so a second `StartDunning` returns the existing run. Retry charges are tagged so the payment_failed webhook doesn't send its own email: an exhausted N-retry run sends N+1 emails, one per attempt. As a result, timelines show events in their real order, and one Advance runs the full retry schedule. Email send times stay wall-clock.
+
 ## Context
 
 ADR-029 (fully disjoint test-clock flows) gave clock-pinned subscriptions

@@ -8,6 +8,20 @@ is the terminal INVOICE action, set independently of the subscription's),
 (the other "terminal until a human" state)
 **Shipped by:** PR #734
 
+## Summary
+
+When an invoice is written off (status `uncollectible`), the customer can no
+longer pay it through Velox's public pages. The hosted invoice page and the
+payment-update page both say collection is closed and point to support. They
+keep the money figure but label it "Invoice amount" instead of "Amount Due".
+The payment-update page keeps its add-a-payment-method button, because a saved
+card still serves the next invoice. Both pages read one shared check in
+`web-v2/src/lib/invoiceTerminal.ts`. Nothing in Velox starts a charge against a
+written-off invoice (see ADR-113), so it is settled only by recording money
+that has already arrived: an offline payment the operator enters
+(`RecordOfflinePayment`), or a provider charge that the ADR-108 search finds
+already succeeded and adopts.
+
 ## Context
 
 Velox has three terminal invoice outcomes. Two are unambiguous — `paid`, and

@@ -3,6 +3,10 @@
 **Status:** Accepted
 **Date:** 2026-05-05
 
+## Summary
+
+Billing a subscription now bills every due period in one call: `billSubscription` repeats `billOnePeriod` until `next_billing_at` is after the subscription's effective now (wall-clock time, or the test clock's `frozen_time` for a subscription on a clock), with a safety cap of 10000 periods. It also stops early when a period does not move `next_billing_at` forward. The wall-clock scheduler and the test-clock Advance now bill separate sets of subscriptions. `GetDueBilling` returns only subscriptions with no `test_clock_id`, and `GetDueBillingForClock` returns only the subscriptions on one clock whose `next_billing_at` has reached its `frozen_time`. Before, a large Advance stopped after 120 passes, and the scheduler raced it and billed test-clock subscriptions one period per tick with no operator action. ADR-029 (2026-05-08) applied the same split to threshold scans, pending-charge retry, dunning, credit expiry, tax retry and invoice reminders, so test-clock time now moves only when the operator advances it. Amended 2026-05-04: one Advance may move `frozen_time` by at most 1 year.
+
 ## Context
 
 Operator clicked Advance on a test clock at frozen_time = 2053 with a sub

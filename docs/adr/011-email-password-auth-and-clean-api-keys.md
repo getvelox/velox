@@ -5,6 +5,10 @@
 shipped (tokenized accept, no RBAC); the "invite flow comes when it's
 needed" deferrals below are partially resolved.
 
+## Summary
+
+The dashboard signs in with email and password, and API keys are only for SDK and curl callers, as on every surveyed platform. A dashboard session (`dashboard_sessions`) belongs to a user, not to an API key. This let us delete every safeguard that existed only because the API key was also the dashboard login: the guard against revoking the tenant's last active secret or platform key, the refusal to revoke or rotate the key making the request, and the revocation of dashboard sessions when their key was revoked. API keys now have a plain create, list, revoke and rotate lifecycle. Password reset uses single-use tokens that expire after 1 hour. Amended 2026-07-06 (ADR-081): team invites shipped with tokenized acceptance and no RBAC, so a tenant can have several users. Amended 2026-07-17 (ADR-094): the failed-login counter and lockout were removed, and the per-IP `/v1/auth` rate limiter is the only brute-force limit in v1.
+
 ## Status
 Accepted
 

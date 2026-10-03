@@ -6,6 +6,23 @@
 **Amends:** ADR-006 (background scheduler; the leader gate it assumed), ADR-072 (transport lease model — unchanged, now composed with a leader fence), ADR-073 (boot contract — `VerifyAdvisoryLockTopology` retired)
 **Plan of record:** [docs/dev/ha-readiness-2026-07-06.md](../dev/ha-readiness-2026-07-06.md) (2026-08-30 header) · velox-ops `ha-program-2026-08-30.md`
 
+## Summary
+
+Five background jobs must run on only one replica at a time: billing, dunning,
+the webhook and email outbox dispatchers, and webhook delivery. Each job now
+has one row in the `leader_leases` table, which a replica claims for one tick
+with a single SQL statement on the database clock, renews every 3 s while the
+tick runs, and releases when the tick ends. The claim returns a fencing token,
+and each job's claim query checks it with `leader_fence`, so a replaced leader
+claims nothing; a lost renewal cancels the tick's work. Only those five claim
+queries are fenced: work already in flight completes through the existing row
+compare-and-set checks and idempotency indexes, so outbound events stay
+at-least-once across a takeover. This replaces Postgres session advisory locks,
+which tied leadership to a TCP session, had no fencing, and failed behind
+PgBouncer transaction mode. Operators pause a job with `leader_pause` and
+inspect `leader_status`; a dead leader's job can be claimed within 10 s of its
+last heartbeat and is running elsewhere within 15 s.
+
 ## Context
 
 Five singleton roles run once per tick cluster-wide — billing, dunning, the

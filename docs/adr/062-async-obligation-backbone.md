@@ -7,6 +7,10 @@ This ADR records a decision we are deliberately **not building yet**, so the
 next session inherits the verdict instead of re-litigating Temporal vs River vs
 a `database/sql`→pgx migration. ADR-061 forward-references it; this is that doc.
 
+## Summary
+
+Velox runs four separate re-drive sweeps that each retry a failed post-commit side effect, such as a tax reversal. When consolidated, they move one at a time onto a single queue: a separate `obligations` table, enqueued in the same transaction as the state change and drained with the `webhook_outbox` machinery. Money obligations do not take the webhook queue's give-up-after-15-attempts rule; a tax reversal retries until it succeeds. A separate table means internal tax and refund data can never reach customer webhook endpoints. Temporal was rejected because its enqueue is not part of the Postgres transaction. Moving the data layer from `database/sql` to native pgx was also rejected for now: it would touch every money query and the tenant-isolation boundary, and today it pays off nowhere. The trigger to revisit it is usage-event ingestion becoming a measured bottleneck, and then only on that path. The queue build is deferred until a named trigger fires, because the sweeps are correct today. Amended 2026-08-30: River works with `database/sql`, so it is the first option evaluated when the queue is built.
+
 ## Context
 
 Velox runs **four bespoke re-drive sweeps** that each recover a post-commit

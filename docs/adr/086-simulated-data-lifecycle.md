@@ -5,6 +5,10 @@
 **Extends:** ADR-029 (fully-disjoint test-clock flows).
 **Reaffirms:** ADR-030 (simulated time on clock-pinned entities stays; `created_at` is domain time) **and its audit exception** (the audit log is always wall-clock).
 
+## Summary
+
+In test mode, jobs that run on real time were charging and dunning (retrying failed payments for) simulated test-clock invoices. The auto-charge, dunning and tax sweeps now skip invoices with `is_simulated = true`, a flag stamped once at write and never changed. Other real-time jobs (credit expiry, usage aggregation, some analytics counts) are not yet gated while a clock is alive. They are deferred because they cannot move live money. Deleting a test clock hard-deletes the clock, its customers and every row they own in one transaction, so no simulated billing row is left for any job to act on. The audit log is kept on purpose as the simulation's only surviving record. Its `test_clock_id` and `sim_effective_at` are filterable columns (2026-07-13 amendment). Schema-walking tests fail CI when a new customer-owned table is neither torn down nor allowlisted with a written reason, or when the teardown would leave a foreign key pointing at a deleted row. Frontend relative-time helpers require an explicit "now" anchor, so a clock-pinned entity is measured against the clock's frozen time.
+
 ## Context
 
 In **test mode** (`livemode=false`) two time domains share one dataset: **wall-clock** (real-test data + every cron sweep on `time.Now()`) and **simulated** (test-clock-pinned entities whose billing timestamps are stamped at the clock's `frozen_time`). An adversarial audit found **24 defects** where a wall-clock plane (auto-charge, dunning, tax, credit-expiry, usage-billing, analytics, ~8 FE surfaces) processes a *simulated* record against wall-clock time. All are test-mode-only (no live-money impact), but they violate ADR-029, corrupt demos/QA, and lie in the UI.

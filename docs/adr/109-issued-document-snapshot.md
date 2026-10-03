@@ -3,6 +3,10 @@
 **Date:** 2026-08-05
 **Status:** Proposed (amended 2026-08-05 — writer site-set corrected after enumeration)
 
+## Summary
+
+Proposed, not yet built. Today a finalized invoice re-renders its bill-to and supplier blocks from live customer and tenant rows, so a later address or VAT number edit changes an issued document. The decision is to copy those fields into new nullable columns on `invoices` in the same transaction that makes the invoice `finalized`, and to render issued documents from that copy; credit notes inherit it. Amended 2026-08-05: five of the six finalize writers skip `invoice.Service.Finalize`, so the copy is written at three SQL sites (`createWithLineItemsInTx`, `FinalizeWithDates`, `updateStatusInTx`). Drafts and invoices with a NULL copy keep rendering from live data, with no backfill.
+
 ## Context
 
 Walking FLOW CU1 surfaced this. Invoice `VLX-000145` was already
