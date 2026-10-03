@@ -37,6 +37,8 @@ Three things happened there that most billing stacks can't do:
 
 **Jump to:** [Quick start](#quick-start) · [The wedge in code](#the-wedge-in-code) · [What's in the box](#whats-in-the-box) · [Benchmarks](#benchmarks) · [Why Velox exists](#why-velox-exists) · [How it fits](#how-it-fits) · [Will it take our volume?](#fewer-dependencies--but-will-it-take-our-volume) · [What Velox is not](#what-velox-is-not) · [Architecture](#architecture) · [Engineering](#engineering) · [Roadmap](#roadmap)
 
+**All docs, by task, with a glossary:** [`docs/README.md`](docs/README.md)
+
 ---
 
 ## Quick start
@@ -242,22 +244,18 @@ Stating these loudly so the wrong customers self-select out:
 
 ## Architecture
 
-One Go binary, one package per domain — full package layout in
+One Go binary, one package per domain. Each domain owns its store, service and handler;
+a billing engine coordinates them, Postgres Row-Level Security isolates tenants, and
+Stripe only executes the card charge. Package layout and design rules:
 [`docs/architecture.md`](docs/architecture.md).
-
-Design rules:
-
-- **Per-domain packages** — each domain owns its store, service, and handler. No peer domain touches another's internals; the imports that legitimately cross domains are pinned edge-by-edge in an allowlist enforced by an [architecture test](internal/arch/boundaries_test.go).
-- **Row-Level Security** — every tenant-scoped query runs inside an RLS-enforced transaction, proven by integration tests.
-- **PaymentIntent-only Stripe** — no Stripe Billing/Invoices. Velox owns invoices end-to-end; Stripe executes the card charge.
-- **Billing engine as coordinator** — orchestrates across domains via narrow interfaces, not a god object.
-- **Append-only event sourcing for money** — credits, audit log, outbound webhook outbox.
 
 ADRs explaining the load-bearing decisions live in [`docs/adr/`](docs/adr/).
 
 ---
 
 ## Engineering
+
+The short version for engineers new to the repo, with the evidence: [`docs/ENGINEERING.md`](docs/ENGINEERING.md).
 
 Velox moves money, so correctness is the product, not a feature. The disciplines that show up in the code:
 
