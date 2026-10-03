@@ -8,10 +8,10 @@ One install shape ships in this directory. The canonical landing page is
 | [`compose/`](compose/) | Single-VM eval, dev/staging, low-volume production. Reference deploy. |
 
 Kubernetes (Helm) and Terraform paths are deliberately not shipped in
-v1 — they land when a design partner (an early production adopter)
-names the flavour they actually run (see the "Operational posture"
-section of `docs/self-host.md`). Pre-emptively shipping three
-deployment paths produced surface area nobody was running.
+v1. They land when a design partner (an early production adopter) names
+the flavour they actually run. See the "Operational posture" section of
+`docs/self-host.md`. The reason: shipping three deployment paths ahead of
+demand produced surface area nobody was running.
 
 ## Local development
 
@@ -42,7 +42,7 @@ docker run --rm -e DATABASE_URL="..." -p 8080:8080 velox:latest
 
 The compose-level schema (authoritative for the compose stack) is
 [`compose/.env.example`](compose/.env.example). The full binary schema
-is the repo-root [`.env.example`](../.env.example); it mirrors the
+is the repo-root [`.env.example`](../.env.example). It mirrors the
 binary's actual reads from `internal/config/config.go` plus the
 per-package `os.Getenv` callsites. Mandatory in a production
 install:
@@ -68,67 +68,81 @@ gates inbound Stripe webhook signature verification.
 Wire your load balancer / ingress / probes to `/health/ready`. Both
 endpoints are exempt from rate limiting and audit logging.
 
-Behind a load balancer or ingress set **`TRUST_PROXY`** to the proxy's
-CIDR(s). Without it every request's client address is the balancer's, so
-the per-IP limits on the public pay pages (60/min) and on `/v1/auth`
-(100/min) become one bucket shared by every customer and every operator of
-the install. **Production refuses to boot without it**; set `TRUST_PROXY=none`
-only when replicas accept client connections directly (no proxy).
+Behind a load balancer or ingress, set **`TRUST_PROXY`** to the proxy's
+CIDR(s). Without it, every request's client address is the balancer's.
+The per-IP limits on the public pay pages (60/min) and on `/v1/auth`
+(100/min) then become one bucket, shared by every customer and every
+operator of the install. **Production refuses to boot without it.** Set
+`TRUST_PROXY=none` only when replicas accept client connections directly
+(no proxy).
+
+## Upgrading
+
+**Upgrading from ≤ v0.3.2** (the release before the leader-lease cutover)
+needs one special rollout. Do this one rollout as stop-all-then-start, not
+rolling: Kubernetes `Recreate`, or `maxSurge: 0, maxUnavailable: 100%`.
+
+- **Why:** an old binary still takes the retired session advisory locks,
+  and a new one ignores them. So a mixed fleet runs every singleton role
+  twice for the length of the rollout. Money converges by the registered
+  CAS guards; webhook events can duplicate.
+- **Migrations:** run migrations first, the same as for any rollout (see
+  **Migrations** under [Scaling](#scaling)).
+- **Change:** the leader-lease cutover, #870.
 
 ## Scaling
 
 - **Horizontal:** Multi-replica is safe on the money paths. Schedulers
-  and outbox dispatchers (the workers that drain the queued
-  side-effect tables — outbound webhooks and emails) are
-  leader-elected: only one replica runs each job at a time, guarded
-  by per-tick leases in `leader_leases` (`internal/platform/leader`,
-  ADR-114) and SKIP-LOCKED row claims (rows another worker already holds are
-  skipped, not waited on), so replicas coexist without
-  double-billing or double-sending. "Safe"
-  is not "fully supported": a few surfaces still assume one process
-  (the dashboard's live webhook-event tail only shows events dispatched
-  by the replica serving the stream; the password-reset send cap
-  becomes per-replica).
-  The complete verified list — what breaks at N=2, what's already safe,
-  and the scoped build plan — is
+  and outbox dispatchers are leader-elected: only one replica runs each
+  job at a time. Outbox dispatchers are the workers that drain the queued
+  side-effect tables (outbound webhooks and emails). Two mechanisms guard
+  this, so replicas coexist without double-billing or double-sending:
+  - per-tick leases in `leader_leases` (`internal/platform/leader`,
+    ADR-114; see [leader lease](../docs/README.md#glossary));
+  - SKIP-LOCKED row claims: rows another worker already holds are
+    skipped, not waited on.
+
+  "Safe" is not "fully supported". A few surfaces still assume one process:
+  - the dashboard's live webhook-event tail only shows events dispatched
+    by the replica serving the stream;
+  - the password-reset send cap becomes per-replica.
+
+  The complete verified list is
   [docs/dev/ha-readiness-2026-07-06.md](../docs/dev/ha-readiness-2026-07-06.md).
-  As of 2026-08-30 N ≥ 2 behind a load balancer is the supported
-  production posture and the remaining items are being built (see the
+  It covers what breaks at N=2, what's already safe, and the scoped build
+  plan. As of 2026-08-30, N ≥ 2 behind a load balancer is the supported
+  production posture. The remaining items are being built (see the
   HA-readiness doc's dated header). The reference compose stack stays
   single-replica for evaluation.
 - **Rolling deploys and shutdown:** on SIGTERM a replica first flips
-  `/health/ready` to `503 {"status":"draining"}` (liveness `/health` stays
-  200) and keeps listening for `SHUTDOWN_DRAIN_DELAY` (default 5s outside
-  local) so a health-check-driven balancer stops routing to it; then it
-  drains in three bounded stages — in-flight HTTP (≤ 30s; the dashboard's
-  live webhook tail is closed first so it cannot pin this stage), an
-  in-flight test-clock advance (≤ 30s, then abandoned — the clock stays
-  `advancing` until some replica restarts, see the runbook's test-clock
-  section), background workers (≤ 30s). Worst case 90s, typically under
-  2s. **Set the orchestrator's grace period to 120s** (Kubernetes
+  readiness so the balancer stops routing to it (while still accepting
+  connections), then drains in three bounded stages.
+
+  | Step | What happens | Time limit |
+  |---|---|---|
+  | Readiness drain | `/health/ready` returns `503 {"status":"draining"}`; liveness `/health` stays 200. The replica keeps listening for this delay, so a health-check-driven balancer has time to stop routing to it. | `SHUTDOWN_DRAIN_DELAY` (default 5s outside local) |
+  | 1. In-flight HTTP | The dashboard's live webhook tail is closed first, so it cannot pin this stage. | ≤ 30s |
+  | 2. In-flight test-clock advance | Abandoned at the limit. The clock stays `advancing` until some replica restarts; see the runbook's test-clock section. | ≤ 30s |
+  | 3. Background workers | | ≤ 30s |
+
+  Worst case 90s, typically under 2s.
+
+  **Set the orchestrator's grace period to 120s** (Kubernetes
   `terminationGracePeriodSeconds: 120`; compose `stop_grace_period: 120s`,
-  already set). Shorter grace SIGKILLs mid-drain, which is designed-for
-  (claimed outbox rows resume via their leases; a killed catch-up is
-  recovered by the next replica boot) but costs bounded at-least-once
-  duplicates.
+  already set). A shorter grace SIGKILLs the replica mid-drain. This is
+  designed-for: claimed outbox rows resume via their leases, and the next
+  replica boot recovers a killed catch-up. The cost is bounded
+  at-least-once duplicates.
 
   **Size `SHUTDOWN_DRAIN_DELAY` to the balancer.** The draining replica
-  keeps listening for this long after flipping readiness, so it must be at
+  keeps listening for this long after flipping readiness. So it must be at
   least the balancer's health-check interval × unhealthy threshold (an AWS
   ALB's defaults are 30s × 2 = 60s; set `SHUTDOWN_DRAIN_DELAY=60s`). `0` is
   fine when the orchestrator removes the endpoint itself (Kubernetes).
-
-  **Upgrading from ≤ v0.3.2** (the release before the leader-lease cutover,
-  #870): do this one rollout as stop-all-then-start (Kubernetes `Recreate`,
-  or `maxSurge: 0, maxUnavailable: 100%`), not rolling. An old binary still
-  takes the retired session advisory locks and a new one ignores them, so
-  a mixed fleet runs every singleton role twice for the length of the
-  rollout (money converges by the registered CAS guards; webhook events
-  can duplicate). Run migrations first as usual.
 - **Database:** Velox uses connection pooling (`DB_MAX_OPEN_CONNS`,
   default 20). When scaling replicas, ensure total connections across
   all instances don't exceed your PostgreSQL `max_connections`.
 - **Migrations:** Only one instance should run migrations per rollout.
-  `RUN_MIGRATIONS_ON_BOOT=true` is safe under races (appliers serialize
-  on an advisory lock and re-check applied state under it), but a
-  dedicated migration step before rollout is still the cleaner shape.
+  `RUN_MIGRATIONS_ON_BOOT=true` is safe under races: appliers serialize
+  on an advisory lock and re-check applied state under it. A dedicated
+  migration step before rollout is still the cleaner shape.

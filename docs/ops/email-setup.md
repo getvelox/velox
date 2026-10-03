@@ -1,21 +1,24 @@
 # Email Setup
 
-How to wire a Velox deployment's outbound email to an SMTP provider
-and verify it works. Written for the engineer operating the
-deployment — no prior familiarity with this codebase assumed.
+How to connect a Velox deployment's outbound email to an SMTP provider
+and check that it works. It is written for the engineer who operates
+the deployment, and it assumes no prior knowledge of this codebase.
 
-Velox sends customer-facing emails (invoices, receipts, credit notes,
-dunning notices — automated overdue-payment reminders — plus
-payment-failed notifications, payment-setup links,
-password resets, team invites) through SMTP. Plug in your existing
-email service provider (ESP) via env vars; no code changes needed to
-swap providers.
+Velox sends all customer-facing email through SMTP:
 
-This doc covers production-ready SMTP configuration. Bounce/
-complaint webhooks (per-ESP webhook receivers feeding `email_status`
-— Velox's per-customer deliverability field — back into Velox) are
-out of scope for v1 — configure suppressions (do-not-send lists) on
-the ESP side instead.
+- invoices, receipts and credit notes
+- [dunning](../README.md#glossary) notices (automated reminders about overdue payments)
+- payment-failed notifications and payment-setup links
+- password resets and team invites
+
+You plug in your existing email service provider (ESP) through env
+vars. Swapping providers needs no code changes.
+
+This doc covers production-ready SMTP configuration. Bounce and
+complaint webhooks are out of scope for v1. These would be per-ESP
+webhook receivers that feed `email_status` back into Velox
+(`email_status` is Velox's per-customer deliverability field). Instead,
+configure suppressions (do-not-send lists) on the ESP side.
 
 ## Quickstart
 
@@ -39,11 +42,13 @@ CUSTOMER_PORTAL_URL=https://billing.example.com        # SPA base for the Stripe
 PAYMENT_UPDATE_URL=https://billing.example.com/update-payment   # payment-update-request emails (no-PM-at-finalize, charge-failure)
 ```
 
-Restart Velox; the next email queued in `email_outbox` — the Postgres
-table where every outgoing email waits for a background dispatcher to
-send it — goes out via your provider. The server boots with WARN
-lines for each missing env, so misconfiguration is unmissable without
-preventing startup:
+Restart Velox. The next email queued in `email_outbox` then goes out
+through your provider. `email_outbox` is the Postgres table where every
+outgoing email waits for a background dispatcher to send it (see
+[outbox](../README.md#glossary)).
+
+The server logs a WARN line at boot for each missing env var. A
+misconfiguration is therefore easy to see, and it does not stop startup:
 
 | Env var unset | Boot warning | Customer-visible failure |
 |---|---|---|
@@ -55,29 +60,29 @@ preventing startup:
 ("No-PM-at-finalize" above = an invoice reached finalization with no
 payment method on file for the customer.)
 
-For local dev, point at the Mailpit container — a local SMTP catcher
-with a web inbox — bundled in `docker-compose.yml` (see the Mailpit
-section at the end of the provider list below).
+For local dev, point Velox at the Mailpit container bundled in
+`docker-compose.yml`. Mailpit is a local SMTP catcher with a web inbox.
+See the Mailpit section at the end of the provider list below.
 
-## Sender domain authentication (DP responsibility)
+## Sender domain authentication (your responsibility)
 
-A DP (design partner) is an early customer running their own Velox
-deployment — DNS sits with you, the operator; Velox can't configure
-it for you. Before going to production, configure your sending
-domain so emails don't land in spam:
+Your sending domain's DNS is yours to manage as the team operating the
+deployment, so Velox can't configure it for you. Before going to production, configure your sending domain so
+emails don't land in spam:
 
 - **SPF** record: list your ESP's sending IPs in DNS.
 - **DKIM**: most ESPs auto-sign if you add their CNAME records.
 - **DMARC**: start with `p=none` (monitor mode), then tighten to
   `p=quarantine` once SPF + DKIM are passing.
 
-Each ESP has step-by-step DNS-config docs; this is one-time setup
-per sending domain. Ignoring it = ~30%+ delivery into spam folders.
+Each ESP has step-by-step DNS-config docs. You do this setup once per
+sending domain. If you skip it, expect ~30%+ of emails to be delivered
+into spam folders.
 
 ## Per-provider configuration
 
 Each section below assumes you've already created the sender domain
-+ verified DKIM/SPF in the ESP's dashboard.
+and verified DKIM/SPF in the ESP's dashboard.
 
 ### SendGrid (most common)
 
@@ -105,8 +110,8 @@ SMTP_TLS=starttls
 ```
 
 Both `SMTP_USERNAME` and `SMTP_PASSWORD` are the same Server API
-Token. Postmark is transactional-only — use for billing emails;
-don't try to push marketing through it. [docs](https://postmarkapp.com/developer/user-guide/send-email-with-smtp)
+Token. Postmark is transactional-only. Use it for billing emails, and
+don't send marketing email through it. [docs](https://postmarkapp.com/developer/user-guide/send-email-with-smtp)
 
 ### AWS SES (port 587, STARTTLS)
 
@@ -119,10 +124,10 @@ SMTP_FROM=billing@yourdomain.com
 SMTP_TLS=starttls
 ```
 
-The username/password aren't your AWS credentials — generate SMTP-
-specific credentials in the SES console (IAM → Create SMTP creds).
-Verify your sending domain in SES first; new accounts start in
-sandbox mode (recipient-verified only). [docs](https://docs.aws.amazon.com/ses/latest/dg/send-email-smtp.html)
+The username and password aren't your AWS credentials. Generate
+SMTP-specific credentials in the SES console (IAM → Create SMTP creds).
+Verify your sending domain in SES first. New accounts start in sandbox
+mode, which sends only to verified recipients. [docs](https://docs.aws.amazon.com/ses/latest/dg/send-email-smtp.html)
 
 ### AWS SES (port 465, implicit TLS)
 
@@ -135,8 +140,8 @@ SMTP_FROM=billing@yourdomain.com
 SMTP_TLS=implicit
 ```
 
-Use this if your egress firewall blocks STARTTLS on 587. Identical
-delivery semantics; just different transport.
+Use this if your egress firewall blocks STARTTLS on 587. Delivery
+works the same way; only the transport differs.
 
 ### Mailgun
 
@@ -164,8 +169,8 @@ SMTP_TLS=starttls
 ```
 
 Username is literally `resend`. Free tier: 3000 emails/month, 100
-emails/day. Cleanest API + dashboard among modern providers; pick
-this if you don't have an ESP yet. [docs](https://resend.com/docs/send-with-smtp)
+emails/day. It has the cleanest API and dashboard among modern
+providers, so pick it if you don't have an ESP yet. [docs](https://resend.com/docs/send-with-smtp)
 
 ### Mailtrap (testing sandbox — non-production)
 
@@ -181,7 +186,7 @@ SMTP_FROM=billing@example.com
 SMTP_TLS=starttls
 ```
 
-Emails appear in the Mailtrap dashboard; nothing reaches the actual
+Emails appear in the Mailtrap dashboard. Nothing reaches the actual
 recipient inbox. [docs](https://help.mailtrap.io/article/12-getting-started-guide)
 
 ### Mailpit (local dev — bundled in `docker-compose.yml`)
@@ -193,9 +198,9 @@ Postgres and Redis. Bring it up with:
 docker compose up -d mailpit
 ```
 
-Then point Velox at it (all five URL/SMTP vars together — leaving any
-of HOSTED_INVOICE_BASE_URL / CUSTOMER_PORTAL_URL / PAYMENT_UPDATE_URL
-unset will leave the corresponding email links blank):
+Then point Velox at it, setting all five URL/SMTP vars together. If you
+leave any of HOSTED_INVOICE_BASE_URL / CUSTOMER_PORTAL_URL /
+PAYMENT_UPDATE_URL unset, the matching email links stay blank:
 
 ```bash
 SMTP_HOST=localhost
@@ -209,14 +214,14 @@ CUSTOMER_PORTAL_URL=http://localhost:5173
 PAYMENT_UPDATE_URL=http://localhost:5173/update-payment
 ```
 
-View captured email at <http://localhost:8025>. Nothing leaves
-your machine, yet dev exercises the same SMTP code path as
-production — an earlier "log to stdout when SMTP_HOST is
-unset" fallback was removed so dev and prod can't drift.
+View captured email at <http://localhost:8025>. Nothing leaves your
+machine, yet dev runs the same SMTP code path as production. An
+earlier "log to stdout when SMTP_HOST is unset" fallback was removed,
+so dev and prod can't drift apart.
 
-The inbox at `http://localhost:8025` is local-only; no DNS or auth
-required. Don't use `SMTP_TLS=none` in production — emails travel
-in plaintext.
+The inbox at `http://localhost:8025` is local-only and needs no DNS or
+auth. Don't use `SMTP_TLS=none` in production, because emails then
+travel in plaintext.
 
 ## Common configuration mistakes
 
@@ -231,7 +236,14 @@ in plaintext.
 
 ## Verifying your configuration
 
-After setting env vars, restart Velox and run a test send:
+After setting env vars, restart Velox and run a test send. The
+commands use three shell variables that you set first:
+
+- `$API`: the base URL of your Velox API.
+- `$KEY`: a secret API key (`vlx_secret_…`) for the tenant that owns the
+  invoice, in the same mode (test or live) as the invoice. See
+  [API key types](../README.md#glossary).
+- `$INV_ID`: the ID of a finalized invoice.
 
 ```bash
 # Trigger an invoice email (requires a finalized invoice)
@@ -246,8 +258,11 @@ PGPASSWORD=velox psql -h localhost -U velox -d velox \
       FROM email_outbox ORDER BY created_at DESC LIMIT 5;"
 ```
 
-Status `dispatched` = delivered to ESP. `pending` with attempts > 0 +
-`last_error` = ESP rejected; fix per the error message.
+How to read the result:
+
+- Status `dispatched` means the email was delivered to the ESP.
+- Status `pending` with attempts > 0 and a `last_error` means the ESP
+  rejected it. Fix the cause the error message names.
 
 ## Bounce + complaint handling (deferred)
 
@@ -255,18 +270,18 @@ When SMTP returns a permanent 5xx, Velox marks the customer's
 `email_status` as `bounced` (via `bounceReporterAdapter` in
 `router.go`). This catches synchronous failures.
 
-Asynchronous bounces — where the ESP accepts the message but the
-recipient mailbox rejects it later — don't flow back through SMTP.
-Each ESP has its own webhook format for these:
+Asynchronous bounces don't flow back through SMTP. In an asynchronous
+bounce, the ESP accepts the message but the recipient mailbox rejects
+it later. Each ESP has its own webhook format for these:
 
 - **SES**: SNS notifications → forward to a Velox webhook endpoint.
 - **SendGrid**: Event Webhook → POST to your endpoint.
 - **Postmark**: Webhooks → POST.
 
-For v1, configure suppressions inside the ESP's dashboard — this
-prevents repeat-sending to bouncing addresses without needing a
-Velox-side integration. Per-ESP webhook receivers can be added later
-when a DP needs them.
+For v1, configure suppressions inside the ESP's dashboard. This stops
+repeat sends to bouncing addresses without a Velox-side integration.
+Per-ESP webhook receivers can be added later, when a
+[design partner](../README.md#glossary) (DP) needs them.
 
 ## When to consider an API-based backend
 
@@ -280,23 +295,24 @@ backend when:
 - Bounce/complaint webhooks need to feed back into Velox without a
   separate IMAP listener.
 
-When that bar is hit, add a backend selector — `EMAIL_PROVIDER=smtp`
-(default) or `EMAIL_PROVIDER=resend|postmark|ses` — that swaps the
-underlying transport. SMTP stays as the universal floor.
+When you reach that point, add a backend selector that swaps the
+underlying transport: `EMAIL_PROVIDER=smtp` (default) or
+`EMAIL_PROVIDER=resend|postmark|ses`. SMTP stays as the option that
+works with every provider.
 
 ## Sending high-volume from one tenant
 
-A tenant is one company's account on a Velox deployment — the
-business doing the billing, not its end customers. If a single
-tenant sends >10k emails/hour:
+A [tenant](../README.md#glossary) is one business that uses a Velox
+install to bill its own customers. If a single tenant sends >10k
+emails/hour:
 
-- **Lower the email-outbox dispatcher concurrency** — Velox runs one
-  dispatcher worker today; high concurrency against rate-limited
-  relays = throttling.
-- **Spread across providers** — some tenants use one ESP for
+- **Lower the email-outbox dispatcher concurrency.** Velox runs one
+  dispatcher worker today. High concurrency against rate-limited
+  relays causes throttling.
+- **Spread across providers.** Some tenants use one ESP for
   transactional billing emails and another for marketing, with
   separate sending domains.
 - **Negotiate dedicated IPs with your ESP** before crossing 50k
   emails/day from a single sender.
 
-These are operations-level decisions; Velox doesn't enforce limits.
+These are operations-level decisions. Velox doesn't enforce limits.
