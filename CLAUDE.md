@@ -75,7 +75,7 @@ Every user-visible ship updates the docs that describe it, in the same PR:
 - `CHANGELOG.md` (Keep-a-Changelog) — what shipped, dated.
 - `MANUAL_TEST.md` — add or revise the matching FLOW so the assertions still match observable behavior. If a flow lies, future-you can't run it; that's the rot trigger we already paid for once. Trimmed shape (post-2026-05-02): one observable per checkbox, no preamble prose, drop DB introspection unless it's the actual assertion. Stale flows = delete or rewrite, not leave-and-document.
 - `docs/adr/` if the change is a decision worth re-litigating later.
-- `README.md` "Recently shipped" / "In flight" sections — keep aligned with reality; if a "Roadmap" item is silently descoped, edit the README first, then act.
+- `README.md` "Roadmap" section ("Recently shipped" / "Explicitly deferred") — keep aligned with reality; if a "Roadmap" item is silently descoped, edit the README first, then act.
 
 How to write them: **[docs/dev/writing-style.md](docs/dev/writing-style.md)** (point first, one idea per sentence, define terms, clarity and truth in separate PRs).
 
