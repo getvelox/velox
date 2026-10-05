@@ -144,7 +144,9 @@ Declared scope note: because the emission attaches inside `Service.Grant`
 routes AND the proration-fallback + credit-note-bridge flows that reach
 `Grant` from other requests. That widening is deliberate: a grant is a
 grant, and the actor attribution (the enclosing request's identity) is
-exactly ADR-090's D16 rule for operator-triggered synchronous effects. Amended in PR4: `GrantTx` (and therefore `GrantForCreditNoteTx`, which
+the rule this ADR applies to operator-triggered synchronous effects.
+*(Edited 2026-10-05: this sentence named that rule "D16", a label from the
+design panel's working list, which is not in the repository.)* Amended in PR4: `GrantTx` (and therefore `GrantForCreditNoteTx`, which
 routes through it) now emits on the caller's transaction, closing the
 own-tx/caller-tx divergence — a credit-note Issue tx deliberately carries
 BOTH its `credit_note.issued` row and the grant's `grant` row.
