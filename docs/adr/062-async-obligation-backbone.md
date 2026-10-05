@@ -187,6 +187,15 @@ stays the last line of each re-drive body, so the PR2 marker-gating anti-pattern
 has nowhere to recur. Shipped as a behaviour-preserving, net-negative-LOC PR; no
 migration, no new table.
 
+> **Note (2026-10-05).** "(c)" is the design panel's label for the consolidated
+> obligation queue. This amendment was committed at 14:21 on 2026-06-25 (#315),
+> 43 minutes before the same day's B1 → B2 flip (#316). Its sentence that the
+> decided (c) "enqueues obligations onto the generalised `webhook_outbox`"
+> describes B1. The current decision is B2 (see Decision): a separate
+> `obligations` table, drained with the `webhook_outbox` machinery. The thin
+> sweep driver described above is unaffected; the obligation drainer still
+> slots in as one more `Reconciler`.
+
 ## Related
 
 - ADR-040 — the transactional outbox this would generalise (`webhook_outbox`).
