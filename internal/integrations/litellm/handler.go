@@ -90,8 +90,8 @@ type SpendResponse struct {
 // SpendRowError carries the per-payload reason a particular row was
 // rejected. The adapter is intentionally permissive — one bad row
 // doesn't fail the whole batch. LiteLLM retries the whole batch on
-// 5xx, so per-row 422 / "skip" semantics avoid retry storms when a
-// single misconfigured call lacks `user`.
+// 5xx, so a per-row errors[] entry inside a 200 avoids retry storms
+// when a single misconfigured call lacks `user`.
 type SpendRowError struct {
 	ID    string `json:"id"`
 	Error string `json:"error"`

@@ -50,8 +50,9 @@ type StandardLoggingPayload struct {
 	// end-user identifier the partner passes to litellm.completion
 	// (`user="..."`). We treat this as the Velox external_customer_id
 	// — operators set their LiteLLM call's user= to the customer's
-	// Velox external_id. Missing → 422; the adapter refuses to bill
-	// "anonymous" usage to "unknown customer".
+	// Velox external_id. Missing → that row is rejected with a per-row
+	// entry in the response's errors[] (the batch still answers 200);
+	// the adapter refuses to bill "anonymous" usage to "unknown customer".
 	User string `json:"user"`
 
 	// Usage carries the token counts the adapter maps to two
