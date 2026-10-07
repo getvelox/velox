@@ -84,7 +84,7 @@ sits outside the RLS fence like `schema_migrations`.
   holder_id IS NOT NULL RETURNING now()`. 0 rows is **definitive loss**
   (takeover, release, or pause) → the work ctx is cancelled with cause
   `ErrLeaseLost`. A statement error is a missed beat, not loss.
-- **RELEASE** — after work returns (normal, panic-recovered, or cancelled),
+- **RELEASE** — after work returns (normal, panicked, or cancelled),
   on a 2 s background ctx: clears the holder; stamps `last_tick_ended_at`
   only if the tick completed, so an interrupted tick leaves the role due —
   with a fixed cooldown (`now() + min(interval, 60 s)`) so a slow database
@@ -274,3 +274,24 @@ winner; `TestClosePeriodTx_CASOneWinner`, which replaced
 `TestAdvanceBillingCycle_StaleWatermarkIsNoOp` at ADR-115) and by
 service/engine unit tests, each mutation-verified.
 
+## Amendment 2026-10-08 — a panicked tick is released as not completed
+
+The RELEASE rule above ("stamps `last_tick_ended_at` only if the tick
+completed") was not what shipped for panics. The runner recovered the panic
+*inside* the work closure, so `Lead` saw a normal return and released the
+tick as completed. A tick that panicked on every run (one malformed row with
+no per-item recover) therefore stamped a fresh completion each interval:
+billing or dunning could halt for every tenant while
+`velox_leader_last_tick_age_seconds` stayed healthy. Found by the 2026-10-08
+lease correctness review (finding L1).
+
+Fix: the runner's `recover` now wraps `gate.Lead`, as this section always
+assumed, so the panic unwinds through `Lead`. `Lead` records whether work
+returned. If it did not, it releases with outcome 3 (failed), which is the same
+SQL branch as a lost lease: `last_tick_*` untouched, `not_before = now() +
+min(interval, 60 s)`. It then reports `reason="panicked"` on
+`velox_leader_lease_lost_total` and lets the panic continue to the runner,
+which logs it with the stack. A deterministic panic now retries at most once
+per cooldown, pages on the lease-lost counter at once, and ages the stall
+gauge. Pinned by `TestLease_PanickedTickIsNotACompletion` (real Postgres) and
+`TestRun_PanicUnwindsThroughTheGate`, both mutation-verified.

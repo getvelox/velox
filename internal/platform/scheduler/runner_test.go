@@ -58,6 +58,56 @@ func TestRun_PanicRecoveryContinuesLoop(t *testing.T) {
 	}
 }
 
+// unwindObservingGate leads every call and records whether work returned
+// normally — the same "did we return" flag leader.Manager.Lead uses to
+// release a panicked tick as not completed.
+type unwindObservingGate struct{ unwound atomic.Int32 }
+
+func (g *unwindObservingGate) Lead(ctx context.Context, role leader.Role, _ time.Duration, work func(context.Context)) (bool, error) {
+	returned := false
+	defer func() {
+		if !returned {
+			g.unwound.Add(1)
+		}
+	}()
+	work(leader.WithToken(ctx, role, 1))
+	returned = true
+	return true, nil
+}
+
+// TestRun_PanicUnwindsThroughTheGate pins where the recover lives. The gate
+// must SEE a panicking tick (work does not return normally), or it releases
+// the lease as a completed tick and the stall gauge stays fresh while the
+// role runs nothing. A recover inside the work closure — the pre-fix shape —
+// swallows the panic before Lead's defer and turns this red.
+func TestRun_PanicUnwindsThroughTheGate(t *testing.T) {
+	var ticks atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gate := &unwindObservingGate{}
+	work := func(context.Context) {
+		if ticks.Add(1) == 1 {
+			panic("boom")
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		Run(ctx, leader.Role("test_worker"), 5*time.Millisecond, gate, work, nil)
+		close(done)
+	}()
+
+	waitFor(t, func() bool { return ticks.Load() >= 3 }, 500*time.Millisecond,
+		"ticks < 3: a panic on tick 1 stopped the loop")
+	cancel()
+	<-done
+
+	if got := gate.unwound.Load(); got != 1 {
+		t.Fatalf("gate saw %d abnormal returns, want 1 (the panicking tick) — a recover inside the work hides the panic from the gate", got)
+	}
+}
+
 // TestRun_StopsOnContextCancel asserts the runner exits cleanly when
 // the parent ctx is cancelled — no leaked goroutines or stuck loops
 // when cmd/velox shuts down.

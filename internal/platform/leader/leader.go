@@ -82,7 +82,9 @@ type Gate interface {
 	// paused — the caller simply polls again. When it leads, work runs with a
 	// ctx that carries (role, token) and is cancelled with cause ErrLeaseLost
 	// if the heartbeat cannot keep the lease; the lease is released after work
-	// returns, on a background ctx, so a cancelled parent cannot skip it.
+	// returns, on a background ctx, so a cancelled parent cannot skip it. A
+	// panic in work is released as a tick that did NOT complete and then
+	// re-propagates to the caller, which owns the recover.
 	Lead(ctx context.Context, role Role, interval time.Duration, work func(ctx context.Context)) (led bool, err error)
 }
 
