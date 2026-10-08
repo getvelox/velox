@@ -10,7 +10,7 @@ import (
 
 // Collect-pipeline collaborators for integration engines. REQUIRED post-#442
 // (the charger/paymentSetups/noPMNotifier nil guards are deleted): every
-// engine whose flow can reach collectAfterFinalize wires these. The defaults
+// engine whose flow can reach the collector (CollectInvoice) wires these. The defaults
 // steer flows into the no-PM arm — queue for the sweep + notify — which only
 // writes auto_charge_pending on the test's own tenant.
 

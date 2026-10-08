@@ -867,74 +867,12 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 		}
 	}
 
-	// Apply customer credits before charging. Same shape as the cycle scan —
-	// INCLUDING the creditApplyOK gate (2026-05-30 fix, ported 2026-06-13): a
-	// failed credit application must flag the invoice for the scheduler-retry
-	// sweep and SKIP the inline charge below, otherwise the customer's card is
-	// charged the FULL pre-credit total while their balance sits unconsumed.
-	// The retry sweep re-applies credits before charging (processAutoCharge).
-	creditApplyOK := true
-	if e.credits != nil && totalWithTax > 0 {
-		if _, err := e.credits.ApplyToInvoiceAt(ctx, sub.TenantID, sub.CustomerID, inv.ID, totalWithTax, now, inv.InvoiceNumber); err != nil {
-			slog.Warn("threshold scan: failed to apply credits — flagging for retry; auto-charge skipped to avoid overcharge",
-				"invoice_id", inv.ID, "error", err)
-			creditApplyOK = false
-			if err := e.invoices.SetAutoChargePending(ctx, sub.TenantID, inv.ID, true); err != nil {
-				// A failed set(true) is a liveness sink: the invoice stays
-				// invisible to RetryPendingCharges forever (playbook class G).
-				slog.Warn("failed to queue invoice for charge retry", "invoice_id", inv.ID, "error", err)
-			}
-		}
-	}
-
-	// If nothing is owed — credits covered 100%, OR the invoice was born $0
-	// (zero-priced usage lines crossing a usage_gte cap) — mark paid
-	// immediately, BUT only on invoices that landed as finalized at create
-	// time. Draft invoices (tax pending / pause-collection) stay draft with
-	// credits applied. A tax-pending draft auto-finalizes later via the
-	// tax-retry chain; a pause-collection draft stays draft until the operator
-	// finalizes it. Mirrors billOnePeriod's gate (2026-05-22 fix — DEMO-000906).
-	// The old `totalWithTax > 0` conjunct stranded $0 finalized invoices
-	// payment_pending FOREVER — never charged (amount_due=0 skips the charge
-	// arm), never paid, polluting the attention queue as overdue (ADR-066;
-	// Stripe parity: zero-amount invoices are auto-marked paid, no payment
-	// attempt).
-	if creditApplyOK && inv.Status == domain.InvoiceFinalized {
-		updatedInv, err := e.invoices.GetInvoice(ctx, sub.TenantID, inv.ID)
-		if err == nil && updatedInv.AmountDueCents <= 0 {
-			if _, err := e.invoices.MarkPaid(ctx, sub.TenantID, inv.ID, "", now); err != nil {
-				slog.Warn("threshold scan: failed to mark fully-credited invoice as paid",
-					"invoice_id", inv.ID, "error", err)
-			} else {
-				// Background credit settle — close any active dunning run so it
-				// isn't left stale (best-effort; processRun pre-check backstops).
-				e.resolveDunningRecovered(ctx, sub.TenantID, inv.ID)
-			}
-		}
-	}
-
-	// Auto-charge: synchronous with timeout, same behaviour as the cycle scan.
-	//
-	// The no-PM arm mirrors billOnePeriod's post-finalize block exactly.
-	// Pre-fix the else was MISSING here: a customer with no payment method
-	// crossing a spend threshold got a finalized invoice that was never
-	// queued for charge-on-attach (auto_charge_pending stayed false, so
-	// RetryPendingCharges never saw it — attaching a card later charged
-	// nothing) and never notified — it sat payment_pending until it aged
-	// into overdue. Cycle-close invoices took the correct arm; threshold
-	// fires silently did nothing (2026-07-10 design-census finding).
-	//
-	// A tax-pending threshold invoice is a DRAFT (paused subs never reach
-	// here — the scan skips them at entry) and is simply not collected here.
-	// This site used to pre-set auto_charge_pending on that draft, because
-	// the tax-retry chain finalized it without collecting and the flag was
-	// the only thing that would make the sweep notice. That gap is closed at
-	// its source now — invoice.Service.RetryTax queues the invoice when it
-	// auto-finalizes — so pre-flagging would be a second owner of one
-	// handoff, covering threshold fires but not cycle closes.
-	if creditApplyOK && inv.AmountDueCents > 0 && inv.Status == domain.InvoiceFinalized {
-		e.collectAfterFinalize(ctx, sub, inv, "threshold fire")
-	}
+	// Collect now, through the one collector (same as cycle close): apply
+	// credits, settle if nothing is owed, else charge the card or email for
+	// one. The fire tx already queued the invoice, so a crash here leaves it
+	// for the next sweep. A tax-pending threshold invoice is a draft and is
+	// collected when the tax-retry chain finalizes it.
+	e.CollectInvoice(ctx, sub.TenantID, inv.ID, &now)
 
 	// Emit subscription.threshold_crossed before the optional cycle reset
 	// so consumers see the crossing event ahead of any cycle-rollover side

@@ -289,7 +289,7 @@ func wireBaseTax(e *Engine) *Engine {
 	}
 	// Collect-pipeline collaborators are REQUIRED post-#442 — the old
 	// charger/paymentSetups/noPMNotifier nil guards are deleted, so any
-	// fixture whose flow reaches collectAfterFinalize needs them wired.
+	// fixture whose flow reaches the collector (CollectInvoice / processAutoCharge) needs them wired.
 	// Defaults (only when the fixture didn't provide its own): no ready PM
 	// → the pipeline takes the queue+notify arm; the sentinel charger errors
 	// if a test somehow reaches a charge without wiring a real fake.
@@ -864,7 +864,7 @@ type mockInvoices struct {
 	// errs.ErrAlreadyExists) and failure tests.
 	createErr error
 	// getErr, when set, is returned by GetInvoice — drives the
-	// collectAfterFinalize reload-failure arms without breaking the mock's
+	// collector's reload-failure arms without breaking the mock's
 	// other by-ID lookups (SetAutoChargePending still succeeds).
 	getErr error
 	// db, when set, gives the Audited create a REAL tenant tx to run the emit
@@ -876,9 +876,16 @@ type mockInvoices struct {
 	db *postgres.DB
 }
 
+// queuedAtBirth mirrors the store's collectionQueuedAtFinalize: an invoice
+// written as finalized and unpaid is queued for collection in the same write.
+func queuedAtBirth(inv domain.Invoice) bool {
+	return inv.Status == domain.InvoiceFinalized && inv.PaymentStatus == domain.PaymentPending
+}
+
 func (m *mockInvoices) CreateInvoice(_ context.Context, tenantID string, inv domain.Invoice) (domain.Invoice, error) {
 	inv.ID = fmt.Sprintf("vlx_inv_%d", len(m.invoices)+1)
 	inv.TenantID = tenantID
+	inv.AutoChargePending = queuedAtBirth(inv)
 	m.invoices = append(m.invoices, inv)
 	return inv, nil
 }
@@ -934,6 +941,7 @@ func (m *mockInvoices) MarkPaid(_ context.Context, _, id string, stripePI string
 			m.invoices[i].AmountPaidCents = m.invoices[i].AmountDueCents
 			m.invoices[i].AmountDueCents = 0
 			m.invoices[i].PaidAt = &paidAt
+			m.invoices[i].AutoChargePending = false
 			return m.invoices[i], nil
 		}
 	}
@@ -954,6 +962,7 @@ func (m *mockInvoices) CreateInvoiceWithLineItemsAudited(ctx context.Context, te
 	}
 	inv.ID = fmt.Sprintf("vlx_inv_%d", len(m.invoices)+1)
 	inv.TenantID = tenantID
+	inv.AutoChargePending = queuedAtBirth(inv)
 	if emit != nil {
 		runEmit := func() error { return emit(nil, inv) }
 		if m.db != nil {
@@ -996,7 +1005,7 @@ func (m *mockInvoices) ClaimAutoCharge(_ context.Context, _, id string) (bool, e
 	for _, inv := range m.invoices {
 		if inv.ID == id {
 			if !inv.AutoChargePending || inv.PaymentStatus != domain.PaymentPending ||
-				inv.Status != domain.InvoiceFinalized || inv.AmountDueCents <= 0 {
+				inv.Status != domain.InvoiceFinalized {
 				return false, nil
 			}
 			m.claimed[id] = true
@@ -1122,7 +1131,7 @@ func (m *mockInvoices) GetInvoiceForPeriod(_ context.Context, _, subscriptionID 
 func (m *mockInvoices) ListAutoChargePending(_ context.Context, limit int) ([]domain.Invoice, error) {
 	var result []domain.Invoice
 	for _, inv := range m.invoices {
-		if inv.AutoChargePending {
+		if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized && inv.PaymentStatus == domain.PaymentPending {
 			result = append(result, inv)
 			if len(result) >= limit {
 				break

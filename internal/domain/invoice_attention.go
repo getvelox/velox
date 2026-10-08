@@ -120,8 +120,9 @@ const (
 	AttentionReasonPaymentProcessing AttentionReason = "payment_processing"
 
 	// AttentionReasonPaymentScheduled: invoice is finalized and unpaid
-	// with auto_charge_pending=true — the scheduler will fire the auto-
-	// charge on its next tick. Operators can short-circuit with
+	// with auto_charge_pending=true (every unpaid invoice is queued by its
+	// finalize write, ADR-116) — the auto-charge sweep will collect it on
+	// its next tick. Operators can short-circuit with
 	// "Charge now". Mirrors Stripe's "Awaiting payment" with auto-retry
 	// scheduled state.
 	AttentionReasonPaymentScheduled AttentionReason = "payment_scheduled"
@@ -135,10 +136,12 @@ const (
 	// action does to every invoice already in flight.
 	AttentionReasonCollectionPaused AttentionReason = "collection_paused"
 
-	// AttentionReasonAwaitingPayment: invoice is finalized and unpaid,
-	// no charge attempt has fired yet (no PaymentIntent or
-	// auto_charge_pending=false). Operator can trigger a charge or send a
-	// reminder. Stripe parity: `open` invoice with no payment activity.
+	// AttentionReasonAwaitingPayment: invoice is finalized and unpaid but
+	// not queued for collection (auto_charge_pending=false). Since
+	// ADR-116 every finalize queues the invoice in the same write, so this
+	// is reached only by rows written before that change. Operator can
+	// trigger a charge or send a reminder. Kept in the enum: the reason
+	// codes are a public contract.
 	AttentionReasonAwaitingPayment AttentionReason = "awaiting_payment"
 
 	// AttentionReasonNoPaymentMethod: invoice is finalized and unpaid,
@@ -1027,10 +1030,10 @@ func classifyPaymentProcessing(inv Invoice, atc AttentionContext) *Attention {
 // wait the scheduler interval.
 func classifyPaymentScheduled(inv Invoice) *Attention {
 	since := attentionSince(inv)
-	// payment_scheduled fires when auto_charge_pending=true: a charge
-	// has been attempted, failed retryably, and the scheduler will
-	// pick it up on its next sweep. The sweep cadence is short
-	// (seconds-to-minutes) so we don't surface a precise
+	// payment_scheduled fires when auto_charge_pending=true and the
+	// invoice is still unpaid: the finalize-time collection didn't finish
+	// (a transient failure, or the process stopped), and the auto-charge
+	// sweep will pick it up on its next tick. We don't surface a precise
 	// next_attempt_at — "on its next tick" is honest.
 	//
 	// A clock-pinned (simulated) invoice is the exception: the wall-clock
@@ -1088,11 +1091,10 @@ func classifyCollectionPaused(inv Invoice) *Attention {
 // reminder email.
 //
 // This is NOT a steady state Velox has a collection mode for — every
-// finalize writer either charges inline or sets auto_charge_pending
-// (which routes to payment_scheduled instead). Reaching here means
-// the window between the finalize commit and that write, or a crash
-// inside it. Both are operator-recoverable via Charge now, which is
-// why the actions matter more than the copy here.
+// finalize write queues the invoice (auto_charge_pending, ADR-116),
+// which routes to payment_scheduled instead. Reaching here means a row
+// written before that change. It is operator-recoverable via Charge now,
+// which is why the actions matter more than the copy here.
 func classifyAwaitingPayment(inv Invoice) *Attention {
 	since := attentionSince(inv)
 	return &Attention{

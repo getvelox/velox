@@ -1786,7 +1786,7 @@ func (h *Handler) enrollAutoCharge(ctx context.Context, tenantID string, detail 
 		return
 	}
 	if err := h.invoices.SetAutoChargePending(ctx, tenantID, detail.AutoChargeInvoiceID, true); err != nil {
-		slog.ErrorContext(ctx, "proration charge invoice not enrolled for auto-charge; collect manually or it will sit unpaid",
+		slog.ErrorContext(ctx, "proration charge invoice: re-queue for auto-charge failed (its create already queued it if finalized)",
 			"error", err, "tenant_id", tenantID, "invoice_id", detail.AutoChargeInvoiceID)
 	}
 }

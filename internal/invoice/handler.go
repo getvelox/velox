@@ -22,7 +22,6 @@ import (
 	"github.com/sagarsuperuser/velox/internal/auth"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/errs"
-	"github.com/sagarsuperuser/velox/internal/payment"
 	"github.com/sagarsuperuser/velox/internal/platform/timeline"
 )
 
@@ -82,6 +81,15 @@ type AuditStampFetcher interface {
 // imports). Optional; nil means no-PM finalize just queues for retry.
 type NoPaymentMethodNotifier interface {
 	NotifyNoPaymentMethod(ctx context.Context, tenantID string, inv domain.Invoice, trigger string) (domain.NotifyOutcome, error)
+}
+
+// Collector collects one finalized invoice now: credits, then the saved card,
+// or the setup-link email when there is none. Satisfied by the billing
+// engine's CollectInvoice, which is the same collector the auto-charge sweep
+// runs. Declared here so the invoice package doesn't import billing. at nil
+// means "the invoice's clock now".
+type Collector interface {
+	CollectInvoice(ctx context.Context, tenantID, invoiceID string, at *time.Time)
 }
 
 // PaymentCanceler stops an invoice from being payable at Stripe when it is
@@ -227,6 +235,7 @@ type Handler struct {
 	auditLogger     auditWriter
 	noPMNotifier    NoPaymentMethodNotifier
 	auditStamps     AuditStampFetcher
+	collector       Collector
 }
 
 // auditWriter is the narrow audit-write interface the invoice handler uses.
@@ -275,15 +284,15 @@ func (h *Handler) SetEmailSender(sender EmailSender) {
 // SetAuditStamps wires the timeline's audit enrichment (ADR-104).
 func (h *Handler) SetAuditStamps(f AuditStampFetcher) { h.auditStamps = f }
 
-// SetNoPaymentMethodNotifier wires the customer-notification dispatcher
-// used when a manually-finalized invoice can't be auto-charged (no PM on
-// file). Mirrors the billing engine's wiring — both receive the same
-// adapter instance — so a manual one-off invoice and a cycle invoice notify
-// the customer identically at finalize. Optional; nil → no-PM finalize
-// still queues for scheduler retry, just without the email.
+// SetNoPaymentMethodNotifier wires the dispatcher behind the operator's
+// "resend payment setup link" action. Optional; nil disables the resend.
 func (h *Handler) SetNoPaymentMethodNotifier(n NoPaymentMethodNotifier) {
 	h.noPMNotifier = n
 }
+
+// SetCollector wires the collector that finalize calls right after the
+// commit. Optional; nil leaves a finalized invoice to the auto-charge sweep.
+func (h *Handler) SetCollector(c Collector) { h.collector = c }
 
 // SetEmailEvents wires the email_outbox lister used by the timeline
 // to surface customer-notification events. Optional — when nil, the
@@ -540,178 +549,25 @@ func (h *Handler) finalize(w http.ResponseWriter, r *http.Request) {
 	// NOT email the invoice. Operators can still send it explicitly via
 	// POST /{id}/send.
 
-	// Bind before the post-finalize side effects (ADR-030 / ADR-104): the
-	// service bound ctx for the finalize WRITE, but this call runs on the
-	// handler's raw ctx, so the setup-link email it may enqueue was
-	// stamped with no billing anchor and fell off the invoice's calendar.
-	inv = h.collectAtFinalize(h.svc.bindForInvoice(r.Context(), tenantID, inv.ID), tenantID, inv)
+	// Collect now through the billing engine's one collector (credits, then
+	// the card, or the setup-link email). The finalize write already queued
+	// the invoice, so if this is unwired or the process dies mid-call the
+	// auto-charge sweep collects it on its next tick. Bind first (ADR-030 /
+	// ADR-104): the setup-link email it may enqueue must carry the invoice's
+	// billing anchor, and this runs on the handler's raw ctx.
+	if h.collector != nil {
+		h.collector.CollectInvoice(h.svc.bindForInvoice(r.Context(), tenantID, inv.ID), tenantID, inv.ID, nil)
+		// Respond with the post-collection state (paid, failed, or still
+		// queued), as the caller saw it before collection moved here.
+		if collected, err := h.svc.Get(r.Context(), tenantID, inv.ID); err == nil {
+			inv = collected
+		} else {
+			slog.WarnContext(r.Context(), "reload after collect failed; responding with the finalized invoice",
+				"invoice_id", inv.ID, "error", err)
+		}
+	}
 
 	respond.JSON(w, r, http.StatusOK, inv)
-}
-
-// collectAtFinalize runs the post-finalize collection step and returns the
-// possibly-updated invoice. It mirrors the billing engine's cycle-invoice
-// post-finalize block so a manual one-off invoice collects identically:
-//   - payment method ready → auto-charge the saved card (the Stripe webhook
-//     fires the receipt on success; a decline starts dunning).
-//   - no payment method → queue for the scheduler's auto-charge retry (the
-//     RetryPendingCharges sweep picks it up on its next tick after the
-//     customer attaches a card — attach itself kicks no charge, so collection
-//     can lag attach by up to the billing interval, 1h in prod / 5m local)
-//     AND email the customer a payment-update link. Pre-fix the no-PM case did nothing, so a manual
-//     invoice silently went overdue — customer never told, scheduler never
-//     retried.
-func (h *Handler) collectAtFinalize(ctx context.Context, tenantID string, inv domain.Invoice) domain.Invoice {
-	// Once the invoice is finalized, collection must not be abortable by the
-	// operator's browser: this ctx is the HTTP request's, and a client
-	// disconnect mid-charge would cancel the Stripe call at its most
-	// ambiguous moment AND kill every write that remembers the failure — the
-	// charger's own 'unknown' outcome-persist runs on this same ctx, as do
-	// the retry-flag set and the notifier below. One external event would
-	// erase the failure and its bookkeeping in the same stroke. WithoutCancel
-	// keeps the request's values (tenant, livemode, clock binding) and drops
-	// only the cancellation; the charge itself is re-bounded by the 30s
-	// deadline below (the engine pipeline's shape: durable parent for
-	// bookkeeping, disposable child for the risky call).
-	ctx = context.WithoutCancel(ctx)
-
-	// Drain the customer's credit balance first (ADR-088: the balance applies
-	// to one-off invoices too — Stripe parity; Lago-style exclusion rejected).
-	// The card below is only ever charged the post-credit remainder, and a
-	// fully covered invoice falls into the zero-due settle arm. An apply
-	// FAILURE queues for the retry sweep and returns WITHOUT charging (trap
-	// R1: never a pre-credit card charge — the sweep re-applies atomically
-	// before its own charge, so recovery pre-exists).
-	if inv.AmountDueCents > 0 {
-		refreshed, err := h.svc.ApplyCreditBalance(ctx, tenantID, inv.ID)
-		if err != nil {
-			slog.WarnContext(ctx, "credit apply failed at manual finalize — queuing for scheduler retry; never charging pre-credit",
-				"invoice_id", inv.ID, "error", err)
-			if serr := h.svc.SetAutoChargePending(ctx, tenantID, inv.ID, true); serr != nil {
-				slog.WarnContext(ctx, "failed to mark invoice for auto-charge retry",
-					"invoice_id", inv.ID, "error", serr)
-			}
-			return inv
-		}
-		inv = refreshed
-	}
-
-	if inv.AmountDueCents <= 0 {
-		// Finalized with nothing left to pay (the ADR-066 class): there is no
-		// payment to wait for, so the terminal state is PAID — Stripe parity:
-		// zero-amount invoices auto-mark paid with no payment attempt.
-		// Pre-fix this was a bare early return, which stranded the invoice
-		// finalized/payment_pending FOREVER: every charge path gates on
-		// amount_due > 0 (correctly), the retry sweep's predicate too, and
-		// dunning never starts — it aged into a permanently-overdue attention
-		// item nothing could act on. The engine's cycle, threshold, and
-		// tax-retry writers all carry this settle arm; the manual writer was
-		// the one that imitated the collect block without it. Draft/tax-
-		// pending invoices can't slip through: our caller just finalized this
-		// invoice, SettleZeroDue re-reads and requires status=finalized, and
-		// the store's MarkPaid guard rejects drafts and non-ok tax
-		// (DEMO-000906) as the last line.
-		settled, err := h.svc.SettleZeroDue(ctx, tenantID, inv.ID)
-		if err != nil {
-			// Best-effort like the rest of collection: the finalize itself is
-			// already authoritative; a transient settle failure leaves the
-			// invoice pending for an operator retry rather than failing the
-			// request.
-			slog.WarnContext(ctx, "zero-due invoice could not be auto-settled at finalize",
-				"invoice_id", inv.ID, "error", err)
-			return inv
-		}
-		slog.InfoContext(ctx, "zero-due invoice auto-settled paid at finalize", "invoice_id", inv.ID)
-		return settled
-	}
-	if h.charger == nil || h.paymentSetups == nil {
-		return inv
-	}
-	ps, psErr := h.paymentSetups.GetPaymentSetup(ctx, tenantID, inv.CustomerID)
-	// pmReady requires the PM ID itself, not just the "ready" status: the
-	// charge below passes ps.StripePaymentMethodID verbatim, and the charger
-	// hard-rejects an empty one — an error that lands in the decline arm,
-	// which deliberately sets no retry flag (dunning owns real declines), so
-	// a ready-status-without-PM-ID row would dead-end with no retry path and
-	// no customer email. Routing it to the not-ready arm instead self-heals:
-	// flag for the sweep + setup-link email. The engine's ResolveForCharge
-	// sites check the PM ID for the same reason; status alone is an
-	// implementation invariant of the current payment-setup reader, not a
-	// guarantee this call site owns.
-	pmReady := psErr == nil && ps.SetupStatus == domain.PaymentSetupReady &&
-		ps.StripeCustomerID != "" && ps.StripePaymentMethodID != ""
-	if pmReady {
-		// Synchronous charge with the same 30s bound as the engine's collect
-		// pipeline — without it the request rode the Stripe SDK's default
-		// (~80s). The deadline applies to the charge only; the flag/notifier
-		// bookkeeping below stays on the durable detached ctx.
-		chargeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		charged, err := h.charger.ChargeInvoice(chargeCtx, tenantID, inv, ps.StripeCustomerID, ps.StripePaymentMethodID)
-		if err == nil {
-			inv = charged
-			slog.InfoContext(ctx, "auto-charge initiated", "invoice_id", inv.ID)
-			return inv
-		}
-		var pe *payment.PaymentError
-		if errors.As(err, &pe) && !pe.Unknown {
-			// Definite decline: the charger persisted payment_status=failed
-			// and started dunning inline — dunning is the single retry owner.
-			// Deliberately NO auto_charge_pending: a second retry owner
-			// minting its own idempotency keys is a double-charge window, and
-			// the sweep only lists payment_status='pending' rows anyway.
-			slog.WarnContext(ctx, "auto-charge declined, invoice stays finalized; dunning drives collection",
-				"invoice_id", inv.ID, "error", err)
-			return inv
-		}
-		// Transient (breaker open — the charger deliberately left the invoice
-		// untouched, no PI exists), ambiguous outcome (persisted 'unknown';
-		// the reconciler resolves the true state against Stripe), or an
-		// unclassified error. NO dunning exists for any of these — nothing
-		// definitely failed — so pre-fix nothing ever retried: no flag, no
-		// dunning, no email, the invoice silently aged into overdue. Queue
-		// for the sweep. Safe by the sweep's own predicate: it lists only
-		// payment_status='pending' rows, so the flag re-drives the breaker
-		// case on the next tick and stays inert on 'unknown'/'failed' until
-		// the reconciler or dunning owns the outcome.
-		slog.WarnContext(ctx, "auto-charge did not complete; queuing for scheduler retry",
-			"invoice_id", inv.ID, "error", err)
-		if err := h.svc.SetAutoChargePending(ctx, tenantID, inv.ID, true); err != nil {
-			// A failed set(true) is a liveness sink: the invoice stays
-			// invisible to RetryPendingCharges forever (playbook class G).
-			slog.WarnContext(ctx, "failed to mark invoice for auto-charge retry",
-				"invoice_id", inv.ID, "error", err)
-		}
-		return inv
-	}
-	// No payment method on file: no charge is attempted, so dunning never
-	// starts — the scheduler flag is the only retry path.
-	slog.InfoContext(ctx, "no payment method at finalize, queuing for scheduler retry + notifying customer",
-		"invoice_id", inv.ID, "customer_id", inv.CustomerID)
-	if err := h.svc.SetAutoChargePending(ctx, tenantID, inv.ID, true); err != nil {
-		slog.WarnContext(ctx, "failed to mark invoice for auto-charge retry",
-			"invoice_id", inv.ID, "error", err)
-	}
-	if h.noPMNotifier != nil {
-		outcome, err := h.noPMNotifier.NotifyNoPaymentMethod(ctx, tenantID, inv, "finalize_no_pm")
-		switch {
-		case err != nil:
-			slog.WarnContext(ctx, "no-payment-method notification failed",
-				"invoice_id", inv.ID, "error", err)
-		case outcome == domain.NotifySkippedNoEmail:
-			// No stamp: self-heals via the sweep if the customer gains an email.
-			slog.InfoContext(ctx, "setup-link email skipped: customer has no email on file",
-				"invoice_id", inv.ID)
-		default:
-			// Send-once marker: the auto-charge sweep revisits this invoice
-			// every tick and must not duplicate the email (ADR-087 follow-up).
-			if serr := h.svc.SetNoPMNotifiedAt(ctx, tenantID, inv.ID, time.Now().UTC()); serr != nil {
-				slog.WarnContext(ctx, "failed to stamp no-PM notified marker",
-					"invoice_id", inv.ID, "error", serr)
-			}
-		}
-	}
-	return inv
 }
 
 func (h *Handler) void(w http.ResponseWriter, r *http.Request) {

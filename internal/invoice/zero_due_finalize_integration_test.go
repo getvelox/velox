@@ -15,10 +15,11 @@ import (
 	"github.com/sagarsuperuser/velox/internal/testutil"
 )
 
-// TestManualFinalize_ZeroDue_SettlesPaid_E2E drives the real path an operator
-// hits when finalizing a manual invoice that ends up with nothing due (today:
-// an empty draft; tomorrow: a fully-discounted one) against Postgres: the
-// invoice must land PAID — exercising the store's MarkPaid state-machine
+// TestManualFinalize_ZeroDue_SettlesPaid_E2E pins Service.SettleZeroDue, which
+// the operator "Collect payment" action uses on an invoice with nothing due.
+// (Finalize itself now collects through the billing engine's collector,
+// ADR-116; billing's TestManualFinalize_CollectsThroughTheEngine_E2E covers
+// that path.) Against Postgres: the invoice must land PAID — exercising the store's MarkPaid state-machine
 // guard (finalized-only, tax ok) with real column defaults — not strand
 // finalized/payment_pending as a permanently-overdue attention item
 // (ADR-066 class; the manual writer's T12).
@@ -73,11 +74,11 @@ func TestManualFinalize_ZeroDue_SettlesPaid_E2E(t *testing.T) {
 	}
 }
 
-// TestManualInvoice_CreditBalanceApplied_E2E drives ADR-088's manual site
-// against Postgres with the REAL credit ledger: a credit-holding customer's
-// operator-composed invoice consumes the balance at finalize through the
-// clock-bound service apply; the remainder (if any) is what a card would be
-// charged. Full coverage drains the ledger to zero.
+// TestManualInvoice_CreditBalanceApplied_E2E pins Service.ApplyCreditBalance,
+// which the operator "Collect payment" action uses before charging, against
+// Postgres with the REAL credit ledger: the balance drains into the invoice
+// and the remainder is what a card would be charged. (Finalize collects
+// through the billing engine instead, ADR-116.)
 func TestManualInvoice_CreditBalanceApplied_E2E(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := postgres.WithLivemode(context.Background(), false)

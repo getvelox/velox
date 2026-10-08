@@ -52,11 +52,14 @@ Mechanism:
   (test-clock catchup) reuse the existing `ListAutoChargePending` /
   `ListAutoChargePendingForClock` candidate queries and call the
   **idempotent** `StartDunning` for each candidate.
-- The sweep runs **after** `RetryPendingCharges` in the cycle, so the
-  remaining `auto_charge_pending` candidates are the genuinely card-less
-  ones: a decline already cleared the flag and started its own run; a
-  success cleared the flag. `StartDunning` is one-run-per-invoice, so any
-  invoice that still carries a run is a no-op.
+- The sweep runs **after** `RetryPendingCharges` in the cycle. *Amended
+  2026-10-08 ([ADR-116](116-collection-intent-at-finalize-one-collector.md)):*
+  every unpaid finalized invoice is now queued from its finalize write, so
+  the queue alone no longer means "card-less". The sweep enrolls a candidate
+  only when it is owed, its customer has no chargeable payment method
+  (`ResolveForCharge`), and it was last written more than 10 minutes ago, so
+  its finalize-time collection has finished. `StartDunning` is
+  one-run-per-invoice, so any invoice that still carries a run is a no-op.
 - The dunning retrier (`RetryPayment`) already returns a *real failed
   attempt* on "no payment method" (not `ErrTransientSkip`), so the campaign
   ticks through grace + retries and **exhausts to the policy

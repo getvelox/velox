@@ -628,10 +628,6 @@ func (s *Service) Get(ctx context.Context, tenantID, id string) (domain.Invoice,
 	return s.attachAttention(ctx, inv), nil
 }
 
-// SetAutoChargePending flags a finalized invoice for the scheduler's
-// auto-charge retry loop. Used by the finalize handler's no-payment-method
-// branch so a manual invoice self-heals when the customer attaches a card —
-// the same flag the billing engine sets for cycle invoices.
 // CreditApplier drains a customer's credit balance against an invoice —
 // atomic ledger debit + amount_due reduction. Satisfied by credit.Service;
 // kept as a local interface so this package doesn't import internal/credit
@@ -724,10 +720,6 @@ func (s *Service) ReleaseChargeClaim(ctx context.Context, tenantID, id string) e
 // SetNoPMNotifiedAt stamps the send-once no-PM email marker (see Store).
 func (s *Service) SetNoPMNotifiedAt(ctx context.Context, tenantID, id string, at time.Time) error {
 	return s.store.SetNoPMNotifiedAt(ctx, tenantID, id, at)
-}
-
-func (s *Service) SetAutoChargePending(ctx context.Context, tenantID, id string, pending bool) error {
-	return s.store.SetAutoChargePending(ctx, tenantID, id, pending)
 }
 
 // attachAttention computes the unified Attention surface from durable
@@ -1776,15 +1768,11 @@ func (s *Service) RetryTax(ctx context.Context, tenantID, invoiceID string) (dom
 				"billing_reason", inv.BillingReason)
 			return s.attachAttention(ctx, inv), nil
 		}
-		// Auto-pay when amount_due_cents <= 0 after finalize. This
-		// closes the loop on the "credits applied at draft time,
-		// tax pending" path: billOnePeriod applied credits to a
-		// draft invoice and left it draft because tax was pending.
-		// Tax retry now resolves — finalize lands the authoritative
-		// total. If credits covered the new total too (amount_due=0),
-		// transition straight to paid. If new tax made the total
-		// larger than the credits could cover, leave finalized for
-		// the normal charge / dunning flow.
+		// Nothing owed after finalize (a $0 invoice): settle it now so the
+		// operator who clicked Retry tax sees it paid. The auto-charge sweep
+		// would settle it too (it is queued), just a tick later. Credits are
+		// not applied to drafts, so a credit-covered invoice is not $0 here;
+		// the collector applies the credits and settles it.
 		if final.AmountDueCents <= 0 {
 			now := s.clock.Now(ctx)
 			paid, perr := s.store.MarkPaid(ctx, tenantID, invoiceID, "", now)
@@ -1796,33 +1784,12 @@ func (s *Service) RetryTax(ctx context.Context, tenantID, invoiceID string) (dom
 			}
 			return s.attachAttention(ctx, paid), nil
 		}
-		// Still owed after finalize: hand the invoice to the auto-charge
-		// sweep, the single retry owner for invoices finalized outside a
-		// collection pipeline. Finalizing is not collecting — this path
-		// charges nothing, so without the flag the invoice is invisible to
-		// every recovery mechanism at once: both charge sweeps list only
-		// auto_charge_pending rows, the dunning backfill lists only
-		// payment_status='failed', and dunning itself never starts because
-		// nothing ever failed. It would sit finalized and owed until an
-		// operator happened to read the banner — the silent-overdue sink
-		// already closed for the manual-finalize path (handler.collectAtFinalize).
-		//
-		// The flag rather than an inline charge: the sweep already owns the
-		// full sequence (credit re-apply, PM resolve, charge, decline →
-		// dunning, no-PM → setup-link email), this runs inside a cron batch
-		// with no operator waiting, and a second charger would be a second
-		// idempotency-key minter on the same invoice. It also makes the
-		// catchup pipeline's deliberate Phase 2 → Phase 3 ordering mean
-		// something: the charge phase can now see what the tax retry unstuck.
-		if err := s.store.SetAutoChargePending(ctx, tenantID, invoiceID, true); err != nil {
-			// Liveness sink (playbook class G): the invoice stays invisible
-			// to the sweep until something else sets the flag. Non-fatal —
-			// the tax decision and finalize are already authoritative.
-			slog.Warn("invoice: failed to queue tax-retry-finalized invoice for auto-charge; collection will not retry until this is set",
-				"error", err, "tenant_id", tenantID, "invoice_id", invoiceID)
-			return s.attachAttention(ctx, final), nil
-		}
-		final.AutoChargePending = true
+		// Still owed after finalize: nothing more to do here. The finalize
+		// write queued the invoice for collection (auto_charge_pending), and
+		// the auto-charge sweep is its collector: credits, the card, a
+		// decline into dunning, or the setup-link email. This runs inside a
+		// cron batch with no operator waiting, so there is no nudge; the
+		// catchup's Phase 2 → Phase 3 order collects it in the same Advance.
 		return s.attachAttention(ctx, final), nil
 	}
 	return s.attachAttention(ctx, inv), nil

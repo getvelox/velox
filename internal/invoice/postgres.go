@@ -317,8 +317,8 @@ func (s *PostgresStore) CreateAudited(
 			source_plan_changed_at, source_subscription_item_id, source_change_type,
 			tax_provider, tax_calculation_id, tax_reverse_charge, tax_exempt_reason,
 			tax_status, tax_deferred_at, tax_retry_count, tax_pending_reason, tax_error_code, billing_reason,
-			stripe_invoice_id, is_simulated, billing_timezone)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
+			stripe_invoice_id, is_simulated, billing_timezone, auto_charge_pending)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44)
 		RETURNING `+invCols,
 		id, tenantID, inv.CustomerID, postgres.NullableString(inv.SubscriptionID), inv.InvoiceNumber,
 		inv.Status, inv.PaymentStatus, inv.Currency,
@@ -339,6 +339,7 @@ func (s *PostgresStore) CreateAudited(
 		postgres.NullableString(inv.StripeInvoiceID),
 		inv.IsSimulated,
 		postgres.NullableString(inv.BillingTimezone),
+		collectionQueuedAtFinalize(inv.Status, inv.PaymentStatus),
 	).Scan(s.scanInvDest(&inv)...)
 
 	if err != nil {
@@ -661,18 +662,18 @@ func (s *PostgresStore) updateStatusInTx(ctx context.Context, tx *sql.Tx, id str
 	}
 
 	var inv domain.Invoice
-	// Terminal statuses also retire the auto-charge work flag: every
-	// charge-path predicate already excludes non-finalized invoices, so
-	// this is a truth fix, not a behavior change — a voided or
-	// uncollectible invoice must not read auto_charge_pending=true
-	// (there is nothing pending). Finalize (draft→finalized) leaves the
-	// flag alone. Settle clears it at the markPaidReportingTransition
-	// choke point the same way.
+	// The auto-charge flag moves with the status in this same write.
+	// Finalize (draft→finalized) of an unpaid invoice queues it for
+	// collection (collectionQueuedAtFinalize). Void and uncollectible
+	// retire it: there is nothing left to collect. Settle clears it at the
+	// markPaidReportingTransition choke point the same way.
 	err := tx.QueryRowContext(ctx, `
 		UPDATE invoices SET status = $1, voided_at = $2,
 			uncollectible_at = COALESCE($3, uncollectible_at), updated_at = $4,
-			auto_charge_pending = CASE WHEN $1 IN ('voided', 'uncollectible')
-				THEN FALSE ELSE auto_charge_pending END
+			auto_charge_pending = CASE
+				WHEN $1 IN ('voided', 'uncollectible') THEN FALSE
+				WHEN $1 = 'finalized' AND payment_status = 'pending' THEN TRUE
+				ELSE auto_charge_pending END
 		WHERE id = $5 AND status = ANY($6)
 		RETURNING `+invCols,
 		status, postgres.NullableTime(voidedAt), postgres.NullableTime(uncollectibleAt), now, id,
@@ -735,7 +736,8 @@ func (s *PostgresStore) FinalizeWithDates(ctx context.Context, tenantID, id stri
 	now := clock.Now(ctx)
 	var inv domain.Invoice
 	err = tx.QueryRowContext(ctx, `
-		UPDATE invoices SET status = $1, issued_at = $2, due_at = $3, updated_at = $4
+		UPDATE invoices SET status = $1, issued_at = $2, due_at = $3, updated_at = $4,
+			auto_charge_pending = (payment_status = 'pending')
 		WHERE id = $5 AND status = 'draft'
 		RETURNING `+invCols,
 		domain.InvoiceFinalized, issuedAt, dueAt, now, id,
@@ -1831,8 +1833,8 @@ func (s *PostgresStore) createWithLineItemsInTx(ctx context.Context, tx *sql.Tx,
 			tax_provider, tax_calculation_id, tax_reverse_charge, tax_exempt_reason,
 			tax_status, tax_deferred_at, tax_retry_count, tax_pending_reason, tax_error_code, billing_reason,
 			stripe_invoice_id, public_token_encrypted, public_token_hash, paid_at, voided_at, is_simulated,
-			billing_timezone)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48)
+			billing_timezone, auto_charge_pending)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)
 		RETURNING `+invCols,
 		id, tenantID, inv.CustomerID, postgres.NullableString(inv.SubscriptionID), inv.InvoiceNumber,
 		inv.Status, inv.PaymentStatus, inv.Currency,
@@ -1856,6 +1858,7 @@ func (s *PostgresStore) createWithLineItemsInTx(ctx context.Context, tx *sql.Tx,
 		postgres.NullableTime(inv.PaidAt), postgres.NullableTime(inv.VoidedAt),
 		inv.IsSimulated,
 		postgres.NullableString(inv.BillingTimezone),
+		collectionQueuedAtFinalize(inv.Status, inv.PaymentStatus),
 	).Scan(s.scanInvDest(&inv)...)
 
 	if err != nil {
@@ -1917,6 +1920,20 @@ func (s *PostgresStore) createWithLineItemsInTx(ctx context.Context, tx *sql.Tx,
 	return inv, nil
 }
 
+// collectionQueuedAtFinalize is the auto_charge_pending value an invoice gets
+// in the same write that makes it finalized and owed. Recording the intent
+// there, not after the commit, is what makes collection crash-safe: an invoice
+// can't be finalized and unpaid without the auto-charge sweep seeing it. Before
+// this, every finalize path committed with the flag off and set it only when
+// its inline charge failed, so a crash between the commit and the charge left
+// an owed invoice that no sweep, email, or dunning run ever saw.
+//
+// The amount is deliberately not part of the rule. A $0 invoice is queued too,
+// and the collector settles it as paid with no charge.
+func collectionQueuedAtFinalize(status domain.InvoiceStatus, paymentStatus domain.InvoicePaymentStatus) bool {
+	return status == domain.InvoiceFinalized && paymentStatus == domain.PaymentPending
+}
+
 // ClaimAutoCharge takes the per-invoice charge lease (HA hazard #1,
 // migration 0141): a 5-minute CAS claim that admits exactly one sweep
 // leader into the charge leg per invoice per window. The full
@@ -1961,7 +1978,6 @@ func (s *PostgresStore) ClaimAutoCharge(ctx context.Context, tenantID, id string
 		  AND auto_charge_pending = TRUE
 		  AND payment_status = 'pending'
 		  AND status = 'finalized'
-		  AND amount_due_cents > 0
 		  AND (auto_charge_claimed_until IS NULL OR auto_charge_claimed_until < now())
 	`, id)
 	if err != nil {
@@ -2213,7 +2229,6 @@ func (s *PostgresStore) ListAutoChargePending(ctx context.Context, limit int) ([
 		WHERE i.auto_charge_pending = TRUE
 		  AND i.payment_status = 'pending'
 		  AND i.status = 'finalized'
-		  AND i.amount_due_cents > 0
 		  AND i.livemode = $1
 		  AND i.is_simulated = false
 		  AND `+notPausedForCollection("i")+`
@@ -2333,7 +2348,6 @@ func (s *PostgresStore) ListAutoChargePendingForClock(ctx context.Context, tenan
 		WHERE i.auto_charge_pending = TRUE
 		  AND i.payment_status = 'pending'
 		  AND i.status = 'finalized'
-		  AND i.amount_due_cents > 0
 		  AND i.tenant_id = $1
 		  AND c.test_clock_id = $2
 		  AND `+notPausedForCollection("i")+`
