@@ -59,7 +59,7 @@ alerting tier: what should page someone, and what is only informational.
 | Postgres connection errors (count) | > 10/min | DB connectivity broken |
 | `time() - velox_scheduler_last_run_timestamp_seconds` | > 2× tick interval | Scheduler stalled (also flips `/health/ready` to 503) |
 | `velox_leader_last_tick_age_seconds{role}` | > 3× the role's interval | The role has not finished a tick on any replica. This is the cluster-wide stall signal that a per-replica liveness gauge cannot give. `SELECT * FROM leader_status;` shows the holder and whether an operator paused the role ([runbook-leader-leases.md](runbook-leader-leases.md)) |
-| `increase(velox_leader_lease_lost_total[1h])` | > 0 | A leader could not keep its lease mid-tick (frozen process, DB stall, pooler hiccup). Correctness held (fence + row CAS), but find out why |
+| `increase(velox_leader_lease_lost_total[1h])` | > 0 | Split by `reason`. `panicked`: the role's tick panicked and ran nothing past the panic; it repeats every `min(interval, 60 s)` until the bad input or code is fixed, so restarting does not help. The stack is in the `scheduler panic recovered` ERROR log. Any other reason: a leader could not keep its lease mid-tick (frozen process, DB stall, pooler hiccup); correctness held (fence + row CAS), but find out why. `paused` is an operator action, so exclude it |
 
 ### Warn (slack/email, not page)
 
@@ -106,8 +106,11 @@ in [Scheduler interval tuning](#scheduler-interval-tuning).
 - Long-running transaction holding row locks (e.g., a tenant with
   millions of usage events on a single subscription).
 - DB primary failover; connections lost mid-tick.
-- The scheduler goroutine (its background worker thread) panicked. This
-  is rare, and `slog.Error` logs it.
+- Not a panic. A tick that panics is recovered and the poll loop keeps
+  running, so `/health/ready` stays green. A panicking tick shows up instead
+  as `velox_leader_lease_lost_total{reason="panicked"}` and a growing
+  `velox_leader_last_tick_age_seconds{role="billing"}`, with the stack in the
+  `scheduler panic recovered` ERROR log.
 
 **Check**:
 1. Cluster view: `SELECT * FROM leader_status;` shows the holder and
@@ -128,7 +131,7 @@ curl -s http://localhost:8080/health/ready
 ```
 
 **Fix**:
-1. Check application logs for panics; restart pod if found.
+1. Check application logs for `scheduler panic recovered`. A panic in the tick repeats on whichever replica leads next, so a restart does not fix it: find the input in the stack and fix or remove it.
 2. Cancel long queries with `SELECT pg_cancel_backend(<pid>)` if
    appropriate.
 3. Batch size is hard-coded as a fixed literal (50 subs per tick,

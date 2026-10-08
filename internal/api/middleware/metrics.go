@@ -169,7 +169,7 @@ var (
 	leaderLeaseLost = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "velox_leader_lease_lost_total",
-			Help: "Ticks whose leader lease was lost mid-tick (ADR-114), by role and reason. heartbeat_timeout = the holder could not renew within the abandon window and cancelled its own work; takeover = a renew found another holder; released = a renew found the row released; paused = an operator paused the role mid-tick (expected — exclude from paging). Correctness held via fence + row CAS; the cause (frozen process, DB stall, pooler) is what to look at.",
+			Help: "Led ticks that ended without completing (ADR-114), by role and reason. heartbeat_timeout = the holder could not renew within the abandon window and cancelled its own work; takeover = a renew found another holder; released = a renew found the row released; paused = an operator paused the role mid-tick (expected — exclude from paging); panicked = the tick's work panicked and the lease was released as not completed (stack in the 'scheduler panic recovered' log; it repeats every cooldown until the input is fixed). For lost leases correctness held via fence + row CAS; the cause (frozen process, DB stall, pooler) is what to look at.",
 		},
 		[]string{"role", "reason"},
 	)

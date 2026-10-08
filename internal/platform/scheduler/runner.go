@@ -43,10 +43,11 @@ type WorkFunc func(ctx context.Context)
 // (used by the billing loop to stamp this replica's liveness for
 // /health/ready — followers stamp too, which is today's contract); then
 // gate.Lead tries to take one tick of the role. Not due / held elsewhere /
-// paused → nothing happens. Led → workFn runs inside a panic-recovering
-// wrapper on the led ctx; a panic logs at ERROR with the stack and the
-// lease is still released (the gate defers it). A gate error logs at
-// ERROR once per poll — the existing per-tick posture, no rate limiter.
+// paused → nothing happens. Led → workFn runs on the led ctx; a panic
+// unwinds through the gate, which releases the lease as NOT completed
+// (so the stall gauge ages), and is then recovered here and logged at
+// ERROR with the stack. A gate error logs at ERROR once per poll — the
+// existing per-tick posture, no rate limiter.
 func Run(ctx context.Context, role leader.Role, interval time.Duration, gate leader.Gate, workFn WorkFunc, onPoll func()) {
 	if gate == nil {
 		slog.Error("scheduler: no leader gate wired — refusing to run an ungated singleton loop", "role", role)
@@ -74,7 +75,7 @@ func Run(ctx context.Context, role leader.Role, interval time.Duration, gate lea
 				onPoll()
 			}
 			start := time.Now()
-			led, err := gate.Lead(ctx, role, interval, func(c context.Context) { runOneTick(c, string(role), workFn) })
+			led, err := leadOneTick(ctx, role, interval, gate, workFn)
 			if err != nil {
 				slog.Error("scheduler: leader gate error", "worker", role, "error", err)
 				continue
@@ -86,18 +87,23 @@ func Run(ctx context.Context, role leader.Role, interval time.Duration, gate lea
 	}
 }
 
-// runOneTick wraps a single workFn invocation in a recover() so a panic
-// doesn't kill the runner goroutine. Logs the recovered value + a stack at
-// ERROR; the caller's next tick fires normally.
-func runOneTick(ctx context.Context, name string, workFn WorkFunc) {
+// leadOneTick runs one gate.Lead with the recover() AROUND it, not inside
+// the work, so a panic in workFn unwinds through Lead. That is how the gate
+// learns the tick did not complete: a recover inside the work made Lead see
+// a normal return, record a completed tick, and keep the stall gauge fresh
+// while a panicking tick ran nothing every interval. Logs the recovered
+// value + a stack at ERROR (the frames are still on the stack inside a
+// deferred call); the caller's next poll fires normally.
+func leadOneTick(ctx context.Context, role leader.Role, interval time.Duration, gate leader.Gate, workFn WorkFunc) (led bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("scheduler panic recovered",
-				"worker", name,
+				"worker", role,
 				"panic", r,
 				"stack", string(debug.Stack()),
 			)
+			led, err = false, nil
 		}
 	}()
-	workFn(ctx)
+	return gate.Lead(ctx, role, interval, workFn)
 }

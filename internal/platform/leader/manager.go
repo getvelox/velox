@@ -16,9 +16,10 @@ type Executor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// LostFunc is told, once, why a led tick lost its lease: "takeover",
-// "paused", "released", or "heartbeat_timeout". Wired to a Prometheus
-// counter by the API server; nil is fine.
+// LostFunc is told, once, why a led tick ended without completing:
+// "takeover", "paused", "released", "heartbeat_timeout" (the lease was
+// lost), or "panicked" (the work panicked; the lease was released as not
+// completed). Wired to a Prometheus counter by the API server; nil is fine.
 type LostFunc func(role Role, reason string)
 
 // Manager leads roles for one process.
@@ -82,7 +83,8 @@ RETURNING now()`
 	// last_tick_* = this holder, now — due again after one interval; clear any
 	// cooldown); 1 = interrupted by the parent ctx (clean SIGTERM: leave the
 	// cadence alone so the role is due on another replica at its next poll,
-	// R3); 2 = lease lost or heartbeat timed out — NOT a completion, so
+	// R3); 2 = lease lost or heartbeat timed out, 3 = the work panicked —
+	// both NOT a completion, so
 	// last_tick_* is left alone (leader_status and the stall gauge report
 	// completed ticks only) and the role is held back by not_before for a
 	// bounded cooldown (min(interval, 60 s)) so a slow database cannot turn an
@@ -111,12 +113,20 @@ func (m *Manager) Lead(ctx context.Context, role Role, interval time.Duration, w
 	workCtx, cancel := context.WithCancelCause(WithToken(ctx, role, token))
 	hb := m.startHeartbeat(role, token, dbNow, cancel)
 
-	// RELEASE always runs — on a panic too (the runner's recover wraps Lead,
-	// so a panic here propagates after the deferred release).
+	// RELEASE always runs — on a panic too. The runner's recover wraps Lead,
+	// so a panic in work unwinds through this defer first; returned stays
+	// false and the tick is released as failed, never as completed (a
+	// completed release would stamp last_tick_ended_at and hide a tick that
+	// panics every interval behind a fresh stall gauge). The panic then
+	// continues to the runner, which logs it with the stack.
+	returned := false
 	defer func() {
 		hb.stop()
+		cause := context.Cause(workCtx)
 		outcome := releaseCompleted
-		switch cause := context.Cause(workCtx); {
+		switch {
+		case !returned:
+			outcome = releaseFailed
 		case cause == nil:
 		case errors.Is(cause, ErrLeaseLost):
 			outcome = releaseLost
@@ -125,9 +135,16 @@ func (m *Manager) Lead(ctx context.Context, role Role, interval time.Duration, w
 		}
 		cancel(nil)
 		m.release(role, token, interval, outcome)
+		// One report per tick. A tick whose lease was already lost has been
+		// reported by the heartbeat (m.lost); a panic while that tick unwinds
+		// on its cancelled ctx is a consequence of the loss, not a second event.
+		if !returned && !errors.Is(cause, ErrLeaseLost) && m.onLost != nil {
+			m.onLost(role, "panicked")
+		}
 	}()
 
 	work(workCtx)
+	returned = true
 	return true, nil
 }
 
@@ -144,11 +161,14 @@ func (m *Manager) acquire(ctx context.Context, role Role, interval time.Duration
 	return token, dbNow, true, nil
 }
 
-// Release outcomes (the $3 of sqlRelease).
+// Release outcomes (the $3 of sqlRelease). releaseFailed (the work
+// panicked) takes the same SQL branch as releaseLost — not a completion,
+// bounded cooldown — and is its own constant so the reason stays legible.
 const (
 	releaseCompleted   = 0
 	releaseInterrupted = 1
 	releaseLost        = 2
+	releaseFailed      = 3
 )
 
 func (m *Manager) release(role Role, token int64, interval time.Duration, outcome int) {

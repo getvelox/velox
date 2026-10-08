@@ -428,3 +428,134 @@ func TestLease_MissingRowRecreated(t *testing.T) {
 		t.Fatalf("recreated token %d must exceed the deleted token %d", got, old)
 	}
 }
+
+// TestLease_PanickedTickIsNotACompletion: a panic in work unwinds through
+// Lead, which must release the lease as a tick that did NOT complete —
+// last_tick_* untouched, a bounded not_before cooldown, the holder cleared,
+// and onLost told "panicked" — then re-propagate the panic to the caller.
+// The control is a completed tick on the same role, which stamps the cadence.
+// Before the fix the runner recovered INSIDE the work, Lead saw a normal
+// return, and a tick that panicked every interval stamped a fresh
+// last_tick_ended_at each time: billing could halt cluster-wide behind a
+// healthy-looking velox_leader_last_tick_age_seconds.
+func TestLease_PanickedTickIsNotACompletion(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	admin := testutil.AdminPool(t)
+	resetRoles(t, admin)
+	ctx := context.Background()
+
+	var reasons []string
+	var mu sync.Mutex
+	m := leader.New(db.Pool, func(_ leader.Role, reason string) {
+		mu.Lock()
+		reasons = append(reasons, reason)
+		mu.Unlock()
+	})
+
+	// Control: a completed tick stamps last_tick_ended_at and clears the cooldown.
+	if led, err := m.Lead(ctx, leader.RoleBilling, time.Hour, func(context.Context) {}); !led || err != nil {
+		t.Fatalf("control tick: led=%v err=%v", led, err)
+	}
+	var stamped sql.NullTime
+	if err := admin.QueryRowContext(ctx, `SELECT last_tick_ended_at FROM leader_leases WHERE role='billing'`).Scan(&stamped); err != nil || !stamped.Valid {
+		t.Fatalf("control: a completed tick must stamp last_tick_ended_at (valid=%v err=%v)", stamped.Valid, err)
+	}
+	// Make the role due again without touching the stamp we compare against.
+	if _, err := admin.ExecContext(ctx, `UPDATE leader_leases SET last_tick_ended_at = now() - interval '2 hours' WHERE role='billing'`); err != nil {
+		t.Fatal(err)
+	}
+	var before time.Time
+	if err := admin.QueryRowContext(ctx, `SELECT last_tick_ended_at FROM leader_leases WHERE role='billing'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered := func() (r any) {
+		defer func() { r = recover() }()
+		_, _ = m.Lead(ctx, leader.RoleBilling, time.Hour, func(context.Context) { panic("poisoned subscription") })
+		return nil
+	}()
+	if recovered != "poisoned subscription" {
+		t.Fatalf("Lead must re-propagate the work's panic to its caller; recovered %v", recovered)
+	}
+
+	var (
+		after      time.Time
+		holder     sql.NullString
+		notBefore  sql.NullTime
+		cooldownOK bool
+	)
+	if err := admin.QueryRowContext(ctx, `
+		SELECT last_tick_ended_at, holder_id, not_before,
+		       COALESCE(not_before > now() AND not_before <= now() + interval '61 seconds', false)
+		  FROM leader_leases WHERE role='billing'`).Scan(&after, &holder, &notBefore, &cooldownOK); err != nil {
+		t.Fatal(err)
+	}
+	if !after.Equal(before) {
+		t.Errorf("a panicked tick stamped last_tick_ended_at (%v -> %v): it was recorded as a completion", before, after)
+	}
+	if holder.Valid {
+		t.Errorf("lease still held by %q after a panicked tick", holder.String)
+	}
+	if !notBefore.Valid || !cooldownOK {
+		t.Errorf("a panicked tick must set a bounded cooldown (min(interval, 60s)); not_before=%v", notBefore)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reasons) != 1 || reasons[0] != "panicked" {
+		t.Errorf("onLost reasons = %v, want [panicked]", reasons)
+	}
+
+	// The cooldown holds the role back from an immediate retry loop.
+	if led, err := m.Lead(ctx, leader.RoleBilling, time.Hour, func(context.Context) {}); led || err != nil {
+		t.Fatalf("role led again inside the cooldown: led=%v err=%v", led, err)
+	}
+}
+
+// TestLease_PanicAfterLeaseLossReportsOnce: a tick whose lease is taken over
+// and whose work then panics while unwinding on the cancelled ctx is ONE
+// event — the loss. The heartbeat already reported "takeover"; Lead must not
+// add "panicked" for the same tick (velox_leader_lease_lost_total would count
+// one tick twice, and LostFunc's contract is one report per tick).
+func TestLease_PanicAfterLeaseLossReportsOnce(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	admin := testutil.AdminPool(t)
+	resetRoles(t, admin)
+	var mu sync.Mutex
+	var reasons []string
+	m := leader.New(db.Pool, func(_ leader.Role, r string) {
+		mu.Lock()
+		reasons = append(reasons, r)
+		mu.Unlock()
+	})
+
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		_, _ = m.Lead(context.Background(), leader.RoleDunning, time.Hour, func(ctx context.Context) {
+			<-ctx.Done()
+			panic("nil result from a call that failed on the cancelled ctx")
+		})
+	}()
+	for i := 0; i < 50; i++ {
+		if _, holder, _ := rowToken(t, admin, leader.RoleDunning); holder.Valid {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE leader_leases SET holder_token=holder_token+1, holder_id='thief:1:00000000' WHERE role='dunning'`); err != nil {
+		t.Fatalf("steal: %v", err)
+	}
+	select {
+	case r := <-done:
+		if r == nil {
+			t.Fatal("the work's panic must still re-propagate out of Lead")
+		}
+	case <-time.After(leader.HeartbeatEvery + leader.StatementTimeout + 2*time.Second):
+		t.Fatal("work was not cancelled after the lease was taken over")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reasons) != 1 || reasons[0] != "takeover" {
+		t.Fatalf("reasons = %v, want exactly [takeover]", reasons)
+	}
+}

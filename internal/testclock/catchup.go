@@ -152,7 +152,7 @@ func (w *CatchupWorker) process(job CatchupJob) {
 	// otherwise unwind this goroutine and crash the whole process, taking
 	// down the API server for every tenant. Recover, log with the stack, and
 	// let the drain loop continue — one bad clock can't kill the server.
-	// Mirrors scheduler.runOneTick's recovering wrapper.
+	// Mirrors scheduler.leadOneTick's recovering wrapper.
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("test-clock catchup panicked",

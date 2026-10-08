@@ -26,9 +26,9 @@ func waitFor(t *testing.T, cond func() bool, within time.Duration, msg string) {
 // Without recover(), the panic would unwind out of the for-select loop
 // and the worker would silently die while the ticker channel kept
 // buffering — which is exactly the bug the helper exists to prevent.
-// With the lease gate the panic must also not leak the lease: the gate
-// double's Lead runs the work synchronously, so a panic that escaped
-// runOneTick would propagate out of Lead and kill this test's goroutine.
+// With the lease gate the panic propagates out of the gate double's Lead
+// (which runs the work synchronously and does not recover) and is recovered
+// by leadOneTick around it, so the loop keeps ticking.
 func TestRun_PanicRecoveryContinuesLoop(t *testing.T) {
 	var ticks int32
 	ctx, cancel := context.WithCancel(context.Background())
@@ -55,6 +55,56 @@ func TestRun_PanicRecoveryContinuesLoop(t *testing.T) {
 	case <-done:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// unwindObservingGate leads every call and records whether work returned
+// normally — the same "did we return" flag leader.Manager.Lead uses to
+// release a panicked tick as not completed.
+type unwindObservingGate struct{ unwound atomic.Int32 }
+
+func (g *unwindObservingGate) Lead(ctx context.Context, role leader.Role, _ time.Duration, work func(context.Context)) (bool, error) {
+	returned := false
+	defer func() {
+		if !returned {
+			g.unwound.Add(1)
+		}
+	}()
+	work(leader.WithToken(ctx, role, 1))
+	returned = true
+	return true, nil
+}
+
+// TestRun_PanicUnwindsThroughTheGate pins where the recover lives. The gate
+// must SEE a panicking tick (work does not return normally), or it releases
+// the lease as a completed tick and the stall gauge stays fresh while the
+// role runs nothing. A recover inside the work closure — the pre-fix shape —
+// swallows the panic before Lead's defer and turns this red.
+func TestRun_PanicUnwindsThroughTheGate(t *testing.T) {
+	var ticks atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gate := &unwindObservingGate{}
+	work := func(context.Context) {
+		if ticks.Add(1) == 1 {
+			panic("boom")
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		Run(ctx, leader.Role("test_worker"), 5*time.Millisecond, gate, work, nil)
+		close(done)
+	}()
+
+	waitFor(t, func() bool { return ticks.Load() >= 3 }, 500*time.Millisecond,
+		"ticks < 3: a panic on tick 1 stopped the loop")
+	cancel()
+	<-done
+
+	if got := gate.unwound.Load(); got != 1 {
+		t.Fatalf("gate saw %d abnormal returns, want 1 (the panicking tick) — a recover inside the work hides the panic from the gate", got)
 	}
 }
 
