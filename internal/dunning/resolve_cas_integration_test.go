@@ -59,7 +59,7 @@ func TestResolveRun_CAS_ExactlyOnce(t *testing.T) {
 	run.Resolution = domain.ResolutionPaymentRecovered
 	run.ResolvedAt = &now
 
-	won1, err := store.ResolveRun(ctx, tenantID, run)
+	won1, err := store.ResolveRun(ctx, tenantID, run, false)
 	if err != nil {
 		t.Fatalf("ResolveRun #1: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestResolveRun_CAS_ExactlyOnce(t *testing.T) {
 		t.Fatal("first ResolveRun on an active run must WIN the CAS (RowsAffected=1)")
 	}
 
-	won2, err := store.ResolveRun(ctx, tenantID, run)
+	won2, err := store.ResolveRun(ctx, tenantID, run, false)
 	if err != nil {
 		t.Fatalf("ResolveRun #2: %v", err)
 	}

@@ -475,7 +475,7 @@ func (s *PostgresStore) ListRuns(ctx context.Context, filter RunListFilter) ([]d
 // already 'resolved' — and returns whether THIS call won the transition. Same field
 // set as UpdateRun plus the `state <> 'resolved'` guard; the RowsAffected==1 result
 // is the exactly-once gate the service uses to fire the resolve side-effects once.
-func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (bool, error) {
+func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, fromActiveOnly bool) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return false, err
@@ -486,11 +486,11 @@ func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run dom
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoice_dunning_runs SET state=$1, reason=$2, attempt_count=$3,
 			last_attempt_at=$4, next_action_at=$5, paused=$6, resolved_at=$7, resolution=$8, updated_at=$9
-		WHERE id=$10 AND state <> 'resolved'`,
+		WHERE id=$10 AND state <> 'resolved' AND (NOT $11 OR state = 'active')`,
 		run.State, postgres.NullableString(run.Reason), run.AttemptCount,
 		postgres.NullableTime(run.LastAttemptAt), postgres.NullableTime(run.NextActionAt),
 		run.Paused, postgres.NullableTime(run.ResolvedAt), postgres.NullableString(string(run.Resolution)),
-		now, run.ID)
+		now, run.ID, fromActiveOnly)
 	if err != nil {
 		return false, err
 	}
@@ -582,7 +582,9 @@ func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, 
 }
 
 // refuseStrandingWrite is the liveness invariant both store implementations
-// enforce before any run write: an active run must carry next_action_at.
+// enforce on every UpdateRunIfActive write: an active run must carry
+// next_action_at. (CreateRun is not guarded; its only production caller,
+// StartDunning, always sets it.)
 func refuseStrandingWrite(run domain.InvoiceDunningRun) error {
 	if run.State == domain.DunningActive && run.NextActionAt == nil {
 		return fmt.Errorf("dunning run %s: refusing to write an active run with no next_action_at (both due-run pickers would never select it again)", run.ID)

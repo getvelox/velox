@@ -483,14 +483,23 @@ func anchorInstant(now time.Time, scheduled *time.Time, simulated bool) time.Tim
 	return now
 }
 
-// exhaustStampAt is the instant a re-driven escalation records (class J). An
-// action_failed re-attempt is its own scheduled action, so it records when it
-// ran (attemptAt). Anything else on the exhaust-on-entry path is the late
-// execution of the exhaustion contracted at the final failed retry, so it
-// records that retry's instant (LastAttemptAt) — the same record the
-// uninterrupted inline path writes — never the lease or frozen_time.
-func exhaustStampAt(run domain.InvoiceDunningRun, attemptAt time.Time) time.Time {
-	if run.Resolution == domain.ResolutionActionFailed || run.LastAttemptAt == nil {
+// exhaustStampAt is the instant a re-driven escalation records (class J).
+// listedNext is the next_action_at the run was listed with, read BEFORE the
+// claim overwrites it.
+//
+// When listedNext is exactly the lease the final retry wrote
+// (leaseFrom(LastAttemptAt)), this is the late execution of the exhaustion
+// contracted at that retry, so it records the retry's instant — the record
+// the uninterrupted inline path writes — never the lease or frozen_time.
+// Every other entry records when it ran (attemptAt): an action_failed
+// re-attempt (it carries attempt+24h, not the lease) is its own scheduled
+// action, and a run exhausted because an operator lowered
+// max_retry_attempts was never contracted at its last retry (backdating it
+// would show the escalation before the edit that caused it).
+// One residue: a re-drive interrupted AFTER its claim re-leases from its own
+// attempt instant, so a second re-drive records that instant instead.
+func exhaustStampAt(run domain.InvoiceDunningRun, listedNext *time.Time, attemptAt time.Time) time.Time {
+	if run.LastAttemptAt == nil || listedNext == nil || !listedNext.Equal(leaseFrom(*run.LastAttemptAt)) {
 		return attemptAt
 	}
 	return *run.LastAttemptAt
@@ -579,17 +588,17 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		if inv, err := s.invoiceGet.Get(ctx, tenantID, run.InvoiceID); err == nil {
 			switch {
 			case inv.Status == domain.InvoicePaid || inv.PaymentStatus == domain.PaymentSucceeded:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered")
+				_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered", nil)
 				return rerr
 			// The resolution names WHICH terminal state closed the run. The
 			// event reason below already derived it from inv.Status; before
 			// the 0170 split the resolution column threw that away and wrote
 			// one value for both outcomes.
 			case inv.Status == domain.InvoiceVoided:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceVoided, "invoice_"+string(inv.Status))
+				_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionInvoiceVoided, "invoice_"+string(inv.Status), nil)
 				return rerr
 			case inv.Status == domain.InvoiceUncollectible:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceNotCollectible, "invoice_"+string(inv.Status))
+				_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionInvoiceNotCollectible, "invoice_"+string(inv.Status), nil)
 				return rerr
 			}
 		}
@@ -638,8 +647,9 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 				"run_id", run.ID, "invoice_id", run.InvoiceID)
 			return nil
 		}
+		stampAt := exhaustStampAt(run, run.NextActionAt, attemptAt)
 		run.NextActionAt = &lease
-		return s.exhaustRun(ctx, tenantID, run, policy, exhaustStampAt(run, attemptAt), attemptAt)
+		return s.exhaustRun(ctx, tenantID, run, policy, stampAt, attemptAt)
 	}
 
 	// Attempt retry
@@ -676,10 +686,13 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 	// dishonestly (ha-8).
 	//
 	// The FINAL attempt also records its exhaustion lease here, before the
-	// charge: the run stays hidden from both pickers for the whole charge and
-	// inline-exhaust window (so no second processor exhausts it under the
-	// charge), and if this process dies anywhere in that window the run is due
-	// again when the lease expires and exhaust-on-entry finishes it.
+	// charge: on the wall clock the run stays hidden from ListDueRuns for the
+	// whole charge and inline-exhaust window (so no second processor exhausts
+	// it under the charge), and if this process dies anywhere in that window
+	// the run is due again when the lease expires and exhaust-on-entry
+	// finishes it. Under test-clock catchup the lease is in simulated time and
+	// an advance can pass it; there the clock's single-flight advance is the
+	// exclusion, and ClaimExhaustion guards any re-entry.
 	if run.AttemptCount >= policy.MaxRetryAttempts {
 		l := leaseFrom(now)
 		run.NextActionAt = &l
@@ -793,7 +806,7 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		// advance-end frozen_time under catchup, which stamped a Mar 7
 		// recovery "resolved Apr 1" when the operator advanced a month in
 		// one click (the contracted-instant class, 4th sighting).
-		_, rerr := s.resolveRunAt(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered", &now)
+		_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered", &now)
 		return rerr
 	}
 
@@ -918,17 +931,17 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		if inv, err := s.invoiceGet.Get(ctx, tenantID, run.InvoiceID); err == nil {
 			switch {
 			case inv.Status == domain.InvoicePaid || inv.PaymentStatus == domain.PaymentSucceeded:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered")
+				_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionPaymentRecovered, "payment_recovered", nil)
 				return rerr
 			// The resolution names WHICH terminal state closed the run. The
 			// event reason below already derived it from inv.Status; before
 			// the 0170 split the resolution column threw that away and wrote
 			// one value for both outcomes.
 			case inv.Status == domain.InvoiceVoided:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceVoided, "invoice_"+string(inv.Status))
+				_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionInvoiceVoided, "invoice_"+string(inv.Status), nil)
 				return rerr
 			case inv.Status == domain.InvoiceUncollectible:
-				_, rerr := s.resolveRunNow(ctx, tenantID, run, domain.ResolutionInvoiceNotCollectible, "invoice_"+string(inv.Status))
+				_, rerr := s.resolveListedRun(ctx, tenantID, run, domain.ResolutionInvoiceNotCollectible, "invoice_"+string(inv.Status), nil)
 				return rerr
 			}
 		}
@@ -1295,7 +1308,14 @@ func (s *Service) ResolveRun(ctx context.Context, tenantID, runID string, resolu
 // invoices. Shared by ResolveByInvoice, the processRun success branch, and the
 // processRun paid-pre-check so the transition is identical across all of them.
 func (s *Service) resolveRunNow(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, resolution domain.DunningResolution, eventReason string) (domain.InvoiceDunningRun, error) {
-	return s.resolveRunAt(ctx, tenantID, run, resolution, eventReason, nil)
+	return s.resolveRunAt(ctx, tenantID, run, resolution, eventReason, nil, false)
+}
+
+// resolveListedRun is the automated processRun/exhaustRun resolve: it acts on
+// a run it listed as active, so the CAS also requires state = 'active' — a
+// stale processor never rewrites a run another processor escalated meanwhile.
+func (s *Service) resolveListedRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, resolution domain.DunningResolution, eventReason string, at *time.Time) (domain.InvoiceDunningRun, error) {
+	return s.resolveRunAt(ctx, tenantID, run, resolution, eventReason, at, true)
 }
 
 // resolveRunAt is resolveRunNow with an explicit resolve instant. at nil
@@ -1305,7 +1325,7 @@ func (s *Service) resolveRunNow(ctx context.Context, tenantID string, run domain
 // timeline row land on the retry that recovered the invoice, not on
 // wherever the clock advance happened to end (ADR-030 contracted-instant
 // rule; same split as trial flips, scheduled cancels, pause resumes).
-func (s *Service) resolveRunAt(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, resolution domain.DunningResolution, eventReason string, at *time.Time) (domain.InvoiceDunningRun, error) {
+func (s *Service) resolveRunAt(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, resolution domain.DunningResolution, eventReason string, at *time.Time, fromActiveOnly bool) (domain.InvoiceDunningRun, error) {
 	ctx = s.bindForInvoice(ctx, tenantID, run.InvoiceID)
 	now := s.clock.Now(ctx)
 	if at != nil {
@@ -1321,7 +1341,7 @@ func (s *Service) resolveRunAt(ctx context.Context, tenantID string, run domain.
 	// just before processRun's own resolve on a synchronous retry-success — this call
 	// loses the CAS and no-ops, so integrators get exactly one dunning.resolved and
 	// the timeline shows one resolved row per recovery.
-	won, err := s.store.ResolveRun(ctx, tenantID, run)
+	won, err := s.store.ResolveRun(ctx, tenantID, run, fromActiveOnly)
 	if err != nil {
 		return domain.InvoiceDunningRun{}, err
 	}

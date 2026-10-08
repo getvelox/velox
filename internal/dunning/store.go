@@ -31,7 +31,13 @@ type Store interface {
 	// the dunning.resolved webhook) only on a win, so two resolvers racing the same
 	// run (e.g. a card-settle resolve and processRun's own resolve) emit exactly one
 	// dunning.resolved per recovery.
-	ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (bool, error)
+	//
+	// fromActiveOnly narrows the CAS to `state = 'active'`. The automated
+	// processRun/exhaustRun resolves pass true: they act on a run they LISTED as
+	// active, so a stale processor must never rewrite a run another processor
+	// escalated in the meantime (SB-2). Settle-driven and operator resolves pass
+	// false: escalated -> resolved after a late payment is legitimate.
+	ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, fromActiveOnly bool) (bool, error)
 	// UpdateRunIfActive is UpdateRun guarded on `state = 'active' AND
 	// attempt_count = expectedAttempts`, and reports whether it applied. Every
 	// automated processRun/exhaustRun write uses it: a concurrent resolve is never

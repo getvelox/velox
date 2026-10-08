@@ -149,7 +149,7 @@ WHERE g.entry_type = 'grant' AND g.consumed_cents < g.amount_cents;`,
 	{
 		Name:   "dunning_active_run_without_next_action",
 		Domain: "dunning",
-		Why:    "an active run must carry next_action_at: both due-run pickers select on it and the per-invoice UNIQUE blocks re-enrolment, so NULL means collection stopped for good (SB-1). No writer can produce this since 2026-10-08 (the store refuses it); a row here predates that or came from direct SQL. Re-drive deliberately with `UPDATE invoice_dunning_runs SET next_action_at = last_attempt_at WHERE id = '<id>' AND state = 'active' AND next_action_at IS NULL` (the next tick fires the terminal actions), or close it with POST /v1/dunning/runs/{id}/resolve",
+		Why:    "an active run must carry next_action_at: both due-run pickers select on it and the per-invoice UNIQUE blocks re-enrolment, so NULL means collection stopped for good (SB-1). No production writer produces this since 2026-10-08 (StartDunning always sets it; UpdateRunIfActive refuses it); a row here predates that or came from direct SQL. Re-drive deliberately with `UPDATE invoice_dunning_runs SET next_action_at = COALESCE(last_attempt_at, now()) WHERE id = '<id>' AND state = 'active' AND next_action_at IS NULL`: the next tick resumes the run under its CURRENT policy (it exhausts if attempt_count >= max_retry_attempts, otherwise it makes the next retry). Or close it with POST /v1/dunning/runs/{id}/resolve",
 		SQL:    `SELECT r.id, r.tenant_id, r.invoice_id, r.attempt_count, r.resolution, r.last_attempt_at, r.updated_at FROM invoice_dunning_runs r WHERE r.state = 'active' AND r.paused = false AND r.next_action_at IS NULL`,
 	},
 	{

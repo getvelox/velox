@@ -144,3 +144,26 @@ func TestUpdateRunIfActive_StateAndLivenessGuards(t *testing.T) {
 		t.Fatalf("escalated run reopened to %s", got.State)
 	}
 }
+
+// TestResolveRun_FromActiveOnly (real Postgres): the automated resolve
+// (fromActiveOnly) never rewrites an escalated run; the settle/operator
+// resolve still may (escalated -> resolved after a late payment is legal).
+// Mutation: drop `(NOT $11 OR state = 'active')`.
+func TestResolveRun_FromActiveOnly(t *testing.T) {
+	ctx, store, tenantID, run := exhaustedRunPG(t, "ResolveActive")
+	now := time.Now().UTC()
+	esc := run
+	esc.State, esc.Resolution, esc.ResolvedAt, esc.NextActionAt = domain.DunningEscalated, domain.ResolutionRetriesExhausted, &now, nil
+	if ok, err := store.UpdateRunIfActive(ctx, tenantID, esc, run.AttemptCount, nil); err != nil || !ok {
+		t.Fatalf("escalate: ok=%v err=%v", ok, err)
+	}
+	res := esc
+	res.State, res.Resolution = domain.DunningResolved, domain.ResolutionInvoiceNotCollectible
+	if won, err := store.ResolveRun(ctx, tenantID, res, true); err != nil || won {
+		t.Fatalf("automated resolve rewrote an escalated run: won=%v err=%v", won, err)
+	}
+	res.Resolution = domain.ResolutionPaymentRecovered
+	if won, err := store.ResolveRun(ctx, tenantID, res, false); err != nil || !won {
+		t.Fatalf("a late-payment resolve of an escalated run must still apply: won=%v err=%v", won, err)
+	}
+}

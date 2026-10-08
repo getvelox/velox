@@ -177,8 +177,9 @@ func (m *memStore) ListRuns(_ context.Context, filter RunListFilter) ([]domain.I
 
 // ResolveRun mirrors the store's CAS: apply the resolved fields only if the row is
 // not already resolved, and report whether this call won the transition.
-func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDunningRun) (bool, error) {
-	if existing, ok := m.runs[run.ID]; ok && existing.State == domain.DunningResolved {
+func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDunningRun, fromActiveOnly bool) (bool, error) {
+	if existing, ok := m.runs[run.ID]; ok && (existing.State == domain.DunningResolved ||
+		(fromActiveOnly && existing.State != domain.DunningActive)) {
 		return false, nil
 	}
 	m.runs[run.ID] = run

@@ -235,8 +235,11 @@ no claim. A second processor could escalate a run twice or reopen it.
 **Decision.**
 - The final attempt writes an **exhaustion lease** (`next_action_at` = the
   attempt's anchored instant + 15 min), both at the pre-charge persist and at the
-  reschedule. The run stays hidden while the charge and the inline exhaustion
-  run, and is due again if they never finish. `exhaustRun` overwrites it on both
+  reschedule. On the wall clock the run stays hidden from `ListDueRuns` while
+  the charge and the inline exhaustion run, and is due again if they never
+  finish. (Under test-clock catchup the lease is in simulated time and an
+  advance can pass it; there the clock's single-flight advance is the
+  exclusion and `ClaimExhaustion` guards re-entry.) `exhaustRun` overwrites it on both
   outcomes (NULL + escalated, or +24h + action_failed).
 - Exhaust-on-entry takes `ClaimExhaustion` first: a CAS that moves
   `next_action_at` from the listed value to a fresh lease. Exactly one
@@ -244,10 +247,16 @@ no claim. A second processor could escalate a run twice or reopen it.
 - `UpdateRunIfActive` guards on `state = 'active'` (escalated is terminal for the
   automated path; `ResolveRun` keeps `state <> 'resolved'` because escalated ->
   resolved after a late payment is legitimate) and refuses to write an active run
-  without `next_action_at`.
-- A re-driven escalation stamps the final retry's instant (`LastAttemptAt`), the
-  record the uninterrupted path writes. An action_failed re-attempt stamps its
-  own attempt instant (playbook class J). Scheduling bases (the lease, +24h)
+  without `next_action_at`. The automated resolves inside processRun and
+  exhaustRun (the paid/terminal pre-check, the late re-check, a successful
+  retry) resolve with `ResolveRun(..., fromActiveOnly=true)`, so a stale
+  processor cannot flip an escalated run to resolved either. Settle-driven and
+  operator resolves keep escalated -> resolved.
+- A re-driven escalation stamps the final retry's instant (`LastAttemptAt`) only
+  when the run was listed carrying that retry's lease (the proof the final retry
+  was the exhausting one), the record the uninterrupted path writes. Every other
+  exhaust-on-entry (an action_failed re-attempt, a lowered
+  `max_retry_attempts`) stamps the instant it ran (playbook class J). Scheduling bases (the lease, +24h)
   use the attempt instant, clamped to now on the wall clock.
 - New doctor check `dunning_active_run_without_next_action` surfaces runs
   stranded before this fix. No backfill: the check names the one-line repair.
@@ -265,6 +274,7 @@ no claim. A second processor could escalate a run twice or reopen it.
 - The escalated timeline row and `dunning.escalated` webhook are written after
   the escalation commits (a crash between loses them). Trigger: the
   one-attempt-path outbox work.
-- InvoiceDetail labels any `next_action_at` "Next retry", including the lease
-  and the action_failed re-attempt. Copy fix; UI needs a show-before-PR walk.
+- InvoiceDetail ("Next retry") and the `/dunning` list's "Next Retry" column
+  render any `next_action_at` as a retry, including the lease and the
+  action_failed re-attempt. Copy fix; UI needs a show-before-PR walk.
 
