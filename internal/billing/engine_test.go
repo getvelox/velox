@@ -302,6 +302,11 @@ func wireBaseTax(e *Engine) *Engine {
 	if e.noPMNotifier == nil {
 		e.noPMNotifier = &fakeNoPMNotifier{}
 	}
+	// The collector starts no-payment dunning for a card-less invoice, so
+	// any fixture that reaches the no-PM arm needs a starter.
+	if e.dunningStarter == nil {
+		e.dunningStarter = &recordingDunningStarter{}
+	}
 	return e
 }
 

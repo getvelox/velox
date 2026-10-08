@@ -161,6 +161,7 @@ func TestLiteLLM_WedgeE2E(t *testing.T) {
 	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 	if _, errs := engine.RunCycle(ctx, 50); len(errs) > 0 {
 		t.Fatalf("RunCycle: %v", errs)
 	}

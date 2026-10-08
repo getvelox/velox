@@ -674,10 +674,6 @@ func (r *countingRunner) RetryPendingChargesForClock(_ context.Context, _, _ str
 	return 0, nil
 }
 
-func (r *countingRunner) EnrollStalledForDunningForClock(_ context.Context, _, _ string, _ int) (int, []error) {
-	return 0, nil
-}
-
 // TestRunCatchup_RecordsAdvanceSummary verifies the post-advance summary
 // captures the (exact) per-phase counts and the simulated span, on both the
 // success transition and the partial-failure transition.
@@ -761,10 +757,6 @@ func (r *stubRunner) RetryPendingChargesForClock(_ context.Context, _, _ string,
 	return 0, nil
 }
 
-func (r *stubRunner) EnrollStalledForDunningForClock(_ context.Context, _, _ string, _ int) (int, []error) {
-	return 0, nil
-}
-
 // ScanThresholdsForClock — ADR-029 Phase 3 stub. Threshold-scan
 // behavior is exercised by the engine's own threshold_scan tests; the
 // catchup-orchestrator tests just need a no-op to satisfy the
@@ -826,11 +818,6 @@ func (r *simCapturingRunner) ScanThresholdsForClock(ctx context.Context, _, _ st
 }
 
 func (r *simCapturingRunner) RetryPendingChargesForClock(ctx context.Context, _, _ string, _ int) (int, []error) {
-	r.capture(ctx)
-	return 0, nil
-}
-
-func (r *simCapturingRunner) EnrollStalledForDunningForClock(ctx context.Context, _, _ string, _ int) (int, []error) {
 	r.capture(ctx)
 	return 0, nil
 }

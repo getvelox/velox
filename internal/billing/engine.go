@@ -5317,87 +5317,6 @@ func (e *Engine) RetryPendingChargesForClock(ctx context.Context, tenantID, cloc
 	return e.processAutoCharge(ctx, pending, nil, noPMTriggerSweep)
 }
 
-// EnrollStalledForDunning routes finalized, still-pending invoices that
-// are auto_charge_pending with NO resolvable payment method into a
-// dunning campaign so they reach a terminal (pause/cancel/uncollectible)
-// instead of being retried forever by RetryPendingCharges — closing the
-// card-less auto_charge_pending "limbo" sink. CRON path; clock-pinned
-// subs are excluded (ListAutoChargePending's NOT EXISTS) and handled by
-// EnrollStalledForDunningForClock during catchup.
-//
-// The queue holds every finalized, unpaid invoice, so it does not by itself
-// mean "no card": withoutPaymentMethod narrows it to the invoices whose
-// customer has no chargeable payment method. StartDunning is idempotent, so
-// any invoice that still carries a run is a no-op.
-func (e *Engine) EnrollStalledForDunning(ctx context.Context, limit int) (int, []error) {
-	pending, err := e.invoices.ListAutoChargePending(ctx, limit)
-	if err != nil {
-		return 0, []error{fmt.Errorf("list stalled auto-charge for dunning: %w", err)}
-	}
-	settledBefore := time.Now().UTC().Add(-noPaymentDunningCoolOff) // wall-clock: cron path, simulated invoices excluded
-	return e.enrollStalledForDunning(ctx, e.withoutPaymentMethod(ctx, pending, settledBefore), domain.DunningCauseNoPaymentMethod)
-}
-
-// EnrollStalledForDunningForClock is the catchup-path counterpart to
-// EnrollStalledForDunning — enrolls clock-pinned no-card invoices into
-// dunning as part of an Advance, so a card-less SIMULATED subscription
-// reaches a terminal under test clocks too, not only on the wall clock.
-// ADR-029 disjoint flows.
-func (e *Engine) EnrollStalledForDunningForClock(ctx context.Context, tenantID, clockID string, limit int) (int, []error) {
-	pending, err := e.invoices.ListAutoChargePendingForClock(ctx, tenantID, clockID, limit)
-	if err != nil {
-		return 0, []error{fmt.Errorf("list stalled auto-charge for dunning (clock %s): %w", clockID, err)}
-	}
-	// No settle window: catchup runs its collection phase before this one in
-	// the same Advance, so every invoice here has already been collected.
-	return e.enrollStalledForDunning(ctx, e.withoutPaymentMethod(ctx, pending, time.Time{}), domain.DunningCauseNoPaymentMethod)
-}
-
-// noPaymentDunningCoolOff keeps no-payment dunning off an invoice whose
-// finalize-time collection may still be running. The finalize write queues
-// the invoice before CollectInvoice applies the customer's credits (it runs
-// after the commit, behind the webhook dispatch and the Stripe tax commit), so
-// without a settle window the tick could enroll an invoice the credits are
-// about to cover, firing dunning.started for it. Wall-clock: the cron path is
-// livemode-only and simulated invoices are excluded by its query.
-const noPaymentDunningCoolOff = 10 * time.Minute
-
-// withoutPaymentMethod keeps only the queued invoices that are owed and whose
-// customer has no chargeable payment method — the ones the auto-charge sweep
-// can never collect. The queue alone doesn't say that: every finalized,
-// unpaid invoice is queued from birth, so a card-holding customer's invoice
-// can still be listed (the sweep didn't reach it this tick, another collector
-// holds its lease, or its charge hit a transient error). Enrolling those as
-// no_payment_method would dun a customer who has a card. A resolve error is
-// not "no card": skip the row and let the next tick decide.
-func (e *Engine) withoutPaymentMethod(ctx context.Context, pending []domain.Invoice, settledBefore time.Time) []domain.Invoice {
-	if e.paymentSetups == nil {
-		return nil // can't tell who has a card; enrolling blind would mislabel
-	}
-	var out []domain.Invoice
-	for _, inv := range pending {
-		if inv.AmountDueCents <= 0 {
-			continue // nothing owed; the sweep settles it
-		}
-		if !settledBefore.IsZero() && inv.UpdatedAt.After(settledBefore) {
-			// Just finalized: its finalize-time collection may still be
-			// applying credits that cover it. Let that finish first.
-			continue
-		}
-		cusID, pmID, err := e.paymentSetups.ResolveForCharge(ctx, inv.TenantID, inv.CustomerID)
-		if err != nil {
-			slog.Warn("no-payment dunning enrollment: payment method lookup failed; skipping this tick",
-				"invoice_id", inv.ID, "error", err)
-			continue
-		}
-		if cusID != "" && pmID != "" {
-			continue
-		}
-		out = append(out, inv)
-	}
-	return out
-}
-
 // failedDunningBackfillCoolOff lets the inline SettleFailed StartDunning win the
 // common case before the backfill sweep considers an invoice — so the sweep stays
 // a pure backstop for the crash / exhausted-retry window, mirroring the payment
@@ -5588,8 +5507,25 @@ func (e *Engine) processAutoCharge(ctx context.Context, pending []domain.Invoice
 					slog.Info("auto-charge retry: setup-link email queued", "invoice_id", inv.ID)
 				}
 			}
-			// Provably pre-Stripe (no chargeable PM resolved): release so
-			// dunning enrollment / a card attach retries without lease lag.
+			// Owed, credits already applied, and genuinely no card: start
+			// no-payment dunning so the invoice reaches a terminal
+			// (pause/cancel/write-off) instead of waiting forever. This is
+			// the one place it starts, the no-card twin of the charger
+			// starting dunning on a decline. Being here is what makes it
+			// correct: the credit step above succeeded and still left money
+			// owed, under this invoice's lease. (A separate enrollment job
+			// that only read the queue could dun an invoice whose credits
+			// were about to cover it, or whose credit apply had just failed.)
+			// A resolve ERROR is not "no card", so it starts nothing.
+			// StartDunning is idempotent: one run per invoice, ever.
+			if err == nil {
+				if derr := e.dunningStarter.StartDunning(ctx, inv.TenantID, inv.ID, inv.CustomerID, dunningFailureAt(inv), domain.DunningCauseNoPaymentMethod); derr != nil {
+					// Left queued: the next sweep retries the start.
+					errs = append(errs, fmt.Errorf("start no-payment dunning for %s: %w", inv.ID, derr))
+				}
+			}
+			// Provably pre-Stripe (no chargeable PM resolved): release so a
+			// card attach retries without lease lag.
 			_ = e.invoices.ReleaseAutoChargeClaim(ctx, inv.TenantID, inv.ID)
 			continue
 		}

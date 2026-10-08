@@ -15,7 +15,10 @@ type Store interface {
 	UpsertPolicyTx(ctx context.Context, tx *sql.Tx, tenantID string, policy domain.DunningPolicy) (domain.DunningPolicy, error)
 
 	// Runs
-	CreateRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error)
+	//
+	// StartRun creates a run together with its dunning_started event and the
+	// dunning.started webhook, in one transaction (all or none).
+	StartRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error)
 	GetRun(ctx context.Context, tenantID, id string) (domain.InvoiceDunningRun, error)
 	GetActiveRunByInvoice(ctx context.Context, tenantID, invoiceID string) (domain.InvoiceDunningRun, error)
 	// GetRunByInvoice returns the (single) dunning run for an invoice

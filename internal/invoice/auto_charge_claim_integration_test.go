@@ -260,11 +260,12 @@ func TestClaimAutoCharge_UpdatedAtStable(t *testing.T) {
 	}
 }
 
-// TestClaimAutoCharge_ListsStayClaimBlind is the enrollment-starvation
-// regression (adversarial-review flaw 2): ListAutoChargePending is
-// shared with dunning enrollment (EnrollStalledForDunning), so a held
-// claim must NOT hide the invoice from the list — only the charge leg
-// consults the lease.
+// TestClaimAutoCharge_ListsStayClaimBlind: a held claim must NOT hide the
+// invoice from the sweep's list — only the claim consults the lease, so the
+// list stays a plain read of the queue and the CAS is the single gate.
+// (Originally the enrollment-starvation regression, adversarial-review flaw 2,
+// when a no-payment dunning sweep shared the list; that sweep is gone,
+// ADR-116.)
 func TestClaimAutoCharge_ListsStayClaimBlind(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := postgres.WithLivemode(context.Background(), false)

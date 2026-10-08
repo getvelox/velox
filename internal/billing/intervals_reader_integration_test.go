@@ -107,6 +107,7 @@ func (f *parityFixture) engine(t *testing.T, now time.Time) *billing.Engine {
 	)
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
 	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	e.SetDunningStarter(testDunningStarter{})
 	e.SetIntervalReader(f.subs)
 	return e
 }

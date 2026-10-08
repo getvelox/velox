@@ -52,46 +52,78 @@ func noPMEngine(t *testing.T, inv *mockInvoices) *Engine {
 	))
 }
 
-// TestEnrollStalledForDunning_EnrollsCardlessInvoice locks the no-card
-// limbo fix: a finalized, auto_charge_pending invoice (no payment method)
-// is enrolled into dunning by the sweep, so it reaches a terminal instead
-// of being retried by RetryPendingCharges forever with nothing to charge.
-func TestEnrollStalledForDunning_EnrollsCardlessInvoice(t *testing.T) {
+// The collector starts no-payment dunning itself, at the one point where it
+// is known to be right: credits applied, money still owed, and no card. That
+// is what keeps a card-less invoice from waiting forever with nothing to
+// charge (it reaches pause/cancel/write-off), and it is the only start site.
+func TestCollector_NoCard_StartsNoPaymentDunningOnce(t *testing.T) {
 	inv := &mockInvoices{invoices: []domain.Invoice{pendingInvoice()}}
 	engine := noPMEngine(t, inv)
 	starter := &recordingDunningStarter{}
 	engine.SetDunningStarter(starter)
 
-	swept, errsOut := engine.EnrollStalledForDunning(context.Background(), 10)
-	if len(errsOut) != 0 {
-		t.Fatalf("unexpected errors: %v", errsOut)
-	}
-	if swept != 1 {
-		t.Fatalf("swept = %d, want 1", swept)
+	if _, errs := engine.RetryPendingCharges(context.Background(), 10); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
 	}
 	if len(starter.started) != 1 || starter.started[0] != "inv_1" {
 		t.Fatalf("StartDunning calls = %v, want [inv_1]", starter.started)
 	}
-	// The card-less sweep declares its cause honestly: nothing was ever
-	// charged, so the run must NOT claim a payment failure.
-	if len(starter.causes) != 1 || starter.causes[0] != domain.DunningCauseNoPaymentMethod {
-		t.Fatalf("causes = %v, want [no_payment_method]", starter.causes)
+	// Nothing was ever charged, so the run must NOT claim a payment failure.
+	if starter.causes[0] != domain.DunningCauseNoPaymentMethod {
+		t.Fatalf("cause = %v, want no_payment_method", starter.causes[0])
 	}
 }
 
-// TestEnrollStalledForDunning_CollectsPerInvoiceErrors verifies one bad
-// row doesn't abort the sweep: the error is collected and reported, and
-// the sweep returns it rather than panicking.
-func TestEnrollStalledForDunning_CollectsPerInvoiceErrors(t *testing.T) {
+// A failed start is surfaced and leaves the invoice queued, so the next sweep
+// retries it rather than the invoice silently never reaching dunning.
+func TestCollector_NoCard_StartFailureIsRetried(t *testing.T) {
 	inv := &mockInvoices{invoices: []domain.Invoice{pendingInvoice()}}
 	engine := noPMEngine(t, inv)
 	engine.SetDunningStarter(&recordingDunningStarter{err: errors.New("create run failed")})
 
-	swept, errsOut := engine.EnrollStalledForDunning(context.Background(), 10)
-	if swept != 0 {
-		t.Fatalf("swept = %d, want 0 (the only candidate errored)", swept)
+	if _, errs := engine.RetryPendingCharges(context.Background(), 10); len(errs) != 1 {
+		t.Fatalf("errors = %v, want the start failure surfaced", errs)
 	}
-	if len(errsOut) != 1 {
-		t.Fatalf("errors = %v, want 1", errsOut)
+	if !inv.invoices[0].AutoChargePending {
+		t.Fatal("the invoice must stay queued so the next sweep retries the start")
+	}
+}
+
+// No dunning on anything that isn't "owed, no card": a credit apply that
+// failed (the invoice may well be covered once it succeeds), a payment-method
+// lookup error (unknown is not missing), an invoice credits fully covered, and
+// a customer with a card.
+func TestCollector_NoDunningUnlessOwedAndCardless(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(e *Engine, inv *mockInvoices)
+	}{
+		{"credit apply failed", func(e *Engine, inv *mockInvoices) {
+			e.credits = &fakeCreditApplier{inv: inv, err: errors.New("ledger blip")}
+		}},
+		{"payment-method lookup error", func(e *Engine, _ *mockInvoices) {
+			e.paymentSetups = &erroringPaymentSetups{err: errors.New("db blip")}
+		}},
+		{"credits cover it", func(e *Engine, inv *mockInvoices) {
+			e.credits = &fakeCreditApplier{inv: inv, applyCents: 1000}
+			e.SetDunningResolver(&recordingDunningResolver{})
+		}},
+		{"customer has a card", func(e *Engine, _ *mockInvoices) {
+			e.paymentSetups = &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe"}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &mockInvoices{invoices: []domain.Invoice{pendingInvoice()}}
+			engine := noPMEngine(t, inv)
+			starter := &recordingDunningStarter{}
+			engine.SetDunningStarter(starter)
+			tc.setup(engine, inv)
+
+			_, _ = engine.RetryPendingCharges(context.Background(), 10)
+			if len(starter.causes) != 0 {
+				t.Fatalf("StartDunning called (%v); must not be", starter.causes)
+			}
+		})
 	}
 }

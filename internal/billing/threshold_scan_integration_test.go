@@ -92,6 +92,7 @@ func newThresholdFixture(t *testing.T, name string) *thresholdFixture {
 	// minimal wiring for tests that don't exercise tax behavior.
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 
 	ctx := postgres.WithLivemode(context.Background(), false)
 

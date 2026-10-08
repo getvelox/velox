@@ -94,6 +94,7 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 
 	// Fire N billing runs at the same instant against the one due sub.
 	const N = 4
@@ -195,6 +196,7 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 
 	var (
 		wg       sync.WaitGroup
@@ -333,6 +335,7 @@ func TestRunCycleForTenant_BillsOnlyCallerLivemode(t *testing.T) {
 	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 
 	// Run in TEST mode — must bill only the test-mode sub.
 	testCtx := postgres.WithLivemode(context.Background(), false)
