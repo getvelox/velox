@@ -50,7 +50,7 @@ SELECT role, held, holder_id, expires_in_s, last_tick_holder,
 | `expires_in_s` | seconds until the lease lapses if the holder stops renewing |
 | `last_tick_holder`, `last_tick_age_s` | which replica last finished a tick, and how long ago — **the cluster fact** |
 | `paused_*` | an operator paused the role (below) |
-| `not_before`, `not_before_in_s` | the role is held back after a tick LOST its lease (heartbeat timeout, takeover, pause) — at most 60 s; a lost tick never counts as a completed one, so `last_tick_*` is untouched by it |
+| `not_before`, `not_before_in_s` | the role is held back after a tick ended without completing and released its own lease (its work panicked, or its heartbeat timed out before anyone took over) — at most 60 s; such a tick never counts as a completed one, so `last_tick_*` is untouched by it |
 
 The same facts as metrics, on every scrape:
 
@@ -59,7 +59,7 @@ The same facts as metrics, on every scrape:
 | `velox_leader_last_tick_age_seconds{role}` | > 3× the role's interval — no replica has finished a tick; this is the stall signal a single replica's liveness gauge (`velox_scheduler_last_run_timestamp_seconds`, which followers also stamp) cannot give |
 | `velox_leader_held{role}` | stays 1 while `last_tick_age` grows — a tick is wedged but still renewing (its heartbeat is alive even when its work is stuck); find the holder in `holder_id` and restart that replica |
 | `velox_leader_paused{role}` | 1 outside a planned window |
-| `velox_leader_lease_lost_total{role,reason}` | any increase, except `reason="paused"` (an operator paused the role mid-tick, expected). `heartbeat_timeout` = the holder could not renew in time and cancelled its own tick; `takeover` = a renew found another holder; `released` = a renew found the row already released; `panicked` = the tick's work panicked: the stack is in the `scheduler panic recovered` ERROR log, and the same panic will repeat every cooldown until the bad input is fixed. For the lost-lease reasons correctness held (fence + row CAS) and the cause (frozen process, database stall, pooler hiccup) is what to chase. After any of these the ROLE (not just this replica) waits `min(interval, 60 s)` before any replica leads it again |
+| `velox_leader_lease_lost_total{role,reason}` | any increase, except `reason="paused"` (an operator paused the role mid-tick, expected). `heartbeat_timeout` = the holder could not renew in time and cancelled its own tick; `takeover` = a renew found another holder; `released` = a renew found the row already released; `panicked` = the tick's work panicked: the stack is in the `scheduler panic recovered` ERROR log, and the same panic will repeat every cooldown until the bad input is fixed. For the lost-lease reasons correctness held (fence + row CAS) and the cause (frozen process, database stall, pooler hiccup) is what to chase. After `panicked`, or a `heartbeat_timeout` nobody took over, the ROLE (not just this replica) waits `min(interval, 60 s)` before any replica leads it again; after a `takeover` the new holder is already running it, and after `paused` nobody leads until it is unpaused |
 | `velox_leader_status_scrape_errors_total` | 1 — the view could not be read; the database is the problem, not the roles |
 
 Log lines: `scheduler tick led` (INFO for billing/dunning, DEBUG for the

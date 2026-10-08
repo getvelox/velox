@@ -510,3 +510,52 @@ func TestLease_PanickedTickIsNotACompletion(t *testing.T) {
 		t.Fatalf("role led again inside the cooldown: led=%v err=%v", led, err)
 	}
 }
+
+// TestLease_PanicAfterLeaseLossReportsOnce: a tick whose lease is taken over
+// and whose work then panics while unwinding on the cancelled ctx is ONE
+// event — the loss. The heartbeat already reported "takeover"; Lead must not
+// add "panicked" for the same tick (velox_leader_lease_lost_total would count
+// one tick twice, and LostFunc's contract is one report per tick).
+func TestLease_PanicAfterLeaseLossReportsOnce(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	admin := testutil.AdminPool(t)
+	resetRoles(t, admin)
+	var mu sync.Mutex
+	var reasons []string
+	m := leader.New(db.Pool, func(_ leader.Role, r string) {
+		mu.Lock()
+		reasons = append(reasons, r)
+		mu.Unlock()
+	})
+
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		_, _ = m.Lead(context.Background(), leader.RoleDunning, time.Hour, func(ctx context.Context) {
+			<-ctx.Done()
+			panic("nil result from a call that failed on the cancelled ctx")
+		})
+	}()
+	for i := 0; i < 50; i++ {
+		if _, holder, _ := rowToken(t, admin, leader.RoleDunning); holder.Valid {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE leader_leases SET holder_token=holder_token+1, holder_id='thief:1:00000000' WHERE role='dunning'`); err != nil {
+		t.Fatalf("steal: %v", err)
+	}
+	select {
+	case r := <-done:
+		if r == nil {
+			t.Fatal("the work's panic must still re-propagate out of Lead")
+		}
+	case <-time.After(leader.HeartbeatEvery + leader.StatementTimeout + 2*time.Second):
+		t.Fatal("work was not cancelled after the lease was taken over")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reasons) != 1 || reasons[0] != "takeover" {
+		t.Fatalf("reasons = %v, want exactly [takeover]", reasons)
+	}
+}

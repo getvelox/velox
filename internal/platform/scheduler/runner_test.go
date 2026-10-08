@@ -26,9 +26,9 @@ func waitFor(t *testing.T, cond func() bool, within time.Duration, msg string) {
 // Without recover(), the panic would unwind out of the for-select loop
 // and the worker would silently die while the ticker channel kept
 // buffering — which is exactly the bug the helper exists to prevent.
-// With the lease gate the panic must also not leak the lease: the gate
-// double's Lead runs the work synchronously, so a panic that escaped
-// runOneTick would propagate out of Lead and kill this test's goroutine.
+// With the lease gate the panic propagates out of the gate double's Lead
+// (which runs the work synchronously and does not recover) and is recovered
+// by leadOneTick around it, so the loop keeps ticking.
 func TestRun_PanicRecoveryContinuesLoop(t *testing.T) {
 	var ticks int32
 	ctx, cancel := context.WithCancel(context.Background())

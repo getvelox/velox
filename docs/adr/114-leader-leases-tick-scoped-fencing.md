@@ -293,5 +293,10 @@ min(interval, 60 s)`. It then reports `reason="panicked"` on
 `velox_leader_lease_lost_total` and lets the panic continue to the runner,
 which logs it with the stack. A deterministic panic now retries at most once
 per cooldown, pages on the lease-lost counter at once, and ages the stall
-gauge. Pinned by `TestLease_PanickedTickIsNotACompletion` (real Postgres) and
+gauge. Each retry re-runs the tick's work up to the panic point; every effect
+there is CAS- or key-guarded (the effect table above), so the cost is load,
+not duplicated money. A panic in a tick whose lease was already lost reports
+only the loss reason, once. The counter's role as the TTL-revisit trigger
+(Observability above) counts only the lost-lease reasons: `panicked` is a
+code or data defect and `paused` an operator action, so both are excluded. Pinned by `TestLease_PanickedTickIsNotACompletion` (real Postgres) and
 `TestRun_PanicUnwindsThroughTheGate`, both mutation-verified.

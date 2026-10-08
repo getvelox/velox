@@ -122,8 +122,9 @@ func (m *Manager) Lead(ctx context.Context, role Role, interval time.Duration, w
 	returned := false
 	defer func() {
 		hb.stop()
+		cause := context.Cause(workCtx)
 		outcome := releaseCompleted
-		switch cause := context.Cause(workCtx); {
+		switch {
 		case !returned:
 			outcome = releaseFailed
 		case cause == nil:
@@ -134,7 +135,10 @@ func (m *Manager) Lead(ctx context.Context, role Role, interval time.Duration, w
 		}
 		cancel(nil)
 		m.release(role, token, interval, outcome)
-		if !returned && m.onLost != nil {
+		// One report per tick. A tick whose lease was already lost has been
+		// reported by the heartbeat (m.lost); a panic while that tick unwinds
+		// on its cancelled ctx is a consequence of the loss, not a second event.
+		if !returned && !errors.Is(cause, ErrLeaseLost) && m.onLost != nil {
 			m.onLost(role, "panicked")
 		}
 	}()
