@@ -928,10 +928,12 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	// nil-guarded — so a dropped wiring here loses that row in silence.
 	audit.MustWired(noPMNotifier)
 	engine.SetNoPaymentMethodNotifier(noPMNotifier)
-	// Same adapter feeds the manual-invoice finalize path so an
-	// operator-composed one-off invoice notifies the customer + queues for
-	// auto-charge retry on no-PM identically to a cycle invoice.
+	// Same adapter backs the operator's "resend payment setup link" action.
 	invoiceH.SetNoPaymentMethodNotifier(noPMNotifier)
+	// Manual finalize collects through the engine's one collector, the same
+	// one the auto-charge sweep runs, so a one-off invoice collects exactly
+	// like a cycle invoice.
+	invoiceH.SetCollector(engine)
 	// No-payment dunning enrollment: the scheduler (and test-clock catchup)
 	// route card-less auto_charge_pending invoices into dunning so they
 	// reach a terminal instead of looping in RetryPendingCharges forever.

@@ -68,6 +68,12 @@ The new sites reuse the retry sweep's proven sequence — apply → reload →
 settle-if-zero → collect — not billOnePeriod's block (whose $0 arm is
 entangled with cycle-advance, trap R2):
 
+*Amended 2026-10-08 ([ADR-116](116-collection-intent-at-finalize-one-collector.md)):
+the per-site blocks below are gone. Every finalize site collects through one
+collector (`processAutoCharge`), which applies credits before any charge on
+every invoice. The policy of this ADR is unchanged; the mechanism below is
+history.*
+
 - Engine: `applyCreditsAndCollect` wraps `collectAfterFinalize` for the day-1
   (`FinalizeOnCreateInvoice`) and final-on-cancel sites. An apply failure
   **flags for the sweep and returns without charging** — never a pre-credit

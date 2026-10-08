@@ -138,8 +138,12 @@ func expireLease(t *testing.T, db *postgres.DB, invoiceID string) {
 // TestClaimAutoCharge_PredicateRecheck: the CAS re-asserts the full
 // sweep eligibility, so any state movement between list and claim —
 // a webhook settle, a rival leader's failed/unknown outcome, a cleared
-// flag, a voided invoice, a zeroed amount_due — fails the claim
-// (mutation-verify style: every predicate flipped once).
+// flag, a voided invoice — fails the claim (mutation-verify style: every
+// predicate flipped once).
+//
+// A zeroed amount_due is deliberately NOT a refusal: the collector claims a
+// $0 invoice to settle it paid with no charge (it re-reads the row after the
+// claim, so a stale snapshot amount is never charged).
 func TestClaimAutoCharge_PredicateRecheck(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := postgres.WithLivemode(context.Background(), false)
@@ -155,7 +159,6 @@ func TestClaimAutoCharge_PredicateRecheck(t *testing.T) {
 		{"rival outcome failed", `UPDATE invoices SET payment_status='failed' WHERE id=$1`},
 		{"flag cleared", `UPDATE invoices SET auto_charge_pending=FALSE WHERE id=$1`},
 		{"voided", `UPDATE invoices SET status='voided' WHERE id=$1`},
-		{"credit-covered (amount_due=0)", `UPDATE invoices SET amount_due_cents=0 WHERE id=$1`},
 	}
 	for i, m := range mutations {
 		t.Run(m.name, func(t *testing.T) {
@@ -175,6 +178,45 @@ func TestClaimAutoCharge_PredicateRecheck(t *testing.T) {
 				t.Fatalf("claim must fail after %q — charging stale state is the double-charge path", m.name)
 			}
 		})
+	}
+}
+
+// TestClaimAutoCharge_ZeroDueIsClaimable: an invoice brought to $0 (a credit
+// note, or credits) is claimed so the collector can settle it. Pre-fix the
+// claim and both sweep lists required amount_due > 0, so such an invoice sat
+// finalized and unpaid forever.
+func TestClaimAutoCharge_ZeroDueIsClaimable(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	ctx := postgres.WithLivemode(context.Background(), false)
+	tenantID := testutil.CreateTestTenant(t, db, "Claim Zero Due")
+	store := invoice.NewPostgresStore(db)
+
+	inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-CLAIM-ZERO")
+	tx, err := db.BeginTx(context.Background(), postgres.TxBypass, "")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE invoices SET amount_due_cents=0 WHERE id=$1`, inv.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("zero amount_due: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	listed, err := store.ListAutoChargePending(ctx, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	found := false
+	for _, l := range listed {
+		found = found || l.ID == inv.ID
+	}
+	if !found {
+		t.Error("a queued $0 invoice must be listed by the sweep so it can be settled")
+	}
+	if ok, err := store.ClaimAutoCharge(ctx, tenantID, inv.ID); err != nil || !ok {
+		t.Fatalf("claim = %v, %v; want true — the collector settles a $0 invoice", ok, err)
 	}
 }
 

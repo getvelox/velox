@@ -47,6 +47,7 @@ func (m *memStore) Create(_ context.Context, tenantID string, inv domain.Invoice
 	now := time.Now().UTC()
 	inv.CreatedAt = now
 	inv.UpdatedAt = now
+	inv.AutoChargePending = collectionQueuedAtFinalize(inv.Status, inv.PaymentStatus)
 	m.invoices[inv.ID] = inv
 	return inv, nil
 }
@@ -235,6 +236,15 @@ func (m *memStore) UpdateStatus(_ context.Context, tenantID, id string, status d
 	}
 	inv.Status = status
 	inv.UpdatedAt = time.Now().UTC()
+	// Mirrors updateStatusInTx: the queue flag moves with the status.
+	switch status {
+	case domain.InvoiceFinalized:
+		if inv.PaymentStatus == domain.PaymentPending {
+			inv.AutoChargePending = true
+		}
+	case domain.InvoiceVoided, domain.InvoiceUncollectible:
+		inv.AutoChargePending = false
+	}
 	m.invoices[id] = inv
 	return inv, nil
 }
@@ -279,6 +289,7 @@ func (m *memStore) FinalizeWithDates(_ context.Context, tenantID, id string, iss
 		return domain.Invoice{}, errs.ErrNotFound
 	}
 	inv.Status = domain.InvoiceFinalized
+	inv.AutoChargePending = inv.PaymentStatus == domain.PaymentPending
 	inv.IssuedAt = &issuedAt
 	inv.DueAt = &dueAt
 	inv.UpdatedAt = time.Now().UTC()
@@ -346,6 +357,7 @@ func (m *memStore) MarkPaid(_ context.Context, tenantID, id, stripeID string, pa
 	if inv.TaxStatus != "" && inv.TaxStatus != domain.InvoiceTaxOK {
 		return domain.Invoice{}, errs.InvalidState("cannot mark invoice paid with tax_status=" + string(inv.TaxStatus))
 	}
+	inv.AutoChargePending = false // mirrors markPaidReportingTransition
 	inv.Status = domain.InvoicePaid
 	inv.PaymentStatus = domain.PaymentSucceeded
 	inv.StripePaymentIntentID = stripeID
@@ -720,6 +732,7 @@ func (m *memStore) CreateWithLineItems(_ context.Context, tenantID string, inv d
 	now := time.Now().UTC()
 	inv.CreatedAt = now
 	inv.UpdatedAt = now
+	inv.AutoChargePending = collectionQueuedAtFinalize(inv.Status, inv.PaymentStatus)
 	m.invoices[inv.ID] = inv
 	for _, item := range items {
 		item.InvoiceID = inv.ID
@@ -768,7 +781,7 @@ func (m *memStore) ClaimAutoCharge(_ context.Context, _, id string) (bool, error
 		return false, errs.ErrNotFound
 	}
 	return inv.AutoChargePending && inv.PaymentStatus == domain.PaymentPending &&
-		inv.Status == domain.InvoiceFinalized && inv.AmountDueCents > 0, nil
+		inv.Status == domain.InvoiceFinalized, nil
 }
 
 func (m *memStore) ClaimChargeForManualCollect(_ context.Context, _, id string) (bool, error) {
@@ -797,7 +810,7 @@ func (m *memStore) SetAutoChargePending(_ context.Context, _, id string, pending
 func (m *memStore) ListAutoChargePending(_ context.Context, _ int) ([]domain.Invoice, error) {
 	var result []domain.Invoice
 	for _, inv := range m.invoices {
-		if inv.AutoChargePending {
+		if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized && inv.PaymentStatus == domain.PaymentPending {
 			result = append(result, inv)
 		}
 	}
@@ -1722,7 +1735,7 @@ func TestRetryTax_AutoFinalize_QueuesForCollection(t *testing.T) {
 
 	store.invoices["inv_stuck"] = domain.Invoice{
 		ID: "inv_stuck", TenantID: "t1", CustomerID: "cus_a",
-		Status: domain.InvoiceDraft,
+		Status: domain.InvoiceDraft, PaymentStatus: domain.PaymentPending,
 		TaxFacts: domain.TaxFacts{
 			TaxStatus: domain.InvoiceTaxPending, TaxErrorCode: "provider_outage",
 		},
@@ -1786,6 +1799,7 @@ func TestRetryTax_AutoFinalize_RespectsPauseCollection(t *testing.T) {
 			ID: "inv_paused", TenantID: "t1", CustomerID: "cus_a",
 			SubscriptionID: "sub_1",
 			Status:         domain.InvoiceDraft,
+			PaymentStatus:  domain.PaymentPending,
 			TaxFacts: domain.TaxFacts{
 				TaxStatus: domain.InvoiceTaxPending, TaxErrorCode: "provider_outage",
 			},

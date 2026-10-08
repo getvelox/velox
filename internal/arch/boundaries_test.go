@@ -45,7 +45,7 @@ var allowedCrossDomainImports = map[string][]string{
 	"dashmembers":    {"audit", "auth", "session"},
 	"dunning":        {"auth"},
 	"hostedinvoice":  {"auth", "invoice"},                      // auth = customer-actor ctx stamping for the public checkout audit row (ADR-090 PR4)
-	"invoice":        {"audit", "auth", "payment", "tax"},      // audit = in-tx Void emission (ADR-090 PR4); // payment = error-taxonomy value types only (PaymentError, ErrPaymentTransient — classified by the finalize decline arm); never the Service
+	"invoice":        {"audit", "auth", "tax"},                 // audit = in-tx Void emission (ADR-090 PR4); the payment edge went with the finalize decline arm (collection moved to the billing engine's one collector)
 	"payment":        {"audit", "auth", "tax", "tenantstripe"}, // audit = in-tx emissions: checkout PM flip, token consume/restore (ADR-090 PR4)
 	"paymentmethods": {"auth", "payment"},                      // audit edge GONE with MarkHandled (ADR-090 uninstall): the service emits through its own narrow interface
 	"pricing":        {"audit", "auth"},                        // audit = in-tx emissions: meter PATCH, meter-pricing-rule DELETE (ADR-090 PR5)

@@ -126,7 +126,7 @@ Each row links to the full record. Browse by Topic, or search this page for a te
 | [083](083-recipe-adoption-conformance-gate.md) | 2026-07-07 | Superseded by ADR-085 | Pricing & usage | A recipe adopts an existing plan or meter only if its billing config matches; else it refuses |
 | [085](085-recipe-idempotent-apply.md) | 2026-07-08 | Accepted | Pricing & usage | Applying a recipe is additive: a first apply makes a new plan, a repeat creates nothing, no uninstall |
 | [086](086-simulated-data-lifecycle.md) | 2026-07-09 | Accepted (amended) | Test clocks & simulated time | Money sweeps skip simulated invoices; deleting a clock deletes its customers' rows, not the audit log |
-| [087](087-collect-after-finalize-pipeline.md) | 2026-07-11 | Accepted | Payments | One method collects payment after every engine finalize; each site keeps its own checks |
+| [087](087-collect-after-finalize-pipeline.md) | 2026-07-11 | Superseded by 116 | Payments | One method collects payment after every engine finalize; each site keeps its own checks |
 | [088](088-credit-balance-applies-to-all-invoices.md) | 2026-07-11 | Accepted | Credits | The credit balance applies to every invoice at finalize; the card is charged the remainder |
 | [089](089-retire-audit-fail-closed-response-swap.md) | 2026-07-13 | Accepted | Audit | A failed audit write never changes the API response; it is logged and counted |
 | [090](090-audit-in-tx-emission.md) | 2026-07-13 | Accepted | Audit | Target: audit rows commit in the business transaction; only some writers do, most still write after commit |
@@ -155,6 +155,7 @@ Each row links to the full record. Browse by Topic, or search this page for a te
 | [113](113-nothing-charges-a-written-off-invoice.md) | 2026-08-06 | Accepted | Invoices | Nothing charges a written-off invoice; it settles only by a recorded payment or a found charge |
 | [114](114-leader-leases-tick-scoped-fencing.md) | 2026-08-30 | Accepted | Platform & ops | Leader election is a database row per role, with a fencing token checked by every claim |
 | [115](115-one-closer-for-the-billing-period.md) | 2026-08-30 | Accepted | Billing | Every period write locks the subscription and rechecks its period snapshot first |
+| [116](116-collection-intent-at-finalize-one-collector.md) | 2026-10-08 | Accepted | Payments | Finalize queues the invoice in its own write; one collector charges it, and a nudge runs it right away |
 
 > ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
 > across every ref). It is a skipped number, not a lost decision.

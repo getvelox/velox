@@ -146,7 +146,7 @@ settings stores.
   the rollout — the same window as before, not wider. Reference deploy is
   `Recreate` / N=1 (ADR-114); on N≥2 do not drain with `POST /v1/billing/run`
   until every replica runs the new binary.
-- **Named crash-point loss.** Merging the advance into the invoice's
+- **Named crash-point loss.** *Closed 2026-10-08 by [ADR-116](116-collection-intent-at-finalize-one-collector.md): the invoice is queued in its finalize write and the collector settles $0 rows, so the sweep heals this state.* Original note: Merging the advance into the invoice's
   transaction removes the `ErrAlreadyExists` re-entry that healed a crash
   between the close commit and the born-$0 / fully-credited `MarkPaid` (that
   heal only ran while the sub was still due). No money moves; the row sits in

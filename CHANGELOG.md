@@ -57,6 +57,13 @@ Older entries keep their original text.
 
 ### Fixed
 
+- **A crash right after an invoice was finalized could leave it unpaid forever; now the next auto-charge tick collects it (2026-10-08).** Every finalize path (cycle close, threshold, a subscription's first or final invoice, operator finalize, tax retry) committed the invoice and then charged it in a separate step. A crash in between left an invoice that was owed but that no sweep, email or dunning run ever picked up. The finalize write now queues the invoice for collection itself, and one collector does all collection: credits, the card, or the "add a card" email. That collector still runs right after the finalize, so charges happen as fast as before. Also fixed:
+  - An invoice brought to $0 (by credits or a credit note) is now marked paid instead of staying "awaiting payment".
+  - The "add a card" email is no longer sent twice.
+  - Card-holding customers are no longer at risk of being dunned as having no payment method.
+
+  Visible changes: `auto_charge_pending` is `true` on every unpaid finalized invoice, including in `invoice.finalized` webhooks. Credits are applied when an invoice is finalized, not while it is a tax-pending draft. ADR-116 (supersedes ADR-087).
+
 - **An interrupted final dunning attempt is now finished, not abandoned (2026-10-08).** If a deploy, leader handover, crash or database error hit between a run's last failed retry and its escalation, the run stayed active with no next action forever: the subscription was never paused or canceled, the invoice never written off, no escalation sent. The run now holds a 15-minute lease and is finished on the next tick after it. A run also escalates exactly once, and a second processor can no longer reopen or re-resolve an escalated run. Under `mark_uncollectible`, a run whose write-off had already committed closes as not collectible without the final notice (deferred, ADR-112). New doctor check `dunning_active_run_without_next_action` lists runs stranded before this fix. ADR-112 amendment 2026-10-08.
 
 - **A background tick that panics no longer reports itself as completed (2026-10-08).** A panic in a billing or dunning tick (or in an outbox's claim/mark code — per-row outbox panics were already contained) was released as a finished tick, so a tick that panicked every run (one malformed subscription) halted that role while `velox_leader_last_tick_age_seconds` stayed healthy. It now counts as not completed: the age gauge grows, `velox_leader_lease_lost_total{reason="panicked"}` pages at once, and it retries after `min(interval, 60 s)`. ADR-114 amendment 2026-10-08.

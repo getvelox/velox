@@ -1,6 +1,7 @@
 # ADR-087: One post-finalize collection pipeline; collection gates stay per-site
 
-**Status:** Accepted (2026-07-11)
+**Status:** Superseded by [ADR-116](116-collection-intent-at-finalize-one-collector.md) (2026-10-08). Collection now runs in one collector, and every finalize queues the invoice in its own write. The per-site gates and the flag-on-decline analysis below are history.
+**Originally accepted:** 2026-07-11
 **Context:** design review 2026-07-10, redesign #4 ("CollectAfterFinalize"); executed after an 8-agent site census verified 18 divergence dimensions across the seven finalize paths.
 
 ## Decision

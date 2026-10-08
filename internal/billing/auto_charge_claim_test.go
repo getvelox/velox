@@ -55,8 +55,8 @@ func TestProcessAutoCharge_DualLeaderChargesOnce(t *testing.T) {
 	samePending := make([]domain.Invoice, len(pending))
 	copy(samePending, pending)
 
-	chargedA, errsA := engine.processAutoCharge(context.Background(), pending)
-	chargedB, errsB := engine.processAutoCharge(context.Background(), samePending)
+	chargedA, errsA := engine.processAutoCharge(context.Background(), pending, nil, noPMTriggerSweep)
+	chargedB, errsB := engine.processAutoCharge(context.Background(), samePending, nil, noPMTriggerSweep)
 
 	if len(errsA) != 0 || len(errsB) != 0 {
 		t.Fatalf("unexpected errors: A=%v B=%v", errsA, errsB)
@@ -95,7 +95,7 @@ func TestProcessAutoCharge_ReleasesClaimOnPreStripeSkips(t *testing.T) {
 		engine := wireBaseTax(NewEngine(&mockSubs{cycleUpdated: make(map[string]bool)}, &mockUsage{}, &mockPricing{}, inv, nil, &mockSettings{}, pms, &countingCharger{}, billingTestClock()))
 
 		pending, _ := inv.ListAutoChargePending(context.Background(), 50)
-		_, _ = engine.processAutoCharge(context.Background(), pending)
+		_, _ = engine.processAutoCharge(context.Background(), pending, nil, noPMTriggerSweep)
 
 		if ok, _ := inv.ClaimAutoCharge(context.Background(), "t1", "inv_nopm"); !ok {
 			t.Fatal("claim must be re-takeable immediately after the no-PM skip — the lease was not released")
@@ -114,7 +114,7 @@ func TestProcessAutoCharge_ReleasesClaimOnPreStripeSkips(t *testing.T) {
 		engine := wireBaseTax(NewEngine(&mockSubs{cycleUpdated: make(map[string]bool)}, &mockUsage{}, &mockPricing{}, inv, failingCredits{}, &mockSettings{}, &fakePaymentSetups{ready: true, stripeCustomerID: "cus_s"}, charger, billingTestClock()))
 
 		pending, _ := inv.ListAutoChargePending(context.Background(), 50)
-		_, _ = engine.processAutoCharge(context.Background(), pending)
+		_, _ = engine.processAutoCharge(context.Background(), pending, nil, noPMTriggerSweep)
 
 		if charger.calls["inv_credfail"] != 0 {
 			t.Fatal("charge must not fire when credit re-apply failed (overcharge guard)")
