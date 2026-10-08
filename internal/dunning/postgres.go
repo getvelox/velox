@@ -475,7 +475,7 @@ func (s *PostgresStore) ListRuns(ctx context.Context, filter RunListFilter) ([]d
 // already 'resolved' — and returns whether THIS call won the transition. Same field
 // set as UpdateRun plus the `state <> 'resolved'` guard; the RowsAffected==1 result
 // is the exactly-once gate the service uses to fire the resolve side-effects once.
-func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (bool, error) {
+func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, fromActiveOnly bool) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return false, err
@@ -486,11 +486,11 @@ func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run dom
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoice_dunning_runs SET state=$1, reason=$2, attempt_count=$3,
 			last_attempt_at=$4, next_action_at=$5, paused=$6, resolved_at=$7, resolution=$8, updated_at=$9
-		WHERE id=$10 AND state <> 'resolved'`,
+		WHERE id=$10 AND state <> 'resolved' AND (NOT $11 OR state = 'active')`,
 		run.State, postgres.NullableString(run.Reason), run.AttemptCount,
 		postgres.NullableTime(run.LastAttemptAt), postgres.NullableTime(run.NextActionAt),
 		run.Paused, postgres.NullableTime(run.ResolvedAt), postgres.NullableString(string(run.Resolution)),
-		now, run.ID)
+		now, run.ID, fromActiveOnly)
 	if err != nil {
 		return false, err
 	}
@@ -504,9 +504,23 @@ func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run dom
 	return n == 1, nil
 }
 
-// UpdateRunIfActive applies the run's fields only when the row has not been
-// concurrently resolved AND still carries the attempt_count the caller's write
-// was derived from (ha-8, 2026-08-31). The state guard alone left the COUNT a
+// UpdateRunIfActive applies the run's fields only when the row is still
+// ACTIVE and still carries the attempt_count the caller's write was derived
+// from. The two guards and one refusal, each for its own defect:
+//
+//   - state = 'active' (SB-2, 2026-10-08): escalated is terminal for the
+//     automated path just as resolved is. The old `state <> 'resolved'`
+//     admitted escalated rows, so a second processor could escalate a run
+//     twice (a second final-notice email, a second dunning.escalated) or
+//     flip an escalated run back to active. ResolveRun stays
+//     `state <> 'resolved'` on purpose: escalated -> resolved after a late
+//     payment is legitimate.
+//   - attempt_count = expected (ha-8, 2026-08-31), below.
+//   - an ACTIVE run is never written with next_action_at NULL (SB-1,
+//     2026-10-08): both due-run pickers select on next_action_at, so NULL
+//     removes an active run from processing forever.
+//
+// ha-8: The state guard alone left the COUNT a
 // blind read-modify-write: two processors of one run — a superseded-but-running
 // dunning tick beside the new leader's (the ADR-114 frozen-process window;
 // ListDueRuns' claim tx is rolled back before processing, so rows are not
@@ -522,6 +536,9 @@ func (s *PostgresStore) ResolveRun(ctx context.Context, tenantID string, run dom
 // the state standing), but an email-side failure only rolls back to the
 // savepoint and is logged loud — it never vetoes the money write.
 func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error) {
+	if err := refuseStrandingWrite(run); err != nil {
+		return false, err
+	}
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return false, err
@@ -532,7 +549,7 @@ func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE invoice_dunning_runs SET state=$1, reason=$2, attempt_count=$3,
 			last_attempt_at=$4, next_action_at=$5, paused=$6, resolved_at=$7, resolution=$8, updated_at=$9
-		WHERE id=$10 AND state <> 'resolved' AND attempt_count = $11`,
+		WHERE id=$10 AND state = 'active' AND attempt_count = $11`,
 		run.State, postgres.NullableString(run.Reason), run.AttemptCount,
 		postgres.NullableTime(run.LastAttemptAt), postgres.NullableTime(run.NextActionAt),
 		run.Paused, postgres.NullableTime(run.ResolvedAt), postgres.NullableString(string(run.Resolution)),
@@ -557,6 +574,47 @@ func (s *PostgresStore) UpdateRunIfActive(ctx context.Context, tenantID string, 
 		} else if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT dunning_email"); err != nil {
 			return false, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// refuseStrandingWrite is the liveness invariant both store implementations
+// enforce on every UpdateRunIfActive write: an active run must carry
+// next_action_at. (CreateRun is not guarded; its only production caller,
+// StartDunning, always sets it.)
+func refuseStrandingWrite(run domain.InvoiceDunningRun) error {
+	if run.State == domain.DunningActive && run.NextActionAt == nil {
+		return fmt.Errorf("dunning run %s: refusing to write an active run with no next_action_at (both due-run pickers would never select it again)", run.ID)
+	}
+	return nil
+}
+
+// ClaimExhaustion is the dunning-level claim taken before any terminal action
+// fires on the exhaust-on-entry path. attempt_count does not move during
+// exhaustion, so the version that tells two processors apart is
+// next_action_at: the caller passes the value it just listed, and the claim
+// moves it to lease. Exactly one processor wins; the loser fires nothing.
+// expectedNext is always a value scanned from this column, so equality is
+// exact at the column's microsecond precision.
+func (s *PostgresStore) ClaimExhaustion(ctx context.Context, tenantID, runID string, expectedAttempts int, expectedNext, lease time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer postgres.Rollback(tx)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE invoice_dunning_runs SET next_action_at=$1, updated_at=$2
+		WHERE id=$3 AND state = 'active' AND attempt_count = $4 AND next_action_at = $5`,
+		lease, clock.Now(ctx), runID, expectedAttempts, expectedNext)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err

@@ -31,14 +31,26 @@ type Store interface {
 	// the dunning.resolved webhook) only on a win, so two resolvers racing the same
 	// run (e.g. a card-settle resolve and processRun's own resolve) emit exactly one
 	// dunning.resolved per recovery.
-	ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (bool, error)
-	// UpdateRunIfActive is UpdateRun guarded on `state <> 'resolved'`: it writes the
-	// run's fields only if the row has NOT been concurrently resolved, and reports
-	// whether it applied. processRun's retry-path writes (the pre-charge attempt
-	// persist and the transient-skip rewind) use it so a concurrent card-settle
-	// webhook resolve landing during the up-to-15s charge window is never clobbered
-	// back to active — preserving the exactly-once dunning.resolved contract.
+	//
+	// fromActiveOnly narrows the CAS to `state = 'active'`. The automated
+	// processRun/exhaustRun resolves pass true: they act on a run they LISTED as
+	// active, so a stale processor must never rewrite a run another processor
+	// escalated in the meantime (SB-2). Settle-driven and operator resolves pass
+	// false: escalated -> resolved after a late payment is legitimate.
+	ResolveRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, fromActiveOnly bool) (bool, error)
+	// UpdateRunIfActive is UpdateRun guarded on `state = 'active' AND
+	// attempt_count = expectedAttempts`, and reports whether it applied. Every
+	// automated processRun/exhaustRun write uses it: a concurrent resolve is never
+	// clobbered back to active (exactly-once dunning.resolved), an escalated run
+	// is never re-escalated or reopened (SB-2), and a stale processor's count is
+	// refused (ha-8). It returns an error, writing nothing, for an active run
+	// with no next_action_at (SB-1: the due-run pickers would never see it again).
 	UpdateRunIfActive(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error)
+	// ClaimExhaustion moves an exhausted run's next_action_at from the value the
+	// caller listed (expectedNext) to lease, only while the row is still active
+	// at expectedAttempts with that next_action_at. Exactly one processor wins;
+	// the exhaust-on-entry path fires terminal actions only on a win.
+	ClaimExhaustion(ctx context.Context, tenantID, runID string, expectedAttempts int, expectedNext, lease time.Time) (bool, error)
 	ListDueRuns(ctx context.Context, tenantID string, dueBefore time.Time, limit int) ([]domain.InvoiceDunningRun, error)
 
 	// ListDueRunsForClock is the catchup-path counterpart to ListDueRuns.

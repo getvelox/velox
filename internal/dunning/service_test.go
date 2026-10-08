@@ -177,8 +177,9 @@ func (m *memStore) ListRuns(_ context.Context, filter RunListFilter) ([]domain.I
 
 // ResolveRun mirrors the store's CAS: apply the resolved fields only if the row is
 // not already resolved, and report whether this call won the transition.
-func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDunningRun) (bool, error) {
-	if existing, ok := m.runs[run.ID]; ok && existing.State == domain.DunningResolved {
+func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDunningRun, fromActiveOnly bool) (bool, error) {
+	if existing, ok := m.runs[run.ID]; ok && (existing.State == domain.DunningResolved ||
+		(fromActiveOnly && existing.State != domain.DunningActive)) {
 		return false, nil
 	}
 	m.runs[run.ID] = run
@@ -191,8 +192,11 @@ func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDun
 // attempt-count CAS — rather than stubbing "true": a fake that always applies
 // would keep every stale-processor test green forever (fake-fidelity rule).
 func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error) {
+	if err := refuseStrandingWrite(run); err != nil {
+		return false, err
+	}
 	existing, ok := m.runs[run.ID]
-	if ok && existing.State == domain.DunningResolved {
+	if ok && existing.State != domain.DunningActive {
 		return false, nil
 	}
 	if ok && existing.AttemptCount != expectedAttempts {
@@ -206,6 +210,18 @@ func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.Inv
 			m.hookErrs = append(m.hookErrs, err)
 		}
 	}
+	return true, nil
+}
+
+// ClaimExhaustion mirrors the real store's predicate exactly.
+func (m *memStore) ClaimExhaustion(_ context.Context, _, runID string, expectedAttempts int, expectedNext, lease time.Time) (bool, error) {
+	existing, ok := m.runs[runID]
+	if !ok || existing.State != domain.DunningActive || existing.AttemptCount != expectedAttempts ||
+		existing.NextActionAt == nil || !existing.NextActionAt.Equal(expectedNext) {
+		return false, nil
+	}
+	existing.NextActionAt = &lease
+	m.runs[runID] = existing
 	return true, nil
 }
 

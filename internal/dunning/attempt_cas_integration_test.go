@@ -47,9 +47,12 @@ func TestUpdateRunIfActive_AttemptCountCAS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create invoice: %v", err)
 	}
+	// Every real active run carries next_action_at (StartDunning sets it; the
+	// store refuses an active write without it — SB-1).
+	next := now.Add(time.Hour)
 	run, err := store.CreateRun(ctx, tenantID, domain.InvoiceDunningRun{
 		InvoiceID: inv.ID, CustomerID: cust.ID, PolicyID: policy.ID,
-		State: domain.DunningActive, Reason: "payment_failed",
+		State: domain.DunningActive, Reason: "payment_failed", NextActionAt: &next,
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
