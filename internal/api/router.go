@@ -355,6 +355,9 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	settingsH.SetAuditLogger(auditLogger)
 	stripeClient := payment.NewLiveStripeClient(stripeClients)
 	dunningStore := dunning.NewPostgresStore(db)
+	// dunning.started is enqueued in StartRun's tx, with the run and its
+	// timeline event (all or none).
+	dunningStore.SetOutboxEnqueuer(outboxStore)
 	dunningSvc := dunning.NewService(dunningStore, nil, clk) // retrier set below after stripeAdapter created
 	// PaymentCancel is wired lazily below (SetPaymentCanceler) — stopping
 	// collection needs the payment SERVICE (session expiry + PI cancel),

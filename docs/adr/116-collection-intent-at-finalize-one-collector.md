@@ -30,12 +30,11 @@ The inline code also existed in several copies: an engine pipeline, a cycle/thre
    - Request-time sites pass nil, meaning the invoice's own clock now.
    - The operator's manual finalize reaches it through a consumer-defined `invoice.Collector`.
 4. **Zero-due settles.** The sweep lists and claims $0 rows (`amount_due_cents > 0` is dropped from both lists and `ClaimAutoCharge`), and the collector marks them paid. This covers an invoice brought to $0 by a credit note, which used to sit unpaid forever.
-5. **No-payment dunning enrollment checks for a card, after collection settles.** The queue now holds every unpaid invoice, so `EnrollStalledForDunning` enrolls a row as `no_payment_method` only when:
-   - it is owed;
-   - `ResolveForCharge` finds no chargeable method (a lookup error skips the row for that tick);
-   - it was last written more than 10 minutes ago.
-
-   The last condition matters because the finalize write queues the invoice before the nudge applies the customer's credits, with the webhook dispatch and the Stripe tax commit in between. Without the settle window, a tick could dun an invoice that its credits are about to cover. The test-clock path has no window, because catchup collects before it enrolls.
+5. **The collector starts no-payment dunning.** *(Amended 2026-10-08, same day.)* In its no-card arm, `processAutoCharge` calls `StartDunning(no_payment_method)`. That arm is reached only after the credit step succeeded, with money still owed and no chargeable method, under the invoice's lease. A lookup error starts nothing.
+   - This replaces the separate `EnrollStalledForDunning` sweeps. They read the queue, and once every unpaid invoice was queued from birth, a reader of the queue could dun an invoice whose credits were about to cover it.
+   - The first fix was a 10-minute settle window on that sweep. It was a time guess, and it still dunned an invoice whose credit apply had just failed. Starting dunning in the collector makes the rule exact and deletes the second decider.
+   - It mirrors the decline path, where the charger starts dunning.
+7. **Starting dunning is one transaction.** `dunning.Store.StartRun` writes the run, its `dunning_started` timeline event, and the `dunning.started` webhook (an outbox row) together. It is the same seam the subscription and invoice stores use (`OutboxEnqueuer`). Before, these were three commits. A crash after the first left a run with no timeline row and no webhook, and nothing re-sent them, because `StartDunning` is idempotent on the existing run. The other dunning webhooks are still post-commit (see the README follow-ups table).
 6. **Any definite failure hands off to dunning.** A charge that fails definitely clears the flag, whether it carries a `decline_code` or not (for example an `invalid_request`). The charger has already marked the invoice failed and started dunning. Before, only a coded decline cleared the flag.
 
 ## Consequences

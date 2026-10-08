@@ -370,7 +370,12 @@ func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, 
 	t := failureAt.Add(firstRetryDelay)
 	nextActionAt := &t
 
-	run, err := s.store.CreateRun(ctx, tenantID, domain.InvoiceDunningRun{
+	// One transaction: the run, its dunning_started timeline event (at the
+	// failure instant, so the invoice timeline's 'Automatic retry scheduled'
+	// row aligns with the cycle's period_end, not the orchestrator's
+	// frozen_time), and the dunning.started webhook. A failure writes none of
+	// them, and the caller's retry starts cleanly.
+	run, err := s.store.StartRun(ctx, tenantID, domain.InvoiceDunningRun{
 		InvoiceID:    invoiceID,
 		CustomerID:   customerID,
 		PolicyID:     policy.ID,
@@ -379,34 +384,14 @@ func (s *Service) StartDunning(ctx context.Context, tenantID string, invoiceID, 
 		AttemptCount: 0,
 		NextActionAt: nextActionAt,
 		// CreatedAt = failureAt so the dunning run lives on simulated
-		// cycle-close time, not orchestrator frozen_time. Aligns the
-		// 'Automatic retry scheduled' row in the invoice timeline with
-		// the cycle's period_end.
+		// cycle-close time, not orchestrator frozen_time.
 		CreatedAt: failureAt,
 	})
 	if err != nil {
-		return domain.InvoiceDunningRun{}, fmt.Errorf("create dunning run: %w", err)
+		return domain.InvoiceDunningRun{}, fmt.Errorf("start dunning run: %w", err)
 	}
 
-	// Record start event at the simulated cycle-close instant so
-	// the invoice timeline's 'Automatic retry scheduled' row aligns
-	// with the cycle's period_end, not the orchestrator's frozen_time.
-	_, _ = s.store.CreateEvent(ctx, tenantID, domain.InvoiceDunningEvent{
-		RunID:     run.ID,
-		InvoiceID: invoiceID,
-		EventType: domain.DunningEventStarted,
-		State:     domain.DunningActive,
-		Reason:    string(cause),
-		CreatedAt: failureAt,
-	})
-
 	slog.Info("dunning started", "run_id", run.ID, "invoice_id", invoiceID)
-
-	s.fireEvent(ctx, tenantID, domain.EventDunningStarted, map[string]any{
-		"run_id":      run.ID,
-		"invoice_id":  invoiceID,
-		"customer_id": customerID,
-	})
 
 	return run, nil
 }

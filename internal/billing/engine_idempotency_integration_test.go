@@ -81,6 +81,7 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	engine.SetIntervalReader(subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 
 	// Run 1: bills the period.
 	count1, errs1 := engine.RunCycle(ctx, 50)

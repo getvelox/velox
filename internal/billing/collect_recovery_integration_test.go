@@ -2,7 +2,6 @@ package billing_test
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +10,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
+	"github.com/sagarsuperuser/velox/internal/dunning"
 	"github.com/sagarsuperuser/velox/internal/invoice"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
@@ -54,29 +54,13 @@ func (c *countingCharger) count(id string) int {
 	return c.n[id]
 }
 
-// recordingDunningStarter records which invoices were enrolled, and why.
-type recordingDunningStarter struct {
-	mu    sync.Mutex
-	cause map[string]domain.DunningStartCause
-}
-
-func (d *recordingDunningStarter) StartDunning(_ context.Context, _, invoiceID, _ string, _ time.Time, cause domain.DunningStartCause) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.cause == nil {
-		d.cause = map[string]domain.DunningStartCause{}
-	}
-	d.cause[invoiceID] = cause
-	return nil
-}
-
 type collectHarness struct {
 	ctx      context.Context
 	tenantID string
 	invoices *invoice.PostgresStore
 	newEng   func(ps billing.PaymentReadiness, ch billing.InvoiceCharger, ds billing.DunningStarter) *billing.Engine
 	seed     func(t *testing.T, num string) domain.Invoice
-	age      func(t *testing.T, invoiceID string, by time.Duration)
+	db       *postgres.DB
 }
 
 func newCollectHarness(t *testing.T) collectHarness {
@@ -96,6 +80,7 @@ func newCollectHarness(t *testing.T) collectHarness {
 		)
 		e.SetTaxProviderResolver(tax.NewResolver(nil))
 		e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+		e.SetDunningStarter(testDunningStarter{})
 		e.SetDunningResolver(&testDunningResolver{})
 		if ds != nil {
 			e.SetDunningStarter(ds)
@@ -123,23 +108,7 @@ func newCollectHarness(t *testing.T) collectHarness {
 		}
 		return inv
 	}
-	// age backdates updated_at, standing in for "finalized a while ago".
-	age := func(t *testing.T, invoiceID string, by time.Duration) {
-		t.Helper()
-		tx, err := db.BeginTx(context.Background(), postgres.TxBypass, "")
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		if _, err := tx.Exec(`UPDATE invoices SET updated_at = now() - $2::interval WHERE id = $1`,
-			invoiceID, fmt.Sprintf("%d seconds", int(by.Seconds()))); err != nil {
-			_ = tx.Rollback()
-			t.Fatalf("age invoice: %v", err)
-		}
-		if err := tx.Commit(); err != nil {
-			t.Fatalf("commit: %v", err)
-		}
-	}
-	return collectHarness{ctx: ctx, tenantID: tenantID, invoices: invoiceStore, newEng: newEng, seed: seed, age: age}
+	return collectHarness{ctx: ctx, tenantID: tenantID, invoices: invoiceStore, newEng: newEng, seed: seed, db: db}
 }
 
 // A crash between the finalize commit and the post-commit collection used to
@@ -199,41 +168,45 @@ func TestCollect_NudgeAndSweepRace_ChargesOnce(t *testing.T) {
 	}
 }
 
-// Every unpaid invoice is queued from birth, so the queue alone no longer
-// means "no card". No-payment dunning must enroll only invoices whose customer
-// really has no chargeable payment method — a cardholder's queued invoice (the
-// sweep didn't reach it, or another collector holds its lease) must not be
-// dunned as no_payment_method.
-func TestEnrollStalledForDunning_OnlyCardless(t *testing.T) {
+// dunningServiceStarter adapts the real dunning.Service to the engine's
+// DunningStarter, the way api.dunningStarterAdapter does.
+type dunningServiceStarter struct{ svc *dunning.Service }
+
+func (d dunningServiceStarter) StartDunning(ctx context.Context, tenantID, invoiceID, customerID string, failureAt time.Time, cause domain.DunningStartCause) error {
+	_, err := d.svc.StartDunning(ctx, tenantID, invoiceID, customerID, failureAt, cause)
+	return err
+}
+
+// The collector starts no-payment dunning for a card-less invoice, against
+// the real dunning store: one run (cause no_payment_method) however many
+// ticks revisit it, and none at all for a customer with a card.
+func TestCollector_StartsNoPaymentDunning_RealStore(t *testing.T) {
 	h := newCollectHarness(t)
-	inv := h.seed(t, "INV-ENROLL-1")
+	dstore := dunning.NewPostgresStore(h.db)
+	if _, err := dstore.UpsertPolicy(h.ctx, h.tenantID, domain.DunningPolicy{
+		Name: "default", Enabled: true, RetrySchedule: []string{"72h"}, MaxRetryAttempts: 3,
+		FinalSubscriptionAction: domain.SubActionNone, FinalInvoiceAction: domain.InvActionNone, GracePeriodDays: 3,
+	}); err != nil {
+		t.Fatalf("upsert policy: %v", err)
+	}
+	starter := dunningServiceStarter{svc: dunning.NewService(dstore, nil, nil)}
 
-	// Just finalized: its finalize-time collection may still be applying
-	// credits that cover it, so even a card-less invoice waits out the
-	// settle window rather than being dunned (and firing dunning.started).
-	fresh := &recordingDunningStarter{}
-	if _, errs := h.newEng(testPaymentSetupsNoPM{}, testChargerSentinel{}, fresh).EnrollStalledForDunning(h.ctx, 50); len(errs) != 0 {
-		t.Fatalf("enroll errs: %v", errs)
+	cardless := h.seed(t, "INV-NOCARD-1")
+	e := h.newEng(testPaymentSetupsNoPM{}, testChargerSentinel{}, starter)
+	for tick := 0; tick < 3; tick++ {
+		e.RetryPendingCharges(h.ctx, 50)
 	}
-	if _, ok := fresh.cause[inv.ID]; ok {
-		t.Fatal("a just-finalized invoice must not be enrolled before its collection settles")
+	run, err := dstore.GetRunByInvoice(h.ctx, h.tenantID, cardless.ID)
+	if err != nil {
+		t.Fatalf("card-less invoice must have a dunning run: %v", err)
 	}
-	h.age(t, inv.ID, time.Hour)
-
-	starter := &recordingDunningStarter{}
-	withCard := h.newEng(testPaymentSetupsReady{}, &countingCharger{}, starter)
-	if _, errs := withCard.EnrollStalledForDunning(h.ctx, 50); len(errs) != 0 {
-		t.Fatalf("enroll errs: %v", errs)
-	}
-	if _, ok := starter.cause[inv.ID]; ok {
-		t.Fatal("a customer with a card on file must not be enrolled as no_payment_method")
+	if run.Reason != string(domain.DunningCauseNoPaymentMethod) {
+		t.Errorf("run reason = %q, want %q", run.Reason, domain.DunningCauseNoPaymentMethod)
 	}
 
-	cardless := h.newEng(testPaymentSetupsNoPM{}, testChargerSentinel{}, starter)
-	if _, errs := cardless.EnrollStalledForDunning(h.ctx, 50); len(errs) != 0 {
-		t.Fatalf("enroll errs: %v", errs)
-	}
-	if got := starter.cause[inv.ID]; got != domain.DunningCauseNoPaymentMethod {
-		t.Fatalf("cardless invoice cause = %q, want %q", got, domain.DunningCauseNoPaymentMethod)
+	withCard := h.seed(t, "INV-CARD-1")
+	h.newEng(testPaymentSetupsReady{}, &countingCharger{}, starter).RetryPendingCharges(h.ctx, 50)
+	if _, err := dstore.GetRunByInvoice(h.ctx, h.tenantID, withCard.ID); err == nil {
+		t.Error("a customer with a card must not be dunned as no_payment_method")
 	}
 }

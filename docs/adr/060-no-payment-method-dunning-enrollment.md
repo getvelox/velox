@@ -48,18 +48,21 @@ Mechanism:
 - The engine gains an optional `DunningStarter` interface (mirroring
   `NoPaymentMethodNotifier`), wired in `router.go` to a thin adapter over
   `dunning.Service`. Nil = inert (local dev / tests).
-- `EnrollStalledForDunning` (cron) and `EnrollStalledForDunningForClock`
-  (test-clock catchup) reuse the existing `ListAutoChargePending` /
-  `ListAutoChargePendingForClock` candidate queries and call the
-  **idempotent** `StartDunning` for each candidate.
-- The sweep runs **after** `RetryPendingCharges` in the cycle. *Amended
-  2026-10-08 ([ADR-116](116-collection-intent-at-finalize-one-collector.md)):*
-  every unpaid finalized invoice is now queued from its finalize write, so
-  the queue alone no longer means "card-less". The sweep enrolls a candidate
-  only when it is owed, its customer has no chargeable payment method
-  (`ResolveForCharge`), and it was last written more than 10 minutes ago, so
-  its finalize-time collection has finished. `StartDunning` is
-  one-run-per-invoice, so any invoice that still carries a run is a no-op.
+- *Amended 2026-10-08 ([ADR-116](116-collection-intent-at-finalize-one-collector.md)):*
+  the auto-charge collector starts the run itself, in its no-card arm: after
+  the credit step succeeded, with money still owed and no chargeable payment
+  method (`ResolveForCharge` found none; a lookup error starts nothing). It is
+  the no-card twin of the charger starting dunning on a decline. The separate
+  `EnrollStalledForDunning` / `…ForClock` sweeps that read the queue are
+  deleted: once every unpaid invoice was queued from its finalize write, the
+  queue alone no longer meant "card-less", and a reader of it could dun an
+  invoice whose credits were about to cover it. `StartDunning` is
+  one-run-per-invoice, so a revisit of an invoice that already has a run is a
+  no-op.
+- *Original mechanism (2026-06-23, superseded above):* `EnrollStalledForDunning`
+  (cron) and `EnrollStalledForDunningForClock` (catchup) listed the
+  `auto_charge_pending` candidates after `RetryPendingCharges` and called
+  `StartDunning` for each.
 - The dunning retrier (`RetryPayment`) already returns a *real failed
   attempt* on "no payment method" (not `ErrTransientSkip`), so the campaign
   ticks through grace + retries and **exhausts to the policy
@@ -80,9 +83,9 @@ and the dunning state machine.
 - The no-card limbo sink is closed on both the wall-clock and test-clock
   paths; a card-less subscription now reaches a terminal exactly as a
   declined-card one does.
-- Telemetry: the scheduler logs a `no-payment dunning enrollment` line with
-  a swept count; errors are collected per-invoice so one bad row doesn't
-  abort the sweep.
+- Telemetry: a failed start is returned as a collector error (logged by the
+  sweep, surfaced by catchup) and retried on the next tick, because the
+  invoice stays queued.
 - Minor wart: a no-card dunning run ticks `attempt_count` on retries that
   never attempt a charge ("attempt N of M" on a never-charged invoice). The
   dunning-list label keys on the run so it reads as a no-payment campaign,

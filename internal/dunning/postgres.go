@@ -16,8 +16,22 @@ import (
 )
 
 type PostgresStore struct {
-	db *postgres.DB
+	db     *postgres.DB
+	outbox OutboxEnqueuer
 }
+
+// OutboxEnqueuer inserts a webhook-event row on the caller's tx, so the event
+// commits or rolls back with the state change that caused it (ADR-040
+// transactional outbox). Satisfied by *webhook.OutboxStore; declared here so
+// this store needs no webhook import. Same seam as the subscription, invoice,
+// and credit stores.
+type OutboxEnqueuer interface {
+	Enqueue(ctx context.Context, tx *sql.Tx, tenantID, eventType string, payload map[string]any) (string, error)
+}
+
+// SetOutboxEnqueuer wires dunning.started into StartRun's transaction.
+// Optional: when unset (narrow tests), no event is enqueued.
+func (s *PostgresStore) SetOutboxEnqueuer(o OutboxEnqueuer) { s.outbox = o }
 
 func NewPostgresStore(db *postgres.DB) *PostgresStore {
 	return &PostgresStore{db: db}
@@ -266,6 +280,9 @@ func (s *PostgresStore) upsertPolicyTx(ctx context.Context, tx *sql.Tx, tenantID
 	return scanPolicy(row)
 }
 
+// CreateRun inserts a run row and nothing else. Production starts a run with
+// StartRun, which also writes its started event and dunning.started; this is
+// the bare insert, for seeding a run in a known state.
 func (s *PostgresStore) CreateRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
@@ -273,6 +290,60 @@ func (s *PostgresStore) CreateRun(ctx context.Context, tenantID string, run doma
 	}
 	defer postgres.Rollback(tx)
 
+	run, err = s.createRunTx(ctx, tx, tenantID, run)
+	if err != nil {
+		return domain.InvoiceDunningRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.InvoiceDunningRun{}, err
+	}
+	return run, nil
+}
+
+// StartRun starts dunning for an invoice in ONE transaction: the run row, its
+// dunning_started timeline event, and the dunning.started webhook (an outbox
+// row the dispatcher delivers later). All three commit together or none do.
+// Before, they were three commits: a crash after the first left a run with no
+// timeline row and no webhook, and nothing re-sent them, because StartDunning
+// is idempotent on the existing run. The event takes the run's reason and
+// created_at, so the timeline row sits at the failure instant.
+func (s *PostgresStore) StartRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error) {
+	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
+	if err != nil {
+		return domain.InvoiceDunningRun{}, err
+	}
+	defer postgres.Rollback(tx)
+
+	run, err = s.createRunTx(ctx, tx, tenantID, run)
+	if err != nil {
+		return domain.InvoiceDunningRun{}, err
+	}
+	if _, err := s.createEventTx(ctx, tx, tenantID, domain.InvoiceDunningEvent{
+		RunID:     run.ID,
+		InvoiceID: run.InvoiceID,
+		EventType: domain.DunningEventStarted,
+		State:     run.State,
+		Reason:    run.Reason,
+		CreatedAt: run.CreatedAt,
+	}); err != nil {
+		return domain.InvoiceDunningRun{}, fmt.Errorf("started event: %w", err)
+	}
+	if s.outbox != nil {
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventDunningStarted, map[string]any{
+			"run_id":      run.ID,
+			"invoice_id":  run.InvoiceID,
+			"customer_id": run.CustomerID,
+		}); err != nil {
+			return domain.InvoiceDunningRun{}, fmt.Errorf("enqueue %s: %w", domain.EventDunningStarted, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.InvoiceDunningRun{}, err
+	}
+	return run, nil
+}
+
+func (s *PostgresStore) createRunTx(ctx context.Context, tx *sql.Tx, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error) {
 	id := postgres.NewID("vlx_drun")
 	// Honor caller-provided CreatedAt — dunning Service passes
 	// s.clock.Now() so test-clock-driven runs (started during a
@@ -282,7 +353,7 @@ func (s *PostgresStore) CreateRun(ctx context.Context, tenantID string, run doma
 	if now.IsZero() {
 		now = clock.Now(ctx)
 	}
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		INSERT INTO invoice_dunning_runs (id, tenant_id, invoice_id, customer_id, policy_id,
 			state, reason, attempt_count, next_action_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
@@ -296,9 +367,6 @@ func (s *PostgresStore) CreateRun(ctx context.Context, tenantID string, run doma
 		&run.State, &run.Reason, &run.AttemptCount, &run.LastAttemptAt, &run.NextActionAt,
 		&run.Paused, &run.ResolvedAt, &run.Resolution, &run.CreatedAt, &run.UpdatedAt)
 	if err != nil {
-		return domain.InvoiceDunningRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return domain.InvoiceDunningRun{}, err
 	}
 	return run, nil
@@ -813,6 +881,17 @@ func (s *PostgresStore) CreateEvent(ctx context.Context, tenantID string, event 
 	}
 	defer postgres.Rollback(tx)
 
+	event, err = s.createEventTx(ctx, tx, tenantID, event)
+	if err != nil {
+		return domain.InvoiceDunningEvent{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.InvoiceDunningEvent{}, err
+	}
+	return event, nil
+}
+
+func (s *PostgresStore) createEventTx(ctx context.Context, tx *sql.Tx, tenantID string, event domain.InvoiceDunningEvent) (domain.InvoiceDunningEvent, error) {
 	id := postgres.NewID("vlx_devt")
 	// Honor caller-supplied CreatedAt so each event row carries the
 	// simulated instant the fact actually occurred — started at cycle
@@ -830,7 +909,7 @@ func (s *PostgresStore) CreateEvent(ctx context.Context, tenantID string, event 
 		metaJSON = []byte("{}")
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO invoice_dunning_events (id, run_id, tenant_id, invoice_id,
 			event_type, state, reason, attempt_count, metadata, created_at, recorded_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
@@ -842,9 +921,6 @@ func (s *PostgresStore) CreateEvent(ctx context.Context, tenantID string, event 
 	event.ID = id
 	event.TenantID = tenantID
 	event.CreatedAt = createdAt
-	if err := tx.Commit(); err != nil {
-		return domain.InvoiceDunningEvent{}, err
-	}
 	return event, nil
 }
 

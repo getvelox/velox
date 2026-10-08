@@ -63,6 +63,7 @@ func newPeriodWriter(f *thresholdFixture) *periodWriter {
 	engine.SetIntervalReader(f.subStore)
 	engine.SetTaxProviderResolver(tax.NewResolver(nil))
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	engine.SetDunningStarter(testDunningStarter{})
 	return &periodWriter{engine: engine, subs: subs, invs: invs}
 }
 

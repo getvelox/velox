@@ -2,6 +2,7 @@ package billing_test
 
 import (
 	"context"
+	"time"
 
 	"errors"
 
@@ -44,4 +45,13 @@ type testNoPMNotifier struct{ got []domain.Invoice }
 func (n *testNoPMNotifier) NotifyNoPaymentMethod(_ context.Context, _ string, inv domain.Invoice, trigger string) (domain.NotifyOutcome, error) {
 	n.got = append(n.got, inv)
 	return domain.NotifySent, nil
+}
+
+// testDunningStarter is a no-op starter for integration engines whose flow can
+// reach the collector's no-card arm (it starts no-payment dunning there).
+// Tests that assert on dunning wire their own.
+type testDunningStarter struct{}
+
+func (testDunningStarter) StartDunning(context.Context, string, string, string, time.Time, domain.DunningStartCause) error {
+	return nil
 }

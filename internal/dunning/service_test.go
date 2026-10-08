@@ -22,6 +22,10 @@ type memStore struct {
 	runs      map[string]domain.InvoiceDunningRun
 	events    []domain.InvoiceDunningEvent
 	hookErrs  []error // errors returned by UpdateRunIfActive `then` hooks (non-vetoing)
+	// started records the dunning.started payloads StartRun enqueued (the
+	// PostgresStore's in-tx outbox row).
+	started  []map[string]any
+	startErr error // when set, StartRun fails and writes nothing (all-or-none)
 }
 
 func newMemStore() *memStore {
@@ -133,6 +137,23 @@ func (m *memStore) CreateRun(_ context.Context, tenantID string, run domain.Invo
 	}
 	run.UpdatedAt = run.CreatedAt
 	m.runs[run.ID] = run
+	return run, nil
+}
+
+// StartRun mirrors PostgresStore.StartRun: the run, its started event and the
+// dunning.started outbox row land together, or nothing does.
+func (m *memStore) StartRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun) (domain.InvoiceDunningRun, error) {
+	if m.startErr != nil {
+		return domain.InvoiceDunningRun{}, m.startErr
+	}
+	run, _ = m.CreateRun(ctx, tenantID, run)
+	_, _ = m.CreateEvent(ctx, tenantID, domain.InvoiceDunningEvent{
+		RunID: run.ID, InvoiceID: run.InvoiceID, EventType: domain.DunningEventStarted,
+		State: run.State, Reason: run.Reason, CreatedAt: run.CreatedAt,
+	})
+	m.started = append(m.started, map[string]any{
+		"run_id": run.ID, "invoice_id": run.InvoiceID, "customer_id": run.CustomerID,
+	})
 	return run, nil
 }
 

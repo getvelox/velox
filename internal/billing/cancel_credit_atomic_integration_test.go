@@ -119,6 +119,7 @@ func TestCancelCredit_DraftFailure_RealTxRollsBackCancel(t *testing.T) {
 	e.SetIntervalReader(subStore)
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
 	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	e.SetDunningStarter(testDunningStarter{})
 	e.SetCreditGranter(creditSvc)
 	e.SetCreditNoteAdjuster(&failingDraftAdjuster{err: errInjectedDraftFail})
 	// Real headroom reader (required post-#442); no prior CNs exist, so the
@@ -224,6 +225,7 @@ func TestCancelCredit_PaidInAdvance_DraftAtomicAndReconcilerRecovers(t *testing.
 	e.SetIntervalReader(subStore)
 	e.SetTaxProviderResolver(tax.NewResolver(nil))
 	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	e.SetDunningStarter(testDunningStarter{})
 	e.SetCreditGranter(creditSvc)
 	e.SetInvoiceVoider(invoiceSvc)
 	e.SetCreditNoteAdjuster(creditNoteSvc)

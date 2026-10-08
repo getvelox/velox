@@ -280,8 +280,8 @@ func (s *Scheduler) runBillingHalf(ctx context.Context) {
 }
 
 // runBillingCycleForMode runs a single mode's half-cycle, in the step order
-// below: reconcile → auto-charge retry → card-less dunning enrollment →
-// threshold scan → trial expiry → pause auto-resume → bill → expire credits.
+// below: reconcile → auto-charge retry (which also starts no-payment dunning
+// for a card-less invoice) → threshold scan → trial expiry → pause auto-resume → bill → expire credits.
 // Called twice per tick — once with ctx livemode=true, once with
 // livemode=false. Logs are tagged with the mode so operators can distinguish
 // partitions.
@@ -313,7 +313,8 @@ func (s *Scheduler) runBillingCycleForMode(ctx context.Context, live bool) {
 	// (ADR-062) slots in here as one more Reconciler.
 	runReconcilers(ctx, mode, s.reconcilers(), s.batch)
 
-	// 0. Retry pending auto-charges from previous cycles
+	// 0. Collect queued invoices: charge, settle $0, or (no card) email the
+	// setup link and start no-payment dunning.
 	if chargeRetried, chargeErrs := s.engine.RetryPendingCharges(ctx, s.batch); chargeRetried > 0 || len(chargeErrs) > 0 {
 		slog.Info("auto-charge retries", "mode", mode, "succeeded", chargeRetried, "errors", len(chargeErrs))
 		for i := 0; i < chargeRetried; i++ {
@@ -322,21 +323,6 @@ func (s *Scheduler) runBillingCycleForMode(ctx context.Context, live bool) {
 		for _, e := range chargeErrs {
 			slog.Error("auto-charge retry error", "mode", mode, "error", e)
 			mw.RecordAutoChargeRetry("failed")
-		}
-	}
-
-	// 0.1 Enroll card-less stalled invoices into dunning. Runs AFTER the
-	// auto-charge retry so a declined card (which already started dunning
-	// inline + cleared auto_charge_pending) and a successful charge are
-	// both gone from the candidate set — what remains is the no-card case
-	// that RetryPendingCharges can never resolve. Without this, a finalized
-	// auto_charge_pending invoice with no payment method is retried forever
-	// and never reaches a terminal (the card-less "limbo" sink). StartDunning
-	// is idempotent, so this is safe to run every tick.
-	if swept, dErrs := s.engine.EnrollStalledForDunning(ctx, s.batch); swept > 0 || len(dErrs) > 0 {
-		slog.Info("no-payment dunning enrollment", "mode", mode, "swept", swept, "errors", len(dErrs))
-		for _, e := range dErrs {
-			slog.Error("no-payment dunning enrollment error", "mode", mode, "error", e)
 		}
 	}
 
