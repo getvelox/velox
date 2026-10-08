@@ -386,7 +386,7 @@ Velox moves money, so correctness is the product, not a feature. The disciplines
   - Tenant isolation is Postgres RLS, proven by tests that fail if a query escapes its tenant.
   - Exactly-once auto-charge is a compare-and-swap claim that holds through a dual-leader failover.
   - A new cross-domain import fails the architecture test until justified in an allowlist; `time.Now()` on a clock-pinned entity (one whose time comes from a test clock, not the wall clock) fails a lint.
-  - A **money-invariant doctor** (`cmd/velox-doctor`) sweeps the whole database for 29 states no legal writer can produce. It runs in CI after every integration pass. It also runs inside a 13-month billing soak, which closes a subscription month thirteen times through the real server and demands a clean sweep after every close.
+  - A **money-invariant doctor** (`cmd/velox-doctor`) sweeps the whole database for 30 states no legal writer can produce. It runs in CI after every integration pass. It also runs inside a 13-month billing soak, which closes a subscription month thirteen times through the real server and demands a clean sweep after every close.
   - The rule behind all of these: if a mistake can recur, a machine catches the next one.
 - **Failure modes are measured, not asserted.**
   - "Crash-safe" and "idempotent" are the two easiest things in billing to claim and the two hardest to check. So both are published as runs with a negative control, not as design notes. See [Benchmarks](#benchmarks).
@@ -418,7 +418,7 @@ July–August 2026:
 - team invites (ADR-081)
 - ambiguous-charge safety (ADR-105–108)
 - bad-debt semantics (ADR-110–113)
-- a 29-check money-invariant sweep in CI
+- a 30-check money-invariant sweep in CI
 - multi-replica leader leases (ADR-114): every background job takes a per-tick lease that every claim re-checks. So a dead replica is replaced in seconds, and a transaction-mode pooler is safe.
 
 Dated detail: [`CHANGELOG.md`](CHANGELOG.md).

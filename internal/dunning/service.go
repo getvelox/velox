@@ -452,6 +452,50 @@ func (s *Service) ProcessDueRuns(ctx context.Context, tenantID string, limit int
 //     advance — bail to avoid spinning.
 const maxDunningCatchupIters = 50
 
+// exhaustLease is how long a run whose retries are exhausted stays hidden from
+// both due-run pickers while its terminal actions run (SB-1/SB-2, 2026-10-08).
+// It must exceed the worst inline charge + terminal-action duration (Stripe
+// calls are bounded at 30s); if the executor dies, the run is due again when
+// the lease expires and exhaust-on-entry finishes it. Truncated to the
+// column's microsecond precision because ClaimExhaustion compares it exactly.
+const exhaustLease = 15 * time.Minute
+
+func leaseFrom(t time.Time) time.Time { return t.Add(exhaustLease).Truncate(time.Microsecond) }
+
+// anchorInstant is the one rule for "the instant this action was contracted
+// for" (playbook class J).
+//
+// Simulated time (test-clock catchup, or a clock-pinned customer): the
+// simulated moment the action was scheduled for (scheduled), not the
+// orchestrator's frozen_time. Otherwise every action under catchup is stamped
+// at advance-end frozen_time and the next one is scheduled past advance-end,
+// so it never fires in the same Advance click.
+//
+// Pure wall-clock cron: max(now, scheduled). In steady state they are equal.
+// After the scheduler was down for several intervals, scheduled is stale-in-
+// the-past; anchoring on it would schedule the next action in the past too,
+// so the whole backlog would fire back-to-back in one tick and collapse the
+// configured cadence. Clamping to now resumes the cadence from recovery.
+func anchorInstant(now time.Time, scheduled *time.Time, simulated bool) time.Time {
+	if scheduled != nil && (simulated || scheduled.After(now)) {
+		return *scheduled
+	}
+	return now
+}
+
+// exhaustStampAt is the instant a re-driven escalation records (class J). An
+// action_failed re-attempt is its own scheduled action, so it records when it
+// ran (attemptAt). Anything else on the exhaust-on-entry path is the late
+// execution of the exhaustion contracted at the final failed retry, so it
+// records that retry's instant (LastAttemptAt) — the same record the
+// uninterrupted inline path writes — never the lease or frozen_time.
+func exhaustStampAt(run domain.InvoiceDunningRun, attemptAt time.Time) time.Time {
+	if run.Resolution == domain.ResolutionActionFailed || run.LastAttemptAt == nil {
+		return attemptAt
+	}
+	return *run.LastAttemptAt
+}
+
 func (s *Service) ProcessDueRunsForClock(ctx context.Context, tenantID, clockID string, frozenTime time.Time, limit int) (int, []error) {
 	if limit <= 0 {
 		limit = 20
@@ -514,13 +558,13 @@ func (s *Service) processRunsBatch(ctx context.Context, tenantID string, dueRuns
 
 func (s *Service) processRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, isCatchup bool) error {
 	// Resolve the policy bound to this run at StartDunning time.
-	// Runs stay on their original policy for their lifetime — if the
-	// customer's dunning_policy_id assignment changed mid-flight (or
-	// the assigned policy was edited), in-flight runs continue with
-	// the original config and only the NEXT run for this customer
-	// picks up the new policy. Stripe-Lago shape (verified during
-	// ADR-036 research — no platform switches a mid-flight retry
-	// schedule under the operator's feet).
+	// Runs stay bound to the policy ID they started on: reassigning the
+	// customer to a different policy mid-flight does not move in-flight
+	// runs, and only the NEXT run picks up the new assignment (Stripe-Lago
+	// shape, ADR-036 research). EDITS to the bound policy do reach
+	// in-flight runs — the row is updated in place and read here every
+	// tick — so lowering max_retry_attempts exhausts a run on its next
+	// tick through the exhaust-on-entry branch below.
 	// Paid-pre-check — the durable backstop for an invoice settled OUT-OF-BAND
 	// (a credit-cover sweep MarkPaids the invoice without resolving its run, or
 	// any settle path the prompt-resolve doesn't instrument). Resolve the run in
@@ -571,39 +615,39 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		return nil // Skip paused runs
 	}
 
-	// Check if max retries exhausted
+	var pinned bool
+	ctx, pinned = clock.BindEffectiveNow(ctx, s.resolver, clock.Pin{TenantID: tenantID, InvoiceID: run.InvoiceID})
+
+	// Retries exhausted on entry: an exhaustion that was interrupted after the
+	// final retry (its lease expired), an action_failed re-attempt, or a policy
+	// whose max_retry_attempts was lowered. Claim it before any terminal action
+	// fires: exactly one processor moves next_action_at from the listed value
+	// to a fresh lease, and only that one exhausts (SB-2). A loser fires nothing.
 	if run.AttemptCount >= policy.MaxRetryAttempts {
-		return s.exhaustRun(ctx, tenantID, run, policy, s.clock.Now(ctx))
+		if run.NextActionAt == nil { // unreachable: both pickers select on next_action_at
+			return fmt.Errorf("exhaust-on-entry: run %s has no next_action_at", run.ID)
+		}
+		attemptAt := anchorInstant(s.clock.Now(ctx), run.NextActionAt, isCatchup || pinned)
+		lease := leaseFrom(attemptAt)
+		won, err := s.store.ClaimExhaustion(ctx, tenantID, run.ID, run.AttemptCount, *run.NextActionAt, lease)
+		if err != nil {
+			return fmt.Errorf("claim exhaustion for run %s: %w", run.ID, err)
+		}
+		if !won {
+			slog.Info("dunning exhaust skipped — run claimed, resolved or escalated by another processor",
+				"run_id", run.ID, "invoice_id", run.InvoiceID)
+			return nil
+		}
+		run.NextActionAt = &lease
+		return s.exhaustRun(ctx, tenantID, run, policy, exhaustStampAt(run, attemptAt), attemptAt)
 	}
 
 	// Attempt retry
 	run.AttemptCount++
 	prevLastAttemptAt := run.LastAttemptAt // for the transient-skip rewind below
-	var pinned bool
-	ctx, pinned = clock.BindEffectiveNow(ctx, s.resolver, clock.Pin{TenantID: tenantID, InvoiceID: run.InvoiceID})
-	// Anchor this attempt's instant.
-	//
-	// Simulated time (test-clock catchup, or a clock-pinned customer): anchor
-	// on the simulated moment the retry was scheduled for (run.NextActionAt)
-	// rather than the orchestrator's frozen_time. Without this, every retry
-	// under catchup gets last_attempt_at = advance-end frozen_time, and the
-	// next retry is scheduled at frozen_time + interval (always past
-	// advance-end, so it never fires in the same Advance click). Anchoring on
-	// NextActionAt walks the state machine through simulated time.
-	//
-	// Pure wall-clock cron (not catchup, not pinned): anchor on
-	// max(now, NextActionAt). In steady state NextActionAt == now. But after
-	// the scheduler is down for several intervals, NextActionAt is
-	// stale-in-the-past; anchoring on it would schedule the next retry at
-	// staleNextActionAt + interval — still in the past — so the whole backlog
-	// fires back-to-back in one tick, collapsing the configured cadence.
-	// Clamping to now resumes the cadence from the recovery instant.
-	now := s.clock.Now(ctx)
-	if run.NextActionAt != nil {
-		if isCatchup || pinned || run.NextActionAt.After(now) {
-			now = *run.NextActionAt
-		}
-	}
+	prevNextActionAt := run.NextActionAt   // ditto: the final attempt replaces it with the lease
+	// Anchor this attempt's instant on the contracted one (see anchorInstant).
+	now := anchorInstant(s.clock.Now(ctx), run.NextActionAt, isCatchup || pinned)
 	run.LastAttemptAt = &now
 
 	// Rebind ctx's instant to the anchored retry time while keeping the
@@ -630,6 +674,16 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 	// concurrently, or another processor already recorded an attempt this
 	// tick's read predates — charging on a stale read would burn budget
 	// dishonestly (ha-8).
+	//
+	// The FINAL attempt also records its exhaustion lease here, before the
+	// charge: the run stays hidden from both pickers for the whole charge and
+	// inline-exhaust window (so no second processor exhausts it under the
+	// charge), and if this process dies anywhere in that window the run is due
+	// again when the lease expires and exhaust-on-entry finishes it.
+	if run.AttemptCount >= policy.MaxRetryAttempts {
+		l := leaseFrom(now)
+		run.NextActionAt = &l
+	}
 	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount-1, nil); err != nil {
 		return fmt.Errorf("persist dunning attempt before retry: %w", err)
 	} else if !applied {
@@ -653,6 +707,7 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 	if errors.Is(retryErr, ErrTransientSkip) {
 		run.AttemptCount--
 		run.LastAttemptAt = prevLastAttemptAt
+		run.NextActionAt = prevNextActionAt // undo the final attempt's lease too
 		// GUARDED rewind. ErrTransientSkip also covers the ambiguous
 		// PI-may-have-succeeded outcome (client saw a 5xx/timeout but the charge
 		// actually went through): its webhook may have resolved this run during the
@@ -770,7 +825,14 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 		t := now.Add(d)
 		run.NextActionAt = &t
 	} else {
-		run.NextActionAt = nil
+		// Never NULL: NULL removes an active run from both due-run pickers for
+		// good, so an exhaustion interrupted after this commit (deploy SIGTERM,
+		// lease loss, a DB error on the escalation write) stranded the run
+		// forever (SB-1). Not now either: that would make the run due while
+		// exhaustRun is still running inline (SB-2). The lease (same value the
+		// pre-charge persist wrote) re-arms it if exhaustion never finishes.
+		l := leaseFrom(now)
+		run.NextActionAt = &l
 	}
 
 	// Warning email rides the reschedule transaction (ADR-040): built here —
@@ -820,21 +882,25 @@ func (s *Service) processRun(ctx context.Context, tenantID string, run domain.In
 	// retry that actually triggered the exhaustion, not orchestrator
 	// frozen_time.
 	if run.AttemptCount >= policy.MaxRetryAttempts {
-		return s.exhaustRun(ctx, tenantID, run, policy, now)
+		return s.exhaustRun(ctx, tenantID, run, policy, now, now)
 	}
 
 	return nil
 }
 
 // exhaustRun finalizes a dunning run after its last retry failed (or
-// it was found already at-or-beyond max attempts on entry). firedAt
-// is the simulated instant of the triggering retry — used as the
-// run's resolved_at and the escalated event's CreatedAt so the
-// invoice timeline shows the escalation aligned with the retry that
-// actually caused it, not at orchestrator frozen_time.
-func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, policy domain.DunningPolicy, firedAt time.Time) error {
+// it was found already at-or-beyond max attempts on entry). stampAt is
+// the contracted instant the escalation records — the run's resolved_at
+// and the escalated event's CreatedAt — so the invoice timeline shows
+// the escalation aligned with the retry that caused it, never the
+// orchestrator's frozen_time or the lease (see exhaustStampAt).
+// attemptAt is when this exhaustion is actually being attempted; an
+// action_failed re-attempt is scheduled from it, so the cadence never
+// collapses after an outage. Inline after the final retry, both are
+// that retry's instant.
+func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.InvoiceDunningRun, policy domain.DunningPolicy, stampAt, attemptAt time.Time) error {
 	ctx = s.bindForInvoice(ctx, tenantID, run.InvoiceID)
-	now := firedAt
+	now := stampAt
 	if now.IsZero() {
 		now = s.clock.Now(ctx)
 	}
@@ -968,7 +1034,11 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		run.State = domain.DunningActive
 		run.Resolution = domain.ResolutionActionFailed
 		run.ResolvedAt = nil
-		retryAt := now.Add(24 * time.Hour)
+		base := attemptAt
+		if base.IsZero() {
+			base = now
+		}
+		retryAt := base.Add(24 * time.Hour)
 		run.NextActionAt = &retryAt
 		// Guarded: a settle may have resolved this run during the failed terminal
 		// action. Don't clobber that resolve back to active — the invoice is paid,
@@ -976,7 +1046,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount, nil); err != nil {
 			return err
 		} else if !applied {
-			slog.Info("dunning terminal action failed but run resolved concurrently — leaving it resolved",
+			slog.Info("dunning terminal action failed but run was resolved or escalated by another processor — leaving it",
 				"run_id", run.ID, "invoice_id", run.InvoiceID)
 			return nil
 		}
@@ -1008,7 +1078,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 	if applied, err := s.store.UpdateRunIfActive(ctx, tenantID, run, run.AttemptCount, escalateTx); err != nil {
 		return err
 	} else if !applied {
-		slog.Info("dunning exhaust: run resolved concurrently during the terminal action — not escalating",
+		slog.Info("dunning exhaust: run resolved or escalated by another processor during the terminal action — not escalating",
 			"run_id", run.ID, "invoice_id", run.InvoiceID)
 		return nil
 	}

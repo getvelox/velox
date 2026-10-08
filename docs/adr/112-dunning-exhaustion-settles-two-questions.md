@@ -215,3 +215,56 @@ invoice can be paid online.
 - **A dunning-exhaustion outcome per customer segment.** Stripe reaches this
   through automations. Trigger: the first tenant who needs different
   terminal outcomes for enterprise vs self-serve on the same retry schedule.
+
+## Amendment 2026-10-08 — an interrupted exhaustion is finished, and escalates once
+
+**Defect (SB-1).** The final failed retry wrote `next_action_at = NULL` and
+committed before `exhaustRun` ran the two terminal actions. Anything that
+interrupted `exhaustRun` after that commit (a deploy SIGTERM, leader-lease loss,
+an operator pause, a crash, a DB error on the action_failed or escalation
+write) left the run `active` with no next action. Both due-run pickers select on
+`next_action_at`, the per-invoice UNIQUE blocks re-enrolment, and the doctor's
+stale-run check required `next_action_at IS NOT NULL`, so nothing ever finished
+it: the subscription was never paused or canceled, the invoice never written
+off, no escalation email.
+
+**Defect (SB-2).** `UpdateRunIfActive` guarded on `state <> 'resolved'`, which
+also matched escalated rows, and exhaust-on-entry fired terminal actions with
+no claim. A second processor could escalate a run twice or reopen it.
+
+**Decision.**
+- The final attempt writes an **exhaustion lease** (`next_action_at` = the
+  attempt's anchored instant + 15 min), both at the pre-charge persist and at the
+  reschedule. The run stays hidden while the charge and the inline exhaustion
+  run, and is due again if they never finish. `exhaustRun` overwrites it on both
+  outcomes (NULL + escalated, or +24h + action_failed).
+- Exhaust-on-entry takes `ClaimExhaustion` first: a CAS that moves
+  `next_action_at` from the listed value to a fresh lease. Exactly one
+  processor wins; a loser fires nothing.
+- `UpdateRunIfActive` guards on `state = 'active'` (escalated is terminal for the
+  automated path; `ResolveRun` keeps `state <> 'resolved'` because escalated ->
+  resolved after a late payment is legitimate) and refuses to write an active run
+  without `next_action_at`.
+- A re-driven escalation stamps the final retry's instant (`LastAttemptAt`), the
+  record the uninterrupted path writes. An action_failed re-attempt stamps its
+  own attempt instant (playbook class J). Scheduling bases (the lease, +24h)
+  use the attempt instant, clamped to now on the wall clock.
+- New doctor check `dunning_active_run_without_next_action` surfaces runs
+  stranded before this fix. No backfill: the check names the one-line repair.
+
+**Deferred, with triggers.**
+- A crash after the write-off committed but before the escalation landed
+  recovers as `invoice_not_collectible` (the late-paid re-check sees the
+  uncollectible invoice), so the run closes without the escalation email. Every
+  terminal action did apply. Trigger: the first tenant on `mark_uncollectible`
+  who reports a missing final notice.
+- A holder frozen longer than the 15-minute lease can repeat terminal actions
+  alongside the claim winner (pause has no skip-if-done; the escalation itself
+  stays exactly-once on `state`). Trigger: two or more dunning replicas in
+  production, or an observed duplicate `collection_paused` audit row.
+- The escalated timeline row and `dunning.escalated` webhook are written after
+  the escalation commits (a crash between loses them). Trigger: the
+  one-attempt-path outbox work.
+- InvoiceDetail labels any `next_action_at` "Next retry", including the lease
+  and the action_failed re-attempt. Copy fix; UI needs a show-before-PR walk.
+

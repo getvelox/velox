@@ -191,8 +191,11 @@ func (m *memStore) ResolveRun(_ context.Context, _ string, run domain.InvoiceDun
 // attempt-count CAS — rather than stubbing "true": a fake that always applies
 // would keep every stale-processor test green forever (fake-fidelity rule).
 func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.InvoiceDunningRun, expectedAttempts int, then func(tx *sql.Tx) error) (bool, error) {
+	if err := refuseStrandingWrite(run); err != nil {
+		return false, err
+	}
 	existing, ok := m.runs[run.ID]
-	if ok && existing.State == domain.DunningResolved {
+	if ok && existing.State != domain.DunningActive {
 		return false, nil
 	}
 	if ok && existing.AttemptCount != expectedAttempts {
@@ -206,6 +209,18 @@ func (m *memStore) UpdateRunIfActive(_ context.Context, _ string, run domain.Inv
 			m.hookErrs = append(m.hookErrs, err)
 		}
 	}
+	return true, nil
+}
+
+// ClaimExhaustion mirrors the real store's predicate exactly.
+func (m *memStore) ClaimExhaustion(_ context.Context, _, runID string, expectedAttempts int, expectedNext, lease time.Time) (bool, error) {
+	existing, ok := m.runs[runID]
+	if !ok || existing.State != domain.DunningActive || existing.AttemptCount != expectedAttempts ||
+		existing.NextActionAt == nil || !existing.NextActionAt.Equal(expectedNext) {
+		return false, nil
+	}
+	existing.NextActionAt = &lease
+	m.runs[runID] = existing
 	return true, nil
 }
 

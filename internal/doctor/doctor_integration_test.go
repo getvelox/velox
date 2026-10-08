@@ -129,15 +129,33 @@ func TestDoctor_CleanSchemaIsQuiet_AndSeededViolationsAreCaught(t *testing.T) {
 	seedUsageLine("vlx_inv_doc_max_t", "mtr_doc", "rrv_doc_sum", p0, t1)
 	seedUsageLine("vlx_inv_doc_max_c", "mtr_doc", "rrv_doc_max", p0, p1)
 
+	// SB-1: an active run with no next action is invisible to both due-run
+	// pickers forever — flagged. Control: an escalated run with no next action
+	// is the legal terminal shape — NOT flagged by the new check.
+	mustExec(`INSERT INTO dunning_policies (id, tenant_id, name) VALUES ('vlx_dpol_doc', $1, 'doc')`, tenantID)
+	mustExec(`INSERT INTO invoice_dunning_runs (id, tenant_id, invoice_id, customer_id, policy_id, state, attempt_count, last_attempt_at)
+		VALUES ('vlx_drun_doc_strand', $1, 'vlx_inv_doc1', 'cus_doc1', 'vlx_dpol_doc', 'active', 3, now())`, tenantID)
+	mustExec(`INSERT INTO invoice_dunning_runs (id, tenant_id, invoice_id, customer_id, policy_id, state, attempt_count, last_attempt_at, resolved_at, resolution)
+		VALUES ('vlx_drun_doc_escal', $1, 'vlx_inv_doc_max_c', 'cus_doc1', 'vlx_dpol_doc', 'escalated', 3, now(), now(), 'retries_exhausted')`, tenantID)
+
 	res = doctor.Run(ctx, admin, doctor.Checks)
 	want := map[string]bool{
 		"invoice_paid_settled_coherence":                  false,
 		"payment_methods_detached_but_still_default":      false,
 		"usage_billed_once_per_subscription_meter_window": false,
+		"dunning_active_run_without_next_action":          false,
 	}
 	for _, v := range res.Violations {
 		if _, ok := want[v.Check.Name]; ok && strings.Contains(v.RowID+v.Detail, "doc1") {
 			want[v.Check.Name] = true
+		}
+		if v.Check.Name == "dunning_active_run_without_next_action" {
+			switch {
+			case strings.Contains(v.RowID, "doc_strand"):
+				want[v.Check.Name] = true
+			case strings.Contains(v.RowID, "doc_escal"):
+				t.Errorf("false positive: an escalated run with no next action is the legal terminal shape: %s", v.RowID)
+			}
 		}
 		if v.Check.Name == "usage_billed_once_per_subscription_meter_window" {
 			switch {
