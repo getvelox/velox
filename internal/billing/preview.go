@@ -141,8 +141,12 @@ func (e *Engine) previewWithWindow(ctx context.Context, sub domain.Subscription,
 	invoiceStart, invoiceEnd := periodStart, periodEnd
 	for _, it := range sub.Items {
 		if plans[it.PlanID].BaseBillTiming == domain.BillInAdvance {
+			loc, err := e.tenantLocation(ctx, sub.TenantID)
+			if err != nil {
+				return PreviewResult{}, err
+			}
 			invoiceStart = periodEnd
-			invoiceEnd = advanceBillingPeriod(periodEnd, plans[it.PlanID].BillingInterval, e.tenantLocation(ctx, sub.TenantID), sub.BillingAnchorDay)
+			invoiceEnd = advanceBillingPeriod(periodEnd, plans[it.PlanID].BillingInterval, loc, sub.BillingAnchorDay)
 			break
 		}
 	}

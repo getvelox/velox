@@ -3,23 +3,45 @@ package subscription
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/sagarsuperuser/velox/internal/auth"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
 )
 
-// netTermsStub satisfies NetTermsReader with a fixed tenant setting.
-type netTermsStub struct{ days int }
+// netTermsStub satisfies NetTermsReader with a fixed tenant setting, or a
+// read failure when err is set.
+type netTermsStub struct {
+	days int
+	err  error
+}
 
-func (s netTermsStub) NetPaymentTermDays(_ context.Context, _ string) int { return s.days }
+func (s netTermsStub) NetPaymentTermDays(_ context.Context, _ string) (int, error) {
+	return s.days, s.err
+}
 
 // runUpgradeProration drives the shared upgrade-proration harness (paid
 // source → charge invoice) and returns the created proration invoice.
 func runUpgradeProration(t *testing.T, configure func(*Handler)) domain.Invoice {
+	t.Helper()
+	rr, invoices := driveUpgradeProration(t, configure)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200. body=%s", rr.Code, rr.Body.String())
+	}
+	if len(invoices.createdInvoices) != 1 {
+		t.Fatalf("expected 1 proration charge invoice, got %d", len(invoices.createdInvoices))
+	}
+	return invoices.createdInvoices[0]
+}
+
+// driveUpgradeProration runs the upgrade request and returns the raw response
+// plus the invoice mock, for tests that expect the request to fail.
+func driveUpgradeProration(t *testing.T, configure func(*Handler)) (*httptest.ResponseRecorder, *invoicesMock) {
 	t.Helper()
 	ctx := clock.WithEffectiveNow(context.Background(), proNow)
 	tenantID := "t1"
@@ -49,14 +71,7 @@ func runUpgradeProration(t *testing.T, configure func(*Handler)) domain.Invoice 
 	req := updateItemURL(context.WithValue(ctx, auth.TestTenantIDKey(), tenantID), subID, itemID, body)
 	rr := httptest.NewRecorder()
 	h.updateItem(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200. body=%s", rr.Code, rr.Body.String())
-	}
-	if len(invoices.createdInvoices) != 1 {
-		t.Fatalf("expected 1 proration charge invoice, got %d", len(invoices.createdInvoices))
-	}
-	return invoices.createdInvoices[0]
+	return rr, invoices
 }
 
 // TestUpdateItem_ProrationInvoiceStampsTenantNetTerms locks the fix for the
@@ -93,5 +108,64 @@ func TestUpdateItem_ProrationInvoiceNetTermsFallback(t *testing.T) {
 	wantDue := proNow.AddDate(0, 0, 30)
 	if inv.DueAt == nil || !inv.DueAt.Equal(wantDue) {
 		t.Errorf("DueAt: got %v, want %v", inv.DueAt, wantDue)
+	}
+}
+
+// TestUpdateItem_ProrationInvoiceHonorsDueOnReceipt: a tenant on "Due on
+// receipt" (Net 0) gets a proration invoice due the moment it is issued.
+// Pre-fix the `d > 0` guard turned 0 into Net 30 (P24).
+func TestUpdateItem_ProrationInvoiceHonorsDueOnReceipt(t *testing.T) {
+	inv := runUpgradeProration(t, func(h *Handler) {
+		h.SetNetTermsReader(netTermsStub{days: 0})
+	})
+
+	if inv.NetPaymentTermDays != 0 {
+		t.Errorf("NetPaymentTermDays: got %d, want 0 (Due on receipt)", inv.NetPaymentTermDays)
+	}
+	if inv.DueAt == nil || !inv.DueAt.Equal(proNow) {
+		t.Errorf("DueAt: got %v, want %v (due == issued)", inv.DueAt, proNow)
+	}
+}
+
+// TestUpdateItem_ProrationFailsWhenNetTermsUnreadable: a settings read failure
+// fails the request with no proration invoice, instead of stamping a guessed
+// Net 30 (P24). This harness has no DB, so it runs the non-transactional path;
+// the item-change rollback on the production path is proven by
+// TestUpdateItem_ProrationSettingsUnreadable_RollsBack (real Postgres).
+func TestUpdateItem_ProrationFailsWhenNetTermsUnreadable(t *testing.T) {
+	rr, invoices := driveUpgradeProration(t, func(h *Handler) {
+		h.SetNetTermsReader(netTermsStub{err: errors.New("settings read: connection reset")})
+	})
+
+	if rr.Code == http.StatusOK {
+		t.Fatalf("status: got 200, want an error when Net terms cannot be read")
+	}
+	if n := len(invoices.createdInvoices); n != 0 {
+		t.Errorf("proration invoices created: got %d, want 0", n)
+	}
+}
+
+// errTenantLocator fails every timezone read.
+type errTenantLocator struct{}
+
+func (errTenantLocator) TenantLocation(_ context.Context, _ string) (*time.Location, error) {
+	return nil, errors.New("settings read: connection reset")
+}
+
+// TestUpdateItem_ProrationFailsWhenTimezoneUnreadable: the proration
+// denominator is a full cycle counted in the tenant timezone, so a timezone
+// read failure fails the request with no proration invoice, instead of
+// prorating in UTC (P24). Rollback of the item change on the production path:
+// TestUpdateItem_ProrationSettingsUnreadable_RollsBack.
+func TestUpdateItem_ProrationFailsWhenTimezoneUnreadable(t *testing.T) {
+	rr, invoices := driveUpgradeProration(t, func(h *Handler) {
+		h.SetTenantLocator(errTenantLocator{})
+	})
+
+	if rr.Code == http.StatusOK {
+		t.Fatalf("status: got 200, want an error when the tenant timezone cannot be read")
+	}
+	if n := len(invoices.createdInvoices); n != 0 {
+		t.Errorf("proration invoices created: got %d, want 0", n)
 	}
 }

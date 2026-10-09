@@ -177,10 +177,7 @@ func TestBillFinalOnImmediateCancel_SingleRuleMeterStillBilled(t *testing.T) {
 	}
 }
 
-// zeroTermsSettings returns a settings row whose NetPaymentTerms is 0 — the
-// legacy-row shape that predates validation clamping (a hard store ERROR
-// can't reach the netDays code: ApplyTaxToLineItems fails loudly first).
-// Exercises the `> 0` guard falling through to the fallback.
+// zeroTermsSettings returns a settings row on Net 0 ("Due on receipt").
 type zeroTermsSettings struct{ mockSettings }
 
 func (z *zeroTermsSettings) Get(_ context.Context, _ string) (domain.TenantSettings, error) {
@@ -280,11 +277,12 @@ func TestBillFinalOnImmediateCancel_UsageCapApplied(t *testing.T) {
 	}
 }
 
-// TestBillFinalOnImmediateCancel_NetTermsFallback30 pins the netDays
-// fallback: when settings carry no positive NetPaymentTerms (legacy zero
-// row), the cancel invoice must fall back to Net-30 like every other
-// writer — not Net-0 (due_at == issued_at → dunning fires on day 0).
-func TestBillFinalOnImmediateCancel_NetTermsFallback30(t *testing.T) {
+// TestBillFinalOnImmediateCancel_HonorsDueOnReceipt: Net 0 is the "Due on
+// receipt" setting (dashboard preset, validated as "0 = due immediately"), so
+// the final cancel invoice is due the moment it is issued. Pre-P24 this test
+// asserted the opposite — that 0 was a legacy row to coerce to Net 30 —
+// which made "Due on receipt" silently mean Net 30 on every engine invoice.
+func TestBillFinalOnImmediateCancel_HonorsDueOnReceipt(t *testing.T) {
 	periodStart := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	periodEnd := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	cancelAt := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
@@ -323,10 +321,10 @@ func TestBillFinalOnImmediateCancel_NetTermsFallback30(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BillFinalOnImmediateCancel: %v", err)
 	}
-	if inv.NetPaymentTermDays != 30 {
-		t.Errorf("NetPaymentTermDays: got %d, want fallback 30 when settings are unreadable (was 0 → instant dunning)", inv.NetPaymentTermDays)
+	if inv.NetPaymentTermDays != 0 {
+		t.Errorf("NetPaymentTermDays: got %d, want 0 (Due on receipt)", inv.NetPaymentTermDays)
 	}
-	if inv.DueAt == nil || inv.IssuedAt == nil || !inv.DueAt.Equal(inv.IssuedAt.AddDate(0, 0, 30)) {
-		t.Errorf("DueAt = %v, want IssuedAt (%v) + 30d", inv.DueAt, inv.IssuedAt)
+	if inv.DueAt == nil || inv.IssuedAt == nil || !inv.DueAt.Equal(*inv.IssuedAt) {
+		t.Errorf("DueAt = %v, want IssuedAt (%v)", inv.DueAt, inv.IssuedAt)
 	}
 }

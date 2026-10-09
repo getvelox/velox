@@ -113,9 +113,11 @@ func (s *PostgresStore) backfillIntervalsPartition(ctx context.Context, tenantID
 	).Scan(&tz); err != nil && err != sql.ErrNoRows {
 		return 0, err
 	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil || tz == "" {
-		loc = time.UTC
+	loc := time.UTC // no settings row: the tenant is on the default zone
+	if tz != "" {
+		if loc, err = time.LoadLocation(tz); err != nil {
+			return 0, fmt.Errorf("load tenant timezone %q: %w", tz, err)
+		}
 	}
 
 	// Draft/trialing subs are excluded by design, not just for economy:

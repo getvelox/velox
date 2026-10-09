@@ -801,7 +801,7 @@ func RenderPDF(ctx context.Context, inv domain.Invoice, lineItems []domain.Invoi
 	} else if inv.PaymentStatus == domain.PaymentSucceeded && inv.PaidAt != nil {
 		textAt(margin, y, fmt.Sprintf("Paid on %s - Thank you!", inv.PaidAt.In(docLoc).Format("January 2, 2006")))
 	} else {
-		textAt(margin, y, fmt.Sprintf("Payment due within %d days of issue date.", inv.NetPaymentTermDays))
+		textAt(margin, y, paymentTermsLine(inv.NetPaymentTermDays))
 	}
 
 	if inv.Memo != "" {
@@ -965,4 +965,13 @@ func aggregateTaxByJurisdiction(lineItems []domain.InvoiceLineItem) []jurisdicti
 		rows = append(rows, jurisdictionTaxRow{label: label, amount: agg[k]})
 	}
 	return rows
+}
+
+// paymentTermsLine is the footer line for an open invoice. Net 0 reads "due on
+// receipt", matching the dashboard's Terms label, not "within 0 days".
+func paymentTermsLine(netDays int) string {
+	if netDays == 0 {
+		return "Payment due on receipt."
+	}
+	return fmt.Sprintf("Payment due within %d days of issue date.", netDays)
 }

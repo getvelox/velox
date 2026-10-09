@@ -19,8 +19,8 @@ import (
 // backend-authored period display must render in exactly this zone.
 type fakeTenantLocator struct{ loc *time.Location }
 
-func (f fakeTenantLocator) TenantLocation(_ context.Context, _ string) *time.Location {
-	return f.loc
+func (f fakeTenantLocator) TenantLocation(_ context.Context, _ string) (*time.Location, error) {
+	return f.loc, nil
 }
 
 // TestHandler_Get_PeriodDisplayTZ is the display half of ADR-077: the

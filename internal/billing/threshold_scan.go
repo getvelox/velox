@@ -499,7 +499,10 @@ func (e *Engine) evaluateThresholds(ctx context.Context, sub domain.Subscription
 					return thresholdEval{}, fmt.Errorf("get plan %s for base proration: %w", pl.PlanID, err)
 				}
 				qty := pl.Quantity.IntPart()
-				loc := e.tenantLocation(ctx, sub.TenantID)
+				loc, err := e.tenantLocation(ctx, sub.TenantID)
+				if err != nil {
+					return thresholdEval{}, err
+				}
 				// Anchor derived from THE PERIOD BEING BILLED, never the
 				// sub's live billing_anchor_day — a cross-interval swap
 				// rewrites the sub anchor before this window closes and
@@ -678,6 +681,16 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 	if e.settings == nil {
 		return false, fmt.Errorf("settings reader required for invoice numbering")
 	}
+	// Resolved before tax is computed and before the fire tx opens: a read
+	// failure fails the fire with nothing written, and the next tick retries.
+	netDays, err := e.netPaymentTermDays(ctx, sub.TenantID)
+	if err != nil {
+		return false, err
+	}
+	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
+	if err != nil {
+		return false, err
+	}
 
 	// Resolve the items' plan map for cycle-advance interval.
 	plans := make(map[string]domain.Plan, len(sub.Items))
@@ -726,11 +739,6 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 	}
 	totalWithTax := taxApp.SubtotalCents - taxApp.DiscountCents + taxApp.TaxAmountCents
 
-	netDays := 30
-	if ts, err := e.settings.Get(ctx, sub.TenantID); err == nil && ts.NetPaymentTerms > 0 {
-		netDays = ts.NetPaymentTerms
-	}
-
 	dueAt := now.AddDate(0, 0, netDays)
 
 	// Shared finalization gate (tax-pending OR pause-collection → Draft),
@@ -752,7 +760,7 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 	invoiceRow := domain.Invoice{
 		CustomerID:      sub.CustomerID,
 		SubscriptionID:  sub.ID,
-		BillingTimezone: e.tenantLocation(ctx, sub.TenantID).String(),
+		BillingTimezone: billingLoc.String(),
 		Status:          invStatus,
 		PaymentStatus:   domain.PaymentPending,
 		Currency:        invoiceCurrency,
@@ -813,10 +821,9 @@ func (e *Engine) fireThreshold(ctx context.Context, sub domain.Subscription, eva
 	var inv domain.Invoice
 	err = e.subs.WithTenantTx(ctx, sub.TenantID, func(tx *sql.Tx) error {
 		if sub.BillingThresholds.ResetBillingCycle {
-			loc := e.tenantLocation(ctx, sub.TenantID)
 			interval := plans[sub.Items[0].PlanID].BillingInterval
-			resetAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, interval, loc)
-			nextPeriodEnd := domain.NextBillingPeriodEnd(now, sub.BillingTime, interval, loc, resetAnchorDay)
+			resetAnchorDay := domain.AnchorDayFor(now, sub.BillingTime, interval, billingLoc)
+			nextPeriodEnd := domain.NextBillingPeriodEnd(now, sub.BillingTime, interval, billingLoc, resetAnchorDay)
 			if err := e.subs.ClosePeriodTx(ctx, tx, sub.TenantID, sub.ID, expected, now, nextPeriodEnd, nextPeriodEnd, resetAnchorDay); err != nil {
 				return err
 			}
