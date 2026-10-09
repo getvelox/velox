@@ -330,8 +330,11 @@ func (m *mockSettings) NextInvoiceNumberTx(ctx context.Context, _ *sql.Tx, tenan
 	return m.NextInvoiceNumber(ctx, tenantID)
 }
 
+// Get mirrors the real store's defaults (tenant.DefaultSettings): Net 30, UTC.
+// A zero struct would read as Net 0 ("Due on receipt"), which is a real
+// setting, not "unset".
 func (m *mockSettings) Get(_ context.Context, _ string) (domain.TenantSettings, error) {
-	return domain.TenantSettings{}, nil
+	return domain.TenantSettings{NetPaymentTerms: 30, Timezone: "UTC"}, nil
 }
 
 // ---------------------------------------------------------------------------

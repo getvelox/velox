@@ -151,18 +151,19 @@ type CreditNoteIssuer interface {
 // engine computes period boundaries in (ADR-058). *billing.Engine satisfies it
 // (TenantLocation). Optional: when unwired (narrow tests) the day-math falls
 // back to UTC — correct for UTC tenants; the only deployments that diverge are
-// offset-TZ tenants, which production always wires.
+// offset-TZ tenants, which production always wires. A wired locator's read
+// failure is an error, never UTC (P24).
 type TenantLocator interface {
-	TenantLocation(ctx context.Context, tenantID string) *time.Location
+	TenantLocation(ctx context.Context, tenantID string) (*time.Location, error)
 }
 
 // NetTermsReader resolves the tenant's configured Net payment terms so the
 // proration invoice stamps the same terms + due date the engine's
-// cycle/create invoices do. *billing.Engine satisfies it. Optional: when
-// unwired (narrow tests) the proration path falls back to Net 30 — the
-// pre-wiring hardcode, kept as the fallback only.
+// cycle/create invoices do, including 0 ("Due on receipt"). *billing.Engine
+// satisfies it. Optional: when unwired (narrow tests) the proration path uses
+// Net 30. A wired reader's failure fails the proration, never a Net 30 guess.
 type NetTermsReader interface {
-	NetPaymentTermDays(ctx context.Context, tenantID string) int
+	NetPaymentTermDays(ctx context.Context, tenantID string) (int, error)
 }
 
 // ProrationGrantInput carries the downgrade/removal/reduction credit payload
@@ -322,9 +323,9 @@ func (h *Handler) SetTenantLocator(l TenantLocator) { h.tzLocator = l }
 func (h *Handler) SetNetTermsReader(r NetTermsReader) { h.netTerms = r }
 
 // tenantLoc resolves the tenant billing timezone, UTC when unwired.
-func (h *Handler) tenantLoc(ctx context.Context, tenantID string) *time.Location {
+func (h *Handler) tenantLoc(ctx context.Context, tenantID string) (*time.Location, error) {
 	if h.tzLocator == nil {
-		return time.UTC
+		return time.UTC, nil
 	}
 	return h.tzLocator.TenantLocation(ctx, tenantID)
 }
@@ -334,10 +335,20 @@ func (h *Handler) tenantLoc(ctx context.Context, tenantID string) *time.Location
 // billing timezone (tenantLoc, ADR-077) so the displayed range matches the
 // invoice and renders in the one timezone the org bills in. No-op when the sub
 // has no current period. Called for every subscription response via respondSub.
+//
+// A timezone read failure leaves the field empty rather than rendering the
+// range in the wrong zone; the response still goes out, since this runs after
+// the handler's write has committed.
 func (h *Handler) stampPeriodDisplay(ctx context.Context, sub *domain.Subscription) {
 	if sub.CurrentBillingPeriodStart != nil && sub.CurrentBillingPeriodEnd != nil {
+		loc, err := h.tenantLoc(ctx, sub.TenantID)
+		if err != nil {
+			slog.WarnContext(ctx, "subscription period display omitted: tenant timezone unreadable",
+				"subscription_id", sub.ID, "error", err)
+			return
+		}
 		sub.CurrentBillingPeriodDisplay = domain.FormatInclusivePeriod(
-			*sub.CurrentBillingPeriodStart, *sub.CurrentBillingPeriodEnd, h.tenantLoc(ctx, sub.TenantID))
+			*sub.CurrentBillingPeriodStart, *sub.CurrentBillingPeriodEnd, loc)
 	}
 }
 
@@ -915,9 +926,17 @@ func (h *Handler) addItem(w http.ResponseWriter, r *http.Request) {
 				// Adds only: plan/quantity/remove changes stay instant-
 				// precise per ADR-012's Consequences, so their handlers
 				// don't clamp.
-				if prorationRemainingDays > 0 && sub.CurrentBillingPeriodStart != nil &&
-					domain.SameCalendarDayIn(clock.Now(ctx), *sub.CurrentBillingPeriodStart, h.tenantLoc(ctx, tenantID)) {
-					prorationRemainingDays = prorationTotalDays
+				if prorationRemainingDays > 0 && sub.CurrentBillingPeriodStart != nil {
+					loc, err := h.tenantLoc(ctx, tenantID)
+					if err != nil {
+						slog.ErrorContext(ctx, "add item refused: tenant timezone unreadable for proration",
+							"subscription_id", id, "error", err)
+						respond.InternalError(w, r)
+						return
+					}
+					if domain.SameCalendarDayIn(clock.Now(ctx), *sub.CurrentBillingPeriodStart, loc) {
+						prorationRemainingDays = prorationTotalDays
+					}
 				}
 			}
 		}
@@ -2108,9 +2127,13 @@ func (h *Handler) handleItemProration(ctx context.Context, tenantID string, sub 
 	// BillOnPlanSwapImmediate (both divide by fullCycleDays).
 	oldAmount := oldPlan.BaseAmountCents * spec.oldQuantity
 	newAmount := newPlan.BaseAmountCents * spec.newQuantity
+	billingLoc, err := h.tenantLoc(ctx, sub.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	denomDays := spec.totalDays
 	if sub.CurrentBillingPeriodStart != nil {
-		if fc := fullBillingCycleDays(*sub.CurrentBillingPeriodStart, effectivePlan.BillingInterval, h.tenantLoc(ctx, sub.TenantID), sub.BillingAnchorDay); fc > 0 {
+		if fc := fullBillingCycleDays(*sub.CurrentBillingPeriodStart, effectivePlan.BillingInterval, billingLoc, sub.BillingAnchorDay); fc > 0 {
 			denomDays = fc
 		}
 	}
@@ -2208,9 +2231,11 @@ func (h *Handler) handleItemProration(ctx context.Context, tenantID string, sub 
 		// dunning timing) than every sibling invoice.
 		netDays := 30
 		if h.netTerms != nil {
-			if d := h.netTerms.NetPaymentTermDays(ctx, tenantID); d > 0 {
-				netDays = d
+			d, err := h.netTerms.NetPaymentTermDays(ctx, tenantID)
+			if err != nil {
+				return nil, err
 			}
+			netDays = d
 		}
 		dueAt := now.AddDate(0, 0, netDays)
 
@@ -2320,7 +2345,7 @@ func (h *Handler) handleItemProration(ctx context.Context, tenantID string, sub 
 			// reuses one plan name, so the seat counts carry the contrast
 			// (Stripe's "Unused time on 1 × Pro" shape). The boundary date
 			// renders in the sub's billing timezone (ADR-077), not the host zone.
-			labelLoc := h.tenantLoc(ctx, sub.TenantID)
+			labelLoc := billingLoc
 			creditDesc := upgradeCreditLabel(oldPlan, spec.changeAt, labelLoc)
 			chargeDesc := upgradeChargeLabel(newPlan, spec.changeAt, labelLoc)
 			if spec.changeType == domain.ItemChangeTypeQuantity {
@@ -2368,7 +2393,7 @@ func (h *Handler) handleItemProration(ctx context.Context, tenantID string, sub 
 			TaxFacts: taxResult.TaxFacts,
 			// Denormalized zone at issue (ADR-077) — every engine writer
 			// stamps this; the proration writer was the one omission.
-			BillingTimezone:    h.tenantLoc(ctx, sub.TenantID).String(),
+			BillingTimezone:    billingLoc.String(),
 			TotalAmountCents:   netProrated,
 			AmountDueCents:     netProrated,
 			BillingPeriodStart: periodStart,
