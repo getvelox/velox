@@ -2496,14 +2496,9 @@ func nominalRate(rule domain.RatingRuleVersion) *decimal.Decimal {
 // billOnePeriod (behavior-preserving) to separate the pricing
 // computation from the billing-cycle orchestration; it remains large
 // and is the next candidate for further decomposition.
-func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, now, periodStart, periodEnd time.Time, plans map[string]domain.Plan, invoiceCurrency string, meterAggs map[string]string, usageTotals map[string]decimal.Decimal) ([]domain.InvoiceLineItem, int64, *time.Time, error) {
+func (e *Engine) buildLineItems(ctx context.Context, sub domain.Subscription, now, periodStart, periodEnd time.Time, plans map[string]domain.Plan, invoiceCurrency string, meterAggs map[string]string, usageTotals map[string]decimal.Decimal, billingLoc *time.Location) ([]domain.InvoiceLineItem, int64, *time.Time, error) {
 	var lineItems []domain.InvoiceLineItem
 	subtotal := int64(0)
-
-	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return nil, 0, nil, err
-	}
 
 	// Detect partial period once — same across all items since they share the
 	// billing period. Use math.Round, not int truncation: a sub created
@@ -3220,14 +3215,18 @@ func (e *Engine) billOnePeriod(ctx context.Context, sub domain.Subscription) (bo
 		return false, err
 	}
 
-	// Build the invoice line items (base fees + usage) for this period.
-	// thresholdBilledThrough is the threshold watermark the lines were built
-	// against; commitPeriodClose re-reads it on the closer tx.
-	lineItems, subtotal, thresholdBilledThrough, err := e.buildLineItems(ctx, sub, now, periodStart, periodEnd, plans, invoiceCurrency, meterAggs, usageTotals)
+	// The tenant zone is read once per close and used for every boundary,
+	// proration denominator and the invoice's BillingTimezone, so one invoice
+	// can never mix two zones (P24).
+	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
 	if err != nil {
 		return false, err
 	}
-	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
+
+	// Build the invoice line items (base fees + usage) for this period.
+	// thresholdBilledThrough is the threshold watermark the lines were built
+	// against; commitPeriodClose re-reads it on the closer tx.
+	lineItems, subtotal, thresholdBilledThrough, err := e.buildLineItems(ctx, sub, now, periodStart, periodEnd, plans, invoiceCurrency, meterAggs, usageTotals, billingLoc)
 	if err != nil {
 		return false, err
 	}
@@ -3912,11 +3911,7 @@ func (e *Engine) resolveRatedRule(ctx context.Context, tenantID, customerID, pin
 // billFinalOnImmediateCancelImpl (behavior-preserving) to separate the
 // pricing computation from the cancel-invoice orchestration; it is the
 // cancel-path analog of buildLineItems and shares its segment model.
-func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscription, wm thresholdWatermark, plans map[string]domain.Plan, invoiceCurrency string, periodStart, canceledAt time.Time) ([]domain.InvoiceLineItem, int64, error) {
-	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return nil, 0, err
-	}
+func (e *Engine) buildCancelLineItems(ctx context.Context, sub domain.Subscription, wm thresholdWatermark, plans map[string]domain.Plan, invoiceCurrency string, periodStart, canceledAt time.Time, billingLoc *time.Location) ([]domain.InvoiceLineItem, int64, error) {
 	// Build base lines: segment-aware in_arrears billing over the
 	// partial period [periodStart, canceledAt]. in_advance items are
 	// explicitly skipped — their base for the just-canceled period
@@ -4414,7 +4409,17 @@ func (e *Engine) billFinalOnImmediateCancelImpl(ctx context.Context, tx *sql.Tx,
 	// Compute the final invoice's line items over the partial cancel
 	// period [periodStart, canceledAt]: segment-aware in_arrears base
 	// (skipped when a threshold fire already billed it) plus usage.
-	lineItems, subtotal, err := e.buildCancelLineItems(ctx, sub, wm, plans, invoiceCurrency, periodStart, canceledAt)
+	// Settings are read once, before lines and tax: one zone for the whole
+	// invoice, and a read failure leaves no orphan tax_calculations row.
+	netDays, err := e.netPaymentTermDays(ctx, sub.TenantID)
+	if err != nil {
+		return domain.Invoice{}, err
+	}
+	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
+	if err != nil {
+		return domain.Invoice{}, err
+	}
+	lineItems, subtotal, err := e.buildCancelLineItems(ctx, sub, wm, plans, invoiceCurrency, periodStart, canceledAt, billingLoc)
 	if err != nil {
 		return domain.Invoice{}, err
 	}
@@ -4424,17 +4429,6 @@ func (e *Engine) billFinalOnImmediateCancelImpl(ctx context.Context, tx *sql.Tx,
 		// customer canceled before they consumed anything billable.
 		// Skip the $0 invoice (matches BillOnCreate's behavior).
 		return domain.Invoice{}, nil
-	}
-
-	// Settings resolve before tax: a read failure fails the cancel with no
-	// orphan tax_calculations row.
-	netDays, err := e.netPaymentTermDays(ctx, sub.TenantID)
-	if err != nil {
-		return domain.Invoice{}, err
-	}
-	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return domain.Invoice{}, err
 	}
 
 	// Apply tax.
@@ -4641,14 +4635,10 @@ type cancelCreditInputs struct {
 // baseFee × periodDays/fullCycleDays for a stub period; using periodDays
 // as the denominator over-refunds whenever periodDays < fullCycleDays.
 // Same pattern as emitBaseSegmentLine.
-func (e *Engine) unusedBaseForPeriod(ctx context.Context, sub domain.Subscription, periodStart, periodEnd, at time.Time) (int64, error) {
+func (e *Engine) unusedBaseForPeriod(ctx context.Context, sub domain.Subscription, periodStart, periodEnd, at time.Time, billingLoc *time.Location) (int64, error) {
 	unusedDays := roundDays(periodEnd.Sub(at))
 	if unusedDays <= 0 {
 		return 0, nil
-	}
-	billingLoc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return 0, err
 	}
 	totalUnused := int64(0)
 	for _, it := range sub.Items {
@@ -4720,7 +4710,12 @@ func (e *Engine) prepareCancelCredit(ctx context.Context, sub domain.Subscriptio
 		return cancelCreditInputs{}, false, nil
 	}
 
-	totalUnused, err := e.unusedBaseForPeriod(ctx, sub, periodStart, periodEnd, cancelAt)
+	// One zone for the refund amount and its description.
+	loc, err := e.tenantLocation(ctx, sub.TenantID)
+	if err != nil {
+		return cancelCreditInputs{}, false, err
+	}
+	totalUnused, err := e.unusedBaseForPeriod(ctx, sub, periodStart, periodEnd, cancelAt, loc)
 	if err != nil {
 		return cancelCreditInputs{}, false, err
 	}
@@ -4731,10 +4726,6 @@ func (e *Engine) prepareCancelCredit(ctx context.Context, sub domain.Subscriptio
 	// Civil-day dates on the customer-facing credit-note / ledger description
 	// render in the tenant billing timezone (ADR-077), not UTC — a raw UTC
 	// render prints the prior calendar day for a positive-offset billing zone.
-	loc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return cancelCreditInputs{}, false, err
-	}
 	desc := prorationRefundDesc("Cancel proration", sub.Code, "canceled", periodStart, periodEnd, cancelAt, loc)
 
 	return cancelCreditInputs{
@@ -4820,7 +4811,12 @@ func (e *Engine) prepareSwapCredit(ctx context.Context, sub domain.Subscription,
 		return cancelCreditInputs{}, false, nil
 	}
 
-	totalUnused, err := e.unusedBaseForPeriod(ctx, sub, periodStart, periodEnd, at)
+	// One zone for the refund amount and its description.
+	loc, err := e.tenantLocation(ctx, sub.TenantID)
+	if err != nil {
+		return cancelCreditInputs{}, false, err
+	}
+	totalUnused, err := e.unusedBaseForPeriod(ctx, sub, periodStart, periodEnd, at, loc)
 	if err != nil {
 		return cancelCreditInputs{}, false, err
 	}
@@ -4828,10 +4824,6 @@ func (e *Engine) prepareSwapCredit(ctx context.Context, sub domain.Subscription,
 		return cancelCreditInputs{}, false, nil
 	}
 
-	loc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return cancelCreditInputs{}, false, err
-	}
 	desc := prorationRefundDesc("Plan-swap refund", sub.Code, "swapped", periodStart, periodEnd, at, loc)
 
 	return cancelCreditInputs{
@@ -5253,7 +5245,12 @@ func (e *Engine) BillOnPlanSwapImmediate(ctx context.Context, sub domain.Subscri
 		return 0, nil
 	}
 
-	totalUnused, err := e.unusedBaseForPeriod(ctx, sub, periodStart, periodEnd, at)
+	// One zone for the refund amount and its description.
+	loc, err := e.tenantLocation(ctx, sub.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	totalUnused, err := e.unusedBaseForPeriod(ctx, sub, periodStart, periodEnd, at, loc)
 	if err != nil {
 		return 0, err
 	}
@@ -5263,10 +5260,6 @@ func (e *Engine) BillOnPlanSwapImmediate(ctx context.Context, sub domain.Subscri
 
 	// Civil-day dates on the customer-facing credit-note / ledger description
 	// render in the tenant billing timezone (ADR-077), not UTC.
-	loc, err := e.tenantLocation(ctx, sub.TenantID)
-	if err != nil {
-		return 0, err
-	}
 	desc := prorationRefundDesc("Plan-swap refund", sub.Code, "swapped", periodStart, periodEnd, at, loc)
 
 	// Fan the refund across EVERY invoice that funded the period (base +

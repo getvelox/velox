@@ -126,9 +126,9 @@ type CustomerReader interface {
 }
 
 // TenantSettingsReader reads tenant settings so a manual invoice with no
-// explicit net term can fall back to the tenant's configured default —
-// mirroring the cycle engine, which reads settings.NetPaymentTerms. Optional;
-// nil falls straight through to the hardcoded 30-day default.
+// explicit net term uses the tenant's configured terms, 0 included — the same
+// resolution as the billing engine's invoices. Optional; nil (narrow tests)
+// uses 30.
 type TenantSettingsReader interface {
 	Get(ctx context.Context, tenantID string) (domain.TenantSettings, error)
 }
@@ -489,10 +489,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, input CreateInput
 	}
 
 	// Resolve net payment terms. An explicit value (including 0 = "Due on
-	// receipt") is honored verbatim. When omitted, fall back to the tenant's
-	// configured net terms, then to 30 — mirroring the cycle engine
-	// (billOnePeriod reads settings.NetPaymentTerms, defaulting to 30). A
-	// negative value is clamped to 0.
+	// receipt") is honored verbatim; a negative value is clamped to 0. When
+	// omitted, the tenant's configured terms apply, 0 included, as on every
+	// engine invoice. A settings read failure fails the create rather than
+	// guessing Net 30 (P24), and happens before an invoice number is spent.
 	netDays := 30
 	switch {
 	case input.NetPaymentTermDays != nil:
@@ -501,9 +501,14 @@ func (s *Service) Create(ctx context.Context, tenantID string, input CreateInput
 			netDays = 0
 		}
 	case s.settings != nil:
-		if ts, err := s.settings.Get(ctx, tenantID); err == nil && ts.NetPaymentTerms > 0 {
-			netDays = ts.NetPaymentTerms
+		ts, err := s.settings.Get(ctx, tenantID)
+		if err != nil {
+			return domain.Invoice{}, fmt.Errorf("read tenant net payment terms: %w", err)
 		}
+		if ts.NetPaymentTerms < 0 {
+			return domain.Invoice{}, fmt.Errorf("tenant net payment terms is negative (%d)", ts.NetPaymentTerms)
+		}
+		netDays = ts.NetPaymentTerms
 	}
 
 	ctx = s.bindForCreate(ctx, tenantID, input)

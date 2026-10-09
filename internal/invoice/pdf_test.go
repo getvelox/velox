@@ -658,3 +658,12 @@ func TestCNChannelDescription_RefundStateAnnotated(t *testing.T) {
 		})
 	}
 }
+
+func TestPaymentTermsLine(t *testing.T) {
+	if got := paymentTermsLine(0); got != "Payment due on receipt." {
+		t.Errorf("Net 0: got %q, want %q", got, "Payment due on receipt.")
+	}
+	if got := paymentTermsLine(30); got != "Payment due within 30 days of issue date." {
+		t.Errorf("Net 30: got %q", got)
+	}
+}

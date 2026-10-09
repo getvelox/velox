@@ -65,11 +65,12 @@ func intervalSubContext(ctx context.Context, tx *sql.Tx, subscriptionID string) 
 		return ic, fmt.Errorf("interval sub context %s: %w", subscriptionID, err)
 	}
 	ic.status = domain.SubscriptionStatus(status)
+	// Same rule as the engine's tenantLocation (P24): an unloadable zone fails
+	// the mutation rather than clamping intervals in UTC. Settings saves
+	// validate the zone, so this needs a row written around that validation.
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		// Same collapse the engine's tenantLocation applies (ADR-077): an
-		// unparseable tz setting means UTC, not a failed mutation.
-		loc = time.UTC
+		return ic, fmt.Errorf("load tenant timezone %q: %w", tz, err)
 	}
 	ic.loc = loc
 	return ic, nil

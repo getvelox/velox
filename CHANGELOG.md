@@ -59,7 +59,7 @@ Older entries keep their original text.
 
 ### Fixed
 
-- **"Due on receipt" now works on subscription invoices, and billing no longer guesses Net 30 or UTC when it cannot read tenant settings (2026-10-09, P24).** Cycle, threshold, first, final-cancel and proration invoices turned Net 0 into Net 30, so dunning started a month late. A failed settings read now fails that invoice and the next tick retries it.
+- **"Due on receipt" (Net 0) now applies to every invoice, and a failed tenant-settings read fails the operation instead of guessing Net 30 or UTC (2026-10-09, P24).** Engine and API-created invoices turned Net 0 into Net 30, starting dunning a month late. Subscription periods no longer fall back to UTC; the next tick or request retries. PDFs say "Payment due on receipt."
 
 - **No-card dunning starts only once credits have been applied and money is still owed; starting dunning is one transaction (2026-10-08).** A separate hourly job used to start dunning for any queued invoice whose customer had no card. It could run in the seconds before a finalize applied the customer's credits, or right after a credit apply failed, so a tenant could get `dunning.started` for an invoice that credits covered. The auto-charge collector now starts it at the point where that is known: credits applied, money owed, no card. The separate job and its 10-minute settle window are deleted. Starting dunning now writes the run, its timeline row and the `dunning.started` webhook in one transaction, so a crash can no longer leave a run with no timeline row or webhook. ADR-116 amendment, ADR-060 amendment.
 

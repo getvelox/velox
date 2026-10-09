@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
+	"github.com/sagarsuperuser/velox/internal/tax"
 )
 
 var errSettingsDown = errors.New("settings read: connection reset")
@@ -32,19 +33,34 @@ func (f *flakySettings) Get(_ context.Context, _ string) (domain.TenantSettings,
 	return f.ts, nil
 }
 
+// recordingTaxCalcs counts tax_calculations rows. A write that fails after a
+// row is recorded leaves an orphan row behind.
+type recordingTaxCalcs struct{ records int }
+
+func (r *recordingTaxCalcs) Record(context.Context, string, string, tax.Request, *tax.Result) (string, error) {
+	r.records++
+	return "taxcalc_test", nil
+}
+func (r *recordingTaxCalcs) LookupCalculationCreatedAt(context.Context, string, string, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (r *recordingTaxCalcs) LinkInvoice(context.Context, string, string, string) error { return nil }
+
 func defaultTermsSettings() domain.TenantSettings {
 	return domain.TenantSettings{NetPaymentTerms: 30, Timezone: "UTC", TaxProvider: "none"}
 }
 
 // failEachSettingsRead runs write once cleanly to count its settings reads,
 // then once per read with that read failing, and asserts every failing run
-// returns an error and writes no invoice. It is order-independent: a read
-// added later is covered without editing the test (P24 — no silent defaults
-// in billing).
-func failEachSettingsRead(t *testing.T, write func(s *flakySettings) (written int, err error)) {
+// returns an error, writes no invoice and records no tax calculation (every
+// settings read happens before tax is computed). It is order-independent: a
+// read added later is covered without editing the test (P24 — no silent
+// defaults in billing).
+func failEachSettingsRead(t *testing.T, write func(s *flakySettings, taxCalcs *recordingTaxCalcs) (written int, err error)) {
 	t.Helper()
 	clean := &flakySettings{ts: defaultTermsSettings()}
-	n, err := write(clean)
+	cleanTax := &recordingTaxCalcs{}
+	n, err := write(clean, cleanTax)
 	if err != nil {
 		t.Fatalf("clean run: %v", err)
 	}
@@ -54,22 +70,30 @@ func failEachSettingsRead(t *testing.T, write func(s *flakySettings) (written in
 	if clean.calls == 0 {
 		t.Fatal("clean run made no settings reads")
 	}
+	if cleanTax.records == 0 {
+		t.Fatal("clean run recorded no tax calculation; the fixture does not reach tax")
+	}
 	for k := 1; k <= clean.calls; k++ {
 		s := &flakySettings{ts: defaultTermsSettings(), failOn: k}
-		written, err := write(s)
+		taxCalcs := &recordingTaxCalcs{}
+		written, err := write(s, taxCalcs)
 		if err == nil {
 			t.Errorf("settings read %d of %d failed but the write succeeded (a silent default was used)", k, clean.calls)
 		}
 		if written != 0 {
 			t.Errorf("settings read %d of %d failed but %d invoice(s) were written", k, clean.calls, written)
 		}
+		if taxCalcs.records != 0 {
+			t.Errorf("settings read %d of %d failed after tax was recorded (%d orphan tax_calculations rows)", k, clean.calls, taxCalcs.records)
+		}
 	}
 }
 
 func TestRunCycle_EverySettingsReadFailsClosed(t *testing.T) {
-	failEachSettingsRead(t, func(s *flakySettings) (int, error) {
+	failEachSettingsRead(t, func(s *flakySettings, taxCalcs *recordingTaxCalcs) (int, error) {
 		engine, subs, _, _, invoices := setupEngine()
 		engine.settings = s
+		engine.SetTaxCalculationStore(taxCalcs)
 		_, runErrs := engine.RunCycle(context.Background(), 50)
 		if len(runErrs) > 0 {
 			if subs.cycleUpdated["sub_1"] {
@@ -138,8 +162,9 @@ func cancelFixture(settings SettingsReader) (*Engine, domain.Subscription, *mock
 }
 
 func TestBillFinalOnImmediateCancel_EverySettingsReadFailsClosed(t *testing.T) {
-	failEachSettingsRead(t, func(s *flakySettings) (int, error) {
+	failEachSettingsRead(t, func(s *flakySettings, taxCalcs *recordingTaxCalcs) (int, error) {
 		engine, sub, invoices := cancelFixture(s)
+		engine.SetTaxCalculationStore(taxCalcs)
 		_, err := engine.BillFinalOnImmediateCancel(context.Background(), sub)
 		return len(invoices.invoices), err
 	})
@@ -168,8 +193,9 @@ func onCreateFixture(settings SettingsReader) (*Engine, domain.Subscription, *mo
 }
 
 func TestBillOnCreateTx_EverySettingsReadFailsClosed(t *testing.T) {
-	failEachSettingsRead(t, func(s *flakySettings) (int, error) {
+	failEachSettingsRead(t, func(s *flakySettings, taxCalcs *recordingTaxCalcs) (int, error) {
 		engine, sub, invoices := onCreateFixture(s)
+		engine.SetTaxCalculationStore(taxCalcs)
 		_, _, err := engine.BillOnCreateTx(context.Background(), nil, sub)
 		return len(invoices.invoices), err
 	})
@@ -205,5 +231,70 @@ func TestRunCycle_UnloadableTimezoneFailsClosed(t *testing.T) {
 	}
 	if len(invoices.invoices) != 0 || subs.cycleUpdated["sub_1"] {
 		t.Errorf("unloadable timezone: invoices=%d advanced=%v, want 0/false", len(invoices.invoices), subs.cycleUpdated["sub_1"])
+	}
+}
+
+// thresholdFixture crosses a $500 spend threshold mid-period: 1000 calls at
+// $1 plus the $49 base.
+func thresholdFixture(t *testing.T, reset bool, settings SettingsReader, taxCalcs *recordingTaxCalcs) (*Engine, *mockInvoices) {
+	t.Helper()
+	engine, _, invoices := setupThresholdEngine(&domain.BillingThresholds{AmountGTE: 50000, ResetBillingCycle: reset}, 1000)
+	engine.clock = clock.NewFake(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
+	engine.settings = settings
+	if taxCalcs != nil {
+		engine.SetTaxCalculationStore(taxCalcs)
+	}
+	return engine, invoices
+}
+
+func TestScanThresholds_EverySettingsReadFailsClosed(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(map[bool]string{false: "continue_cycle", true: "reset_cycle"}[reset], func(t *testing.T) {
+			failEachSettingsRead(t, func(s *flakySettings, taxCalcs *recordingTaxCalcs) (int, error) {
+				engine, invoices := thresholdFixture(t, reset, s, taxCalcs)
+				_, errs := engine.ScanThresholds(context.Background(), 50)
+				if len(errs) > 0 {
+					return len(invoices.invoices), errs[0]
+				}
+				return len(invoices.invoices), nil
+			})
+		})
+	}
+}
+
+func TestScanThresholds_HonorsDueOnReceipt(t *testing.T) {
+	ts := defaultTermsSettings()
+	ts.NetPaymentTerms = 0
+	engine, invoices := thresholdFixture(t, false, &flakySettings{ts: ts}, nil)
+
+	if fired, errs := engine.ScanThresholds(context.Background(), 50); fired != 1 || len(errs) > 0 {
+		t.Fatalf("ScanThresholds: fired=%d errs=%v, want one fire", fired, errs)
+	}
+	inv := invoices.invoices[0]
+	if inv.NetPaymentTermDays != 0 {
+		t.Errorf("NetPaymentTermDays: got %d, want 0 (Due on receipt; was coerced to 30)", inv.NetPaymentTermDays)
+	}
+	if inv.DueAt == nil || inv.IssuedAt == nil || !inv.DueAt.Equal(*inv.IssuedAt) {
+		t.Errorf("DueAt = %v, want IssuedAt %v", inv.DueAt, inv.IssuedAt)
+	}
+}
+
+// A trial that is still running advances its period without billing; that
+// advance is computed in the tenant zone, so a failed read must not advance
+// the period in UTC.
+func TestRunCycle_TrialAdvanceTimezoneUnreadableFailsClosed(t *testing.T) {
+	engine, subs, _, _, invoices := setupEngine()
+	sub := subs.subs["sub_1"]
+	trialEnd := sub.CurrentBillingPeriodEnd.AddDate(0, 3, 0)
+	sub.Status = domain.SubscriptionTrialing
+	sub.TrialEndAt = &trialEnd
+	subs.subs["sub_1"] = sub
+	engine.settings = &flakySettings{ts: defaultTermsSettings(), failOn: 1}
+
+	if _, runErrs := engine.RunCycle(context.Background(), 50); len(runErrs) == 0 {
+		t.Fatal("trial advance succeeded with an unreadable timezone; want an error")
+	}
+	if subs.cycleUpdated["sub_1"] || len(invoices.invoices) != 0 {
+		t.Errorf("trial period advanced (%v) or invoices written (%d) despite the failure", subs.cycleUpdated["sub_1"], len(invoices.invoices))
 	}
 }

@@ -128,7 +128,10 @@ func TestUpdateItem_ProrationInvoiceHonorsDueOnReceipt(t *testing.T) {
 }
 
 // TestUpdateItem_ProrationFailsWhenNetTermsUnreadable: a settings read failure
-// refuses the change instead of stamping a guessed Net 30 (P24).
+// fails the request with no proration invoice, instead of stamping a guessed
+// Net 30 (P24). This harness has no DB, so it runs the non-transactional path;
+// the item-change rollback on the production path is proven by
+// TestUpdateItem_ProrationSettingsUnreadable_RollsBack (real Postgres).
 func TestUpdateItem_ProrationFailsWhenNetTermsUnreadable(t *testing.T) {
 	rr, invoices := driveUpgradeProration(t, func(h *Handler) {
 		h.SetNetTermsReader(netTermsStub{err: errors.New("settings read: connection reset")})
@@ -151,7 +154,9 @@ func (errTenantLocator) TenantLocation(_ context.Context, _ string) (*time.Locat
 
 // TestUpdateItem_ProrationFailsWhenTimezoneUnreadable: the proration
 // denominator is a full cycle counted in the tenant timezone, so a timezone
-// read failure refuses the change instead of prorating in UTC (P24).
+// read failure fails the request with no proration invoice, instead of
+// prorating in UTC (P24). Rollback of the item change on the production path:
+// TestUpdateItem_ProrationSettingsUnreadable_RollsBack.
 func TestUpdateItem_ProrationFailsWhenTimezoneUnreadable(t *testing.T) {
 	rr, invoices := driveUpgradeProration(t, func(h *Handler) {
 		h.SetTenantLocator(errTenantLocator{})
