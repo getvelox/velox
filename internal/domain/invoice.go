@@ -597,3 +597,19 @@ func (li InvoiceLineItem) MarshalJSON() ([]byte, error) {
 		UnitAmountDecimal string `json:"unit_amount_decimal"`
 	}{alias(li), li.DisplayUnitAmountDecimal().String()})
 }
+
+// InvoiceKeyset is a position in a queue read oldest-first by (created_at, id).
+// The zero value means "from the start". Both columns are fixed at insert, so
+// the cursor only moves forward and never repeats a row. A sweep that pages by
+// it visits every row queued when the pass reached its position, however many
+// rows ahead of it never leave; a row queued behind the cursor mid-pass is
+// visited on the next pass.
+type InvoiceKeyset struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// KeysetOf returns inv's position, for the next page's cursor.
+func KeysetOf(inv Invoice) InvoiceKeyset {
+	return InvoiceKeyset{CreatedAt: inv.CreatedAt, ID: inv.ID}
+}

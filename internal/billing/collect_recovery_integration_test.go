@@ -30,14 +30,17 @@ func (testPaymentSetupsReady) ResolveForCharge(_ context.Context, _, _ string) (
 }
 
 // countingCharger counts charges per invoice. delay holds each charge open
-// so concurrent collectors overlap inside the charge leg.
+// so concurrent collectors overlap inside the charge leg. A successful charge
+// marks the invoice paid through store, as the real charger's settle does:
+// the queue hand-off clears the flag only once an outcome is on the row.
 type countingCharger struct {
 	mu    sync.Mutex
 	n     map[string]int
 	delay time.Duration
+	store *invoice.PostgresStore
 }
 
-func (c *countingCharger) ChargeInvoice(_ context.Context, _ string, inv domain.Invoice, _, _ string) (domain.Invoice, error) {
+func (c *countingCharger) ChargeInvoice(ctx context.Context, tenantID string, inv domain.Invoice, _, _ string) (domain.Invoice, error) {
 	time.Sleep(c.delay)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -45,6 +48,13 @@ func (c *countingCharger) ChargeInvoice(_ context.Context, _ string, inv domain.
 		c.n = map[string]int{}
 	}
 	c.n[inv.ID]++
+	if c.store != nil {
+		paid, err := c.store.MarkPaid(ctx, tenantID, inv.ID, "pi_test_"+inv.ID, time.Now().UTC())
+		if err != nil {
+			return inv, err
+		}
+		return paid, nil
+	}
 	return inv, nil
 }
 
@@ -127,10 +137,10 @@ func TestCollect_CrashAfterFinalize_SweepChargesExactlyOnce(t *testing.T) {
 		t.Fatal("a finalized, unpaid invoice must be queued by its finalize write")
 	}
 
-	charger := &countingCharger{}
+	charger := &countingCharger{store: h.invoices}
 	e := h.newEng(testPaymentSetupsReady{}, charger, nil)
 	for tick := 0; tick < 3; tick++ {
-		e.RetryPendingCharges(h.ctx, 50)
+		e.RetryPendingCharges(h.ctx, 50, nil)
 	}
 	if got := charger.count(inv.ID); got != 1 {
 		t.Fatalf("charges = %d across 3 ticks, want exactly 1", got)
@@ -144,7 +154,7 @@ func TestCollect_CrashAfterFinalize_SweepChargesExactlyOnce(t *testing.T) {
 func TestCollect_NudgeAndSweepRace_ChargesOnce(t *testing.T) {
 	h := newCollectHarness(t)
 	inv := h.seed(t, "INV-RACE-1")
-	charger := &countingCharger{delay: 50 * time.Millisecond}
+	charger := &countingCharger{delay: 50 * time.Millisecond, store: h.invoices}
 	e := h.newEng(testPaymentSetupsReady{}, charger, nil)
 
 	var wg sync.WaitGroup
@@ -159,7 +169,7 @@ func TestCollect_NudgeAndSweepRace_ChargesOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			started.Add(1)
-			e.RetryPendingCharges(h.ctx, 50)
+			e.RetryPendingCharges(h.ctx, 50, nil)
 		}()
 	}
 	wg.Wait()
@@ -194,7 +204,7 @@ func TestCollector_StartsNoPaymentDunning_RealStore(t *testing.T) {
 	cardless := h.seed(t, "INV-NOCARD-1")
 	e := h.newEng(testPaymentSetupsNoPM{}, testChargerSentinel{}, starter)
 	for tick := 0; tick < 3; tick++ {
-		e.RetryPendingCharges(h.ctx, 50)
+		e.RetryPendingCharges(h.ctx, 50, nil)
 	}
 	run, err := dstore.GetRunByInvoice(h.ctx, h.tenantID, cardless.ID)
 	if err != nil {
@@ -205,7 +215,7 @@ func TestCollector_StartsNoPaymentDunning_RealStore(t *testing.T) {
 	}
 
 	withCard := h.seed(t, "INV-CARD-1")
-	h.newEng(testPaymentSetupsReady{}, &countingCharger{}, starter).RetryPendingCharges(h.ctx, 50)
+	h.newEng(testPaymentSetupsReady{}, &countingCharger{store: h.invoices}, starter).RetryPendingCharges(h.ctx, 50, nil)
 	if _, err := dstore.GetRunByInvoice(h.ctx, h.tenantID, withCard.ID); err == nil {
 		t.Error("a customer with a card must not be dunned as no_payment_method")
 	}

@@ -186,3 +186,100 @@ func TestDrain_StopsAtTheNextSubWhenCtxEnds(t *testing.T) {
 		t.Errorf("got %d errors, want 2 (sub_1 in flight + the stopped run): %v", len(errs), errs)
 	}
 }
+
+// The auto-charge sweep pages through the whole queue, so the scheduler hands
+// it the same liveness stamp as the billing drain.
+func TestScheduler_ChargeSweepStampsLivenessPerPage(t *testing.T) {
+	_, invoices, _, inv := collectFixture() // one queued, card-less invoice
+	for _, id := range []string{"inv_c2", "inv_c3"} {
+		more := inv
+		more.ID = id
+		invoices.invoices = append(invoices.invoices, more)
+	}
+	e := wireBaseTax(NewEngine(&mockSubs{}, &mockUsage{}, &mockPricing{}, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
+	stamps := 0
+	s := &Scheduler{engine: e, batch: 1, onRun: func() { stamps++ }}
+
+	s.runBillingCycleForMode(postgres.WithLivemode(context.Background(), true), true)
+
+	if stamps != 3 {
+		t.Fatalf("liveness stamped %d times while sweeping 3 queued invoices one per page, want 3", stamps)
+	}
+}
+
+// cancelingCharger ends the sweep's ctx while charging, as a shutdown or a
+// lost lease would mid-sweep.
+type cancelingCharger struct {
+	recordingCharger
+	cancel context.CancelFunc
+}
+
+func (c *cancelingCharger) ChargeInvoice(ctx context.Context, tenantID string, inv domain.Invoice, cus, pm string) (domain.Invoice, error) {
+	defer c.cancel()
+	return c.recordingCharger.ChargeInvoice(ctx, tenantID, inv, cus, pm)
+}
+
+// A sweep whose ctx ends mid-page stops before claiming the next invoice:
+// the next tick charges it. Before, every remaining row was claimed and
+// charged on a dead ctx, failing one by one.
+func TestProcessAutoCharge_StopsAtTheNextInvoiceWhenCtxEnds(t *testing.T) {
+	e, invoices, _, inv := collectFixture()
+	second := inv
+	second.ID = "inv_c2"
+	invoices.invoices = append(invoices.invoices, second)
+	e.paymentSetups = &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	charger := &cancelingCharger{recordingCharger: recordingCharger{store: invoices}, cancel: cancel}
+	e.charger = charger
+
+	_, errs := e.processAutoCharge(ctx, invoices.invoices, nil, noPMTriggerSweep)
+
+	if len(charger.got) != 1 {
+		t.Fatalf("charged %d invoices, want 1: the second must wait for the next tick", len(charger.got))
+	}
+	// The stop is not a failure per row; the drain reports it once.
+	if len(errs) != 0 {
+		t.Fatalf("want no per-row errors for a stopped sweep, got %v", errs)
+	}
+	if !autoChargePending(t, invoices, "inv_c2") {
+		t.Error("the uncharged invoice must stay queued")
+	}
+}
+
+// Test-clock Advance pages through the clock's queue the same way. The three
+// invoices are card-less, so they stay queued after their visit: only the
+// cursor moves the drain past them. Without it, the first page would come
+// back forever and Advance would hang until its timeout.
+func TestRetryPendingChargesForClock_PagesThroughTheQueue(t *testing.T) {
+	e, invoices, notifier, inv := collectFixture() // no card on file
+	invoices.clockQueue = map[string]bool{inv.ID: true}
+	for _, id := range []string{"inv_c2", "inv_c3"} {
+		more := inv
+		more.ID = id
+		invoices.invoices = append(invoices.invoices, more)
+		invoices.clockQueue[id] = true
+	}
+
+	done := make(chan []error, 1)
+	go func() {
+		_, errs := e.RetryPendingChargesForClock(context.Background(), "t1", "clk_1", 1)
+		done <- errs
+	}()
+	select {
+	case errs := <-done:
+		if len(errs) != 0 {
+			t.Fatalf("errors: %v", errs)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the clock sweep did not finish: it re-reads the first page instead of paging past it")
+	}
+	if len(notifier.got) != 3 {
+		t.Fatalf("setup emails = %d, want 3: every queued invoice must be visited once", len(notifier.got))
+	}
+	for _, id := range []string{inv.ID, "inv_c2", "inv_c3"} {
+		if !autoChargePending(t, invoices, id) {
+			t.Errorf("%s left the queue; card-less invoices stay queued", id)
+		}
+	}
+}

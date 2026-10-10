@@ -62,7 +62,7 @@ func TestCollector_NoCard_StartsNoPaymentDunningOnce(t *testing.T) {
 	starter := &recordingDunningStarter{}
 	engine.SetDunningStarter(starter)
 
-	if _, errs := engine.RetryPendingCharges(context.Background(), 10); len(errs) != 0 {
+	if _, errs := engine.RetryPendingCharges(context.Background(), 10, nil); len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	if len(starter.started) != 1 || starter.started[0] != "inv_1" {
@@ -81,7 +81,7 @@ func TestCollector_NoCard_StartFailureIsRetried(t *testing.T) {
 	engine := noPMEngine(t, inv)
 	engine.SetDunningStarter(&recordingDunningStarter{err: errors.New("create run failed")})
 
-	if _, errs := engine.RetryPendingCharges(context.Background(), 10); len(errs) != 1 {
+	if _, errs := engine.RetryPendingCharges(context.Background(), 10, nil); len(errs) != 1 {
 		t.Fatalf("errors = %v, want the start failure surfaced", errs)
 	}
 	if !inv.invoices[0].AutoChargePending {
@@ -120,7 +120,7 @@ func TestCollector_NoDunningUnlessOwedAndCardless(t *testing.T) {
 			engine.SetDunningStarter(starter)
 			tc.setup(engine, inv)
 
-			_, _ = engine.RetryPendingCharges(context.Background(), 10)
+			_, _ = engine.RetryPendingCharges(context.Background(), 10, nil)
 			if len(starter.causes) != 0 {
 				t.Fatalf("StartDunning called (%v); must not be", starter.causes)
 			}

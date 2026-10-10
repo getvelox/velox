@@ -116,7 +116,7 @@ func TestThresholdScan_CreditsApplied_ChargesRemainder(t *testing.T) {
 	}
 	invoices := &mockInvoices{}
 	applier := &fakeCreditApplier{inv: invoices, applyCents: 4900}
-	charger := &recordingCharger{}
+	charger := &recordingCharger{store: invoices}
 	pms := &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe_1"}
 
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, applier, &mockSettings{}, pms, charger, billingTestClock()))

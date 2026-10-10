@@ -75,7 +75,7 @@ func TestCollectInvoice(t *testing.T) {
 	t.Run("PM ready → charged once, flag cleared, no email", func(t *testing.T) {
 		e, invoices, notifier, inv := collectFixture()
 		e.paymentSetups = &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe"}
-		charger := &recordingCharger{}
+		charger := &recordingCharger{store: invoices}
 		e.charger = charger
 
 		e.CollectInvoice(ctx, "t1", inv.ID, nil)
@@ -158,7 +158,7 @@ func TestCollectInvoice(t *testing.T) {
 	t.Run("decline → flag cleared: dunning is the one retry owner", func(t *testing.T) {
 		e, invoices, _, inv := collectFixture()
 		e.paymentSetups = &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe"}
-		e.charger = &fakeChargerDecline{}
+		e.charger = &fakeChargerDecline{store: invoices}
 
 		e.CollectInvoice(ctx, "t1", inv.ID, nil)
 		if autoChargePending(t, invoices, inv.ID) {
@@ -418,9 +418,11 @@ func TestCycleClose_CollectsAtThePeriodBoundary(t *testing.T) {
 
 // refusingCharger fails definitely with no decline code (a Stripe
 // invalid_request, or a card_error that carries only a code).
-type refusingCharger struct{}
+// Records payment_status='failed' on store first, as the real charger does.
+type refusingCharger struct{ store *mockInvoices }
 
-func (refusingCharger) ChargeInvoice(_ context.Context, _ string, inv domain.Invoice, _, _ string) (domain.Invoice, error) {
+func (c refusingCharger) ChargeInvoice(_ context.Context, _ string, inv domain.Invoice, _, _ string) (domain.Invoice, error) {
+	c.store.stampPaymentStatus(inv.ID, domain.PaymentFailed)
 	return inv, &payment.PaymentError{Message: "No such PaymentMethod"}
 }
 
@@ -430,7 +432,7 @@ func (refusingCharger) ChargeInvoice(_ context.Context, _ string, inv domain.Inv
 func TestCollect_DefiniteFailureWithoutDeclineCode_ClearsFlag(t *testing.T) {
 	e, invoices, _, inv := collectFixture()
 	e.paymentSetups = &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe"}
-	e.charger = refusingCharger{}
+	e.charger = refusingCharger{store: invoices}
 
 	_, errs := e.processAutoCharge(context.Background(), []domain.Invoice{inv}, nil, noPMTriggerSweep)
 	if len(errs) != 1 {

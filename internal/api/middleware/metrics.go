@@ -569,6 +569,31 @@ func RegisterQueueDepthGauges(count func(query string) (float64, error)) {
 			})
 		}
 	}
+	// Auto-charge queue depth. The predicate is ListAutoChargePending's, so
+	// this counts exactly what the sweep visits each tick. Card-less invoices
+	// stay queued on purpose (charge-on-attach), so a steady baseline is
+	// normal. ADR-116 amendment: sustained > 5,000 is the trigger to park
+	// them instead.
+	for _, m := range []struct {
+		label string
+		live  bool
+	}{{"live", true}, {"test", false}} {
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM invoices i
+			WHERE i.auto_charge_pending AND i.payment_status = 'pending' AND i.status = 'finalized'
+			  AND i.livemode = %t AND i.is_simulated = false
+			  AND NOT EXISTS (SELECT 1 FROM subscriptions ps WHERE ps.id = i.subscription_id AND ps.pause_collection_behavior IS NOT NULL)`, m.live)
+		promauto.NewGaugeFunc(prometheus.GaugeOpts{
+			Name:        "velox_auto_charge_queued_invoices",
+			Help:        "Invoices the auto-charge sweep visits each tick, including card-less ones waiting for a payment method. Sustained > 5000 is the ADR-116 amendment trigger. For charges that keep failing, watch velox_auto_charge_retries_total{result=\"failed\"}. -1 = metric query failed.",
+			ConstLabels: prometheus.Labels{"mode": m.label},
+		}, func() float64 {
+			n, err := count(q)
+			if err != nil {
+				return -1
+			}
+			return n
+		})
+	}
 	gauge("velox_email_outbox_pending",
 		"Emails waiting for the outbox dispatcher (status='pending'). -1 = metric query failed.",
 		`SELECT COUNT(*) FROM email_outbox WHERE status = 'pending'`)

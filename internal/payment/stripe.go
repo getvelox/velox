@@ -941,9 +941,12 @@ const purposePaymentUpdateToken = "payment_update_token"
 // Three attempts with 100ms / 500ms backoff covers the typical transient
 // case. Persistent failure (Stripe outage, DB unavailable for seconds)
 // surfaces as the returned error; caller upgrades the slog level to
-// ERROR so operators have an alertable signal, and the operator path
-// (start dunning manually from the invoice attention banner) stays
-// available as the last resort.
+// ERROR so operators have an alertable signal. There is no manual
+// "start dunning" action. The run is re-driven automatically: the
+// payment_intent.payment_failed webhook (SettleFailed) starts it, and the
+// dunning_backfill reconciler retries StartDunning every tick for a
+// wall-clock failed invoice with no run, after a 10-minute cool-off
+// (test-clock invoices are dunned inline during Advance).
 //
 // 2026-05-30 design-debt audit (Tier 1 #5) replaced two log-and-swallow
 // sites here and at the inline charge-failure path with this retry.

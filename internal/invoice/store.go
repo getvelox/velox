@@ -86,7 +86,7 @@ type Store interface {
 	// lease — see postgres.go (2026-07-21 snapshot-race audit).
 	ClaimChargeForManualCollect(ctx context.Context, tenantID, id string) (bool, error)
 	ReleaseAutoChargeClaim(ctx context.Context, tenantID, id string) error
-	ListAutoChargePending(ctx context.Context, limit int) ([]domain.Invoice, error)
+	ListAutoChargePending(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error)
 
 	CreateLineItem(ctx context.Context, tenantID string, item domain.InvoiceLineItem) (domain.InvoiceLineItem, error)
 	ListLineItems(ctx context.Context, tenantID, invoiceID string) ([]domain.InvoiceLineItem, error)

@@ -25,6 +25,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/payment"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/money"
+	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/platform/telemetry"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/tax"
@@ -302,11 +303,12 @@ type NoPaymentMethodNotifier interface {
 // (ChargeInvoice → StartDunning), so the declined-card customer is
 // escalated toward a terminal (pause/cancel/uncollectible). But an
 // invoice with NO resolvable payment method is only flagged
-// auto_charge_pending + emailed once, then retried by RetryPendingCharges
-// forever with nothing to charge — it never reaches a terminal. That
-// card-less "limbo" is an absorbing sink: unbounded unpaid invoices, no
-// escalation. Routing the no-card invoice into the SAME dunning machine
-// gives it the same escalation-to-terminal the declined-card path gets.
+// auto_charge_pending + emailed once, then visited by RetryPendingCharges
+// every tick with nothing to charge — with no escalation it would sit unpaid
+// for good. Routing the no-card invoice into the SAME dunning machine gives it
+// the same escalation-to-terminal the declined-card path gets. The invoice
+// stays queued while the run escalates, so a card added mid-campaign is
+// charged on the next visit.
 //
 // StartDunning is idempotent (one run per invoice, lifetime), so calling
 // it every tick for the same candidate is safe — an invoice that already
@@ -626,7 +628,6 @@ type InvoiceWriter interface {
 	GetInvoiceForPeriod(ctx context.Context, tenantID, subscriptionID string, periodStart, periodEnd time.Time) (domain.Invoice, error)
 	ListLineItems(ctx context.Context, tenantID, invoiceID string) ([]domain.InvoiceLineItem, error)
 	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
-	SetAutoChargePending(ctx context.Context, tenantID, id string, pending bool) error
 	// SetNoPMNotifiedAt stamps the send-once marker for the no-PM setup-link
 	// email (ADR-087 follow-up): whoever delivers the email stamps it; the
 	// auto-charge sweep checks it so a card-less invoice is emailed exactly
@@ -639,18 +640,19 @@ type InvoiceWriter interface {
 	// ReleaseAutoChargeClaim clears the lease on provably-pre-Stripe skip
 	// paths so the next tick/Advance retries immediately.
 	ReleaseAutoChargeClaim(ctx context.Context, tenantID, id string) error
-	ListAutoChargePending(ctx context.Context, limit int) ([]domain.Invoice, error)
+	ListAutoChargePending(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error)
 	// ListAutoChargePendingForClock is the catchup-path counterpart to
 	// ListAutoChargePending — returns invoices whose owning subscription
 	// is pinned to the given clock. ADR-029 Phase 1: simulation-time
 	// charge attempts only fire on operator Advance, never on the
 	// wall-clock cron tick, mirroring Stripe Test Clocks.
-	ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Invoice, error)
+	ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error)
 	// ListFailedWithoutDunningRun powers the dunning_backfill reconciler:
 	// finalized, still-owed invoices in payment_status='failed' with NO
 	// dunning run — the SettleFailed post-commit crash / exhausted-retry
 	// window. olderThan is the cool-off.
 	ListFailedWithoutDunningRun(ctx context.Context, olderThan time.Time, limit int) ([]domain.Invoice, error)
+	SetAutoChargePending(ctx context.Context, tenantID, id string, pending bool) error
 	// SetTaxTransaction persists the upstream provider's tax_transaction
 	// reference (Stripe: tx_xxx) after CommitTax succeeds. Required for
 	// later reversal when a credit note is issued against the invoice.
@@ -941,8 +943,8 @@ func (e *Engine) SetNoPaymentMethodNotifier(n NoPaymentMethodNotifier) {
 
 // SetDunningStarter wires the no-payment-method dunning enroller — the
 // sweep that routes card-less auto_charge_pending invoices into dunning
-// so they reach a terminal instead of looping in RetryPendingCharges
-// forever. See the DunningStarter doc-comment for the full rationale.
+// so they escalate to a terminal instead of only being re-visited by
+// RetryPendingCharges. See the DunningStarter doc-comment for the full rationale.
 func (e *Engine) SetDunningStarter(d DunningStarter) {
 	e.dunningStarter = d
 }
@@ -5245,21 +5247,79 @@ func (e *Engine) BillOnPlanSwapImmediate(ctx context.Context, sub domain.Subscri
 	return credited, nil
 }
 
-// RetryPendingCharges picks up invoices flagged for auto-charge retry
-// and attempts to charge them. CRON path — the wall-clock scheduler
-// calls this every tick. ADR-029 Phase 1: clock-pinned invoices are
-// excluded from this query and are processed instead by
-// RetryPendingChargesForClock during catchup.
-func (e *Engine) RetryPendingCharges(ctx context.Context, limit int) (int, []error) {
+// invoicePage returns one page of a background invoice queue after the
+// cursor, oldest first by (created_at, id).
+type invoicePage func(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error)
+
+// drainInvoiceQueue visits every row of a background invoice queue once:
+// page after page by (created_at, id) until a short page. It replaced
+// single-page sweeps. Those read the oldest pageSize rows and stopped, so rows
+// that stay queued by design (a card-less invoice waits for a card; a
+// no-policy invoice is skipped by dunning) filled the page for good, and
+// nothing newer was ever reached.
+//
+// The cursor comes from the LISTED row, and the queue's order columns never
+// change, so the drain ends: each full page moves the cursor forward. A row
+// that joins behind the cursor mid-drain is visited on the next call.
+//
+// visit returns how many rows it completed; onPage, if set, runs after each
+// page (the scheduler's liveness stamp: a drain can outlast the interval).
+func drainInvoiceQueue(ctx context.Context, pageSize int, fetch invoicePage, visit func(context.Context, []domain.Invoice) (int, []error), onPage func()) (listed, done int, errs []error) {
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	var after domain.InvoiceKeyset
+	for {
+		if err := ctx.Err(); err != nil {
+			return listed, done, append(errs, fmt.Errorf("queue drain stopped: %w", err))
+		}
+		page, err := fetch(ctx, after, pageSize)
+		if err != nil {
+			return listed, done, append(errs, err)
+		}
+		if len(page) == 0 {
+			return listed, done, errs
+		}
+		n, verrs := visit(ctx, page)
+		listed += len(page)
+		done += n
+		errs = append(errs, verrs...)
+		after = domain.KeysetOf(page[len(page)-1])
+		if onPage != nil {
+			onPage()
+		}
+		if len(page) < pageSize {
+			return listed, done, errs
+		}
+	}
+}
+
+// RetryPendingCharges visits every invoice queued for auto-charge, once per
+// call, pageSize at a time, and tries to collect it. CRON path — the
+// wall-clock scheduler calls this every tick, passing its liveness stamp as
+// onPage. ADR-029 Phase 1: clock-pinned invoices are excluded from this query
+// and are processed instead by RetryPendingChargesForClock during catchup.
+func (e *Engine) RetryPendingCharges(ctx context.Context, pageSize int, onPage func()) (int, []error) {
 	if e.charger == nil || e.paymentSetups == nil {
 		return 0, nil
 	}
-
-	pending, err := e.invoices.ListAutoChargePending(ctx, limit)
-	if err != nil {
-		return 0, []error{fmt.Errorf("list pending charges: %w", err)}
+	start := time.Now()
+	fetch := func(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+		pending, err := e.invoices.ListAutoChargePending(ctx, after, limit)
+		if err != nil {
+			return nil, fmt.Errorf("list pending charges: %w", err)
+		}
+		return pending, nil
 	}
-	return e.processAutoCharge(ctx, pending, nil, noPMTriggerSweep)
+	visit := func(ctx context.Context, page []domain.Invoice) (int, []error) {
+		return e.processAutoCharge(ctx, page, nil, noPMTriggerSweep)
+	}
+	listed, charged, errs := drainInvoiceQueue(ctx, pageSize, fetch, visit, onPage)
+	if listed > 0 {
+		slog.Info("auto-charge sweep", "livemode", postgres.Livemode(ctx), "listed", listed,
+			"charged", charged, "errors", len(errs), "duration_ms", time.Since(start).Milliseconds())
+	}
+	return charged, errs
 }
 
 // RetryPendingChargesForClock is the catchup-path counterpart to
@@ -5275,11 +5335,18 @@ func (e *Engine) RetryPendingChargesForClock(ctx context.Context, tenantID, cloc
 	if e.charger == nil || e.paymentSetups == nil {
 		return 0, nil
 	}
-	pending, err := e.invoices.ListAutoChargePendingForClock(ctx, tenantID, clockID, limit)
-	if err != nil {
-		return 0, []error{fmt.Errorf("list pending charges for clock %s: %w", clockID, err)}
+	fetch := func(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+		pending, err := e.invoices.ListAutoChargePendingForClock(ctx, tenantID, clockID, after, limit)
+		if err != nil {
+			return nil, fmt.Errorf("list pending charges for clock %s: %w", clockID, err)
+		}
+		return pending, nil
 	}
-	return e.processAutoCharge(ctx, pending, nil, noPMTriggerSweep)
+	visit := func(ctx context.Context, page []domain.Invoice) (int, []error) {
+		return e.processAutoCharge(ctx, page, nil, noPMTriggerSweep)
+	}
+	_, charged, errs := drainInvoiceQueue(ctx, limit, fetch, visit, nil)
+	return charged, errs
 }
 
 // failedDunningBackfillCoolOff lets the inline SettleFailed StartDunning win the
@@ -5377,6 +5444,13 @@ func (e *Engine) processAutoCharge(ctx context.Context, pending []domain.Invoice
 	charged := 0
 	var errs []error
 	for _, inv := range pending {
+		// Shutdown or a lost lease: stop before claiming the next row. The
+		// finalize-time nudge passes a detached ctx, so this only ends sweeps.
+		// No error here: the drain reports the stop once, so one shutdown is
+		// not counted as a failed retry per remaining row.
+		if ctx.Err() != nil {
+			return charged, errs
+		}
 		// Per-invoice charge lease (HA hazard #1): exactly one collector
 		// enters the charge leg per invoice per 5m window. The CAS
 		// re-asserts the full eligibility predicate, so a rival collector's
@@ -5490,7 +5564,12 @@ func (e *Engine) processAutoCharge(ctx context.Context, pending []domain.Invoice
 				}
 			}
 			// Provably pre-Stripe (no chargeable PM resolved): release so a
-			// card attach retries without lease lag.
+			// card attach retries without lease lag. The invoice stays queued
+			// on purpose, and the sweep visits it every tick (the drain
+			// reaches every queued row). That visit is what charges it once a
+			// card is attached, settles it if credits arrive, retries an email
+			// that was skipped, and starts dunning once the tenant has a
+			// policy.
 			_ = e.invoices.ReleaseAutoChargeClaim(ctx, inv.TenantID, inv.ID)
 			continue
 		}
@@ -5506,6 +5585,14 @@ func (e *Engine) processAutoCharge(ctx context.Context, pending []domain.Invoice
 			// EnrollFailedWithoutDunning reconciler). Clearing the flag is the
 			// OWNERSHIP HANDOFF: dunning's retry schedule drives every later
 			// attempt, so the sweep is never a second retry owner (ADR-116).
+			//
+			// Cleared even if the charger could not record 'failed' (it logs
+			// CRITICAL then). Keeping the invoice queued would re-charge it
+			// under the same idempotency key with rebuilt parameters (amount
+			// after credits, a swapped card, the test-clock anchor), which
+			// Stripe rejects as an idempotency conflict, and that parks the
+			// invoice as unknown for good. The inline dunning run, which
+			// retries under its own key, and the payment_failed webhook own it.
 			var pe *payment.PaymentError
 			if errors.As(err, &pe) && !pe.Unknown {
 				if err := e.invoices.SetAutoChargePending(ctx, inv.TenantID, inv.ID, false); err != nil {

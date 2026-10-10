@@ -48,7 +48,7 @@ func TestProcessAutoCharge_DualLeaderChargesOnce(t *testing.T) {
 
 	// Both leaders fetched the candidate list BEFORE either claimed —
 	// the exact premise of the hazard.
-	pending, err := inv.ListAutoChargePending(context.Background(), 50)
+	pending, err := inv.ListAutoChargePending(context.Background(), domain.InvoiceKeyset{}, 50)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestProcessAutoCharge_ReleasesClaimOnPreStripeSkips(t *testing.T) {
 		pms := &fakePaymentSetups{ready: false}
 		engine := wireBaseTax(NewEngine(&mockSubs{cycleUpdated: make(map[string]bool)}, &mockUsage{}, &mockPricing{}, inv, nil, &mockSettings{}, pms, &countingCharger{}, billingTestClock()))
 
-		pending, _ := inv.ListAutoChargePending(context.Background(), 50)
+		pending, _ := inv.ListAutoChargePending(context.Background(), domain.InvoiceKeyset{}, 50)
 		_, _ = engine.processAutoCharge(context.Background(), pending, nil, noPMTriggerSweep)
 
 		if ok, _ := inv.ClaimAutoCharge(context.Background(), "t1", "inv_nopm"); !ok {
@@ -113,7 +113,7 @@ func TestProcessAutoCharge_ReleasesClaimOnPreStripeSkips(t *testing.T) {
 		charger := &countingCharger{}
 		engine := wireBaseTax(NewEngine(&mockSubs{cycleUpdated: make(map[string]bool)}, &mockUsage{}, &mockPricing{}, inv, failingCredits{}, &mockSettings{}, &fakePaymentSetups{ready: true, stripeCustomerID: "cus_s"}, charger, billingTestClock()))
 
-		pending, _ := inv.ListAutoChargePending(context.Background(), 50)
+		pending, _ := inv.ListAutoChargePending(context.Background(), domain.InvoiceKeyset{}, 50)
 		_, _ = engine.processAutoCharge(context.Background(), pending, nil, noPMTriggerSweep)
 
 		if charger.calls["inv_credfail"] != 0 {

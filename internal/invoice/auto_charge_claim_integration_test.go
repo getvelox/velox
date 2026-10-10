@@ -204,7 +204,7 @@ func TestClaimAutoCharge_ZeroDueIsClaimable(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	listed, err := store.ListAutoChargePending(ctx, 50)
+	listed, err := store.ListAutoChargePending(ctx, domain.InvoiceKeyset{}, 50)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestClaimAutoCharge_ListsStayClaimBlind(t *testing.T) {
 	if ok, _ := store.ClaimAutoCharge(ctx, tenantID, inv.ID); !ok {
 		t.Fatal("claim must succeed")
 	}
-	listed, err := store.ListAutoChargePending(ctx, 50)
+	listed, err := store.ListAutoChargePending(ctx, domain.InvoiceKeyset{}, 50)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

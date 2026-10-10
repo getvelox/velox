@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/invoice"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -60,7 +61,7 @@ func TestListAutoChargePending_ExcludesSimulatedOneOff(t *testing.T) {
 		       updated_at = now()
 		 WHERE id = $1`)
 
-	pending, err := store.ListAutoChargePending(ctx, 200)
+	pending, err := store.ListAutoChargePending(ctx, domain.InvoiceKeyset{}, 200)
 	if err != nil {
 		t.Fatalf("ListAutoChargePending: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestListAutoChargePending_ExcludesPausedSubscription(t *testing.T) {
 		       updated_at = now()
 		 WHERE id = $1`)
 
-	listed, err := store.ListAutoChargePending(ctx, 100)
+	listed, err := store.ListAutoChargePending(ctx, domain.InvoiceKeyset{}, 100)
 	if err != nil {
 		t.Fatalf("ListAutoChargePending: %v", err)
 	}
