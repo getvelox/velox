@@ -54,9 +54,7 @@ func TestUnknownSweepRotatesInsteadOfJamming(t *testing.T) {
 		}
 		// The PI id is what makes a row reconcilable at all (parked rows are
 		// excluded); write it the real way.
-		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID, domain.PaymentUnknown, piID, "", nil); err != nil {
-			t.Fatalf("attach PI to %s: %v", num, err)
-		}
+		stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentUnknown, piID, "")
 		tx, err := db.BeginTx(ctx, postgres.TxTenant, tenantID)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -160,9 +158,7 @@ func TestRecordProviderSyncTouchesOnlyTheObservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create invoice: %v", err)
 	}
-	if _, err := store.UpdatePayment(ctx, tenantID, inv.ID, domain.PaymentUnknown, "pi_narrow", "", nil); err != nil {
-		t.Fatalf("attach PI: %v", err)
-	}
+	stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentUnknown, "pi_narrow", "")
 
 	before, err := store.Get(ctx, tenantID, inv.ID)
 	if err != nil {

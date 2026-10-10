@@ -273,7 +273,7 @@ func (s *Stripe) SettleSucceeded(ctx context.Context, tenantID string, inv domai
 }
 
 // SettleFailed transitions an invoice to FAILED and fires the complete failure
-// side-effect set: an out-of-order guard, UpdatePayment(failed), fire
+// side-effect set: an out-of-order guard, the failed stamp, fire
 // payment.failed, auto-start dunning (anchored on simulated cycle-close time),
 // and enqueue the payment-failed email unless suppressed.
 //
@@ -305,7 +305,7 @@ func (s *Stripe) SettleFailed(ctx context.Context, tenantID string, inv domain.I
 		return nil
 	}
 
-	// Bind effective-now so dunning's StartDunning and any UpdatePayment-side
+	// Bind effective-now so dunning's StartDunning and any payment-stamp-side
 	// stamps land in simulated time on clock-pinned invoices.
 	ctx = s.bindForInvoice(ctx, tenantID, inv.ID)
 

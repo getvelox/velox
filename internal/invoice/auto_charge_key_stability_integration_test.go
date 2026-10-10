@@ -99,14 +99,11 @@ func TestChargeKey_MovesOnEveryRecordedOutcome(t *testing.T) {
 	tenantID := testutil.CreateTestTenant(t, db, "Key Advance")
 	store := invoice.NewPostgresStore(db)
 
-	t.Run("UpdatePayment", func(t *testing.T) {
+	t.Run("StampChargeOutcome", func(t *testing.T) {
 		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-KEY-ADV-1")
 		before := chargeKey(t, store, ctx, tenantID, inv.ID)
 
-		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID,
-			domain.PaymentFailed, "pi_declined_1", "card_declined", nil); err != nil {
-			t.Fatalf("update payment: %v", err)
-		}
+		stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentFailed, "pi_declined_1", "card_declined")
 
 		if after := chargeKey(t, store, ctx, tenantID, inv.ID); after == before {
 			t.Fatalf("a recorded decline left the key at %q — the retry would be handed "+

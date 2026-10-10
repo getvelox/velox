@@ -105,20 +105,26 @@ func newMockInvoiceUpdater() *mockInvoiceUpdater {
 	}
 }
 
-func (m *mockInvoiceUpdater) UpdatePayment(_ context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, piID, errMsg string, paidAt *time.Time) (domain.Invoice, error) {
+// StampChargeOutcome models the real store's attempt-seq CAS (P13), so a
+// charge-path test exercises the same refusal production does. The SQL itself
+// is proven in internal/invoice/charge_outcome_guard_integration_test.go.
+func (m *mockInvoiceUpdater) StampChargeOutcome(_ context.Context, tenantID, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, piID, errMsg string) (domain.Invoice, bool, error) {
 	inv, ok := m.invoices[id]
 	if !ok {
-		return domain.Invoice{}, errs.ErrNotFound
+		return domain.Invoice{}, false, errs.ErrNotFound
+	}
+	if inv.ChargeAttemptSeq != attemptSeq {
+		return inv, false, nil
 	}
 	inv.PaymentStatus = ps
 	inv.StripePaymentIntentID = piID
 	inv.LastPaymentError = errMsg
-	inv.PaidAt = paidAt
+	inv.ChargeAttemptSeq++
 	m.invoices[id] = inv
 	if piID != "" {
 		m.byPI[piID] = id
 	}
-	return inv, nil
+	return inv, true, nil
 }
 
 func (m *mockInvoiceUpdater) UpdateStatus(_ context.Context, _, id string, status domain.InvoiceStatus) (domain.Invoice, error) {
@@ -220,6 +226,12 @@ func (m *mockInvoiceUpdater) MarkPaymentFailedReportingTransition(_ context.Cont
 	}
 	// firstForThisPI: have we NOT yet fired failure notifications for this PI?
 	first := m.failNotedPI[id] != piID
+	// Mirror the store: a NEW outcome bumps charge_attempt_seq; re-recording
+	// the failure already on the row (same PI) does not.
+	alreadyRecorded := inv.PaymentStatus == domain.PaymentFailed && piID != "" && inv.StripePaymentIntentID == piID
+	if !alreadyRecorded {
+		inv.ChargeAttemptSeq++
+	}
 	inv.PaymentStatus = domain.PaymentFailed
 	inv.StripePaymentIntentID = piID
 	inv.LastPaymentError = errMsg

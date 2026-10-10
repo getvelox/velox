@@ -48,7 +48,12 @@ type Store interface {
 	// (Stripe finalized_at semantics). Cycle invoices keep their build-time
 	// dates via UpdateStatus.
 	FinalizeWithDates(ctx context.Context, tenantID, id string, issuedAt, dueAt time.Time) (domain.Invoice, error)
-	UpdatePayment(ctx context.Context, tenantID, id string, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error)
+	// StampChargeOutcome records a charge attempt's outcome (processing /
+	// unknown / failed) only if no outcome was recorded since the attempt
+	// read attemptSeq — the charge_attempt_seq its idempotency key was built
+	// from (P13). A refused stamp returns the row as it now stands with
+	// applied=false and a nil error.
+	StampChargeOutcome(ctx context.Context, tenantID, id string, attemptSeq int64, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string) (domain.Invoice, bool, error)
 	// MarkPaymentFailedReportingTransition records a failure and reports
 	// whether THIS call is the first to fire the failure-notification set
 	// (payment.failed event + customer email + dunning) for this

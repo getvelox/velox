@@ -471,20 +471,21 @@ func newMockInvoiceUpdaterH() *mockInvoiceUpdaterHandler {
 	}
 }
 
-func (m *mockInvoiceUpdaterHandler) UpdatePayment(_ context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, piID, errMsg string, paidAt *time.Time) (domain.Invoice, error) {
+// StampChargeOutcome: the webhook-handler tests never run the charge path,
+// so this fake does not model the attempt-seq CAS (see mockInvoiceUpdater).
+func (m *mockInvoiceUpdaterHandler) StampChargeOutcome(_ context.Context, tenantID, id string, _ int64, ps domain.InvoicePaymentStatus, piID, errMsg string) (domain.Invoice, bool, error) {
 	inv, ok := m.invoices[id]
 	if !ok {
-		return domain.Invoice{}, fmt.Errorf("not found")
+		return domain.Invoice{}, false, fmt.Errorf("not found")
 	}
 	inv.paymentStatus = string(ps)
 	inv.stripePI = piID
 	inv.lastError = errMsg
-	inv.paidAt = paidAt
 	m.invoices[id] = inv
 	if piID != "" {
 		m.byPI[piID] = id
 	}
-	return domain.Invoice{ID: id, TenantID: tenantID, PaymentStatus: ps}, nil
+	return domain.Invoice{ID: id, TenantID: tenantID, PaymentStatus: ps}, true, nil
 }
 
 func (m *mockInvoiceUpdaterHandler) UpdateStatus(_ context.Context, _, id string, status domain.InvoiceStatus) (domain.Invoice, error) {

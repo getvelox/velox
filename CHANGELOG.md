@@ -59,6 +59,12 @@ Older entries keep their original text.
 
 ### Fixed
 
+- **A charge's late result can no longer undo a payment or a decline recorded while the charge was in flight (2026-10-10, P13).** After a Stripe call, the charge path records the outcome (processing, unknown or failed). If another outcome was recorded during that call, the late write used to win anyway. Outcomes that can land mid-call include the payment's own webhook (paid or declined), an offline payment, a hosted Checkout payment, or credits. The late write could leave:
+  - a paid invoice with no `paid_at`, an in-flight payment status, and the wrong PaymentIntent, so a second capture read as "already settled" instead of raising `payment.duplicate_charge`;
+  - a recorded decline turned back into "unknown". That paused dunning until the reconciler restored it. When the late result carried no PaymentIntent ID, it parked the invoice for good.
+
+  The write now succeeds only if no outcome was recorded since the charge started. It checks the attempt counter the charge's Stripe idempotency key is built from. Also, a decline on an invoice paid mid-call no longer starts dunning, and the "invoice is parked" alert fires only when the invoice actually parked. `UpdatePayment` is replaced by `StampChargeOutcome`, which takes that counter and accepts only processing, unknown or failed.
+
 - **"Due on receipt" (Net 0) now applies to every invoice, and a failed tenant-settings read fails the operation instead of guessing Net 30 or UTC (2026-10-09, P24).** Engine and API-created invoices turned Net 0 into Net 30, starting dunning a month late. Subscription periods no longer fall back to UTC; the next tick or request retries. PDFs say "Payment due on receipt."
 
 - **No-card dunning starts only once credits have been applied and money is still owed; starting dunning is one transaction (2026-10-08).** A separate hourly job used to start dunning for any queued invoice whose customer had no card. It could run in the seconds before a finalize applied the customer's credits, or right after a credit apply failed, so a tenant could get `dunning.started` for an invoice that credits covered. The auto-charge collector now starts it at the point where that is known: credits applied, money owed, no card. The separate job and its 10-minute settle window are deleted. Starting dunning now writes the run, its timeline row and the `dunning.started` webhook in one transaction, so a crash can no longer leave a run with no timeline row or webhook. ADR-116 amendment, ADR-060 amendment.

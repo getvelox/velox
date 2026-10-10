@@ -80,10 +80,7 @@ func TestUnknownPaymentIsUnchargeableByEveryClaimPath(t *testing.T) {
 			releaseClaim(t, db, inv.ID)
 
 			// Treatment: an ambiguous outcome with no PaymentIntent id.
-			if _, err := store.UpdatePayment(ctx, tenantID, inv.ID,
-				domain.PaymentUnknown, "", "ambiguous: no payment_intent_id", nil); err != nil {
-				t.Fatalf("set unknown: %v", err)
-			}
+			stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentUnknown, "", "ambiguous: no payment_intent_id")
 
 			ok, err = c.claim(inv)
 			if err != nil {

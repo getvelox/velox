@@ -18,7 +18,7 @@ import (
 //
 // Why a source-scanning test and not a convention: this is a class-C2 hazard
 // (playbook §1) — the invariant is spread across THREE writers today
-// (UpdatePayment, MarkPaymentFailedReportingTransition,
+// (StampChargeOutcome, MarkPaymentFailedReportingTransition,
 // markPaidReportingTransition), and a fourth added later would fail silently in
 // the worst direction. Missing the bump means a RECORDED decline reuses its
 // key, Stripe hands back the declined PaymentIntent forever, and the invoice
@@ -73,7 +73,7 @@ func TestChargeAttemptSeqBumpedByEveryPIStamp(t *testing.T) {
 	// Guard against the scanner silently matching nothing after a refactor:
 	// the three known outcome writers must all be seen.
 	if stamps < 3 {
-		t.Errorf("expected at least 3 PI-stamping UPDATEs (UpdatePayment, MarkPaymentFailedReportingTransition, "+
+		t.Errorf("expected at least 3 PI-stamping UPDATEs (StampChargeOutcome, MarkPaymentFailedReportingTransition, "+
 			"markPaidReportingTransition), found %d — did the scanner stop matching?", stamps)
 	}
 	if bumps != stamps {

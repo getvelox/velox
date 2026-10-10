@@ -170,7 +170,8 @@ func TestReconciler_RaceGuardSkipsWebhookWinner(t *testing.T) {
 	// The skip must still RECORD the observation (verbatim provider status).
 	// Pre-fix this branch wrote nothing, so a row that keeps re-entering the
 	// sweep's list (invoice status terminal, payment_status still in-flight on
-	// disk — a shape only seed/ops artifacts produce) was polled every tick
+	// disk — the shape a late charge-outcome write left before P13, and that
+	// seed/ops artifacts still can) was polled every tick
 	// with provider_synced_at NULL and permanently headed the LIMITed queue:
 	// found live on two rows monopolising the walk DB's queue head since May.
 	got := store.byID["inv_1"]

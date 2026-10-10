@@ -149,7 +149,7 @@ func TestAdoptPaymentIntentIfParked_CAS(t *testing.T) {
 	t.Run("refuses once the webhook settled the row", func(t *testing.T) {
 		id := mkParked(t, ctx, db, store, tenantID, cust.ID, "INV-CAS-2", 2*time.Hour, 0)
 		// Webhook wins: settle the invoice paid under a different PI.
-		if _, err := store.UpdatePayment(ctx, tenantID, id, domain.PaymentSucceeded, "pi_webhook", "", nil); err != nil {
+		if _, err := store.MarkPaid(ctx, tenantID, id, "pi_webhook", time.Now().UTC()); err != nil {
 			t.Fatalf("simulate webhook settle: %v", err)
 		}
 		won, err := store.AdoptPaymentIntentIfParked(ctx, tenantID, id, "pi_search")

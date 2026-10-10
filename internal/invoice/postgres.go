@@ -796,37 +796,78 @@ func (s *PostgresStore) FinalizeWithDates(ctx context.Context, tenantID, id stri
 	return inv, nil
 }
 
-func (s *PostgresStore) UpdatePayment(ctx context.Context, tenantID, id string, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error) {
+// StampChargeOutcome records a charge attempt's outcome (processing / unknown
+// / failed) on the invoice. The write lands AFTER a Stripe round-trip, and
+// another outcome can be recorded during it: the PaymentIntent's own webhook
+// (paid or declined), an offline payment, a hosted Checkout payment, a credit
+// cover. A late write over any of those undid it (P13) — a paid invoice lost
+// paid_at and its PaymentIntent, so a second capture read as "already
+// settled" instead of payment.duplicate_charge; a recorded decline turned
+// back into "unknown", and with no PaymentIntent id that parked the invoice
+// for good.
+//
+// attemptSeq is the charge_attempt_seq the attempt read — the value its
+// Stripe idempotency key was built from. Every writer that records an outcome
+// bumps the column in the same statement (TestChargeAttemptSeqBumpedByEveryPIStamp),
+// and status='paid' is only ever set by one of them, so "seq unchanged" means
+// exactly "nothing was recorded since this attempt began". That one CAS covers
+// a named and an unnamed attempt alike, which no comparison of state or
+// PaymentIntent id can: an unknown with no id cannot tell its own decline
+// from someone else's.
+//
+// Writes that do not record an outcome leave the seq alone and so do not
+// block the stamp: a void or write-off that lands mid-charge (neither takes
+// the charge lease) still gets it, and on those rows it is the reconciler's
+// only handle on a PaymentIntent that may have captured.
+//
+// The CAS is in the UPDATE's own WHERE, so under READ COMMITTED it is
+// re-checked against a concurrent settle's committed row after waiting on its
+// lock. A refused stamp re-reads in the same transaction and returns the row
+// as it now stands with applied=false and a nil error.
+func (s *PostgresStore) StampChargeOutcome(ctx context.Context, tenantID, id string, attemptSeq int64, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string) (domain.Invoice, bool, error) {
+	switch paymentStatus {
+	case domain.PaymentProcessing, domain.PaymentUnknown, domain.PaymentFailed:
+	default:
+		// succeeded goes through MarkPaid*, which also flips status and
+		// amounts and emits the paid events.
+		return domain.Invoice{}, false, fmt.Errorf("stamp charge outcome: %q is not a charge outcome", paymentStatus)
+	}
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
-		return domain.Invoice{}, err
+		return domain.Invoice{}, false, err
 	}
 	defer postgres.Rollback(tx)
 
 	now := clock.Now(ctx)
 	var inv domain.Invoice
+	applied := true
 	err = tx.QueryRowContext(ctx, `
 		UPDATE invoices SET payment_status = $1, stripe_payment_intent_id = $2,
-			last_payment_error = $3, paid_at = $4, updated_at = $5,
-			charge_attempt_seq = charge_attempt_seq + 1,
-			auto_charge_pending = CASE WHEN $1 = 'succeeded'
-				THEN FALSE ELSE auto_charge_pending END
-		WHERE id = $6
+			last_payment_error = $3, updated_at = $4,
+			charge_attempt_seq = charge_attempt_seq + 1
+		WHERE id = $5 AND charge_attempt_seq = $6
 		RETURNING `+invCols,
 		paymentStatus, postgres.NullableString(stripePaymentIntentID),
-		postgres.NullableString(lastPaymentError), postgres.NullableTime(paidAt), now, id,
+		postgres.NullableString(lastPaymentError), now, id, attemptSeq,
 	).Scan(s.scanInvDest(&inv)...)
 
 	if err == sql.ErrNoRows {
-		return domain.Invoice{}, errs.ErrNotFound
-	}
-	if err != nil {
-		return domain.Invoice{}, err
+		// Refused, or no such invoice: the re-read tells which.
+		applied = false
+		if err := tx.QueryRowContext(ctx, `SELECT `+invCols+` FROM invoices WHERE id = $1`, id).
+			Scan(s.scanInvDest(&inv)...); err != nil {
+			if err == sql.ErrNoRows {
+				return domain.Invoice{}, false, errs.ErrNotFound
+			}
+			return domain.Invoice{}, false, fmt.Errorf("re-read invoice after refused charge-outcome stamp: %w", err)
+		}
+	} else if err != nil {
+		return domain.Invoice{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.Invoice{}, err
+		return domain.Invoice{}, false, err
 	}
-	return inv, nil
+	return inv, applied, nil
 }
 
 // MarkPaymentFailedReportingTransition records a payment failure and reports
@@ -865,10 +906,10 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 	defer postgres.Rollback(tx)
 
 	var status, paymentStatus string
-	var notifiedPI sql.NullString
+	var notifiedPI, rowPI sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT status, payment_status, failure_notified_pi FROM invoices WHERE id = $1 FOR UPDATE`, id,
-	).Scan(&status, &paymentStatus, &notifiedPI); err != nil {
+		`SELECT status, payment_status, failure_notified_pi, stripe_payment_intent_id FROM invoices WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&status, &paymentStatus, &notifiedPI, &rowPI); err != nil {
 		if err == sql.ErrNoRows {
 			return domain.Invoice{}, false, errs.ErrNotFound
 		}
@@ -893,20 +934,43 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 
 	firstForThisPI := !notifiedPI.Valid || notifiedPI.String != paymentIntentID
 
+	// This PaymentIntent's failure is already the recorded outcome (the
+	// synchronous decline stamped it, or this is a redelivery): record the
+	// notification marker, but do NOT re-stamp the PI or bump
+	// charge_attempt_seq. The seq moves only when a NEW outcome is recorded —
+	// a charge already in flight for the next attempt reads it as its CAS
+	// (StampChargeOutcome, P13), and a bump here would refuse that charge's
+	// outcome and leave its PaymentIntent recorded nowhere.
+	alreadyRecorded := domain.InvoicePaymentStatus(paymentStatus) == domain.PaymentFailed &&
+		paymentIntentID != "" && rowPI.Valid && rowPI.String == paymentIntentID
+
 	now := clock.Now(ctx)
 	var inv domain.Invoice
-	if err := tx.QueryRowContext(ctx, `
-		UPDATE invoices SET
-			payment_status = 'failed',
-			stripe_payment_intent_id = $1,
-			last_payment_error = $2,
-			failure_notified_pi = $1,
-			charge_attempt_seq = charge_attempt_seq + 1,
-			updated_at = $3
-		WHERE id = $4
-		RETURNING `+invCols,
-		postgres.NullableString(paymentIntentID), postgres.NullableString(lastPaymentError), now, id,
-	).Scan(s.scanInvDest(&inv)...); err != nil {
+	if alreadyRecorded {
+		err = tx.QueryRowContext(ctx, `
+			UPDATE invoices SET
+				last_payment_error = $1,
+				failure_notified_pi = $2,
+				updated_at = $3
+			WHERE id = $4
+			RETURNING `+invCols,
+			postgres.NullableString(lastPaymentError), paymentIntentID, now, id,
+		).Scan(s.scanInvDest(&inv)...)
+	} else {
+		err = tx.QueryRowContext(ctx, `
+			UPDATE invoices SET
+				payment_status = 'failed',
+				stripe_payment_intent_id = $1,
+				last_payment_error = $2,
+				failure_notified_pi = $1,
+				charge_attempt_seq = charge_attempt_seq + 1,
+				updated_at = $3
+			WHERE id = $4
+			RETURNING `+invCols,
+			postgres.NullableString(paymentIntentID), postgres.NullableString(lastPaymentError), now, id,
+		).Scan(s.scanInvDest(&inv)...)
+	}
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return domain.Invoice{}, false, errs.ErrNotFound
 		}
@@ -2490,7 +2554,7 @@ func (s *PostgresStore) ListParkedSearchable(ctx context.Context, olderThan time
 // LIVE PaymentIntent onto a parked invoice and move it into the ordinary
 // reconcilable population (unknown -> processing WITH an id).
 //
-// It is a CAS on the FULL parked shape, not a plain UpdatePayment, because the
+// It is a CAS on the FULL parked shape, not a plain StampChargeOutcome, because the
 // webhook racing this sweep is the COMMON case — both fire when Stripe
 // recovers. An unconditional stamp landing after a webhook settle would
 // regress a paid invoice to in-flight: every IsInFlight-derived gate would

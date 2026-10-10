@@ -90,7 +90,7 @@ func TestListPendingClawbackDrafts_DefersInFlightSource(t *testing.T) {
 
 	// 3. Source settles → the draft becomes eligible despite being >24h old,
 	//    proving the 24h window was removed (else this would return 0).
-	if _, err := invStore.UpdatePayment(ctx, tenantID, inv.ID, domain.PaymentSucceeded, "pi_defer", "", &now); err != nil {
+	if _, err := invStore.MarkPaid(ctx, tenantID, inv.ID, "pi_defer", now); err != nil {
 		t.Fatalf("settle source: %v", err)
 	}
 	mustCount(1, "settled source must make even an aged draft eligible — no 24h window")
