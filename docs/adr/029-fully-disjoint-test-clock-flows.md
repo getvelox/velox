@@ -7,7 +7,7 @@
 
 ## Summary
 
-Every time-driven scheduler job (auto-charge retry, tax retry, threshold scan, dunning, credit expiry) is split into two separate flows. The wall-clock cron query excludes entities attached to a test clock. A per-clock variant (`*ForClock`) processes those entities only when an operator clicks Advance, through `testclock.CatchupWorker`. Each entity is processed by exactly one flow, so the cron can no longer charge a test-clock invoice, and simulated time moves only on Advance. The tax-commit reconciler (`RetryPendingTaxCommit`) also excludes test-clock invoices but has no per-clock variant, because those invoices are test-mode only. Amended 2026-06-13: the invoice-reminder job was removed.
+Every time-driven scheduler job (auto-charge retry, tax retry, threshold scan, dunning, credit expiry) is split into two separate flows. The wall-clock cron query excludes entities attached to a test clock. A per-clock variant (`*ForClock`) processes those entities only when an operator clicks Advance, through `testclock.CatchupWorker`. Each entity is processed by exactly one flow, so the cron can no longer charge a test-clock invoice, and simulated time moves only on Advance. The tax-commit reconciler (`RetryPendingTaxCommit`) also excludes test-clock invoices but has no per-clock variant, because those invoices are test-mode only. Amended 2026-06-13: the invoice-reminder job was removed. Amended 2026-10-10: the payment reconciler is not split, and a rule now decides which test-clock defects get fixed (see the amendment below).
 
 ## Context
 
@@ -280,6 +280,23 @@ boundary stays per-phase (current shape).
   ceiling, still single-goroutine drain.
 - ADR-019 Stripe-reconnect-flush: cross-mode by design (operator
   trigger, not time-driven). Unaffected.
+
+## Amendment 2026-10-10: the payment reconciler, and which test-clock defects get fixed
+
+**The payment reconciler is not split.** `payment.Reconciler` (ADR-049 Phase 2, ADR-107, ADR-108) asks Stripe for the outcome of `unknown`, stale `processing` and parked invoices. Its queries carry no `test_clock_id` filter and Advance has no per-clock phase for it, so it scans clock-pinned invoices on the wall-clock tick. That does not break what this ADR protects: the reconciler charges nobody and moves no simulated time. It records an outcome Stripe already reached, in real time, the same as the inbound webhook, which also settles clock-pinned invoices without waiting for Advance.
+
+Known defect, deferred: its cool-off compares wall `now` with `updated_at`, which is simulated on a clock-pinned invoice. After a clock moves past the real date, such an invoice is not picked up until wall time catches up. If this is fixed, measure the cool-off from a wall-time stamp rather than moving it into Advance. Stripe resolves in real time, so a per-clock phase would still need the same real wait.
+
+**Which test-clock defects get fixed now.** The core of this design is sound: one pin per customer (ADR-027), disjoint flows (ADR-028, this ADR), one effective "now". Most defects found since come from the seam where Stripe, webhooks and email run in real time while Velox simulates. That seam can absorb unbounded work, so:
+
+- **Fix now** when a normal simulation gives a wrong result: a wrong amount, a wrong state, or a run that gets stuck under ordinary use.
+- **Register with a trigger** when the defect needs an unusual combination (for example an async payment method, a lost webhook and a clock together) or only makes a timestamp look inconsistent.
+
+Registered under this rule on 2026-10-10, in the velox-ops DP-readiness register (invoicing-collection):
+
+- the reconciler cool-off above;
+- a clock invoice that failed without a dunning run is never enrolled, because the backfill excludes simulated invoices;
+- `velox_anchor_at` in the idempotent PaymentIntent params (plausible, not reproduced).
 
 ## Test strategy
 
