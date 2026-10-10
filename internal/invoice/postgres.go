@@ -2026,8 +2026,9 @@ func collectionQueuedAtFinalize(status domain.InvoiceStatus, paymentStatus domai
 // under the 1h prod tick so a crashed leader's claim self-heals before
 // the next sweep. Deliberately per-invoice, not stamped at list time —
 // a batch-wide lease cannot cover a serial 50-invoice loop, and a
-// claiming LIST would starve dunning enrollment, which shares the list
-// methods (adversarial review, 2026-07-06).
+// claiming LIST would hide rows from dunning enrollment, which shares the
+// list methods (adversarial review, 2026-07-06). The list stays claim-blind:
+// a rival-held row is listed and skipped here when its claim fails.
 func (s *PostgresStore) ClaimAutoCharge(ctx context.Context, tenantID, id string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
@@ -2261,12 +2262,18 @@ func notPausedForCollection(alias string) string {
 		)`
 }
 
-// ListAutoChargePending returns invoices that need auto-charge retry —
-// CRON path. Excludes clock-pinned subscriptions per ADR-029: simulation
+// ListAutoChargePending returns one page of invoices queued for the
+// auto-charge sweep, after the cursor `after`, oldest first — CRON path. The
+// engine pages through the whole queue every tick. A single oldest-first page
+// was the bug this replaced: card-less invoices stay queued (so a card added
+// later is charged on the next visit), and 50 of them filled the page for
+// good, so nothing newer was ever retried.
+//
+// Excludes clock-pinned subscriptions per ADR-029: simulation
 // time progresses only on operator Advance, so the wall-clock scheduler
 // must never charge a clock-pinned invoice. The catchup worker uses
 // ListAutoChargePendingForClock as the disjoint per-clock entry point.
-func (s *PostgresStore) ListAutoChargePending(ctx context.Context, limit int) ([]domain.Invoice, error) {
+func (s *PostgresStore) ListAutoChargePending(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
 		return nil, err
@@ -2296,9 +2303,10 @@ func (s *PostgresStore) ListAutoChargePending(ctx context.Context, limit int) ([
 		  AND i.livemode = $1
 		  AND i.is_simulated = false
 		  AND `+notPausedForCollection("i")+`
-		ORDER BY i.created_at ASC
+		  AND (i.created_at, i.id) > ($3, $4)
+		ORDER BY i.created_at ASC, i.id ASC
 		LIMIT $2
-	`, postgres.Livemode(ctx), limit)
+	`, postgres.Livemode(ctx), limit, after.CreatedAt, after.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -2396,7 +2404,7 @@ func (s *PostgresStore) ListFailedWithoutDunningRun(ctx context.Context, olderTh
 //
 // Scoped by tenantID + clockID; livemode is implied (test clocks are
 // test-mode-only, enforced by the test_clocks CHECK constraint).
-func (s *PostgresStore) ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Invoice, error) {
+func (s *PostgresStore) ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxBypass, "")
 	if err != nil {
 		return nil, err
@@ -2415,9 +2423,10 @@ func (s *PostgresStore) ListAutoChargePendingForClock(ctx context.Context, tenan
 		  AND i.tenant_id = $1
 		  AND c.test_clock_id = $2
 		  AND `+notPausedForCollection("i")+`
-		ORDER BY i.created_at ASC
+		  AND (i.created_at, i.id) > ($4, $5)
+		ORDER BY i.created_at ASC, i.id ASC
 		LIMIT $3
-	`, tenantID, clockID, limit)
+	`, tenantID, clockID, limit, after.CreatedAt, after.ID)
 	if err != nil {
 		return nil, err
 	}

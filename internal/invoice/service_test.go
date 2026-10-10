@@ -810,7 +810,7 @@ func (m *memStore) SetAutoChargePending(_ context.Context, _, id string, pending
 	return nil
 }
 
-func (m *memStore) ListAutoChargePending(_ context.Context, _ int) ([]domain.Invoice, error) {
+func (m *memStore) ListAutoChargePending(_ context.Context, _ domain.InvoiceKeyset, _ int) ([]domain.Invoice, error) {
 	var result []domain.Invoice
 	for _, inv := range m.invoices {
 		if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized && inv.PaymentStatus == domain.PaymentPending {

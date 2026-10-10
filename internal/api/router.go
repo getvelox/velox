@@ -939,7 +939,7 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client) *Server {
 	invoiceH.SetCollector(engine)
 	// No-payment dunning enrollment: the scheduler (and test-clock catchup)
 	// route card-less auto_charge_pending invoices into dunning so they
-	// reach a terminal instead of looping in RetryPendingCharges forever.
+	// escalate to a terminal instead of only being re-visited by the sweep.
 	engine.SetDunningStarter(&dunningStarterAdapter{dunning: dunningSvc})
 	// ADR-097: a cancel_at strictly inside a billing period fires through
 	// the subscription service's one-tx composition (flip + final invoice +

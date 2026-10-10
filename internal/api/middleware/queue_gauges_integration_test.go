@@ -49,7 +49,7 @@ func TestQueueDepthGauges_EveryQueryRunsOnRealPostgres(t *testing.T) {
 		}
 		seen[f.GetName()] = true
 	}
-	for _, name := range []string{"velox_billing_due_subscriptions", "velox_billing_oldest_due_age_seconds", "velox_parked_invoices", "velox_email_outbox_pending"} {
+	for _, name := range []string{"velox_billing_due_subscriptions", "velox_billing_oldest_due_age_seconds", "velox_auto_charge_queued_invoices", "velox_parked_invoices", "velox_email_outbox_pending"} {
 		if !seen[name] {
 			t.Errorf("gauge %s not registered", name)
 		}

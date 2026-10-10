@@ -166,8 +166,9 @@ const (
 	// subscription). Distinct from no_payment_method because the
 	// reassuring "recovery is running" framing is no longer true: the
 	// operator must know the engine has escalated. Charge-on-attach
-	// still works (the pending-charge sweep has no pause filter), so
-	// attaching a card still collects this invoice. Chargebee/Stripe
+	// works only while collection is not paused: the pending-charge
+	// sweep skips paused subscriptions (notPausedForCollection), so after
+	// the default pause action collection must be resumed too. Chargebee/Stripe
 	// parity: the end-of-dunning terminal is an explicit, visible state.
 	AttentionReasonDunningExhausted AttentionReason = "dunning_exhausted"
 )
@@ -1149,8 +1150,9 @@ func classifyNoPaymentMethod(inv Invoice, atc AttentionContext) *Attention {
 	// and the policy's final action fired (default pauses the
 	// subscription's collection). The reassuring pre-escalation framing
 	// is no longer the whole story — say so (2026-07-22 audit, P1-4).
-	// Charge-on-attach still works (the pending-charge sweep has no
-	// pause filter), so the attach path stays the primary fix.
+	// Charge-on-attach works only while collection is not paused: the
+	// pending-charge sweep skips paused subscriptions. After the default
+	// pause action the copy below overpromises (registered follow-up).
 	if atc.DunningEscalated {
 		msg := "Payment recovery has ended without collecting — the customer still has no payment method on file, and the recovery policy's final action has fired (check the subscription: collection may be paused or it may have been canceled). " + autoCharge
 		actions := []AttentionActionItem{

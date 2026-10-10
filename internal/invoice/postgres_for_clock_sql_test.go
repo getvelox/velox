@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/invoice"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/testutil"
@@ -32,7 +33,7 @@ func TestPerClockQueries_SQLValid(t *testing.T) {
 	// Empty-DB smoke: each query should return ([], nil) — proving the
 	// SQL parses and executes, not that anything matches.
 	t.Run("ListAutoChargePendingForClock", func(t *testing.T) {
-		got, err := store.ListAutoChargePendingForClock(ctx, "vlx_ten_test", "vlx_tclk_test", 50)
+		got, err := store.ListAutoChargePendingForClock(ctx, "vlx_ten_test", "vlx_tclk_test", domain.InvoiceKeyset{}, 50)
 		if err != nil {
 			t.Fatalf("expected nil error on empty DB; got: %v", err)
 		}
@@ -122,7 +123,7 @@ func TestListAutoChargePendingForClock_IncludesOneOffInvoices(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	got, err := store.ListAutoChargePendingForClock(ctx, tenantID, clockID, 50)
+	got, err := store.ListAutoChargePendingForClock(ctx, tenantID, clockID, domain.InvoiceKeyset{}, 50)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}

@@ -66,6 +66,7 @@ alerting tier: what should page someone, and what is only informational.
 | Metric | Threshold | What it means |
 |---|---|---|
 | `velox_payment_charges_total{result="failed"}` | rate spikes 5× baseline | Stripe issue or systematic decline |
+| `velox_auto_charge_queued_invoices{mode}` | > 5000 sustained | The charge retry visits every queued invoice each tick, so a large queue makes the sweep slow. Card-less invoices stay queued on purpose (adding a card charges them on the next visit), so a steady baseline is normal. Above 5,000 is the ADR-116 amendment's trigger to stop re-visiting card-less invoices every tick |
 | `velox_billing_oldest_due_age_seconds{mode}` | > 2× billing interval | A subscription has been due for billing that long. Either billing is behind (`velox_billing_due_subscriptions` is large and falling: a busy day, it catches up) or one subscription fails on every tick (the count is small and flat: its id is in the `bill subscription failed` ERROR log) |
 | `velox_dunning_runs_processed_total{outcome="failed"}` | rate > 0.5/s | Dunning machinery struggling |
 | `velox_webhook_deliveries_total{status="failed"}` | sustained failure | Customer's webhook endpoint down or signature wrong |

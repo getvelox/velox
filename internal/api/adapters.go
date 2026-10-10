@@ -215,12 +215,12 @@ func (a *invoiceWriterAdapter) ReleaseAutoChargeClaim(ctx context.Context, tenan
 	return a.store.ReleaseAutoChargeClaim(ctx, tenantID, id)
 }
 
-func (a *invoiceWriterAdapter) ListAutoChargePending(ctx context.Context, limit int) ([]domain.Invoice, error) {
-	return a.store.ListAutoChargePending(ctx, limit)
+func (a *invoiceWriterAdapter) ListAutoChargePending(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+	return a.store.ListAutoChargePending(ctx, after, limit)
 }
 
-func (a *invoiceWriterAdapter) ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Invoice, error) {
-	return a.store.ListAutoChargePendingForClock(ctx, tenantID, clockID, limit)
+func (a *invoiceWriterAdapter) ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+	return a.store.ListAutoChargePendingForClock(ctx, tenantID, clockID, after, limit)
 }
 
 func (a *invoiceWriterAdapter) RecordChargeAttempt(ctx context.Context, tenantID string, att domain.InvoiceChargeAttempt) error {

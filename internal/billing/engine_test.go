@@ -152,7 +152,7 @@ func TestRetryPendingCharges_DispatchesToCorrectQuery(t *testing.T) {
 		// We don't have a charger wired so the loop short-circuits at
 		// the paymentSetups nil check — that's fine, the assertion
 		// here is structural, not behavioural.
-		_, _ = engine.RetryPendingCharges(context.Background(), 50)
+		_, _ = engine.RetryPendingCharges(context.Background(), 50, nil)
 	})
 
 	t.Run("catchup path uses ListAutoChargePendingForClock", func(t *testing.T) {
@@ -185,11 +185,11 @@ func TestRetryPendingCharges_CardDeclineDoesNotEscalate(t *testing.T) {
 	subs := &mockSubs{cycleUpdated: make(map[string]bool)}
 	pricing := &mockPricing{}
 	pms := &fakePaymentSetups{ready: true, stripeCustomerID: "cus_stripe_1"}
-	charger := &fakeChargerDecline{}
+	charger := &fakeChargerDecline{store: inv}
 
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{}, pricing, inv, nil, &mockSettings{}, pms, charger, billingTestClock()))
 
-	charged, errs := engine.RetryPendingCharges(context.Background(), 50)
+	charged, errs := engine.RetryPendingCharges(context.Background(), 50, nil)
 	if charged != 0 {
 		t.Errorf("charged: got %d, want 0 (card declined)", charged)
 	}
@@ -205,11 +205,27 @@ func TestRetryPendingCharges_CardDeclineDoesNotEscalate(t *testing.T) {
 }
 
 // fakeChargerDecline returns a *payment.PaymentError with DeclineCode
-// set — the canonical "card declined" Stripe outcome.
-type fakeChargerDecline struct{}
+// set — the canonical "card declined" Stripe outcome. With store set it also
+// records payment_status='failed', as the real charger does before returning;
+// left nil it models a decline whose outcome write failed.
+type fakeChargerDecline struct{ store *mockInvoices }
 
 func (c *fakeChargerDecline) ChargeInvoice(_ context.Context, _ string, inv domain.Invoice, _, _ string) (domain.Invoice, error) {
+	c.store.stampPaymentStatus(inv.ID, domain.PaymentFailed)
 	return inv, &payment.PaymentError{Message: "Card was declined.", DeclineCode: "card_declined"}
+}
+
+// stampPaymentStatus records a charge outcome on the fake row, as the real
+// charger does. A nil store is a no-op.
+func (m *mockInvoices) stampPaymentStatus(id string, status domain.InvoicePaymentStatus) {
+	if m == nil {
+		return
+	}
+	for i, inv := range m.invoices {
+		if inv.ID == id {
+			m.invoices[i].PaymentStatus = status
+		}
+	}
 }
 
 // fakePaymentSetups returns a static "ready" payment-readiness signal
@@ -867,10 +883,13 @@ func (m *mockPricing) ListMeterPricingRulesByMeter(_ context.Context, _, meterID
 }
 
 type mockInvoices struct {
-	mu        sync.Mutex
-	claimed   map[string]bool
-	invoices  []domain.Invoice
-	lineItems []domain.InvoiceLineItem
+	mu sync.Mutex
+	// clockQueue holds the ids ListAutoChargePendingForClock returns (the fake
+	// has no sub→clock mapping). Empty by default.
+	clockQueue map[string]bool
+	claimed    map[string]bool
+	invoices   []domain.Invoice
+	lineItems  []domain.InvoiceLineItem
 	// createErr, when set, is returned by CreateInvoiceWithLineItems[Tx] instead
 	// of inserting — used to drive the idempotent-skip heal path (set to
 	// errs.ErrAlreadyExists) and failure tests.
@@ -1059,8 +1078,38 @@ func (m *mockInvoices) SetAutoChargePending(_ context.Context, _, id string, pen
 // install a more meaningful stub via the test fixture; the default
 // returns nothing because mockInvoices doesn't track sub→clock
 // mapping (that's the postgres store's job).
-func (m *mockInvoices) ListAutoChargePendingForClock(_ context.Context, _ string, _ string, _ int) ([]domain.Invoice, error) {
-	return nil, nil
+func (m *mockInvoices) ListAutoChargePendingForClock(_ context.Context, _ string, _ string, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+	var result []domain.Invoice
+	for _, inv := range m.invoices {
+		if m.clockQueue[inv.ID] && inv.AutoChargePending && inv.Status == domain.InvoiceFinalized && inv.PaymentStatus == domain.PaymentPending {
+			result = append(result, inv)
+		}
+	}
+	return keysetPage(result, after, limit), nil
+}
+
+// keysetPage mirrors the store's queue paging: ORDER BY (created_at, id),
+// rows strictly after the cursor, at most limit. Fakes must page like the
+// real query, or a drain test proves nothing about the real one.
+func keysetPage(rows []domain.Invoice, after domain.InvoiceKeyset, limit int) []domain.Invoice {
+	sorted := slices.Clone(rows)
+	slices.SortFunc(sorted, func(a, b domain.Invoice) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	var out []domain.Invoice
+	for _, inv := range sorted {
+		if c := inv.CreatedAt.Compare(after.CreatedAt); c < 0 || (c == 0 && inv.ID <= after.ID) {
+			continue
+		}
+		out = append(out, inv)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
 }
 
 // LatestThresholdPeriodEnd mirrors the postgres semantics: MAX
@@ -1140,17 +1189,14 @@ func (m *mockInvoices) GetInvoiceForPeriod(_ context.Context, _, subscriptionID 
 	return domain.Invoice{}, errs.ErrNotFound
 }
 
-func (m *mockInvoices) ListAutoChargePending(_ context.Context, limit int) ([]domain.Invoice, error) {
+func (m *mockInvoices) ListAutoChargePending(_ context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
 	var result []domain.Invoice
 	for _, inv := range m.invoices {
 		if inv.AutoChargePending && inv.Status == domain.InvoiceFinalized && inv.PaymentStatus == domain.PaymentPending {
 			result = append(result, inv)
-			if len(result) >= limit {
-				break
-			}
 		}
 	}
-	return result, nil
+	return keysetPage(result, after, limit), nil
 }
 
 // ListFailedWithoutDunningRun models only the invoice-level predicates; the

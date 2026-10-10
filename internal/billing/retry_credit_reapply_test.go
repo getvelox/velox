@@ -34,11 +34,17 @@ func (f *fakeCreditApplier) ApplyToInvoiceAt(_ context.Context, _, _, invoiceID 
 	return deduct, nil
 }
 
-// recordingCharger records each invoice it is asked to charge.
-type recordingCharger struct{ got []domain.Invoice }
+// recordingCharger records each invoice it is asked to charge. With store set
+// it also records the success on the row (payment_status='succeeded'), as the
+// real charger's settle does.
+type recordingCharger struct {
+	got   []domain.Invoice
+	store *mockInvoices
+}
 
 func (c *recordingCharger) ChargeInvoice(_ context.Context, _ string, inv domain.Invoice, _, _ string) (domain.Invoice, error) {
 	c.got = append(c.got, inv)
+	c.store.stampPaymentStatus(inv.ID, domain.PaymentSucceeded)
 	return inv, nil
 }
 
@@ -94,7 +100,7 @@ func TestRetrySweep_ReappliesCreditsBeforeCharge(t *testing.T) {
 	applier := &fakeCreditApplier{applyCents: 400}
 	_, charger, engine := retryHarness(t, applier)
 
-	charged, errs := engine.RetryPendingCharges(context.Background(), 50)
+	charged, errs := engine.RetryPendingCharges(context.Background(), 50, nil)
 	if len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
 	}
@@ -121,7 +127,7 @@ func TestRetrySweep_FullyCreditCovered_MarksPaidWithoutCharge(t *testing.T) {
 	resolver := &fakeDunResolver{}
 	engine.SetDunningResolver(resolver)
 
-	charged, errs := engine.RetryPendingCharges(context.Background(), 50)
+	charged, errs := engine.RetryPendingCharges(context.Background(), 50, nil)
 	if len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
 	}
@@ -153,7 +159,7 @@ func TestRetrySweep_CreditApplyFailure_SkipsCharge(t *testing.T) {
 	applier := &fakeCreditApplier{err: errors.New("db blip")}
 	inv, charger, engine := retryHarness(t, applier)
 
-	charged, errs := engine.RetryPendingCharges(context.Background(), 50)
+	charged, errs := engine.RetryPendingCharges(context.Background(), 50, nil)
 	if len(errs) != 0 {
 		t.Fatalf("a credit-apply failure is a skip, not an escalated error: %v", errs)
 	}
@@ -173,7 +179,7 @@ func TestRetrySweep_CreditApplyFailure_SkipsCharge(t *testing.T) {
 func TestRetrySweep_NoCreditsWired_ChargesAsBefore(t *testing.T) {
 	_, charger, engine := retryHarness(t, nil)
 
-	charged, errs := engine.RetryPendingCharges(context.Background(), 50)
+	charged, errs := engine.RetryPendingCharges(context.Background(), 50, nil)
 	if len(errs) != 0 || charged != 1 {
 		t.Fatalf("charged/errs: got %d/%v, want 1/none", charged, errs)
 	}

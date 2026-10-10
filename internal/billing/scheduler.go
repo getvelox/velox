@@ -316,9 +316,11 @@ func (s *Scheduler) runBillingCycleForMode(ctx context.Context, live bool) {
 	runReconcilers(ctx, mode, s.reconcilers(), s.batch)
 
 	// 0. Collect queued invoices: charge, settle $0, or (no card) email the
-	// setup link and start no-payment dunning.
-	if chargeRetried, chargeErrs := s.engine.RetryPendingCharges(ctx, s.batch); chargeRetried > 0 || len(chargeErrs) > 0 {
-		slog.Info("auto-charge retries", "mode", mode, "succeeded", chargeRetried, "errors", len(chargeErrs))
+	// setup link and start no-payment dunning. Visits every queued invoice,
+	// page by page (card-less ones stay queued, and a single oldest-first page
+	// filled up with them for good). The engine logs the sweep summary; it
+	// stamps liveness per page, like the billing drain.
+	if chargeRetried, chargeErrs := s.engine.RetryPendingCharges(ctx, s.batch, s.onRun); chargeRetried > 0 || len(chargeErrs) > 0 {
 		for i := 0; i < chargeRetried; i++ {
 			mw.RecordAutoChargeRetry("succeeded")
 		}

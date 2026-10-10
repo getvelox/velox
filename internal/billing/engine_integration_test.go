@@ -183,16 +183,16 @@ func (a *invoiceStoreAdapter) ReleaseAutoChargeClaim(ctx context.Context, tenant
 	return a.store.ReleaseAutoChargeClaim(ctx, tenantID, id)
 }
 
-func (a *invoiceStoreAdapter) ListAutoChargePending(ctx context.Context, limit int) ([]domain.Invoice, error) {
-	return a.store.ListAutoChargePending(ctx, limit)
+func (a *invoiceStoreAdapter) ListAutoChargePending(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+	return a.store.ListAutoChargePending(ctx, after, limit)
 }
 
 func (a *invoiceStoreAdapter) ListFailedWithoutDunningRun(ctx context.Context, olderThan time.Time, limit int) ([]domain.Invoice, error) {
 	return a.store.ListFailedWithoutDunningRun(ctx, olderThan, limit)
 }
 
-func (a *invoiceStoreAdapter) ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Invoice, error) {
-	return a.store.ListAutoChargePendingForClock(ctx, tenantID, clockID, limit)
+func (a *invoiceStoreAdapter) ListAutoChargePendingForClock(ctx context.Context, tenantID, clockID string, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
+	return a.store.ListAutoChargePendingForClock(ctx, tenantID, clockID, after, limit)
 }
 
 func (a *invoiceStoreAdapter) SetTaxTransaction(ctx context.Context, tenantID, id string, taxTransactionID string) error {

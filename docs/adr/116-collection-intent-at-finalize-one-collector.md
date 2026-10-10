@@ -45,6 +45,35 @@ The inline code also existed in several copies: an engine pipeline, a cycle/thre
 - **Dashboard and webhook copy.** `auto_charge_pending` is now `true` on every unpaid finalized invoice, including in `invoice.finalized` payloads. The attention banner reads "payment scheduled" where it used to say "awaiting payment".
 - **No backfill.** Rows written before this change that are finalized, unpaid and unflagged are left alone. The trigger to revisit is the first such row observed.
 - **Not covered, with triggers.**
-  - The sweep lists `ORDER BY created_at LIMIT batch`, and card-less invoices stay queued while they are in dunning. A backlog larger than the batch can delay crash recovery of newer rows. Trigger: a tick that lists a full batch with no charge.
+  - ~~The sweep lists `ORDER BY created_at LIMIT batch`… Trigger: a tick that lists a full batch with no charge.~~ Fixed by the amendment below. The trigger could not fire: nothing emitted that signal.
   - Proration invoices are queued but get no nudge (unchanged). Trigger: an operator asking for an immediate charge on a plan change.
   - The dunning adapter's `$0 → recovered` branch does not settle the invoice; that is a separate change.
+
+## Amendment 2026-10-10: the sweep visits the whole queue every tick
+
+**What was wrong.** The sweep read the 50 oldest queued invoices per mode, across all tenants, once per tick. Card-less invoices stay queued by design, and some never leave on their own:
+- one-off invoices, and invoices of canceled subscriptions (dunning's pause has nothing to act on, and the default final invoice action is none);
+- every card-less invoice of a tenant with no dunning policy (bootstrap seeds none).
+
+Fifty of them filled the page for good, and nothing newer was retried. That includes the invoices that rely only on the sweep:
+- proration charges;
+- invoices finalized by the tax retry;
+- charges retried after a temporary Stripe error;
+- card-less invoices whose customer later adds a card.
+
+It was reproduced against real Postgres (`TestRetryPendingCharges_CardlessHeadDoesNotBlockNewerInvoices`).
+
+**Change.**
+- The sweep and the test-clock sweep page by `(created_at, id)` until a short page (`drainInvoiceQueue`). Every queued row is visited once per tick, however many rows ahead of it never leave. Both columns are fixed at insert, so the cursor moves strictly forward; a row that is queued behind it during the drain is visited on the next tick.
+- A sweep stops before the next invoice when its ctx ends (shutdown, lost lease), and the scheduler passes its liveness stamp to the sweep, as it does to the billing drain (P27).
+- New gauge `velox_auto_charge_queued_invoices{mode}`, using the list's predicate.
+
+**Kept on purpose.** Card-less invoices stay queued and are visited every tick. That visit is what charges an invoice once a card is attached, settles it when credits arrive, retries a setup email that was skipped, and starts dunning once the tenant creates a policy. The cost grows with the queue: about ten statements per resident row per tick, and for a tenant with no dunning policy, one "dunning not configured" WARN per card-less invoice per tick.
+
+**Considered and deferred: park card-less invoices until they can be collected** (Stripe and Kill Bill do not retry with no payment method). Reviewers found it loses the email self-heal and the late-policy dunning start unless both are rebuilt. It also needs SQL copies of the payment-method, credit and policy resolution, which can drift towards stranding an invoice that has a card on file. Trigger to revisit: `velox_auto_charge_queued_invoices` above 5,000 for a sustained period, the `auto-charge sweep` log line's `duration_ms` above 600,000, or the no-policy WARN volume becoming a log-cost problem.
+
+**Considered and rejected: keep the queue flag until the charge outcome is saved.** If a decline's `failed` write fails, the invoice stays `pending`. Keeping it queued looked safer, but the next visit charges again under the same idempotency key with rebuilt parameters (amount after credits, a swapped card, the test-clock anchor). Stripe rejects that as an idempotency conflict, which parks the invoice as unknown for good. Clearing the flag leaves it to the inline dunning run, which retries under its own key, and to the `payment_failed` webhook.
+
+**Not changed: the dunning backfill** (`ListFailedWithoutDunningRun`, `ORDER BY updated_at LIMIT 50`). It has the same shape: a no-policy skip writes nothing, so those rows stay at the head. Paging it every tick would scan every such invoice forever, and a starved row needs a lost dunning start on both the inline and the webhook path. Trigger to revisit: a failed invoice with no dunning run older than a day in a tenant that has a policy. The fix then is to make the skip durable, not to page.
+
+**First deploy.** Rows that sat past position 50 are visited for the first time. Those with a card on file are charged then, which can be well after the invoice was issued. Card-less ones get their setup email and no-payment dunning start, anchored on the issue date, so an old invoice's grace period may already have passed.
