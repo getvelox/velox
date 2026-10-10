@@ -32,16 +32,16 @@ type subStoreAdapter struct {
 	store *subscription.PostgresStore
 }
 
-func (a *subStoreAdapter) GetDueBilling(ctx context.Context, before time.Time, limit int) ([]domain.Subscription, error) {
-	return a.store.GetDueBilling(ctx, before, limit)
+func (a *subStoreAdapter) GetDueBilling(ctx context.Context, before time.Time, exclude []string, limit int) ([]domain.Subscription, error) {
+	return a.store.GetDueBilling(ctx, before, exclude, limit)
 }
 
-func (a *subStoreAdapter) GetDueBillingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Subscription, error) {
-	return a.store.GetDueBillingForClock(ctx, tenantID, clockID, limit)
+func (a *subStoreAdapter) GetDueBillingForClock(ctx context.Context, tenantID, clockID string, exclude []string, limit int) ([]domain.Subscription, error) {
+	return a.store.GetDueBillingForClock(ctx, tenantID, clockID, exclude, limit)
 }
 
-func (a *subStoreAdapter) GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, limit int) ([]domain.Subscription, error) {
-	return a.store.GetDueBillingForTenant(ctx, tenantID, before, limit)
+func (a *subStoreAdapter) GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, exclude []string, limit int) ([]domain.Subscription, error) {
+	return a.store.GetDueBillingForTenant(ctx, tenantID, before, exclude, limit)
 }
 
 func (a *subStoreAdapter) Get(ctx context.Context, tenantID, id string) (domain.Subscription, error) {
@@ -372,7 +372,7 @@ func TestFullBillingCycle_E2E(t *testing.T) {
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 	engine.SetDunningStarter(testDunningStarter{})
 
-	count, errs := engine.RunCycle(ctx, 50)
+	count, errs := engine.RunCycle(ctx, 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("billing cycle errors: %v", errs)
 	}
@@ -591,7 +591,7 @@ func TestBillTiming_InAdvance_E2E(t *testing.T) {
 	fakeClk.Set(periodEnd.Add(time.Nanosecond))
 	// RunCycle scans across all tenants in the shared test DB; we
 	// can't assert on the global count. Filter by tenantID below.
-	_, runErrs := engine.RunCycle(ctx, 50)
+	_, runErrs := engine.RunCycle(ctx, 50, nil)
 	if len(runErrs) > 0 {
 		t.Fatalf("RunCycle errors: %v", runErrs)
 	}

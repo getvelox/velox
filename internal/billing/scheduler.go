@@ -122,7 +122,7 @@ type Scheduler struct {
 	gate              leader.Gate
 	interval          time.Duration
 	batch             int
-	onRun             func() // called after each complete scheduler tick (for health tracking)
+	onRun             func() // liveness stamp: every poll, and every page of a billing drain (see SetOnRun)
 	clock             clock.Clock
 }
 
@@ -208,8 +208,10 @@ func (s *Scheduler) SetGate(gate leader.Gate) {
 	s.gate = gate
 }
 
-// SetOnRun registers a callback invoked after each complete scheduler tick.
-// Used by the API health check to track scheduler liveness.
+// SetOnRun registers this replica's liveness stamp (the API health check and
+// velox_scheduler_last_run_timestamp_seconds). It fires on every poll of the
+// billing loop, and after every page of the billing drain, since one tick can
+// run for hours (P27).
 func (s *Scheduler) SetOnRun(fn func()) {
 	s.onRun = fn
 }
@@ -371,8 +373,12 @@ func (s *Scheduler) runBillingCycleForMode(ctx context.Context, live bool) {
 		}
 	}
 
-	// 1. Billing cycle — generate invoices
-	generated, errs := s.engine.RunCycle(ctx, s.batch)
+	// 1. Billing cycle — bill every due sub before moving on (P27). The drain
+	// can outlast the interval (thousands of subs due on the 1st, each charged
+	// inline), so it stamps this replica's liveness after every page: the
+	// stamp normally fires between ticks, and /health/ready reports 503 once
+	// it is 2x the interval old.
+	generated, errs := s.engine.RunCycle(ctx, s.batch, s.onRun)
 	// Record the cycle execution + its invoice count. Per-mode (live, then
 	// test), so billing_cycles_total counts mode-passes and invoices_generated
 	// accumulates the per-mode totals. Recorded unconditionally — a run with

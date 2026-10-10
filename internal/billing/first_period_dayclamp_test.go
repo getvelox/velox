@@ -99,7 +99,7 @@ func TestRunCycle_FirstPeriod_CreationAddRow_BillsFullBase(t *testing.T) {
 		&tzSettings{tz: "Asia/Kolkata"}, nil, nil,
 		clock.NewFake(periodEnd.Add(time.Second))))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}

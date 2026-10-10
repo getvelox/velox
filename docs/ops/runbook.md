@@ -58,7 +58,7 @@ alerting tier: what should page someone, and what is only informational.
 | `up{job="velox"}` | == 0 | Process down |
 | Postgres connection errors (count) | > 10/min | DB connectivity broken |
 | `time() - velox_scheduler_last_run_timestamp_seconds` | > 2× tick interval | Scheduler stalled (also flips `/health/ready` to 503) |
-| `velox_leader_last_tick_age_seconds{role}` | > 3× the role's interval | The role has not finished a tick on any replica. This is the cluster-wide stall signal that a per-replica liveness gauge cannot give. `SELECT * FROM leader_status;` shows the holder and whether an operator paused the role ([runbook-leader-leases.md](runbook-leader-leases.md)) |
+| `velox_leader_last_tick_age_seconds{role}` | > 3× the role's interval | The role has not finished a tick on any replica. This is the cluster-wide stall signal that a per-replica liveness gauge cannot give. `SELECT * FROM leader_status;` shows the holder and whether an operator paused the role ([runbook-leader-leases.md](runbook-leader-leases.md)). **For billing, a busy billing day also trips this:** a tick bills every due subscription before it ends. If `velox_billing_due_subscriptions` is falling, the tick is draining; do not restart it |
 | `increase(velox_leader_lease_lost_total[1h])` | > 0 | Split by `reason`. `panicked`: the role's tick panicked and ran nothing past the panic; it repeats every `min(interval, 60 s)` until the bad input or code is fixed, so restarting does not help. The stack is in the `scheduler panic recovered` ERROR log. Any other reason: a leader could not keep its lease mid-tick (frozen process, DB stall, pooler hiccup); correctness held (fence + row CAS), but find out why. `paused` is an operator action, so exclude it |
 
 ### Warn (slack/email, not page)
@@ -66,6 +66,7 @@ alerting tier: what should page someone, and what is only informational.
 | Metric | Threshold | What it means |
 |---|---|---|
 | `velox_payment_charges_total{result="failed"}` | rate spikes 5× baseline | Stripe issue or systematic decline |
+| `velox_billing_oldest_due_age_seconds{mode}` | > 2× billing interval | A subscription has been due for billing that long. Either billing is behind (`velox_billing_due_subscriptions` is large and falling: a busy day, it catches up) or one subscription fails on every tick (the count is small and flat: its id is in the `bill subscription failed` ERROR log) |
 | `velox_dunning_runs_processed_total{outcome="failed"}` | rate > 0.5/s | Dunning machinery struggling |
 | `velox_webhook_deliveries_total{status="failed"}` | sustained failure | Customer's webhook endpoint down or signature wrong |
 | `velox_stripe_breaker_state` | == 2 (open; 0=closed, 1=half_open) | Stripe API circuit-breaker tripped |

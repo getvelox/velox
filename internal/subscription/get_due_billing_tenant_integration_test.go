@@ -68,7 +68,7 @@ func TestGetDueBillingForTenant_ScopesToTenant(t *testing.T) {
 	subB := seedDue(t, tenantB, "b")
 
 	// Tenant A's manual run sees ONLY A's due sub.
-	dueA, err := store.GetDueBillingForTenant(ctx, tenantA, now, 50)
+	dueA, err := store.GetDueBillingForTenant(ctx, tenantA, now, nil, 50)
 	if err != nil {
 		t.Fatalf("GetDueBillingForTenant(A): %v", err)
 	}
@@ -87,7 +87,7 @@ func TestGetDueBillingForTenant_ScopesToTenant(t *testing.T) {
 	}
 
 	// Symmetric: B sees only B.
-	dueB, err := store.GetDueBillingForTenant(ctx, tenantB, now, 50)
+	dueB, err := store.GetDueBillingForTenant(ctx, tenantB, now, nil, 50)
 	if err != nil {
 		t.Fatalf("GetDueBillingForTenant(B): %v", err)
 	}
@@ -158,7 +158,7 @@ func TestGetDueBillingForTenant_ExcludesClockPinnedAndNotDue(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	due, err := store.GetDueBillingForTenant(ctx, tenantID, now, 50)
+	due, err := store.GetDueBillingForTenant(ctx, tenantID, now, nil, 50)
 	if err != nil {
 		t.Fatalf("GetDueBillingForTenant: %v", err)
 	}

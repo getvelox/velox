@@ -57,7 +57,7 @@ The same facts as metrics, on every scrape:
 | Metric | Alert when |
 |---|---|
 | `velox_leader_last_tick_age_seconds{role}` | > 3× the role's interval — no replica has finished a tick; this is the stall signal a single replica's liveness gauge (`velox_scheduler_last_run_timestamp_seconds`, which followers also stamp) cannot give |
-| `velox_leader_held{role}` | stays 1 while `last_tick_age` grows — a tick is wedged but still renewing (its heartbeat is alive even when its work is stuck); find the holder in `holder_id` and restart that replica |
+| `velox_leader_held{role}` | stays 1 while `last_tick_age` grows — a tick is wedged but still renewing (its heartbeat is alive even when its work is stuck); find the holder in `holder_id` and restart that replica. **For billing, check `velox_billing_due_subscriptions` first:** if it is falling, the tick is draining a backlog (a busy billing day), not wedged, and a restart only restarts the drain |
 | `velox_leader_paused{role}` | 1 outside a planned window |
 | `velox_leader_lease_lost_total{role,reason}` | any increase, except `reason="paused"` (an operator paused the role mid-tick, expected). `heartbeat_timeout` = the holder could not renew in time and cancelled its own tick; `takeover` = a renew found another holder; `released` = a renew found the row already released; `panicked` = the tick's work panicked: the stack is in the `scheduler panic recovered` ERROR log, and the same panic will repeat every cooldown until the bad input is fixed. For the lost-lease reasons correctness held (fence + row CAS) and the cause (frozen process, database stall, pooler hiccup) is what to chase. After `panicked`, or a `heartbeat_timeout` nobody took over, the ROLE (not just this replica) waits `min(interval, 60 s)` before any replica leads it again; after a `takeover` the new holder is already running it, and after `paused` nobody leads until it is unpaused |
 | `velox_leader_status_scrape_errors_total` | 1 — the view could not be read; the database is the problem, not the roles |
@@ -90,9 +90,13 @@ silently return nothing.
    growing `last_tick_age_s` (wedged holder — restart that replica) or false
    with a growing age (no replica is polling: check every replica's logs
    and `/health/ready`)?
-2. A long tick is not a stuck one: billing over a large tenant set can run
-   past its interval; the next tick starts one interval after it ends.
-   `velox_billing_cycle_duration_seconds` says how long ticks take.
+2. A long tick is not a stuck one. A billing tick bills every subscription
+   that is due before it ends, so on a busy billing day it can run for
+   hours; the next tick starts one interval after it ends. While it runs,
+   `velox_billing_due_subscriptions` falls page by page. If it is flat, the
+   tick is wedged. `velox_billing_cycle_duration_seconds` is recorded only
+   when a tick ends, so it shows how long past ticks took, not the one
+   running now.
 3. After a database failover the roles carry on — the row moved with the
    data. Expect at most one `lease_lost` per role from the ticks that were
    in flight.

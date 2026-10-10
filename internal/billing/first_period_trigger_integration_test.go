@@ -111,7 +111,7 @@ func TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E(t *testing.T) {
 	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
 	engine.SetDunningStarter(testDunningStarter{})
 
-	count, errs := engine.RunCycle(ctx, 50)
+	count, errs := engine.RunCycle(ctx, 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("billing cycle errors: %v", errs)
 	}

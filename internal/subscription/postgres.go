@@ -1145,7 +1145,7 @@ func (s *PostgresStore) transitionInTx(ctx context.Context, tx *sql.Tx, id strin
 	return sub, nil
 }
 
-func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, limit int) ([]domain.Subscription, error) {
+func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, exclude []string, limit int) ([]domain.Subscription, error) {
 	// Leader-only funnel (ADR-114): the claim proves the caller's lease token
 	// in its own snapshot. Outside a led tick this fails loud — never an
 	// unfenced fallback.
@@ -1180,6 +1180,11 @@ func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, lim
 	// settings lookups) default to live and silently fail for test-mode
 	// subs. The scheduler fans out ctx per livemode; we honour that here
 	// with an explicit WHERE clause since TxBypass doesn't set app.livemode.
+	//
+	// exclude: subs the billing drain already attempted this run (P27). The
+	// COALESCE is load-bearing: a nil slice reaches Postgres as NULL (see
+	// postgres.StringArray), and NOT (id = ANY(NULL)) is NULL, which would
+	// drop every row. The drain's first page always passes nil.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+qualifiedSubCols("s")+` FROM subscriptions s
 		WHERE s.status IN ('active', 'trialing')
@@ -1188,9 +1193,10 @@ func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, lim
 		  AND (s.next_billing_at <= $2
 		       OR (s.status = 'active' AND s.cancel_at IS NOT NULL AND s.cancel_at <= $2))
 		  AND leader_fence($4, $5)
+		  AND NOT (s.id = ANY(COALESCE($6::text[], '{}')))
 		ORDER BY s.next_billing_at ASC LIMIT $3
 		FOR UPDATE OF s SKIP LOCKED
-	`, postgres.Livemode(ctx), before, limit, string(leader.RoleBilling), token)
+	`, postgres.Livemode(ctx), before, limit, string(leader.RoleBilling), token, postgres.StringArray(exclude))
 	if err != nil {
 		return nil, err
 	}
@@ -1230,7 +1236,7 @@ func (s *PostgresStore) GetDueBilling(ctx context.Context, before time.Time, lim
 // Exactly-once is guaranteed downstream by idx_invoices_billing_idempotency (a
 // loser's 23505 → graceful ErrAlreadyExists skip), a mechanism this path reuses
 // unchanged.
-func (s *PostgresStore) GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, limit int) ([]domain.Subscription, error) {
+func (s *PostgresStore) GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, exclude []string, limit int) ([]domain.Subscription, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return nil, err
@@ -1244,15 +1250,17 @@ func (s *PostgresStore) GetDueBillingForTenant(ctx context.Context, tenantID str
 	// No explicit tenant_id/livemode predicate: TxTenant sets app.tenant_id +
 	// app.livemode and the mode-aware RLS policy scopes both. Adding them to the
 	// WHERE would be redundant with — and weaker than — the policy fence.
+	// exclude: see GetDueBilling (the COALESCE is load-bearing).
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+qualifiedSubCols("s")+` FROM subscriptions s
 		WHERE s.status IN ('active', 'trialing')
 		  AND s.test_clock_id IS NULL
 		  AND (s.next_billing_at <= $1
 		       OR (s.status = 'active' AND s.cancel_at IS NOT NULL AND s.cancel_at <= $1))
+		  AND NOT (s.id = ANY(COALESCE($3::text[], '{}')))
 		ORDER BY s.next_billing_at ASC LIMIT $2
 		FOR UPDATE OF s SKIP LOCKED
-	`, before, limit)
+	`, before, limit, postgres.StringArray(exclude))
 	if err != nil {
 		return nil, err
 	}
@@ -1289,7 +1297,7 @@ func (s *PostgresStore) GetDueBillingForTenant(ctx context.Context, tenantID str
 // "now" cutoff. Tenant scope comes from RLS via the BeginTx
 // caller, but because the catchup worker is a per-clock unit of
 // work, we also filter by test_clock_id explicitly.
-func (s *PostgresStore) GetDueBillingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Subscription, error) {
+func (s *PostgresStore) GetDueBillingForClock(ctx context.Context, tenantID, clockID string, exclude []string, limit int) ([]domain.Subscription, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return nil, err
@@ -1300,6 +1308,7 @@ func (s *PostgresStore) GetDueBillingForClock(ctx context.Context, tenantID, clo
 		limit = 50
 	}
 
+	// exclude: see GetDueBilling (the COALESCE is load-bearing).
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+qualifiedSubCols("s")+` FROM subscriptions s
 		JOIN test_clocks tc ON tc.id = s.test_clock_id
@@ -1307,9 +1316,10 @@ func (s *PostgresStore) GetDueBillingForClock(ctx context.Context, tenantID, clo
 		  AND s.test_clock_id = $1
 		  AND (s.next_billing_at <= tc.frozen_time
 		       OR (s.status = 'active' AND s.cancel_at IS NOT NULL AND s.cancel_at <= tc.frozen_time))
+		  AND NOT (s.id = ANY(COALESCE($3::text[], '{}')))
 		ORDER BY s.next_billing_at ASC LIMIT $2
 		FOR UPDATE OF s SKIP LOCKED
-	`, clockID, limit)
+	`, clockID, limit, postgres.StringArray(exclude))
 	if err != nil {
 		return nil, err
 	}

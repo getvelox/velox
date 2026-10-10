@@ -76,9 +76,12 @@ var (
 
 	billingCycleDuration = promauto.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "velox_billing_cycle_duration_seconds",
-			Help:    "Duration of billing cycle runs in seconds.",
-			Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+			Name: "velox_billing_cycle_duration_seconds",
+			Help: "Duration of billing cycle runs in seconds.",
+			// A tick bills everything due (P27), so a busy billing day runs
+			// for hours. Buckets reach 4h; capped at 300s, histogram_quantile
+			// would report 300 for any long tick.
+			Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400},
 		},
 	)
 
@@ -481,7 +484,7 @@ func isID(s string) bool {
 var schedulerLastRunTimestamp = promauto.NewGauge(
 	prometheus.GaugeOpts{
 		Name: "velox_scheduler_last_run_timestamp_seconds",
-		Help: "Unix timestamp of the billing scheduler's last completed tick. Alert when time() - this > 2x the scheduler interval.",
+		Help: "Unix timestamp of this replica's last billing-loop liveness stamp: every poll, and every page of a long billing drain. Alert when time() - this > 2x the scheduler interval.",
 	},
 )
 
@@ -523,6 +526,41 @@ func RegisterQueueDepthGauges(count func(query string) (float64, error)) {
 		for _, d := range []struct{ label, status string }{{"open", "finalized"}, {"written_off", "uncollectible"}} {
 			q := fmt.Sprintf(`SELECT COUNT(*) FROM invoices WHERE status = '%s' AND payment_status = 'unknown' AND COALESCE(stripe_payment_intent_id, '') = '' AND livemode = %t`, d.status, m.live)
 			promauto.NewGaugeFunc(prometheus.GaugeOpts{Name: "velox_parked_invoices", Help: parkedHelp, ConstLabels: prometheus.Labels{"mode": m.label, "disposition": d.label}}, func() float64 {
+				n, err := count(q)
+				if err != nil {
+					return -1
+				}
+				return n
+			})
+		}
+	}
+	// Billing backlog (P27). The scheduler drains every due subscription in
+	// one tick, so on a busy day one tick can run for hours. That looks like a
+	// wedged tick on velox_leader_last_tick_age_seconds. These two tell the
+	// cases apart: a draining tick shrinks the count; a wedged one doesn't.
+	// The age also grows for a sub that fails on every tick, which otherwise
+	// shows up only as error logs. The predicate is GetDueBilling's: wall-clock
+	// subs only, because test-clock subs bill on Advance.
+	dueHelp := "Subscriptions due for billing now (wall-clock subs; test-clock subs bill on Advance). Spikes on busy billing days and falls as the scheduler drains it. -1 = metric query failed."
+	ageHelp := "Seconds since the oldest due subscription became due; 0 when nothing is due. Alert when it exceeds 2x the billing interval: billing is behind, or a sub fails on every tick. -1 = metric query failed."
+	const duePredicate = `status IN ('active', 'trialing') AND test_clock_id IS NULL AND livemode = %t
+		AND (next_billing_at <= now() OR (status = 'active' AND cancel_at IS NOT NULL AND cancel_at <= now()))`
+	for _, m := range []struct {
+		label string
+		live  bool
+	}{{"live", true}, {"test", false}} {
+		pred := fmt.Sprintf(duePredicate, m.live)
+		for _, g := range []struct{ name, help, query string }{
+			{"velox_billing_due_subscriptions", dueHelp, `SELECT COUNT(*) FROM subscriptions WHERE ` + pred},
+			// The due instant is the earlier of the arms that admit the row
+			// (LEAST skips the NULL of an arm that doesn't).
+			{"velox_billing_oldest_due_age_seconds", ageHelp, `SELECT COALESCE(EXTRACT(EPOCH FROM now() - MIN(LEAST(
+				CASE WHEN next_billing_at <= now() THEN next_billing_at END,
+				CASE WHEN status = 'active' AND cancel_at <= now() THEN cancel_at END))), 0)
+				FROM subscriptions WHERE ` + pred},
+		} {
+			q := g.query
+			promauto.NewGaugeFunc(prometheus.GaugeOpts{Name: g.name, Help: g.help, ConstLabels: prometheus.Labels{"mode": m.label}}, func() float64 {
 				n, err := count(q)
 				if err != nil {
 					return -1

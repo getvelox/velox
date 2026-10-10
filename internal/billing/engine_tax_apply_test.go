@@ -468,7 +468,7 @@ func TestRunCycle_TaxErrorAbortsBeforeInvoiceAndCycleAdvance(t *testing.T) {
 	engine := NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, fakeClk)
 	engine.SetIntervalReader(subs)
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 
 	if len(errs) == 0 {
 		t.Fatal("expected a billing error when tax application fails, got none")

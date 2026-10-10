@@ -81,7 +81,7 @@ func TestRunCycle_MidPeriodCancelAt_FiresViaExecutor(t *testing.T) {
 	exec := &mockCancelExecutor{subs: subs}
 	engine.SetScheduledCancelExecutor(exec)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -132,7 +132,7 @@ func TestRunCycle_CancelAtEqualsBoundary_TieGoesToBoundaryPath(t *testing.T) {
 	exec := &mockCancelExecutor{subs: subs}
 	engine.SetScheduledCancelExecutor(exec)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	if len(exec.calls) != 0 {
@@ -153,7 +153,7 @@ func TestRunCycle_MidPeriodCancel_NoExecutorFailsLoud(t *testing.T) {
 	engine := midPeriodEngine(subs)
 	// deliberately NOT wiring the executor
 
-	_, errs := engine.RunCycle(context.Background(), 50)
+	_, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) == 0 {
 		t.Fatal("expected a loud error for a due mid-period cancel with no executor wired")
 	}
