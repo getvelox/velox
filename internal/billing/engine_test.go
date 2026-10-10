@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -105,7 +107,7 @@ func TestRunCycle_SkipsClockPinnedSubs(t *testing.T) {
 	invoices := &mockInvoices{}
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -261,7 +263,7 @@ func TestBillSubscription_LoopsUntilCaughtUp(t *testing.T) {
 	clk := clock.NewFake(time.Date(2026, 9, 1, 0, 0, 1, 0, time.UTC))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, clk))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -447,12 +449,12 @@ func (m *mockSubs) ClosePeriod(ctx context.Context, tenantID, id string, expecte
 	})
 }
 
-func (m *mockSubs) GetDueBilling(_ context.Context, before time.Time, limit int) ([]domain.Subscription, error) {
+func (m *mockSubs) GetDueBilling(_ context.Context, before time.Time, exclude []string, limit int) ([]domain.Subscription, error) {
 	var result []domain.Subscription
 	for _, s := range m.subs {
 		// ADR-028 disjoint flows: wall-clock GetDueBilling only
 		// returns NON-clock-pinned subs.
-		if s.TestClockID != "" {
+		if s.TestClockID != "" || slices.Contains(exclude, s.ID) {
 			continue
 		}
 		eligible := s.Status == domain.SubscriptionActive || s.Status == domain.SubscriptionTrialing
@@ -464,6 +466,7 @@ func (m *mockSubs) GetDueBilling(_ context.Context, before time.Time, limit int)
 			result = append(result, s)
 		}
 	}
+	sortDueLikeSQL(result)
 	if len(result) > limit {
 		result = result[:limit]
 	}
@@ -474,8 +477,8 @@ func (m *mockSubs) GetDueBilling(_ context.Context, before time.Time, limit int)
 // The mock doesn't model RLS, so it returns the same non-clock-pinned due subs
 // as GetDueBilling (all mock subs are one tenant); tenantID is accepted for
 // signature parity.
-func (m *mockSubs) GetDueBillingForTenant(ctx context.Context, _ string, before time.Time, limit int) ([]domain.Subscription, error) {
-	return m.GetDueBilling(ctx, before, limit)
+func (m *mockSubs) GetDueBillingForTenant(ctx context.Context, _ string, before time.Time, exclude []string, limit int) ([]domain.Subscription, error) {
+	return m.GetDueBilling(ctx, before, exclude, limit)
 }
 
 // GetDueBillingForClock — mirror of GetDueBilling for the disjoint
@@ -483,10 +486,10 @@ func (m *mockSubs) GetDueBillingForTenant(ctx context.Context, _ string, before 
 // clock whose next_billing_at is on-or-before `before`. The mock
 // uses `before` directly because it doesn't model test-clock rows;
 // real engine wiring resolves frozen_time via the SQL JOIN.
-func (m *mockSubs) GetDueBillingForClock(_ context.Context, _, clockID string, limit int) ([]domain.Subscription, error) {
+func (m *mockSubs) GetDueBillingForClock(_ context.Context, _, clockID string, exclude []string, limit int) ([]domain.Subscription, error) {
 	var result []domain.Subscription
 	for _, s := range m.subs {
-		if s.TestClockID != clockID {
+		if s.TestClockID != clockID || slices.Contains(exclude, s.ID) {
 			continue
 		}
 		eligible := s.Status == domain.SubscriptionActive || s.Status == domain.SubscriptionTrialing
@@ -494,6 +497,7 @@ func (m *mockSubs) GetDueBillingForClock(_ context.Context, _, clockID string, l
 			result = append(result, s)
 		}
 	}
+	sortDueLikeSQL(result)
 	if len(result) > limit {
 		result = result[:limit]
 	}
@@ -1444,7 +1448,7 @@ func TestBillOnePeriod_HealPathPropagatesAdvanceError(t *testing.T) {
 	subs.closePeriodErr = fmt.Errorf("watermark write failed")
 	subs.closePeriodErrOnCall = 2
 
-	if _, runErrs := engine.RunCycle(ctx, 50); len(runErrs) == 0 {
+	if _, runErrs := engine.RunCycle(ctx, 50, nil); len(runErrs) == 0 {
 		t.Fatal("heal-path advance error must surface in RunCycle errors, not be swallowed")
 	}
 }
@@ -1497,7 +1501,7 @@ func TestRunCycle_GeneratesInvoice(t *testing.T) {
 	engine, subs, _, _, invoices := setupEngine()
 	ctx := context.Background()
 
-	count, errs := engine.RunCycle(ctx, 50)
+	count, errs := engine.RunCycle(ctx, 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -1592,7 +1596,7 @@ func TestRunCycle_CalendarMonthly_AutoRealignsOnCycleClose(t *testing.T) {
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, fakeClk))
 
-	_, errs := engine.RunCycle(context.Background(), 50)
+	_, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -1664,7 +1668,7 @@ func TestRunCycle_PlanIntervalChange_CalendarSnaps(t *testing.T) {
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, &mockInvoices{}, nil, &mockSettings{}, nil, nil, fakeClk))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	updated := subs.subs["sub_1"]
@@ -1732,7 +1736,7 @@ func TestRunCycle_PlanIntervalChange_InAdvance_StubProrated(t *testing.T) {
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, fakeClk))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	// New period: (Jun 24 2029, Jul 1 2029) — 7-day calendar-snap stub.
@@ -1778,7 +1782,7 @@ func TestRunCycle_AnniversaryMonthly_PreservesDayOfMonth(t *testing.T) {
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, &mockInvoices{}, nil, &mockSettings{}, nil, nil, fakeClk))
 
-	_, errs := engine.RunCycle(context.Background(), 50)
+	_, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -1798,7 +1802,7 @@ func TestRunCycle_NoDueSubscriptions(t *testing.T) {
 	s.NextBillingAt = &future
 	subs.subs["sub_1"] = s
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -1820,7 +1824,7 @@ func TestRunCycle_SkipsTrialSubscription(t *testing.T) {
 	s.TrialEndAt = &trialEnd
 	subs.subs["sub_1"] = s
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -1842,7 +1846,7 @@ func TestRunCycle_ZeroUsage(t *testing.T) {
 	// No usage at all
 	usage.totals = map[string]int64{}
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -1863,7 +1867,7 @@ func TestRunCycle_ZeroUsage(t *testing.T) {
 func TestRunCycle_LineItemDetails(t *testing.T) {
 	engine, _, _, _, invoices := setupEngine()
 
-	engine.RunCycle(context.Background(), 50)
+	engine.RunCycle(context.Background(), 50, nil)
 
 	// Find usage line items
 	for _, item := range invoices.lineItems {
@@ -1915,7 +1919,7 @@ func TestRunCycle_OverrideLookupTransientError_Aborts(t *testing.T) {
 	engine, _, _, pricing, invoices := setupEngine()
 	pricing.overrideErr = fmt.Errorf("connection reset by peer")
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) == 0 {
 		t.Fatal("close succeeded despite override-lookup failure; want abort")
 	}
@@ -1925,7 +1929,7 @@ func TestRunCycle_OverrideLookupTransientError_Aborts(t *testing.T) {
 
 	// Recovery: the same sub bills normally once the lookup heals.
 	pricing.overrideErr = nil
-	count, errs = engine.RunCycle(context.Background(), 50)
+	count, errs = engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("healed close errors: %v", errs)
 	}
@@ -1978,7 +1982,7 @@ func TestRunCycle_WithPriceOverride(t *testing.T) {
 		},
 	}
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("errors: %v", errs)
 	}
@@ -2060,7 +2064,7 @@ func TestRunCycle_UnitAmountRoundsBankers(t *testing.T) {
 	invoices := &mockInvoices{}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	if len(invoices.invoices) != 1 {
@@ -2130,7 +2134,7 @@ func TestRunCycle_AppliesScheduledPlanChangeAtBoundary(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -2208,7 +2212,7 @@ func TestRunCycle_ScheduledPlanSwap_CrossInterval_BillsElapsedAtOutgoingPlan(t *
 	usage := &mockUsage{totals: map[string]int64{}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -2265,7 +2269,7 @@ func TestRunCycle_SkipsPendingChangeNotYetDue(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	_, errs := engine.RunCycle(context.Background(), 50)
+	_, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -2599,7 +2603,7 @@ func TestRunCycle_FiresPendingChangeAppliedEvent(t *testing.T) {
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 	engine.SetEventDispatcher(dispatcher)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -2674,7 +2678,7 @@ func TestRunCycle_OneSubFailsOthersContinue(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{"mtr_missing": 100}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, runErrs := engine.RunCycle(context.Background(), 50)
+	count, runErrs := engine.RunCycle(context.Background(), 50, nil)
 
 	if count != 1 {
 		t.Errorf("got %d invoices, want 1 (only sub_ok should succeed)", count)
@@ -2703,7 +2707,7 @@ func TestRunCycle_TaxProviderErrorDefersInvoice(t *testing.T) {
 	engine, _, _, _, invoices := setupEngine()
 	engine.SetTaxProviderResolver(stubResolver(&stubProvider{err: fmt.Errorf("stripe down")}))
 
-	count, runErrs := engine.RunCycle(context.Background(), 50)
+	count, runErrs := engine.RunCycle(context.Background(), 50, nil)
 	if len(runErrs) > 0 {
 		t.Fatalf("unexpected errors: %v", runErrs)
 	}
@@ -2757,7 +2761,7 @@ func TestRunCycle_NoPendingChangeNoAppliedEvent(t *testing.T) {
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 	engine.SetEventDispatcher(dispatcher)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -2806,7 +2810,7 @@ func TestRunCycle_CancelAtPeriodEnd_FiresAtBoundary(t *testing.T) {
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 	engine.SetEventDispatcher(dispatcher)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -2875,7 +2879,7 @@ func TestRunCycle_CancelAt_FiresWhenTimestampReached(t *testing.T) {
 	invoices := &mockInvoices{}
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -2992,7 +2996,7 @@ func TestRunCycle_PauseCollection_GeneratesDraft(t *testing.T) {
 	invoices := &mockInvoices{}
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -3054,7 +3058,7 @@ func TestRunCycle_Trial_Active_SkipsBillingAndAdvancesCycle(t *testing.T) {
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 	engine.SetEventDispatcher(dispatcher)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -3106,7 +3110,7 @@ func TestRunCycle_Trial_Ended_AutoActivatesAndBills(t *testing.T) {
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, clk))
 	engine.SetEventDispatcher(dispatcher)
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -3183,7 +3187,7 @@ func TestRunCycle_Trial_Ended_InAdvance_CoversTrialEndPeriod(t *testing.T) {
 	clk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, clk))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -3263,7 +3267,7 @@ func TestRunCycle_InAdvance_ScheduledCancelAtPeriodEnd_NoOvercharge(t *testing.T
 	clk := clock.NewFake(periodEnd.Add(time.Nanosecond))
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, clk))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
@@ -3315,7 +3319,7 @@ func TestRunCycle_SkipEmptyCycleInvoice_NoChargeAttempt(t *testing.T) {
 	invoices := &mockInvoices{}
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -3869,7 +3873,7 @@ func TestRunCycle_SegmentAware_SkipsInAdvanceSegment(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	_, errs := engine.RunCycle(context.Background(), 50)
+	_, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -3939,7 +3943,7 @@ func TestRunCycle_SegmentAware_InArrears_MidPeriodPlanChange(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -4045,7 +4049,7 @@ func TestRunCycle_SegmentAware_UsageMetersDifferPerSegment(t *testing.T) {
 	invoices := &mockInvoices{}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -4131,7 +4135,7 @@ func TestRunCycle_SegmentAware_NoChanges_FullPeriodLine(t *testing.T) {
 	usage := &mockUsage{totals: map[string]int64{}}
 	engine := wireBaseTax(NewEngine(subs, usage, pricing, invoices, nil, &mockSettings{}, nil, nil, billingTestClock()))
 
-	count, errs := engine.RunCycle(context.Background(), 50)
+	count, errs := engine.RunCycle(context.Background(), 50, nil)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -4233,5 +4237,27 @@ func TestBillSubscription_PeriodMoved_RetriesOnce(t *testing.T) {
 		if len(invoices.invoices) != 0 {
 			t.Fatalf("a lost race wrote %d invoice(s), want 0", len(invoices.invoices))
 		}
+	})
+}
+
+// sortDueLikeSQL orders a fake due page like the real scans: ORDER BY
+// next_billing_at ASC (NULLs last, as Postgres sorts them), with
+// id as a tiebreak so a page is deterministic. Head-of-line tests depend
+// on the order: the oldest due subs come first, so failing ones lead every
+// page unless the drain excludes them.
+func sortDueLikeSQL(result []domain.Subscription) {
+	slices.SortFunc(result, func(a, b domain.Subscription) int {
+		switch {
+		case a.NextBillingAt == nil && b.NextBillingAt == nil:
+		case a.NextBillingAt == nil:
+			return 1
+		case b.NextBillingAt == nil:
+			return -1
+		default:
+			if c := a.NextBillingAt.Compare(*b.NextBillingAt); c != 0 {
+				return c
+			}
+		}
+		return strings.Compare(a.ID, b.ID)
 	})
 }

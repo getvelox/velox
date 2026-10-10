@@ -108,7 +108,7 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 	for range N {
 		wg.Go(func() {
 			<-start // barrier: all goroutines race from the same instant
-			gen, errs := engine.RunCycle(ctx, 50)
+			gen, errs := engine.RunCycle(ctx, 50, nil)
 			mu.Lock()
 			totalGen += gen
 			allErrs = append(allErrs, errs...)
@@ -209,7 +209,7 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 	for range 2 {
 		wg.Go(func() {
 			<-start
-			g, errs := engine.RunCycle(ctx, 50)
+			g, errs := engine.RunCycle(ctx, 50, nil)
 			mu.Lock()
 			totalGen += g
 			schedErr = append(schedErr, errs...)
@@ -263,7 +263,7 @@ func TestManualRunVsSchedulerRace_ExactlyOneInvoice(t *testing.T) {
 
 		subs.beforeTx = func() {
 			subs.beforeTx = nil
-			if g, errs := engine.RunCycle(ctx, 50); g != 1 || len(errs) != 0 {
+			if g, errs := engine.RunCycle(ctx, 50, nil); g != 1 || len(errs) != 0 {
 				t.Fatalf("scheduler run under the manual run: gen=%d errs=%v, want 1 and none", g, errs)
 			}
 		}

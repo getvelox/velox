@@ -59,6 +59,8 @@ Older entries keep their original text.
 
 ### Fixed
 
+- **Each billing tick now bills every subscription that is due, not the first 50 (2026-10-10, P27).** The hourly tick billed one page of 50 per mode, so 20,000 subscriptions due on the 1st took about 17 days to invoice. A subscription that fails is skipped for the rest of the run instead of blocking the ones behind it; the manual billing run and test-clock Advance get the same fix. New gauges: `velox_billing_due_subscriptions{mode}`, `velox_billing_oldest_due_age_seconds{mode}`. [ADR-006 amendment](docs/adr/006-background-scheduler-vs-message-queue.md#amendment-2026-10-10-p27-a-tick-bills-everything-due).
+
 - **A charge's late result can no longer undo a payment or a decline recorded while the charge was in flight (2026-10-10, P13).** After a Stripe call, the charge path records the outcome (processing, unknown or failed). If another outcome was recorded during that call, the late write used to win anyway. Outcomes that can land mid-call include the payment's own webhook (paid or declined), an offline payment, a hosted Checkout payment, or credits. The late write could leave:
   - a paid invoice with no `paid_at`, an in-flight payment status, and the wrong PaymentIntent, so a second capture read as "already settled" instead of raising `payment.duplicate_charge`;
   - a recorded decline turned back into "unknown". That paused dunning until the reconciler restored it. When the late result carried no PaymentIntent ID, it parked the invoice for good.

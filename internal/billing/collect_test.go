@@ -402,7 +402,7 @@ func TestCycleClose_CollectsAtThePeriodBoundary(t *testing.T) {
 	runAt := time.Date(2026, 7, 1, 0, 0, 1, 0, time.UTC) // three periods due: May 1, Jun 1, Jul 1
 	engine := wireBaseTax(NewEngine(subs, &mockUsage{totals: map[string]int64{}}, pricing, invoices, applier, &mockSettings{}, nil, nil, clock.NewFake(runAt)))
 
-	if _, errs := engine.RunCycle(context.Background(), 50); len(errs) > 0 {
+	if _, errs := engine.RunCycle(context.Background(), 50, nil); len(errs) > 0 {
 		t.Fatalf("RunCycle: %v", errs)
 	}
 	want := []time.Time{periodEnd, periodEnd.AddDate(0, 1, 0), periodEnd.AddDate(0, 2, 0)}

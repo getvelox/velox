@@ -94,7 +94,7 @@ func TestRunCycle_EverySettingsReadFailsClosed(t *testing.T) {
 		engine, subs, _, _, invoices := setupEngine()
 		engine.settings = s
 		engine.SetTaxCalculationStore(taxCalcs)
-		_, runErrs := engine.RunCycle(context.Background(), 50)
+		_, runErrs := engine.RunCycle(context.Background(), 50, nil)
 		if len(runErrs) > 0 {
 			if subs.cycleUpdated["sub_1"] {
 				t.Errorf("read %d failed but the billing period advanced", s.failOn)
@@ -111,7 +111,7 @@ func TestRunCycle_HonorsDueOnReceipt(t *testing.T) {
 	ts.NetPaymentTerms = 0
 	engine.settings = &flakySettings{ts: ts}
 
-	if _, runErrs := engine.RunCycle(context.Background(), 50); len(runErrs) > 0 {
+	if _, runErrs := engine.RunCycle(context.Background(), 50, nil); len(runErrs) > 0 {
 		t.Fatalf("RunCycle: %v", runErrs)
 	}
 	if len(invoices.invoices) != 1 {
@@ -226,7 +226,7 @@ func TestRunCycle_UnloadableTimezoneFailsClosed(t *testing.T) {
 	ts.Timezone = "Mars/Olympus_Mons"
 	engine.settings = &flakySettings{ts: ts}
 
-	if _, runErrs := engine.RunCycle(context.Background(), 50); len(runErrs) == 0 {
+	if _, runErrs := engine.RunCycle(context.Background(), 50, nil); len(runErrs) == 0 {
 		t.Fatal("RunCycle succeeded with an unloadable timezone; it must fail, not fall back to UTC")
 	}
 	if len(invoices.invoices) != 0 || subs.cycleUpdated["sub_1"] {
@@ -291,7 +291,7 @@ func TestRunCycle_TrialAdvanceTimezoneUnreadableFailsClosed(t *testing.T) {
 	subs.subs["sub_1"] = sub
 	engine.settings = &flakySettings{ts: defaultTermsSettings(), failOn: 1}
 
-	if _, runErrs := engine.RunCycle(context.Background(), 50); len(runErrs) == 0 {
+	if _, runErrs := engine.RunCycle(context.Background(), 50, nil); len(runErrs) == 0 {
 		t.Fatal("trial advance succeeded with an unreadable timezone; want an error")
 	}
 	if subs.cycleUpdated["sub_1"] || len(invoices.invoices) != 0 {

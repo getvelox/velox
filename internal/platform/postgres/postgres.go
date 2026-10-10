@@ -327,6 +327,12 @@ func NullableTime(v *time.Time) any {
 type StringArray []string
 
 // Value converts the StringArray to a PostgreSQL array literal.
+//
+// Observed with the pgx stdlib driver: a nil StringArray reaches Postgres as
+// NULL, not '{}', despite the nil branch below. For a negated test that
+// matters: NOT (x = ANY(NULL)) is NULL and filters out every row. COALESCE
+// the parameter in SQL when nil can reach a NOT ANY / <> ALL
+// (TestDueScans_ExcludeAppliesBeforeLimit fails without it).
 func (a StringArray) Value() (interface{}, error) {
 	if a == nil {
 		return "{}", nil

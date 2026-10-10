@@ -84,7 +84,7 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	engine.SetDunningStarter(testDunningStarter{})
 
 	// Run 1: bills the period.
-	count1, errs1 := engine.RunCycle(ctx, 50)
+	count1, errs1 := engine.RunCycle(ctx, 50, nil)
 	if len(errs1) > 0 {
 		t.Fatalf("run 1 errors: %v", errs1)
 	}
@@ -97,7 +97,7 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
 	// Run 2: must idempotently skip — no second invoice, no surfaced error.
-	count2, errs2 := engine.RunCycle(ctx, 50)
+	count2, errs2 := engine.RunCycle(ctx, 50, nil)
 	if len(errs2) > 0 {
 		t.Fatalf("run 2 surfaced an error — the duplicate-period insert was not handled gracefully: %v", errs2)
 	}

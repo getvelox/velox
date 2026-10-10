@@ -46,3 +46,23 @@ The scheduler is stateless. If the process crashes, the next tick picks up where
 - **Temporal**: Provides durable workflows, automatic retries, and visibility. But it requires a Temporal server cluster (3+ pods), adds ~500ms latency per workflow step, and introduces a significant operational dependency. Rejected for v1 — the complexity is not justified when PostgreSQL SKIP LOCKED provides the core guarantee we need.
 - **Redis + worker pool (e.g., Asynq, Faktory)**: Adds Redis as a dependency. Provides faster polling than PostgreSQL but introduces a new failure mode (Redis unavailability). Since our job source-of-truth is already PostgreSQL (subscriptions, dunning runs), adding Redis as an intermediary creates data consistency concerns. Rejected.
 - **SQS/PubSub**: Cloud-native but creates vendor lock-in and requires event-driven refactoring. Billing cycles are naturally periodic (run every hour), not event-driven (react to each subscription change). Rejected for poor fit.
+
+## Amendment 2026-10-10 (P27): a tick bills everything due
+
+Two claims above were false.
+
+- **"50 subscriptions per tick at 5-minute intervals handles ~600 invoices/hour."** Production ticks hourly (5 minutes is local dev only), so the cap was 50 invoices per hour per mode. 20,000 subscriptions due on the 1st took about 17 days to invoice.
+- **"Adding a second replica with SKIP LOCKED doubles throughput."** Every singleton loop has run on a leader lease since ADR-114. One replica leads billing at a time, and a second replica adds no billing throughput.
+
+**Change.** `RunCycle` now drains: it bills page after page of `batch` due subscriptions until a page comes back empty. `batch` is now the page size, not a per-tick cap. The manual `POST /v1/billing/run` and test-clock Advance use the same loop (`drainDue`), as ADR-065 already did for the threshold scan. Each subscription is attempted at most once per run. A subscription still due after its attempt is excluded from later pages in SQL (`NOT (id = ANY(exclude))`). Without that, a persistently failing subscription is the oldest due row and leads every page, ahead of the healthy ones.
+
+**What a long tick costs.**
+
+- The rest of the billing tick waits for the drain: reconcilers, charge retries and the test-mode pass. The dunning loop is a separate role and keeps running.
+- The lease does not expire, because ADR-114 heartbeats every 3 s for the whole tick.
+- The replica's liveness stamp (`/health/ready`, `velox_scheduler_last_run_timestamp_seconds`) normally fires only between ticks. The drain now stamps it after every page. Without that, a drain longer than 2× the interval turns `/health/ready` into a 503, which on a single replica takes the API out of the load balancer. A tick wedged inside one subscription completes no page, so it still goes stale.
+- `velox_leader_last_tick_age_seconds{role="billing"}` grows during a long drain, the same as for a wedged tick. `velox_billing_due_subscriptions{mode}` tells the two apart: it falls during a drain and stays flat when the tick is wedged.
+
+**No circuit breaker.** A drain does not stop after N consecutive failures. A breaker would bring back the head-of-line block this change removes: a run of failing subscriptions at the front would end the tick before the healthy ones. The broad failures that could make a whole-set drain expensive are already handled. A tax provider outage defers the invoice's tax (`tax_status=pending`) instead of failing the subscription. A database outage fails the page fetch, which ends the drain.
+
+**Deferred: billing subscriptions in parallel.** The drain is serial, and each subscription's close includes its inline charge (a Stripe round trip). Drain time therefore grows with the number of subscriptions due at once. Trigger to revisit: `velox_billing_cycle_duration_seconds` p95 approaching the billing interval.

@@ -451,17 +451,18 @@ type InvoiceCharger interface {
 type SubscriptionReader interface {
 	// GetDueBilling: wall-clock cron path. Returns ONLY subs that
 	// are NOT pinned to a test clock (ADR-028 disjoint flows). The
-	// scheduler tick fans this out per livemode.
-	GetDueBilling(ctx context.Context, before time.Time, limit int) ([]domain.Subscription, error)
+	// scheduler tick fans this out per livemode. Every due scan takes
+	// exclude: ids the caller already attempted this run (drainDue).
+	GetDueBilling(ctx context.Context, before time.Time, exclude []string, limit int) ([]domain.Subscription, error)
 	// GetDueBillingForClock: operator-driven catchup path. Returns
 	// ONLY subs pinned to the given clock whose next_billing_at is
 	// on-or-before that clock's frozen time. Called by RunCatchup
 	// after Advance flips status to 'advancing'.
-	GetDueBillingForClock(ctx context.Context, tenantID, clockID string, limit int) ([]domain.Subscription, error)
+	GetDueBillingForClock(ctx context.Context, tenantID, clockID string, exclude []string, limit int) ([]domain.Subscription, error)
 	// GetDueBillingForTenant: operator-triggered (POST /v1/billing/run)
 	// path, scoped to ONE tenant under RLS. Wall-clock-due, non-clock-
 	// pinned subs for the caller's tenant only — never cross-tenant.
-	GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, limit int) ([]domain.Subscription, error)
+	GetDueBillingForTenant(ctx context.Context, tenantID string, before time.Time, exclude []string, limit int) ([]domain.Subscription, error)
 	Get(ctx context.Context, tenantID, id string) (domain.Subscription, error)
 	// WithTenantTx opens a period closer's transaction (ADR-115). The store
 	// that owns the period state machine owns the coordinator tx: the engine
@@ -1691,26 +1692,106 @@ func (e *Engine) ApplyTaxToLineItems(ctx context.Context, tenantID, customerID, 
 	return app, nil
 }
 
-// RunCycle finds all subscriptions due for billing and generates invoices.
-// Returns the number of invoices generated and any errors encountered.
-// RunCycleForClock processes due subs attached to ONE test clock. The
-// per-sub period loop in billSubscription catches each sub up to the
-// clock's frozen time in a single pass. Called by the test-clock
-// catchup worker after MarkAdvancing — operator-driven (Advance
-// click), never the wall-clock cron.
+// errStillDue marks a subscription that was billed without error in this run
+// and came back due on a later page. billSubscription returns cleanly while the
+// sub is still due only when a concurrent change raced it: another closer won
+// its period twice in a row (errPeriodMoved), or a cancel or trial change was
+// rescheduled while it fired. The drain does not bill a sub twice in one run,
+// so it reports the sub, and the next run retries it.
+var errStillDue = errors.New("still due after a clean billing attempt: the subscription changed concurrently; the next run retries it")
+
+// dueFetch returns up to limit due subscriptions, oldest first, leaving out
+// the ids in exclude.
+type dueFetch func(ctx context.Context, exclude []string, limit int) ([]domain.Subscription, error)
+
+// drainDue bills page after page of due subscriptions until a page comes back
+// empty. All three billing runs use it: the scheduler tick, the operator's
+// POST /v1/billing/run, and test-clock Advance.
 //
-// Returns the count of invoices generated and any per-sub errors
-// (non-fatal — failures on one sub don't stall the others). The
-// outer loop ensures every due sub on the clock is processed even
-// if more than batchSize are attached.
+// Each sub is attempted at most once per call. A sub that is still due after
+// its attempt (it failed, or errStillDue) goes into exclude, and the next page
+// skips it. Without that, a persistently failing sub stays first in the
+// oldest-first order and comes back on every page. A page made only of such
+// subs used to end the run while healthy subs waited behind them.
 //
-// ADR-028 disjoint-flow architecture: this is the ONLY path for
-// clock-pinned billing. The wall-clock RunCycle explicitly excludes
-// clock-pinned subs.
-func (e *Engine) RunCycleForClock(ctx context.Context, tenantID, clockID string, batchSize int) (int, []error) {
+// Termination: every sub on a non-empty page is either attempted for the first
+// time or added to exclude, so each page shrinks what the next page can return.
+//
+// onPage, if set, runs after every page. The scheduler stamps its liveness
+// there, because one tick can now run for hours.
+func (e *Engine) drainDue(ctx context.Context, batchSize int, fetch dueFetch, onPage func(), logArgs ...any) (int, []SubBillError) {
 	if batchSize <= 0 {
 		batchSize = 50
 	}
+	generated := 0
+	var failures []SubBillError
+	attempted := make(map[string]bool)
+	var exclude []string
+	for {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, SubBillError{Err: fmt.Errorf("billing run ctx done: %w", err)})
+			return generated, failures
+		}
+		due, err := fetch(ctx, exclude, batchSize)
+		if err != nil {
+			failures = append(failures, SubBillError{Err: fmt.Errorf("fetch due subscriptions: %w", err)})
+			return generated, failures
+		}
+		if len(due) == 0 {
+			return generated, failures
+		}
+		for _, sub := range due {
+			// Shutdown or a lost lease mid-page: stop here. Billing the rest
+			// would only fail each sub with the same ctx error.
+			if err := ctx.Err(); err != nil {
+				failures = append(failures, SubBillError{Err: fmt.Errorf("billing run ctx done: %w", err)})
+				return generated, failures
+			}
+			if attempted[sub.ID] {
+				exclude = append(exclude, sub.ID)
+				slog.Error("bill subscription failed",
+					append([]any{"subscription_id", sub.ID, "tenant_id", sub.TenantID, "error", errStillDue}, logArgs...)...)
+				failures = append(failures, SubBillError{SubscriptionID: sub.ID, Err: errStillDue})
+				continue
+			}
+			attempted[sub.ID] = true
+			n, err := e.billSubscription(ctx, sub)
+			generated += n
+			if err != nil {
+				exclude = append(exclude, sub.ID)
+				slog.Error("bill subscription failed",
+					append([]any{"subscription_id", sub.ID, "tenant_id", sub.TenantID, "invoices_before_error", n, "error", err}, logArgs...)...)
+				failures = append(failures, SubBillError{SubscriptionID: sub.ID, Err: err})
+			}
+		}
+		if onPage != nil {
+			onPage()
+		}
+	}
+}
+
+// subBillErrors flattens SubBillErrors for the []error callers.
+func subBillErrors(failures []SubBillError) []error {
+	if len(failures) == 0 {
+		return nil
+	}
+	out := make([]error, len(failures))
+	for i, f := range failures {
+		out[i] = f
+	}
+	return out
+}
+
+// RunCycleForClock bills the due subs attached to ONE test clock, catching
+// each up to the clock's frozen time. Called by the test-clock catchup worker
+// after MarkAdvancing — operator-driven (Advance click), never the wall-clock
+// cron. ADR-028 disjoint flows: this is the ONLY path for clock-pinned
+// billing; the wall-clock RunCycle excludes clock-pinned subs.
+//
+// Per-sub errors are returned, not fatal: one failing sub doesn't stall the
+// others. When any sub fails, the worker marks the clock internal_failure and
+// the operator's "Retry advance" resumes once the cause is fixed.
+func (e *Engine) RunCycleForClock(ctx context.Context, tenantID, clockID string, batchSize int) (int, []error) {
 	ctx, span := telemetry.Tracer("billing").Start(ctx, "billing.RunCycleForClock",
 		trace.WithAttributes(
 			attribute.String("clock_id", clockID),
@@ -1720,85 +1801,18 @@ func (e *Engine) RunCycleForClock(ctx context.Context, tenantID, clockID string,
 	)
 	defer span.End()
 
-	generated := 0
-	var errs []error
-
-	// Outer loop only matters if a clock has more than batchSize
-	// attached subs (rare). Each pass fetches a fresh batch; subs
-	// whose catchup completes in the inner per-sub period loop advance
-	// past the clock and fall off the next pass.
-	//
-	// Termination guard (best-practice hardening, 2026-05-31):
-	// GetDueBillingForClock returns subs whose next_billing_at <=
-	// frozen_time. A sub that FAILS to bill never advances
-	// next_billing_at, so it stays "due" and is re-fetched on every
-	// pass — an infinite outer loop. We attempt each sub at most once
-	// per call: once it errors it's excluded from further passes via
-	// `failed`. When every due sub has already failed this call, no
-	// progress is possible — break and let the worker mark the clock
-	// internal_failure (the operator's "Retry advance" resumes once
-	// the cause is fixed). Pre-fix, a single persistently-failing sub
-	// (e.g. a malformed INSERT, a constraint violation) spun this loop
-	// at ~30/sec, pegging CPU and flooding tax_calculations with
-	// orphan rows — and because RunCycleForClock never returned, the
-	// worker never reached MarkFailed, so the clock stayed 'advancing'
-	// and was re-enqueued on every boot.
-	failed := make(map[string]bool)
-	for {
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, fmt.Errorf("clock catchup ctx done: %w", err))
-			break
-		}
-
-		due, err := e.subs.GetDueBillingForClock(ctx, tenantID, clockID, batchSize)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("fetch due-on-clock: %w", err))
-			break
-		}
-		if len(due) == 0 {
-			break
-		}
-
-		// No-progress break: if every due sub has already been
-		// attempted-and-failed this call, re-fetching returns the same
-		// stuck set forever. Stop.
-		progressable := false
-		for _, sub := range due {
-			if !failed[sub.ID] {
-				progressable = true
-				break
-			}
-		}
-		if !progressable {
-			break
-		}
-
-		for _, sub := range due {
-			if failed[sub.ID] {
-				continue // already attempted + failed this call
-			}
-			n, err := e.billSubscription(ctx, sub)
-			if err != nil {
-				slog.Error("bill subscription failed (clock-catchup)",
-					"subscription_id", sub.ID,
-					"clock_id", clockID,
-					"invoices_before_error", n,
-					"error", err,
-				)
-				errs = append(errs, fmt.Errorf("subscription %s: %w", sub.ID, err))
-				failed[sub.ID] = true
-			}
-			generated += n
-		}
+	fetch := func(ctx context.Context, exclude []string, limit int) ([]domain.Subscription, error) {
+		return e.subs.GetDueBillingForClock(ctx, tenantID, clockID, exclude, limit)
 	}
+	generated, failures := e.drainDue(ctx, batchSize, fetch, nil, "run", "clock_catchup", "clock_id", clockID)
 
 	span.SetAttributes(attribute.Int("generated", generated))
 	slog.Info("clock catchup cycle complete",
 		"clock_id", clockID,
 		"generated", generated,
-		"errors", len(errs),
+		"errors", len(failures),
 	)
-	return generated, errs
+	return generated, subBillErrors(failures)
 }
 
 // SubBillError pairs a subscription that failed to bill with its cause. The
@@ -1822,15 +1836,8 @@ func (e SubBillError) Unwrap() error { return e.Err }
 // pass, scoped to ONE tenant. Unlike the unscoped RunCycle (scheduler-only,
 // scheduler.go), it bills only the caller's own due subscriptions via
 // GetDueBillingForTenant (RLS-fenced) — the manual trigger can never sweep or
-// observe another tenant. It drains the tenant's due set across batches (a
-// single batchSize pass would silently under-bill a tenant with >batchSize due
-// subs), attempting each sub at most once per call: a sub that fails to bill
-// never advances next_billing_at and stays "due", so the no-progress guard
-// breaks instead of re-billing it forever — the same shape as RunCycleForClock.
+// observe another tenant.
 func (e *Engine) RunCycleForTenant(ctx context.Context, tenantID string, batchSize int) (int, []SubBillError) {
-	if batchSize <= 0 {
-		batchSize = 50
-	}
 	ctx, span := telemetry.Tracer("billing").Start(ctx, "billing.RunCycleForTenant",
 		trace.WithAttributes(
 			attribute.String("tenant_id", tenantID),
@@ -1842,105 +1849,44 @@ func (e *Engine) RunCycleForTenant(ctx context.Context, tenantID string, batchSi
 	// Anchor the whole run at one instant so a sub billed early can't re-qualify
 	// under a later "now" within the same call.
 	now := e.clock.Now(ctx)
-
-	generated := 0
-	var failures []SubBillError
-	failed := make(map[string]bool)
-	for {
-		if err := ctx.Err(); err != nil {
-			failures = append(failures, SubBillError{Err: fmt.Errorf("billing run ctx done: %w", err)})
-			break
-		}
-
-		due, err := e.subs.GetDueBillingForTenant(ctx, tenantID, now, batchSize)
-		if err != nil {
-			span.RecordError(err)
-			failures = append(failures, SubBillError{Err: fmt.Errorf("fetch due subscriptions: %w", err)})
-			break
-		}
-		if len(due) == 0 {
-			break
-		}
-
-		// No-progress break: if every due sub has already been attempted-and-
-		// failed this call, re-fetching returns the same stuck set forever.
-		progressable := false
-		for _, sub := range due {
-			if !failed[sub.ID] {
-				progressable = true
-				break
-			}
-		}
-		if !progressable {
-			break
-		}
-
-		for _, sub := range due {
-			if failed[sub.ID] {
-				continue
-			}
-			n, err := e.billSubscription(ctx, sub)
-			if err != nil {
-				slog.Error("bill subscription failed (manual run)",
-					"tenant_id", tenantID,
-					"subscription_id", sub.ID,
-					"invoices_before_error", n,
-					"error", err,
-				)
-				failed[sub.ID] = true
-				failures = append(failures, SubBillError{SubscriptionID: sub.ID, Err: err})
-			}
-			generated += n
-		}
+	fetch := func(ctx context.Context, exclude []string, limit int) ([]domain.Subscription, error) {
+		return e.subs.GetDueBillingForTenant(ctx, tenantID, now, exclude, limit)
 	}
+	generated, failures := e.drainDue(ctx, batchSize, fetch, nil, "run", "manual")
 
 	span.SetAttributes(attribute.Int("generated", generated))
 	return generated, failures
 }
 
-func (e *Engine) RunCycle(ctx context.Context, batchSize int) (int, []error) {
-	if batchSize <= 0 {
-		batchSize = 50
-	}
-
+// RunCycle is the scheduler's billing run: it bills every wall-clock sub that
+// is due, across all tenants in ctx's livemode, before returning. Before P27 it
+// billed one page of batchSize subs per tick, which at 50 subs per hourly tick
+// meant 20,000 subs due on the 1st took about 17 days to invoice.
+//
+// onPage runs after each page; the scheduler passes its liveness stamp.
+// Returns the invoices generated and the per-sub errors.
+func (e *Engine) RunCycle(ctx context.Context, batchSize int, onPage func()) (int, []error) {
 	ctx, span := telemetry.Tracer("billing").Start(ctx, "billing.RunCycle",
 		trace.WithAttributes(attribute.Int("batch_size", batchSize)),
 	)
 	defer span.End()
 
-	due, err := e.subs.GetDueBilling(ctx, e.clock.Now(ctx), batchSize)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "fetch due subscriptions")
-		return 0, []error{fmt.Errorf("fetch due subscriptions: %w", err)}
+	// Same one-instant anchor as RunCycleForTenant: a sub due a few minutes
+	// into a long drain waits for the next tick instead of extending this one.
+	now := e.clock.Now(ctx)
+	fetch := func(ctx context.Context, exclude []string, limit int) ([]domain.Subscription, error) {
+		return e.subs.GetDueBilling(ctx, now, exclude, limit)
 	}
-	span.SetAttributes(attribute.Int("due_count", len(due)))
+	generated, failures := e.drainDue(ctx, batchSize, fetch, onPage, "run", "scheduled")
 
-	if len(due) == 0 {
-		return 0, nil
+	span.SetAttributes(attribute.Int("generated", generated))
+	if len(failures) > 0 {
+		span.SetStatus(codes.Error, "subscriptions failed to bill")
 	}
-
-	slog.Info("billing cycle started", "due_count", len(due))
-
-	generated := 0
-	var errs []error
-
-	for _, sub := range due {
-		n, err := e.billSubscription(ctx, sub)
-		if err != nil {
-			slog.Error("bill subscription failed",
-				"subscription_id", sub.ID,
-				"tenant_id", sub.TenantID,
-				"invoices_before_error", n,
-				"error", err,
-			)
-			errs = append(errs, fmt.Errorf("subscription %s: %w", sub.ID, err))
-		}
-		generated += n
+	if generated > 0 || len(failures) > 0 {
+		slog.Info("billing cycle complete", "generated", generated, "errors", len(failures))
 	}
-
-	slog.Info("billing cycle complete", "generated", generated, "errors", len(errs))
-	return generated, errs
+	return generated, subBillErrors(failures)
 }
 
 // maxPeriodsPerSubPerCall caps how many periods billSubscription
