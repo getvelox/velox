@@ -5303,7 +5303,7 @@ func (e *Engine) RetryPendingCharges(ctx context.Context, pageSize int, onPage f
 	if e.charger == nil || e.paymentSetups == nil {
 		return 0, nil
 	}
-	start := time.Now()
+	start := time.Now() // wall-clock: measures how long the sweep ran, for its log line; not a billing instant
 	fetch := func(ctx context.Context, after domain.InvoiceKeyset, limit int) ([]domain.Invoice, error) {
 		pending, err := e.invoices.ListAutoChargePending(ctx, after, limit)
 		if err != nil {
