@@ -256,16 +256,12 @@ type InvoiceUpdater interface {
 	// is crash-safe instead of fire-and-forget post-commit. SettleSucceeded uses
 	// this; non-card settlement paths keep MarkPaidReportingTransition.
 	MarkPaidCardSettlementTransition(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error)
-	// MarkPaymentFailedReportingTransition records a failure and reports
-	// whether THIS call is the first to fire the failure-notification set
-	// (payment.failed event + customer email + dunning) for this
-	// PaymentIntent. SettleFailed gates those side-effects on the flag so a
-	// concurrent at-least-once redelivery of the same
-	// payment_intent.payment_failed doesn't double-notify. PI-keyed because
-	// failure is non-terminal — one fresh failure per dunning retry — and
-	// because the synchronous charge path stamps payment_status='failed'
-	// before deferring the notifications here.
-	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error)
+	// MarkPaymentFailedReportingTransition records one report that a
+	// PaymentIntent failed. It moves the invoice only for the attempt the
+	// invoice is waiting on, and reports whether this was the first notice
+	// for that PaymentIntent, so the charge response, a webhook redelivery
+	// and the reconciler notify once between them.
+	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id string, report domain.PaymentFailureReport, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error)
 	// SetPaymentCard stamps the card brand + last4 used to settle
 	// an invoice. Optional — empty values render no sub-line in
 	// the timeline. Called by handlePaymentSucceeded after MarkPaid
@@ -465,10 +461,11 @@ func (s *Stripe) ChargeInvoice(ctx context.Context, tenantID string, inv domain.
 
 // ChargeInvoiceForDunningRetry charges an invoice as part of a dunning
 // retry attempt. Identical to ChargeInvoice except the resulting
-// PaymentIntent carries velox_purpose=dunning_retry metadata, which
-// the payment_intent.payment_failed webhook handler reads to suppress
-// the duplicate generic payment-failed email (dunning sends its own
-// per-attempt warning / escalation inline from processRun / exhaustRun).
+// PaymentIntent carries velox_purpose=dunning_retry metadata, so every
+// source that reports its failure — this call's own decline, the
+// payment_intent.payment_failed webhook, the reconciler — skips the
+// generic payment-failed email (failureEmailSuppressed): dunning sends its
+// own per-attempt warning / escalation inline from processRun / exhaustRun.
 //
 // Exposed as a separate method rather than a variadic option so the
 // engine's InvoiceCharger interface stays narrow (default-mode only)
@@ -631,14 +628,13 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 		// but-actually-succeeded charge would double-bill the customer; the
 		// reconciler resolves unknowns by querying Stripe later.
 		//
-		// Dunning for DEFINITE failures is started inline further down this
-		// block (!pe.Unknown → startDunningWithRetry — added for test-clock
-		// catchup, see that comment). The payment_intent.payment_failed
-		// webhook (handlePaymentFailed) is the redundant-but-idempotent
-		// second path: with Confirm:true + OffSession:true Stripe creates
-		// the PI even on decline and sends the event; StartDunning's
-		// per-invoice UNIQUE makes the pair safe. Unknown outcomes start
-		// nothing — the reconciler resolves them first.
+		// A DEFINITE decline is reported below through SettleFailed, the
+		// primitive its webhook and the reconciler also report through: with
+		// Confirm:true + OffSession:true Stripe creates the PI even on decline
+		// and sends payment_intent.payment_failed for it, so the decline has
+		// up to three reporters, and the primitive records it and notifies
+		// once between them. Unknown outcomes notify nothing — the reconciler
+		// resolves them first.
 		var pe *PaymentError
 		if !errors.As(err, &pe) {
 			pe = &PaymentError{Message: errs.Scrub(err.Error()), Unknown: true}
@@ -677,66 +673,67 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 				"error", pe.Message,
 			)
 		}
-		// current is the invoice as it stands after the outcome write — which
-		// is refused if another outcome was recorded during the call (P13).
-		// The side effects below key off it, not off the pre-call snapshot.
-		current := inv
-		if fresh, applied, perr := persistChargeOutcomeWithRetry(ctx, s.invoices, tenantID, inv, status, pe.PaymentIntentID, pe.Message); perr == nil {
-			current = fresh
-			if !applied {
-				logRefusedChargeOutcome(ctx, current, status, pe.PaymentIntentID, idempotencyKey)
-			}
-			if applied && current.PaymentStatus == domain.PaymentUnknown && current.StripePaymentIntentID == "" {
-				// PARKED (ADR-107). With no PaymentIntent id the GetPaymentIntent
-				// sweeps cannot query anything, so the invoice is deliberately
-				// excluded from every charge path rather than risk a second
-				// charge. Since ADR-108 it is not strictly terminal: the
-				// search-and-adopt sweep looks the attempt up by metadata and
-				// adopts it if the provider can find it — but only a FOUND
-				// PaymentIntent may resolve this, so the operator advice below
-				// stays. This is the ONE place the park is announced — the
-				// sweeps do not re-announce it, precisely so this does not
-				// become an identical CRITICAL every tick forever, which is
-				// how real alerts get buried. Announced only once the park is
-				// on disk: an outcome recorded during the call leaves nothing
-				// parked.
-				slog.ErrorContext(ctx, "CRITICAL: a charge attempt could not be identified at the provider — this invoice is parked; Velox will keep searching the provider and adopts the attempt if it can be found, but if it cannot be found this will not resolve on its own. If it is still parked tomorrow: find the attempt in the Stripe dashboard (search by customer and amount); if no charge succeeded, mark the invoice uncollectible to close it out",
-					"invoice_id", inv.ID, "tenant_id", tenantID,
-					"customer_id", inv.CustomerID, "invoice_number", inv.InvoiceNumber,
-					"amount_due_cents", inv.AmountDueCents, "error", pe.Message)
-			}
-		} else {
-			// LOAD-BEARING, especially on the Unknown path: this is the SOLE
-			// write that sets payment_status='unknown' — enrolling the invoice
-			// into the reconciler's unknown-payment sweep (ListUnknownPayments)
-			// — and persists the PaymentIntent id. Losing it strands a
-			// possibly-SUCCEEDED PI: the reconciler never resolves it → silent
-			// under-collection. Pre-fix the call swallowed both the return AND
-			// the error (`_, _ =`). Fail LOUD with the PI id so an operator can
-			// reconcile manually. The charge-error return below is unchanged —
-			// the caller still classifies the outcome and defers unknowns.
-			slog.Error("CRITICAL: could not persist post-charge payment state — invoice may be orphaned from the reconciler sweep",
-				"invoice_id", inv.ID,
-				"payment_status", string(status),
-				"unknown_outcome", pe.Unknown,
-				"stripe_payment_intent_id", pe.PaymentIntentID,
-				"error", perr,
-			)
-		}
-		// Count unknown outcomes as failed for the success-rate alert — a
-		// Stripe outage genuinely impairs customer charging and should page,
-		// even though the reconciler will later resolve the per-invoice state.
-		mw.RecordPaymentCharge("failed")
-
-		// ADR-102: the attempt is a billing fact regardless of what
-		// follows (dunning or nothing). Covers the empty-PI shape too —
-		// a PI-create network failure is an attempt with no webhook twin,
-		// and this row is its only record.
+		// ADR-102: the attempt is a billing fact regardless of what follows.
+		// Written BEFORE the outcome: a decline's report below upserts this
+		// row inside its transaction, and an upsert that finds no row inserts
+		// it as an 'external' attempt with no sim anchor, which nothing later
+		// corrects. Covers the empty-PI shape too — a PI-create network
+		// failure is an attempt with no webhook twin, and this row is its
+		// only record.
 		attemptOutcome := domain.ChargeAttemptFailed
 		if pe.Unknown {
 			attemptOutcome = domain.ChargeAttemptUnknown
 		}
 		recordChargeAttempt(ctx, s.invoices, tenantID, inv, pe.PaymentIntentID, purpose, attemptOutcome, pe.Message)
+
+		if !pe.Unknown && pe.PaymentIntentID != "" {
+			// A decline that names its PaymentIntent is reported through the
+			// same primitive as its webhook and the reconciler, so
+			// payment.failed and the customer email fire once per
+			// PaymentIntent whichever source arrives first — and fire at all
+			// when no webhook does (a lost delivery, a test clock with no
+			// forwarder). Before, this path stamped the failure and left every
+			// notification to the webhook.
+			//
+			// ChargedAtSeq is the seq CAS (P13): the report is refused when
+			// another outcome was recorded during the call. If that outcome is
+			// this PaymentIntent's own decline, delivered by its webhook first,
+			// the store sees the invoice already holds it and only confirms the
+			// notice went out once.
+			//
+			// SettleFailed also starts dunning inline, from the row it wrote, so
+			// the run exists when a test-clock Advance's dunning phase runs
+			// moments later (the webhook lands after that phase has exited) —
+			// and never on an invoice voided, written off or paid during the
+			// call.
+			seq := inv.ChargeAttemptSeq
+			current, res, serr := s.settleDeclineWithRetry(ctx, tenantID, inv, PaymentFailure{
+				PaymentIntentID: pe.PaymentIntentID,
+				Message:         pe.Message,
+				Purpose:         purpose,
+				ChargedAtSeq:    &seq,
+			})
+			switch {
+			case serr != nil:
+				// The decline is not on the invoice, which stays claimable at the
+				// same seq. Its webhook records it if the invoice holds no other
+				// PaymentIntent; otherwise the next charge reuses this attempt's
+				// idempotency key and Stripe answers with this same decline.
+				slog.Error("could not record a declined charge — its webhook or the next charge attempt records it",
+					"invoice_id", inv.ID,
+					"stripe_payment_intent_id", pe.PaymentIntentID,
+					"error", serr,
+				)
+			case !res.Recorded:
+				logRefusedChargeOutcome(ctx, current, domain.PaymentFailed, pe.PaymentIntentID, idempotencyKey)
+			}
+		} else {
+			s.stampUnreportableOutcome(ctx, tenantID, inv, pe, status, idempotencyKey)
+		}
+		// Count unknown outcomes as failed for the success-rate alert — a
+		// Stripe outage genuinely impairs customer charging and should page,
+		// even though the reconciler will later resolve the per-invoice state.
+		mw.RecordPaymentCharge("failed")
 
 		// A DEFINITE decline completed the round-trip — no charge is in
 		// flight, so free the lease instead of starving the next
@@ -748,53 +745,6 @@ func (s *Stripe) chargeInvoice(ctx context.Context, tenantID string, inv domain.
 			if rerr := s.invoices.ReleaseAutoChargeClaim(ctx, tenantID, inv.ID); rerr != nil {
 				slog.Warn("release charge lease after definite decline failed — next initiator waits out the lease window",
 					"invoice_id", inv.ID, "error", rerr)
-			}
-		}
-
-		// Inline StartDunning for known-failed charges so the dunning run
-		// exists by the time the orchestrator's Phase 5 queries due runs
-		// in the same Advance. Pre-fix this was deferred to the
-		// payment_intent.payment_failed webhook — fine on wall-clock, but
-		// under test-clock catchup the webhook arrives AFTER Phase 5 has
-		// already exited (Phase 3 fires PI, Phase 5 runs immediately,
-		// webhook lands later), so the new dunning run sat at
-		// attempt_count=0 with no retries fired until the next Advance.
-		// Industry parity: Stripe Test Clocks processes the failure
-		// synchronously inside the advance.
-		//
-		// Safe to call alongside the webhook path: StartDunning is
-		// idempotent by invoice (migration 0085 UNIQUE), so the
-		// subsequent webhook-driven call returns the existing run.
-		//
-		// Only fires on definitively-failed charges. Unknown outcomes
-		// (Stripe outage, ambiguous timeout) defer to the webhook so
-		// the reconciler can resolve them without burning a retry on
-		// an ambiguous result.
-		// ...and never on a WRITTEN-OFF invoice. It has already been through
-		// dunning: it ran, exhausted, and the policy's final action fired.
-		// Re-enrolling it would restart escalation emails — and under a
-		// cancel-subscription final action, cancel a subscription — on a debt
-		// the business gave up on. Post-ADR-113 no charge path admits
-		// uncollectible, so this fires only for charges already in flight at
-		// the removal deploy; the guard stays because the failure it prevents
-		// is catastrophic and the cost is one status check.
-		//
-		// This is the second of TWO dunning-start sites; the other is
-		// SettleFailed (settlement.go). Guarding only one leaves the inline
-		// decline — the path an operator's charge actually takes — unguarded.
-		//
-		// The check reads `current`, not the pre-call snapshot: an invoice paid
-		// (offline, hosted Checkout, credits) or voided while this charge was
-		// in flight must not be dunned — StartDunning has no paid check.
-		if !pe.Unknown && s.dunning != nil && current.Status != domain.InvoiceFinalized {
-			slog.InfoContext(ctx, "dunning not started for a declined charge — the invoice is no longer finalized (paid, voided or written off before or during the charge), so there is nothing to collect",
-				"invoice_id", inv.ID, "status", current.Status)
-		} else if !pe.Unknown && s.dunning != nil {
-			failureAt := simulatedFailureAt(inv)
-			// A definitively-declined charge — the cause is a real payment failure.
-			if _, derr := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt, domain.DunningCausePaymentFailed); derr != nil {
-				slog.Error("inline StartDunning after known-failed charge failed — no action needed: the payment-failed webhook or the dunning backfill sweep will start the run automatically",
-					"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", derr)
 			}
 		}
 
@@ -905,12 +855,18 @@ func logRefusedChargeOutcome(ctx context.Context, current domain.Invoice, attemp
 }
 
 // piPurposeDunningRetry tags a PaymentIntent created by the dunning
-// retrier so the payment_intent.payment_failed webhook can suppress
-// its generic payment-failed email — dunning's warning/escalation is
+// retrier so a report of its failure skips the generic payment-failed
+// email (failureEmailSuppressed) — dunning's warning/escalation is
 // the canonical notification for retry attempts. Stripe-parity (Smart
 // Retries sends one email per attempt, not one webhook-email plus one
 // engine-email).
 const piPurposeDunningRetry = "dunning_retry"
+
+// PurposeHostedInvoicePay tags a PaymentIntent created by the hosted invoice
+// page's Stripe Checkout session. Velox never waits on such an attempt — the
+// customer drives it while Velox's own charges carry on — so its failure is
+// recorded on its attempt row and never moves the invoice (SettleFailed).
+const PurposeHostedInvoicePay = "hosted_invoice_pay"
 
 // purposePaymentUpdateToken tags a SetupIntent created by the customer-driven
 // payment-update token link (public_handler.createCheckoutSession). It is the
@@ -942,11 +898,12 @@ const purposePaymentUpdateToken = "payment_update_token"
 // case. Persistent failure (Stripe outage, DB unavailable for seconds)
 // surfaces as the returned error; caller upgrades the slog level to
 // ERROR so operators have an alertable signal. There is no manual
-// "start dunning" action. The run is re-driven automatically: the
-// payment_intent.payment_failed webhook (SettleFailed) starts it, and the
-// dunning_backfill reconciler retries StartDunning every tick for a
-// wall-clock failed invoice with no run, after a 10-minute cool-off
-// (test-clock invoices are dunned inline during Advance).
+// "start dunning" action. The run is re-driven automatically: every later
+// report of the same decline (its webhook, the reconciler) calls
+// StartDunning again through SettleFailed, and the dunning_backfill
+// reconciler retries it every tick for a wall-clock failed invoice with no
+// run, after a 10-minute cool-off. A test-clock invoice has only the
+// reports: the backfill skips simulated invoices.
 //
 // 2026-05-30 design-debt audit (Tier 1 #5) replaced two log-and-swallow
 // sites here and at the inline charge-failure path with this retry.
@@ -979,6 +936,111 @@ func startDunningWithRetry(ctx context.Context, dunning DunningStarter, tenantID
 		return true, nil
 	}
 	return false, fmt.Errorf("StartDunning failed after %d attempts: %w", len(delays), lastErr)
+}
+
+// stampUnreportableOutcome records a charge outcome that has no PaymentIntent
+// to report: an ambiguous one (unknown, with or without an id) or a definite
+// failure where the create itself failed. There is nothing for a webhook to
+// match and nothing to notify about, so it is stamped through the seq CAS
+// (P13) rather than reported. A definite failure still starts dunning.
+func (s *Stripe) stampUnreportableOutcome(ctx context.Context, tenantID string, inv domain.Invoice, pe *PaymentError, status domain.InvoicePaymentStatus, idempotencyKey string) {
+	// current is the invoice as it stands after the outcome write — which is
+	// refused if another outcome was recorded during the call (P13). The
+	// dunning gate below keys off it, not off the pre-call snapshot.
+	current := inv
+	if fresh, applied, perr := persistChargeOutcomeWithRetry(ctx, s.invoices, tenantID, inv, status, pe.PaymentIntentID, pe.Message); perr == nil {
+		current = fresh
+		if !applied {
+			logRefusedChargeOutcome(ctx, current, status, pe.PaymentIntentID, idempotencyKey)
+		}
+		if applied && current.PaymentStatus == domain.PaymentUnknown && current.StripePaymentIntentID == "" {
+			// PARKED (ADR-107). With no PaymentIntent id the GetPaymentIntent
+			// sweeps cannot query anything, so the invoice is deliberately
+			// excluded from every charge path rather than risk a second
+			// charge. Since ADR-108 it is not strictly terminal: the
+			// search-and-adopt sweep looks the attempt up by metadata and
+			// adopts it if the provider can find it — but only a FOUND
+			// PaymentIntent may resolve this, so the operator advice below
+			// stays. This is the ONE place the park is announced — the
+			// sweeps do not re-announce it, precisely so this does not
+			// become an identical CRITICAL every tick forever, which is
+			// how real alerts get buried. Announced only once the park is
+			// on disk: an outcome recorded during the call leaves nothing
+			// parked.
+			slog.ErrorContext(ctx, "CRITICAL: a charge attempt could not be identified at the provider — this invoice is parked; Velox will keep searching the provider and adopts the attempt if it can be found, but if it cannot be found this will not resolve on its own. If it is still parked tomorrow: find the attempt in the Stripe dashboard (search by customer and amount); if no charge succeeded, mark the invoice uncollectible to close it out",
+				"invoice_id", inv.ID, "tenant_id", tenantID,
+				"customer_id", inv.CustomerID, "invoice_number", inv.InvoiceNumber,
+				"amount_due_cents", inv.AmountDueCents, "error", pe.Message)
+		}
+	} else {
+		// LOAD-BEARING, especially on the Unknown path: this is the SOLE
+		// write that sets payment_status='unknown' — enrolling the invoice
+		// into the reconciler's unknown-payment sweep (ListUnknownPayments)
+		// — and persists the PaymentIntent id. Losing it strands a
+		// possibly-SUCCEEDED PI: the reconciler never resolves it → silent
+		// under-collection. Fail LOUD with the PI id so an operator can
+		// reconcile manually. The charge-error return is unchanged — the
+		// caller still classifies the outcome and defers unknowns.
+		slog.Error("CRITICAL: could not persist post-charge payment state — invoice may be orphaned from the reconciler sweep",
+			"invoice_id", inv.ID,
+			"payment_status", string(status),
+			"unknown_outcome", pe.Unknown,
+			"stripe_payment_intent_id", pe.PaymentIntentID,
+			"error", perr,
+		)
+	}
+
+	// Unknown outcomes start nothing — the reconciler resolves them first,
+	// without burning a retry on an ambiguous result.
+	if pe.Unknown || s.dunning == nil {
+		return
+	}
+	// A definite failure with no PaymentIntent starts dunning inline, for the
+	// same test-clock reason as a decline (see chargeInvoice): the run must
+	// exist when the Advance's dunning phase runs. Never on an invoice that is
+	// no longer finalized — paid, voided or written off before or during the
+	// charge — and the check reads `current`, not the pre-call snapshot:
+	// StartDunning has no status opinion. A written-off invoice already ran
+	// dunning to its final action; re-enrolling would restart escalation (and,
+	// under a cancel-subscription final action, cancel a subscription).
+	if current.Status != domain.InvoiceFinalized {
+		slog.InfoContext(ctx, "dunning not started for a failed charge — the invoice is no longer finalized (paid, voided or written off before or during the charge), so there is nothing to collect",
+			"invoice_id", inv.ID, "status", current.Status)
+		return
+	}
+	failureAt := simulatedFailureAt(inv)
+	if _, derr := startDunningWithRetry(ctx, s.dunning, tenantID, inv.ID, inv.CustomerID, failureAt, domain.DunningCausePaymentFailed); derr != nil {
+		slog.Error("inline StartDunning after a failed charge failed — for a wall-clock invoice the dunning backfill sweep starts the run on a later scheduler tick",
+			"invoice_id", inv.ID, "customer_id", inv.CustomerID, "error", derr)
+	}
+}
+
+// settleDeclineWithRetry reports the charge call's own decline through
+// settleFailed with a bounded retry on a store error, mirroring
+// persistChargeOutcomeWithRetry: losing this write leaves the decline off the
+// invoice until a webhook or the next attempt records it. A retry after a
+// commit-ambiguous error is safe — the first attempt's commit left the
+// invoice holding this PaymentIntent, so the retry only confirms the notice
+// went out once.
+func (s *Stripe) settleDeclineWithRetry(ctx context.Context, tenantID string, inv domain.Invoice, f PaymentFailure) (domain.Invoice, domain.PaymentFailureResult, error) {
+	delays := []time.Duration{0, 100 * time.Millisecond, 500 * time.Millisecond}
+	var lastErr error
+	for i, d := range delays {
+		if d > 0 {
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+				return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("ctx canceled reporting a declined charge (attempt %d): %w", i+1, ctx.Err())
+			}
+		}
+		current, res, err := s.settleFailed(ctx, tenantID, inv, f, SourceChargeResponse)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return current, res, nil
+	}
+	return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("report declined charge failed after %d attempts: %w", len(delays), lastErr)
 }
 
 // persistChargeOutcomeWithRetry records the post-charge payment state (the
@@ -1414,22 +1476,17 @@ func (s *Stripe) handlePaymentFailed(ctx context.Context, tenantID string, event
 		return fmt.Errorf("find invoice for PI %s: %w", event.PaymentIntentID, err)
 	}
 
-	// Suppress the customer-facing email for two flows; the event + dunning
-	// still fire (they happen inside the primitive before the email step):
-	//   - hosted_invoice_pay: an interactive Pay flow — the customer is on the
-	//     hosted invoice page and already saw "Your card was declined" inline;
-	//     an email telling them what they just saw is noise.
-	//   - dunning_retry: this PI was created by the dunning retrier, which
-	//     already sent its own per-attempt warning/escalation email; firing the
-	//     generic payment-failed email too would double-notify for the same
-	//     attempt (Stripe Smart Retries / Lago shape: one email per attempt).
-	purpose := piPurposeFromPayload(event.Payload)
-	suppressEmail := purpose == "hosted_invoice_pay" || purpose == "dunning_retry"
-
-	// Discover-then-settle (ADR-049): hand the terminal outcome to the shared
-	// primitive, which owns the out-of-order guard, mark-failed, payment.failed
-	// event, dunning auto-start, and the (possibly suppressed) failure email.
-	return s.SettleFailed(ctx, tenantID, inv, event.PaymentIntentID, event.FailureMessage, suppressEmail, SourceWebhook)
+	// Discover-then-settle (ADR-049): hand the report to the shared primitive,
+	// which decides whether it moves the invoice (only for the attempt the
+	// invoice is waiting on) and fires payment.failed, the customer email and
+	// dunning once per PaymentIntent. The purpose decides the email (a dunning
+	// retry sent its own) and marks a hosted Checkout attempt, which never
+	// moves the invoice.
+	return s.SettleFailed(ctx, tenantID, inv, PaymentFailure{
+		PaymentIntentID: event.PaymentIntentID,
+		Message:         event.FailureMessage,
+		Purpose:         piPurposeFromPayload(event.Payload),
+	}, SourceWebhook)
 }
 
 // piPurposeFromPayload extracts data.object.metadata.velox_purpose from
@@ -1555,7 +1612,7 @@ func (s *Stripe) handleCheckoutCompleted(ctx context.Context, tenantID string, e
 	// same velox_purpose gate as the setup_intent attach path (#461); an
 	// operator-driven or purposeless session stays system-attributed.
 	auditCtx := ctx
-	if veloxPurpose == "hosted_invoice_pay" || veloxPurpose == purposePaymentUpdateToken {
+	if veloxPurpose == PurposeHostedInvoicePay || veloxPurpose == purposePaymentUpdateToken {
 		auditCtx = veloxauth.WithCustomerActor(ctx, customerID)
 	}
 	var emit func(tx *sql.Tx) error

@@ -313,24 +313,28 @@ func (m *memStore) StampChargeOutcome(_ context.Context, tenantID, id string, at
 	return inv, true, nil
 }
 
-func (m *memStore) MarkPaymentFailedReportingTransition(_ context.Context, tenantID, id, piID, errMsg string, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
+func (m *memStore) MarkPaymentFailedReportingTransition(_ context.Context, tenantID, id string, report domain.PaymentFailureReport, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error) {
+	piID := report.PaymentIntentID
 	inv, ok := m.invoices[id]
 	if !ok || inv.TenantID != tenantID {
-		return domain.Invoice{}, false, errs.ErrNotFound
+		return domain.Invoice{}, domain.PaymentFailureResult{}, errs.ErrNotFound
 	}
-	if inv.Status == domain.InvoicePaid || inv.PaymentStatus == domain.PaymentSucceeded {
-		return inv, false, nil
+	if !report.MovesInvoice(inv.Status, inv.PaymentStatus, inv.StripePaymentIntentID, inv.ChargeAttemptSeq, domain.AttemptNotVelox) {
+		return inv, domain.PaymentFailureResult{}, nil
 	}
 	if m.failNotedPI == nil {
 		m.failNotedPI = make(map[string]string)
 	}
 	first := m.failNotedPI[id] != piID
+	if inv.PaymentStatus != domain.PaymentFailed || inv.StripePaymentIntentID != piID {
+		inv.ChargeAttemptSeq++
+	}
 	inv.PaymentStatus = domain.PaymentFailed
 	inv.StripePaymentIntentID = piID
-	inv.LastPaymentError = errMsg
+	inv.LastPaymentError = report.Message
 	m.invoices[id] = inv
 	m.failNotedPI[id] = piID
-	return inv, first, nil
+	return inv, domain.PaymentFailureResult{Recorded: true, FirstNotice: first}, nil
 }
 
 func (m *memStore) SetNoPMNotifiedAt(_ context.Context, tenantID, id string, at time.Time) error {

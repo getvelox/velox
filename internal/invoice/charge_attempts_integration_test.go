@@ -198,10 +198,12 @@ func TestChargeAttempt_SettleTransitionsResolveOutcomeAtomically(t *testing.T) {
 		return inv
 	}
 
-	// FAILED settle on a PI no chokepoint ever recorded (hosted checkout):
-	// the transition itself must create the row.
+	// FAILED report on a PI no chokepoint ever recorded (hosted checkout):
+	// the transition itself must create the row — it is the only record of a
+	// hosted attempt, which never moves the invoice.
 	failed := mk("VLX-ATOMIC-FAIL")
-	if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, failed.ID, "pi_atomic_fail", "Your card was declined.", nil); err != nil {
+	if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, failed.ID,
+		domain.PaymentFailureReport{PaymentIntentID: "pi_atomic_fail", Message: "Your card was declined.", External: true}, nil); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
 	got, err := store.ListChargeAttemptsByInvoice(ctx, tenantID, failed.ID)

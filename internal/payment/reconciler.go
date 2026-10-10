@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,7 +48,7 @@ type ReconcileInvoiceStore interface {
 	// a parked invoice via a CAS on the full parked shape. false = another
 	// path (usually the webhook) won the race; the caller does nothing.
 	AdoptPaymentIntentIfParked(ctx context.Context, tenantID, id, paymentIntentID string) (bool, error)
-	StampChargeOutcome(ctx context.Context, tenantID, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string) (domain.Invoice, bool, error)
+	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id string, report domain.PaymentFailureReport, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error)
 	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
 }
 
@@ -60,11 +61,11 @@ type ReconcileInvoiceStore interface {
 //
 // Optional (nil-tolerant): when unwired — narrow unit tests only; production
 // always wires it via SetSettler — the reconciler falls back to the legacy bare
-// MarkPaid / StampChargeOutcome writes (no dunning/event/email). The fallback exists
+// MarkPaid / MarkPaymentFailedReportingTransition writes (no dunning/email). The fallback exists
 // solely so status-discovery tests need not construct a full Stripe adapter.
 type Settler interface {
 	SettleSucceeded(ctx context.Context, tenantID string, inv domain.Invoice, paymentIntentID string, capturedCents int64, source SettlementSource) error
-	SettleFailed(ctx context.Context, tenantID string, inv domain.Invoice, paymentIntentID, failureMsg string, suppressCustomerEmail bool, source SettlementSource) error
+	SettleFailed(ctx context.Context, tenantID string, inv domain.Invoice, f PaymentFailure, source SettlementSource) error
 }
 
 // Reconciler resolves invoices stuck in PaymentUnknown by asking Stripe for
@@ -287,9 +288,7 @@ func (r *Reconciler) searchAndAdoptOne(ctx context.Context, inv domain.Invoice, 
 		// (settle re-reads fresh and skips an already-settled invoice). Any
 		// SECOND succeeded PI is left to the webhook path, whose already-paid +
 		// different-PI branch escalates the duplicate-charge anomaly.
-		// suppressEmail=false: it only gates the FAILURE email, and this arm
-		// settles success.
-		done, serr := r.settle(ctx, inv, succeeded.ID, succeeded.AmountReceivedCents, false, "adopted: search found succeeded PI", terminalSucceeded, succeeded.Status)
+		done, serr := r.settle(ctx, inv, succeeded.ID, succeeded.AmountReceivedCents, succeeded.Purpose, "adopted: search found succeeded PI", terminalSucceeded, succeeded.Status)
 		if serr != nil {
 			return false, fmt.Errorf("settle search-found succeeded PI %s: %w", succeeded.ID, serr)
 		}
@@ -454,14 +453,12 @@ func (r *Reconciler) reconcileOne(ctx context.Context, inv domain.Invoice) (bool
 		if !res.AnchorAt.IsZero() {
 			settleCtx = withSettleAnchor(ctx, res.AnchorAt)
 		}
-		return r.settle(settleCtx, inv, res.ID, res.AmountReceivedCents, false, "", terminalSucceeded, res.Status)
+		return r.settle(settleCtx, inv, res.ID, res.AmountReceivedCents, res.Purpose, "", terminalSucceeded, res.Status)
 
 	case "canceled", "requires_payment_method":
-		// Replicate the webhook's customer-email suppression from the PI
-		// purpose: a dunning-retry PI already sent its own per-attempt email,
-		// and a hosted-pay PI's decline was shown inline. Other failures send.
-		suppressEmail := res.Purpose == "hosted_invoice_pay" || res.Purpose == "dunning_retry"
-		return r.settle(ctx, inv, res.ID, 0, suppressEmail, "reconciled: "+res.Status, terminalFailed, res.Status)
+		// The PI purpose travels with the report, as on the webhook: it
+		// decides the customer email (failureEmailSuppressed).
+		return r.settle(ctx, inv, res.ID, 0, res.Purpose, "reconciled: "+res.Status, terminalFailed, res.Status)
 
 	case "processing", "requires_action", "requires_confirmation", "requires_capture":
 		// Not terminal, so nothing settles here — but RECORD WHAT WE OBSERVED
@@ -505,7 +502,7 @@ func (r *Reconciler) recordSync(ctx context.Context, inv domain.Invoice, provide
 // through the settlement primitive so it fires the full side-effects (dunning,
 // event, email, card stamp) — identical to the webhook (ADR-049 Phase 2).
 // Falls back to legacy bare writes when no settler is wired (test-only).
-func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string, capturedCents int64, suppressEmail bool, failMsg string, kind terminalKind, providerStatus string) (bool, error) {
+func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string, capturedCents int64, purpose, failMsg string, kind terminalKind, providerStatus string) (bool, error) {
 	// Fresh re-read so a webhook that won the race during the round-trip is
 	// observed (the sweep-list snapshot may be stale). On read error, proceed
 	// with the snapshot — the primitive's own guards still apply.
@@ -546,7 +543,9 @@ func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string
 				return false, fmt.Errorf("settle succeeded: %w", err)
 			}
 		default:
-			if err := r.settler.SettleFailed(ctx, inv.TenantID, fresh, piID, failMsg, suppressEmail, SourceReconciler); err != nil {
+			if err := r.settler.SettleFailed(ctx, inv.TenantID, fresh, PaymentFailure{
+				PaymentIntentID: piID, Message: failMsg, Purpose: purpose,
+			}, SourceReconciler); err != nil {
 				return false, fmt.Errorf("settle failed: %w", err)
 			}
 		}
@@ -575,8 +574,8 @@ func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string
 		}
 		return true, nil
 	default:
-		if _, _, err := r.invoices.StampChargeOutcome(ctx, inv.TenantID, inv.ID, fresh.ChargeAttemptSeq,
-			domain.PaymentFailed, piID, failMsg); err != nil {
+		if _, _, err := r.invoices.MarkPaymentFailedReportingTransition(ctx, inv.TenantID, inv.ID,
+			domain.PaymentFailureReport{PaymentIntentID: piID, Message: failMsg}, nil); err != nil {
 			return false, fmt.Errorf("mark failed (legacy): %w", err)
 		}
 		return true, nil

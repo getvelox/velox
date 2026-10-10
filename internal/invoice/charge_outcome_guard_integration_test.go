@@ -22,6 +22,16 @@ func stampOutcome(t *testing.T, store *invoice.PostgresStore, ctx context.Contex
 	if err != nil {
 		t.Fatalf("get before stamp: %v", err)
 	}
+	if ps == domain.PaymentFailed && pi != "" {
+		// A decline naming its PaymentIntent is the charge call's report, not
+		// a stamp — the path production takes.
+		seq := cur.ChargeAttemptSeq
+		if _, res, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, id,
+			domain.PaymentFailureReport{PaymentIntentID: pi, Message: msg, ChargedAtSeq: &seq}, nil); err != nil || !res.Recorded {
+			t.Fatalf("report decline %q: recorded=%v err=%v", pi, res.Recorded, err)
+		}
+		return
+	}
 	if _, applied, err := store.StampChargeOutcome(ctx, tenantID, id, cur.ChargeAttemptSeq, ps, pi, msg); err != nil || !applied {
 		t.Fatalf("stamp %s/%q: applied=%v err=%v", ps, pi, applied, err)
 	}
@@ -55,7 +65,7 @@ func TestStampChargeOutcome_OutcomeRecordedDuringTheCallWins(t *testing.T) {
 	}
 	markFailed := func(pi string) step {
 		return func(t *testing.T, id string) {
-			if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, id, pi, "card_declined", nil); err != nil {
+			if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, id, failureReport(pi, "card_declined"), nil); err != nil {
 				t.Fatalf("MarkPaymentFailedReportingTransition: %v", err)
 			}
 		}
@@ -86,12 +96,11 @@ func TestStampChargeOutcome_OutcomeRecordedDuringTheCallWins(t *testing.T) {
 		{"own webhook paid, then unknown with the PI", none, markPaid("pi_X"), domain.PaymentUnknown, "pi_X", false},
 		{"own webhook paid, then unknown with no PI", none, markPaid("pi_X"), domain.PaymentUnknown, "", false},
 		{"paid offline, then processing", none, markPaid("out_of_band:2026-10-10T09:00:00Z"), domain.PaymentProcessing, "pi_X", false},
-		{"paid by credits (no PI), then failed", none, markPaid(""), domain.PaymentFailed, "pi_X", false},
+		{"paid by credits (no PI), then failed with no PI", none, markPaid(""), domain.PaymentFailed, "", false},
 		// Refused — a decline its own webhook already recorded stays recorded.
 		{"own decline webhook, then unknown with the PI", none, markFailed("pi_X"), domain.PaymentUnknown, "pi_X", false},
 		{"own decline webhook, then processing with the PI", none, markFailed("pi_X"), domain.PaymentProcessing, "pi_X", false},
 		{"own decline webhook, then unknown with no PI (would park a known decline)", none, markFailed("pi_X"), domain.PaymentUnknown, "", false},
-		{"own decline webhook, then the sync decline", none, markFailed("pi_X"), domain.PaymentFailed, "pi_X", false},
 
 		// Applied — a new attempt starting from the previous attempt's failure.
 		{"previous attempt failed, then unknown for a new PI", markFailed("pi_W"), none, domain.PaymentUnknown, "pi_X", true},
@@ -161,6 +170,13 @@ func TestStampChargeOutcome_OutcomeRecordedDuringTheCallWins(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a failure naming a PaymentIntent is a report, not a stamp", func(t *testing.T) {
+		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-P13-FAILPI")
+		if _, _, err := store.StampChargeOutcome(ctx, tenantID, inv.ID, inv.ChargeAttemptSeq, domain.PaymentFailed, "pi_X", "declined"); err == nil {
+			t.Fatal("stamped a named decline; want a refusal — it would skip the once-per-PaymentIntent notice and the attempt check")
+		}
+	})
 
 	t.Run("succeeded is not a charge outcome — it goes through MarkPaid", func(t *testing.T) {
 		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-P13-SUCC")

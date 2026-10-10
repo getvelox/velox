@@ -6,7 +6,7 @@
 
 ## Summary
 
-Every terminal Stripe PaymentIntent outcome settles through one idempotent primitive: `SettleSucceeded` (mark paid, fire `payment.succeeded`, send a receipt) or `SettleFailed` (mark failed, fire `payment.failed`, start dunning, send a failure email unless the flow suppresses it). Before this, about ten code paths wrote these states with different side effects, so a failure found by the reconciler started no dunning and sent nothing. Three callers find the outcome and pass it in: the webhook, the synchronous charge response when its status is `succeeded`, and the reconciler for stale `unknown` or `processing` invoices. Invoices that settle without a charge ($0 or fully covered by credits) and out-of-band manual payments stay on their own paths and send no receipt. Amended 2026-07-31: if a lost response leaves no PaymentIntent id, the invoice is parked in `unknown` and no charge path retries it. ADR-107 and ADR-108 cover how it is resolved: a provider search first, and an operator write-off otherwise.
+Every terminal Stripe PaymentIntent outcome settles through one idempotent primitive: `SettleSucceeded` (mark paid, fire `payment.succeeded`, send a receipt) or `SettleFailed` (mark failed, fire `payment.failed`, start dunning, send a failure email unless the flow suppresses it). Before this, about ten code paths wrote these states with different side effects, so a failure found by the reconciler started no dunning and sent nothing. Three callers find the outcome and pass it in: the webhook, the synchronous charge response when its status is `succeeded`, and the reconciler for stale `unknown` or `processing` invoices. Invoices that settle without a charge ($0 or fully covered by credits) and out-of-band manual payments stay on their own paths and send no receipt. Amended 2026-07-31: if a lost response leaves no PaymentIntent id, the invoice is parked in `unknown` and no charge path retries it. ADR-107 and ADR-108 cover how it is resolved: a provider search first, and an operator write-off otherwise. Amended 2026-10-11: a declined charge response now reports through `SettleFailed` too, and a failure moves the invoice only when it is about the attempt the invoice is waiting on (see the amendment below).
 
 ## Context
 
@@ -88,6 +88,29 @@ The webhook + reconciler remain idempotent backstops routing through the one pri
 - **Dedicated `payment_processing_since` column.** The age banner runs off `updated_at` today; add the column only when an async method or a mid-`processing` mutation path makes `updated_at` provably wrong (same trigger as method-specific windows).
 
 These are documented decisions, not silent gaps; the code would be dead until the trigger fires.
+
+## Amendment 2026-10-11: failures report like successes, and only for the current attempt
+
+Two defects shared one function, `MarkPaymentFailedReportingTransition`, the store write behind `SettleFailed`.
+
+**The charge response's decline notified nobody.** Phase 3 made a `succeeded` response settle through `SettleSucceeded`. A declined response only stamped `failed` and started dunning; `payment.failed` and the customer email fired from `SettleFailed`, which only the webhook and the reconciler called. With no webhook (a lost delivery, a test clock with no forwarder) the decline was never announced. The charge call now reports its decline through `SettleFailed` with source `charge_response`. Whichever of the three reporters arrives first records it and fires `payment.failed` and the email; the others find the PaymentIntent already recorded and skip them (`failure_notified_pi`). A failure with no PaymentIntent (the create itself failed) is still stamped by `StampChargeOutcome` and announced to nobody: there is nothing to match, and it is usually a merchant configuration error. `StampChargeOutcome` now refuses a failure that names a PaymentIntent, so the report path cannot be bypassed.
+
+**A late decline for an older attempt overwrote the newer one.** The webhook resolves the invoice by PaymentIntent and falls back to the `velox_invoice_id` metadata, so a decline for any attempt reached the invoice, and the write relinked that PaymentIntent, set `failed` and bumped `charge_attempt_seq`. A stale delivery hid an in-flight attempt from the reconciler (which only watches `processing` and `unknown`), refused the outcome of a charge in flight (its seq CAS, P13) and sent a late "payment failed" email. The rule is now `domain.PaymentFailureReport.MovesInvoice`, applied under the row lock:
+
+- a paid invoice: never;
+- the invoice already holds this PaymentIntent: record it, whoever created it (a parked invoice can adopt a hosted attempt through the ADR-108 search);
+- any other hosted Checkout attempt (`velox_purpose=hosted_invoice_pay`): never;
+- the charge call reporting its own attempt: record it only if the seq is still the one it charged with;
+- a webhook or reconciler report about a different PaymentIntent: never while the invoice waits on an in-flight attempt; otherwise the invoice's attempt history decides. If the PaymentIntent is Velox's newest attempt, record it (the charge call's own report was lost). If Velox made a newer attempt since, ignore it (a late decline for an older attempt). With no Velox attempt row to judge by, record it only if the invoice holds no PaymentIntent yet (the first attempt, or a parked attempt whose id Velox never learned).
+
+Why this identifies the attempt the invoice waits on: every Velox charge starts only from `pending` or `failed` under the charge lease. It records its `invoice_charge_attempts` row when Stripe answers, and only then reports its outcome through the seq CAS. So Velox's attempt rows are in attempt order, and the newest is the one the invoice waits on. A hosted Checkout attempt runs outside that lease, at the same time as Velox's own charges; its row is `external` and never counts. The charge call's write claims a row that a faster webhook inserted as `external` first. Every report lands on its own attempt row, so a failure that does not move the invoice stays on the timeline. Kill Bill has the same shape: outcomes are stored per payment transaction, and the invoice derives from the successful ones, so a late event updates only its own attempt.
+
+Consequences:
+
+- A decline on the hosted payment page no longer marks the invoice failed or sends `payment.failed`. The customer saw the decline on the page and can retry there; the attempt shows on the timeline.
+- Dunning start is re-driven by every report that records the failure, not only the first. The first reporter's start can fail after its stamp committed, and a test-clock invoice has no other re-drive: the dunning backfill skips simulated invoices.
+- The decline email is skipped for an invoice that is no longer `finalized` when the failure is recorded (voided or written off during the charge).
+- A parked invoice (`unknown`, no PaymentIntent) is released only by a decline the attempt history cannot place as older: the parked attempt's own decline, whose id Velox never learned. A late decline for an older attempt is superseded by the parked attempt's row. Residual, registered (velox-ops DP-readiness register): the attempt-row write is best-effort, so an older attempt whose row was lost still looks like the parked one.
 
 ## Consequences
 

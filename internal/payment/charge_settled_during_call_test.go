@@ -30,7 +30,8 @@ func paidMidCharge() (*mockInvoiceUpdater, domain.Invoice) {
 }
 
 // declinedMidCharge: this attempt's own decline webhook recorded failed/pi_X
-// (bumping the seq) before the charge call returned.
+// (bumping the seq) and sent its notice before the charge call returned — the
+// store sets failure_notified_pi in the same write, so the fixture does too.
 func declinedMidCharge() (*mockInvoiceUpdater, domain.Invoice) {
 	base := newMockInvoiceUpdater()
 	row := pendingSnapshot()
@@ -38,6 +39,9 @@ func declinedMidCharge() (*mockInvoiceUpdater, domain.Invoice) {
 	row.StripePaymentIntentID = "pi_X"
 	row.ChargeAttemptSeq = 1
 	base.invoices["inv_1"] = row
+	base.byPI["pi_X"] = "inv_1"
+	base.failNotedPI["inv_1"] = "pi_X"
+	base.failedEventEnqueues = 1
 	return base, pendingSnapshot()
 }
 

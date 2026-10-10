@@ -49,19 +49,18 @@ type Store interface {
 	// dates via UpdateStatus.
 	FinalizeWithDates(ctx context.Context, tenantID, id string, issuedAt, dueAt time.Time) (domain.Invoice, error)
 	// StampChargeOutcome records a charge attempt's outcome (processing /
-	// unknown / failed) only if no outcome was recorded since the attempt
-	// read attemptSeq — the charge_attempt_seq its idempotency key was built
-	// from (P13). A refused stamp returns the row as it now stands with
-	// applied=false and a nil error.
+	// unknown, or a failure with no PaymentIntent) only if no outcome was
+	// recorded since the attempt read attemptSeq — the charge_attempt_seq its
+	// idempotency key was built from (P13). A refused stamp returns the row
+	// as it now stands with applied=false and a nil error. A failure that
+	// names a PaymentIntent goes through MarkPaymentFailedReportingTransition.
 	StampChargeOutcome(ctx context.Context, tenantID, id string, attemptSeq int64, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string) (domain.Invoice, bool, error)
-	// MarkPaymentFailedReportingTransition records a failure and reports
-	// whether THIS call is the first to fire the failure-notification set
-	// (payment.failed event + customer email + dunning) for this
-	// PaymentIntent. SettleFailed gates those side-effects on the flag so a
-	// concurrent at-least-once redelivery of the same
-	// payment_intent.payment_failed doesn't double-notify. PI-keyed because
-	// failure is non-terminal (one fresh failure per dunning retry).
-	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error)
+	// MarkPaymentFailedReportingTransition records one report that a
+	// PaymentIntent failed. It moves the invoice only for the attempt the
+	// invoice is waiting on, and reports whether this was the first notice
+	// for that PaymentIntent (payment.failed + customer email fire once per
+	// PaymentIntent). See the PostgresStore method for the rule.
+	MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id string, report domain.PaymentFailureReport, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error)
 	// MarkPaid flips status='paid', payment_status='succeeded',
 	// amount_paid=amount_due, amount_due=0 in one transaction. Used by
 	// the engine's zero-amount auto-pay path, the billing threshold

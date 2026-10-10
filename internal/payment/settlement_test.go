@@ -222,7 +222,7 @@ func TestSettleFailed_ConcurrentRedeliveryFiresSideEffectsOnce(t *testing.T) {
 	// Both racers hold the same stale `processing` snapshot.
 	stale := invoices.invoices["inv_1"]
 	for i := 0; i < 2; i++ {
-		if err := s.SettleFailed(context.Background(), "t1", stale, "pi_x", "Your card was declined.", false, SourceWebhook); err != nil {
+		if err := s.SettleFailed(context.Background(), "t1", stale, PaymentFailure{PaymentIntentID: "pi_x", Message: "Your card was declined."}, SourceWebhook); err != nil {
 			t.Fatalf("settle attempt %d: %v", i+1, err)
 		}
 	}
@@ -239,17 +239,21 @@ func TestSettleFailed_ConcurrentRedeliveryFiresSideEffectsOnce(t *testing.T) {
 	if failedEmail.sends != 1 {
 		t.Errorf("payment-failed email enqueued %d times, want exactly 1 (no double-notify)", failedEmail.sends)
 	}
-	if len(dunning.calls) != 1 {
-		t.Errorf("StartDunning called %d times, want exactly 1", len(dunning.calls))
+	// StartDunning is re-driven by every report that records the failure, not
+	// only the first: the first reporter's start can fail after its stamp
+	// committed, and a test-clock invoice has no backfill. It is idempotent by
+	// invoice (0085 UNIQUE), so the second call returns the existing run.
+	if len(dunning.calls) != 2 {
+		t.Errorf("StartDunning called %d times, want 2 (once per recording report)", len(dunning.calls))
 	}
 }
 
 // TestSettleFailed_InlinePresetThenWebhookStillNotifiesOnce guards the trap that
-// makes a naive status-keyed gate WRONG: the synchronous charge path stamps
-// payment_status='failed' (same PI) WITHOUT firing notifications, deferring them
-// to the payment_intent.payment_failed webhook. The webhook's SettleFailed must
-// still fire the notification set exactly once — the PI marker (which the inline
-// preset never writes), not the status, is the dedup key.
+// makes a naive status-keyed gate WRONG: an invoice stamped
+// payment_status='failed' (same PI) with no notification sent — the shape every
+// charge-call decline left before the charge call reported through
+// SettleFailed. The webhook's SettleFailed must still fire the notification set
+// exactly once — the PI marker, not the status, is the dedup key.
 func TestSettleFailed_InlinePresetThenWebhookStillNotifiesOnce(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	// Inline charge path already flipped payment_status=failed with pi_y but did
@@ -268,7 +272,7 @@ func TestSettleFailed_InlinePresetThenWebhookStillNotifiesOnce(t *testing.T) {
 	s.SetEventDispatcher(events)
 	s.SetEmailPaymentFailed(failedEmail, staticCustomerEmail{})
 
-	if err := s.SettleFailed(context.Background(), "t1", invoices.invoices["inv_1"], "pi_y", "Your card was declined.", false, SourceWebhook); err != nil {
+	if err := s.SettleFailed(context.Background(), "t1", invoices.invoices["inv_1"], PaymentFailure{PaymentIntentID: "pi_y", Message: "Your card was declined."}, SourceWebhook); err != nil {
 		t.Fatalf("SettleFailed: %v", err)
 	}
 	if got := invoices.failedEventEnqueues; got != 1 {
@@ -281,7 +285,9 @@ func TestSettleFailed_InlinePresetThenWebhookStillNotifiesOnce(t *testing.T) {
 
 // TestSettleFailed_NewRetryPIFiresAgain ensures the gate does NOT suppress a
 // genuinely new failure: a later dunning retry uses a fresh PI, so its failure
-// is a distinct event and must fire its own notification set.
+// is a distinct event and must fire its own notification set. The retry's
+// decline is reported by its own charge call (ChargedAtSeq), which is how a
+// new PI reaches an invoice holding the previous one.
 func TestSettleFailed_NewRetryPIFiresAgain(t *testing.T) {
 	invoices := newMockInvoiceUpdater()
 	invoices.invoices["inv_1"] = domain.Invoice{
@@ -294,13 +300,17 @@ func TestSettleFailed_NewRetryPIFiresAgain(t *testing.T) {
 	s := NewStripe(&mockStripeClient{}, invoices, newMockWebhookStore(), nil, dunning)
 	s.SetEventDispatcher(events)
 
-	// First failure (pi_a), then a retry's failure on a fresh PI (pi_b).
-	// suppressCustomerEmail=true (dunning-retry PIs), so we assert on the event.
-	for _, pi := range []string{"pi_a", "pi_b"} {
-		cur := invoices.invoices["inv_1"]
-		if err := s.SettleFailed(context.Background(), "t1", cur, pi, "declined", true, SourceWebhook); err != nil {
-			t.Fatalf("SettleFailed %s: %v", pi, err)
-		}
+	// First failure (pi_a, the PI the invoice holds), then a dunning retry's
+	// decline on a fresh PI (pi_b) reported by its charge call. Dunning-retry
+	// PIs skip the customer email, so we assert on the event.
+	cur := invoices.invoices["inv_1"]
+	if err := s.SettleFailed(context.Background(), "t1", cur, PaymentFailure{PaymentIntentID: "pi_a", Message: "declined", Purpose: piPurposeDunningRetry}, SourceWebhook); err != nil {
+		t.Fatalf("SettleFailed pi_a: %v", err)
+	}
+	cur = invoices.invoices["inv_1"]
+	seq := cur.ChargeAttemptSeq
+	if err := s.SettleFailed(context.Background(), "t1", cur, PaymentFailure{PaymentIntentID: "pi_b", Message: "declined", Purpose: piPurposeDunningRetry, ChargedAtSeq: &seq}, SourceChargeResponse); err != nil {
+		t.Fatalf("SettleFailed pi_b: %v", err)
 	}
 	if got := invoices.failedEventEnqueues; got != 2 {
 		t.Errorf("payment.failed enqueued %d times across two distinct PIs, want 2 (a new retry failure is a fresh event)", got)
@@ -322,7 +332,7 @@ func TestSettleFailed_FiresDunningFromAnySource(t *testing.T) {
 	// convergence Phase 2 depends on — the primitive fires dunning regardless
 	// of who discovered the failure, so a dropped-webhook recovery is not a
 	// silent under-collection.
-	if err := s.SettleFailed(context.Background(), "t1", invoices.invoices["inv_1"], "pi_def", "Your card was declined.", false, SourceReconciler); err != nil {
+	if err := s.SettleFailed(context.Background(), "t1", invoices.invoices["inv_1"], PaymentFailure{PaymentIntentID: "pi_def", Message: "Your card was declined."}, SourceReconciler); err != nil {
 		t.Fatalf("SettleFailed: %v", err)
 	}
 
@@ -353,7 +363,7 @@ func TestSettleFailed_OutOfOrderGuardLivesInPrimitive(t *testing.T) {
 	// A stale failure for an already-paid invoice, arriving via ANY source,
 	// must be a no-op — the guard lives in the primitive, so every settler
 	// (reconciler included) inherits it.
-	if err := s.SettleFailed(context.Background(), "t1", invoices.invoices["inv_1"], "pi_stale", "Your card was declined.", false, SourceReconciler); err != nil {
+	if err := s.SettleFailed(context.Background(), "t1", invoices.invoices["inv_1"], PaymentFailure{PaymentIntentID: "pi_stale", Message: "Your card was declined."}, SourceReconciler); err != nil {
 		t.Fatalf("SettleFailed: %v", err)
 	}
 
@@ -478,7 +488,11 @@ func TestSettleFailed_NoticeRidesFailStampTx_BeforeDunningStart(t *testing.T) {
 		s.SetEmailPaymentFailed(sequencedFailedEmail{seq}, staticCustomerEmail{})
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := s.SettleFailed(ctx, "t1", invoices.invoices["inv_1"], "pi_abc", "card declined", suppress, SourceWebhook); err != nil {
+		purpose := ""
+		if suppress {
+			purpose = piPurposeDunningRetry
+		}
+		if err := s.SettleFailed(ctx, "t1", invoices.invoices["inv_1"], PaymentFailure{PaymentIntentID: "pi_abc", Message: "card declined", Purpose: purpose}, SourceWebhook); err != nil {
 			t.Fatalf("SettleFailed(suppress=%v): %v", suppress, err)
 		}
 		return seq, dunning

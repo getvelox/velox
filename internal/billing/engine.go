@@ -5578,11 +5578,11 @@ func (e *Engine) processAutoCharge(ctx context.Context, pending []domain.Invoice
 		if _, err := e.charger.ChargeInvoice(chargeCtx, inv.TenantID, inv, stripeCusID, stripePMID); err != nil {
 			cancel()
 			// A DEFINITE failure (declined, or refused outright by Stripe):
-			// ChargeInvoice stamped payment_status='failed' AND started
-			// dunning inline (stripe.go startDunningWithRetry; the
-			// payment_intent.payment_failed webhook is the idempotent second
-			// path, and a lost/late webhook is backstopped by the
-			// EnrollFailedWithoutDunning reconciler). Clearing the flag is the
+			// ChargeInvoice recorded payment_status='failed' AND started
+			// dunning inline (a decline through SettleFailed, which its
+			// payment_intent.payment_failed webhook re-drives; a failure with
+			// no PaymentIntent through stampUnreportableOutcome; a lost start is
+			// backstopped by the EnrollFailedWithoutDunning reconciler). Clearing the flag is the
 			// OWNERSHIP HANDOFF: dunning's retry schedule drives every later
 			// attempt, so the sweep is never a second retry owner (ADR-116).
 			//
@@ -5592,7 +5592,9 @@ func (e *Engine) processAutoCharge(ctx context.Context, pending []domain.Invoice
 			// after credits, a swapped card, the test-clock anchor), which
 			// Stripe rejects as an idempotency conflict, and that parks the
 			// invoice as unknown for good. The inline dunning run, which
-			// retries under its own key, and the payment_failed webhook own it.
+			// retries under its own key, and the payment_failed webhook own it:
+			// the charge call wrote its attempt row before reporting, so the
+			// webhook records the decline as the invoice's newest attempt.
 			var pe *payment.PaymentError
 			if errors.As(err, &pe) && !pe.Unknown {
 				if err := e.invoices.SetAutoChargePending(ctx, inv.TenantID, inv.ID, false); err != nil {

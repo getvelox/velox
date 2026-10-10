@@ -134,12 +134,12 @@ func TestSettleTransitions_EmailRidesTheTx(t *testing.T) {
 
 	t.Run("decline notice rides the fail stamp", func(t *testing.T) {
 		tenantID, invID, store := settleFixture(t, db, ctx, "settle-failed")
-		_, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_decline", "card_declined",
+		_, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_decline", "card_declined"),
 			func(tx *sql.Tx, _ domain.Invoice) error {
 				_, e := outbox.Enqueue(ctx, tx, tenantID, email.TypePaymentFailed, map[string]any{"to": "c@example.test"})
 				return e
 			})
-		if err != nil || !first {
+		if err != nil || !first.FirstNotice {
 			t.Fatalf("fail stamp: first=%v err=%v", first, err)
 		}
 		if n := outboxCount(t, db, ctx, tenantID, email.TypePaymentFailed); n != 1 {
@@ -147,8 +147,8 @@ func TestSettleTransitions_EmailRidesTheTx(t *testing.T) {
 		}
 		// A same-PI redelivery is not the first report: no second notice.
 		ran := false
-		if _, again, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_decline", "card_declined",
-			func(tx *sql.Tx, _ domain.Invoice) error { ran = true; return nil }); err != nil || again || ran {
+		if _, again, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_decline", "card_declined"),
+			func(tx *sql.Tx, _ domain.Invoice) error { ran = true; return nil }); err != nil || again.FirstNotice || ran {
 			t.Fatalf("same-PI redelivery must not re-notify: again=%v hookRan=%v err=%v", again, ran, err)
 		}
 	})

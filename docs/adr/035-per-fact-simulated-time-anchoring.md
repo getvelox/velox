@@ -146,9 +146,10 @@ wall-clock too (e.g. Stripe webhook outage).
 
 ### 7. One email per retry attempt
 
-`payment_intent.payment_failed` webhook handler suppresses its generic
-payment-failed email when the PI carries `velox_purpose=dunning_retry`
-metadata. Dunning's `paymentRetrierAdapter` tags retry PIs via a
+The generic payment-failed email is skipped when the PI carries
+`velox_purpose=dunning_retry` metadata. (Amended 2026-10-11: the skip lives in
+`SettleFailed`, so it applies to whichever source reports the decline — the
+charge response, the webhook or the reconciler — not only the webhook.) Dunning's `paymentRetrierAdapter` tags retry PIs via a
 dedicated `Stripe.ChargeInvoiceForDunningRetry` method (typed,
 explicit — not a ctx-threaded side channel, not a cross-domain
 options import). End state per exhausted N-retry run: 1 initial-fail
