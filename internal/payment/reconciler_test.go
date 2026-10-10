@@ -38,15 +38,19 @@ func (m *mockReconcileStore) ListUnknownPayments(_ context.Context, _ time.Time,
 	return out, nil
 }
 
-func (m *mockReconcileStore) UpdatePayment(_ context.Context, _, id string, ps domain.InvoicePaymentStatus, piID, errMsg string, _ *time.Time) (domain.Invoice, error) {
+func (m *mockReconcileStore) StampChargeOutcome(_ context.Context, _, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, piID, errMsg string) (domain.Invoice, bool, error) {
 	inv, ok := m.byID[id]
 	if !ok {
-		return domain.Invoice{}, errs.ErrNotFound
+		return domain.Invoice{}, false, errs.ErrNotFound
+	}
+	if inv.ChargeAttemptSeq != attemptSeq {
+		return *inv, false, nil
 	}
 	inv.PaymentStatus = ps
 	inv.StripePaymentIntentID = piID
 	inv.LastPaymentError = errMsg
-	return *inv, nil
+	inv.ChargeAttemptSeq++
+	return *inv, true, nil
 }
 
 func (m *mockReconcileStore) MarkPaid(_ context.Context, _, id string, piID string, paidAt time.Time) (domain.Invoice, error) {

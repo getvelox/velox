@@ -297,17 +297,20 @@ func (m *memStore) FinalizeWithDates(_ context.Context, tenantID, id string, iss
 	return inv, nil
 }
 
-func (m *memStore) UpdatePayment(_ context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, stripeID, errMsg string, paidAt *time.Time) (domain.Invoice, error) {
+func (m *memStore) StampChargeOutcome(_ context.Context, tenantID, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, stripeID, errMsg string) (domain.Invoice, bool, error) {
 	inv, ok := m.invoices[id]
 	if !ok || inv.TenantID != tenantID {
-		return domain.Invoice{}, errs.ErrNotFound
+		return domain.Invoice{}, false, errs.ErrNotFound
+	}
+	if inv.ChargeAttemptSeq != attemptSeq {
+		return inv, false, nil
 	}
 	inv.PaymentStatus = ps
 	inv.StripePaymentIntentID = stripeID
 	inv.LastPaymentError = errMsg
-	inv.PaidAt = paidAt
+	inv.ChargeAttemptSeq++
 	m.invoices[id] = inv
-	return inv, nil
+	return inv, true, nil
 }
 
 func (m *memStore) MarkPaymentFailedReportingTransition(_ context.Context, tenantID, id, piID, errMsg string, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {

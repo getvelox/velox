@@ -47,7 +47,7 @@ type ReconcileInvoiceStore interface {
 	// a parked invoice via a CAS on the full parked shape. false = another
 	// path (usually the webhook) won the race; the caller does nothing.
 	AdoptPaymentIntentIfParked(ctx context.Context, tenantID, id, paymentIntentID string) (bool, error)
-	UpdatePayment(ctx context.Context, tenantID, id string, ps domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string, paidAt *time.Time) (domain.Invoice, error)
+	StampChargeOutcome(ctx context.Context, tenantID, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string) (domain.Invoice, bool, error)
 	MarkPaid(ctx context.Context, tenantID, id string, stripePaymentIntentID string, paidAt time.Time) (domain.Invoice, error)
 }
 
@@ -60,7 +60,7 @@ type ReconcileInvoiceStore interface {
 //
 // Optional (nil-tolerant): when unwired — narrow unit tests only; production
 // always wires it via SetSettler — the reconciler falls back to the legacy bare
-// MarkPaid / UpdatePayment writes (no dunning/event/email). The fallback exists
+// MarkPaid / StampChargeOutcome writes (no dunning/event/email). The fallback exists
 // solely so status-discovery tests need not construct a full Stripe adapter.
 type Settler interface {
 	SettleSucceeded(ctx context.Context, tenantID string, inv domain.Invoice, paymentIntentID string, capturedCents int64, source SettlementSource) error
@@ -525,9 +525,11 @@ func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string
 		// forever (the 0167 shape). Ordinarily the winner's settle removes the
 		// row from the sweep's predicate and this stamp is a harmless one-off —
 		// but a row whose invoice status is terminal while payment_status stays
-		// in-flight (no real writer produces one; seed/ops artifacts can) hits
-		// this branch every tick, and two such rows were found monopolising the
-		// walk DB's queue head, never stamped, since May 2026.
+		// in-flight hits this branch every tick, and two such rows were found
+		// monopolising the walk DB's queue head, never stamped, since May 2026.
+		// The charge path's late outcome write produced that shape whenever a
+		// settle landed during the Stripe call, until StampChargeOutcome refused it
+		// (P13); rows written before that fix, and seed/ops artifacts, remain.
 		r.recordSync(ctx, inv, providerStatus)
 		slog.Info("reconcile: invoice already settled by another path, skipping",
 			"invoice_id", inv.ID, "payment_status", fresh.PaymentStatus, "invoice_status", fresh.Status)
@@ -573,8 +575,8 @@ func (r *Reconciler) settle(ctx context.Context, inv domain.Invoice, piID string
 		}
 		return true, nil
 	default:
-		if _, err := r.invoices.UpdatePayment(ctx, inv.TenantID, inv.ID,
-			domain.PaymentFailed, piID, failMsg, nil); err != nil {
+		if _, _, err := r.invoices.StampChargeOutcome(ctx, inv.TenantID, inv.ID, fresh.ChargeAttemptSeq,
+			domain.PaymentFailed, piID, failMsg); err != nil {
 			return false, fmt.Errorf("mark failed (legacy): %w", err)
 		}
 		return true, nil

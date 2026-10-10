@@ -33,10 +33,7 @@ func TestParkedInvoiceHasExactlyOneWayOut(t *testing.T) {
 
 	park := func(num string) domain.Invoice {
 		inv := seedClaimableInvoice(t, db, ctx, tenantID, num)
-		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID,
-			domain.PaymentUnknown, "", "ambiguous: no payment_intent_id", nil); err != nil {
-			t.Fatalf("park: %v", err)
-		}
+		stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentUnknown, "", "ambiguous: no payment_intent_id")
 		return inv
 	}
 
@@ -72,10 +69,7 @@ func TestParkedInvoiceHasExactlyOneWayOut(t *testing.T) {
 		// carve-out would be a hole rather than an exit: that charge really is
 		// resolving, and writing it off races the settle.
 		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-PARK-PROC")
-		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID,
-			domain.PaymentProcessing, "pi_live_1", "", nil); err != nil {
-			t.Fatalf("set processing: %v", err)
-		}
+		stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentProcessing, "pi_live_1", "")
 		if _, err := svc.MarkUncollectible(ctx, tenantID, inv.ID); err == nil {
 			t.Fatal("a charge that is genuinely in flight must NOT be write-off-able — it is about to settle")
 		}

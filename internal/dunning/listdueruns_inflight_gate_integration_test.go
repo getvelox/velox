@@ -95,8 +95,8 @@ func TestListDueRuns_InFlightGate(t *testing.T) {
 		// nothing, which once made the "unknown WITH a PI" row indistinguishable
 		// from a parked one and its assertion vacuous. Write it the real way.
 		if piID != "" {
-			if _, err := istore.UpdatePayment(ctx, tenantID, inv.ID, ps, piID, "", nil); err != nil {
-				t.Fatalf("attach payment intent to %s: %v", num, err)
+			if _, applied, err := istore.StampChargeOutcome(ctx, tenantID, inv.ID, inv.ChargeAttemptSeq, ps, piID, ""); err != nil || !applied {
+				t.Fatalf("attach payment intent to %s: applied=%v err=%v", num, applied, err)
 			}
 			after, gerr := istore.Get(ctx, tenantID, inv.ID)
 			if gerr != nil {

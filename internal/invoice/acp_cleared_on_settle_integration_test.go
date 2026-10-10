@@ -65,17 +65,14 @@ func TestTerminalTransitions_ClearAutoChargePending(t *testing.T) {
 		}
 	})
 
-	t.Run("UpdatePayment succeeded clears it; failed leaves it", func(t *testing.T) {
+	t.Run("a failed charge outcome leaves it; the later settle clears it", func(t *testing.T) {
 		inv := seedClaimableInvoice(t, db, ctx, tenantID, "INV-ACP-UPDPAY")
-		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID, domain.PaymentFailed, "pi_acp_f", "card_declined", nil); err != nil {
-			t.Fatalf("update failed: %v", err)
-		}
+		stampOutcome(t, store, ctx, tenantID, inv.ID, domain.PaymentFailed, "pi_acp_f", "card_declined")
 		if !acp(inv.ID) {
 			t.Error("a FAILED payment must keep the flag — the invoice is still on the charge track (dunning/collect)")
 		}
-		paidAt := time.Now().UTC()
-		if _, err := store.UpdatePayment(ctx, tenantID, inv.ID, domain.PaymentSucceeded, "pi_acp_s", "", &paidAt); err != nil {
-			t.Fatalf("update succeeded: %v", err)
+		if _, err := store.MarkPaid(ctx, tenantID, inv.ID, "pi_acp_s", time.Now().UTC()); err != nil {
+			t.Fatalf("settle: %v", err)
 		}
 		if acp(inv.ID) {
 			t.Error("a succeeded payment must retire the flag")
