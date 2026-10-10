@@ -116,7 +116,7 @@ func TestChargeKey_MovesOnEveryRecordedOutcome(t *testing.T) {
 		before := chargeKey(t, store, ctx, tenantID, inv.ID)
 
 		if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, inv.ID,
-			"pi_declined_2", "card_declined", nil); err != nil {
+			failureReport("pi_declined_2", "card_declined"), nil); err != nil {
 			t.Fatalf("mark payment failed: %v", err)
 		}
 

@@ -118,7 +118,7 @@ func (a *anchorCapturingSettler) SettleSucceeded(ctx context.Context, _ string, 
 	return nil
 }
 
-func (a *anchorCapturingSettler) SettleFailed(context.Context, string, domain.Invoice, string, string, bool, SettlementSource) error {
+func (a *anchorCapturingSettler) SettleFailed(context.Context, string, domain.Invoice, PaymentFailure, SettlementSource) error {
 	return nil
 }
 

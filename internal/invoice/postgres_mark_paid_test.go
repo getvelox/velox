@@ -173,11 +173,11 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	}
 
 	// First failure for pi_a → first notification for this PI.
-	inv, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil)
+	inv, firstRes, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_a", "card declined"), nil)
 	if err != nil {
 		t.Fatalf("first failure: %v", err)
 	}
-	if !first {
+	if !firstRes.FirstNotice {
 		t.Error("first failure for pi_a must report firstForThisPI=true")
 	}
 	if inv.PaymentStatus != domain.PaymentFailed || inv.LastPaymentError != "card declined" {
@@ -185,20 +185,20 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	}
 
 	// Duplicate delivery of the SAME PI → not a fresh notification.
-	_, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil)
+	_, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_a", "card declined"), nil)
 	if err != nil {
 		t.Fatalf("duplicate failure: %v", err)
 	}
-	if dup {
+	if dup.FirstNotice {
 		t.Error("duplicate failure for pi_a must report firstForThisPI=false (no double-notify)")
 	}
 
 	// A later retry fails on a fresh PI → a genuinely new event.
-	_, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_b", "card declined again", nil)
+	_, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, ownDecline(t, store, ctx, tenantID, invID, "pi_b", "card declined again"), nil)
 	if err != nil {
 		t.Fatalf("retry failure: %v", err)
 	}
-	if !retry {
+	if !retry.FirstNotice {
 		t.Error("a new retry PI (pi_b) must report firstForThisPI=true (a distinct failure event)")
 	}
 
@@ -208,11 +208,11 @@ func TestMarkPaymentFailedReportingTransition_FlagsTheRealNotification(t *testin
 	if _, err := store.MarkPaid(ctx, tenantID, invID, "pi_b", now); err != nil {
 		t.Fatalf("mark paid: %v", err)
 	}
-	stale, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_stale", "late decline", nil)
+	stale, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_stale", "late decline"), nil)
 	if err != nil {
 		t.Fatalf("stale failure: %v", err)
 	}
-	if staleFirst {
+	if staleFirst.FirstNotice || staleFirst.Recorded {
 		t.Error("out-of-order failure on a paid invoice must report firstForThisPI=false")
 	}
 	if stale.PaymentStatus != domain.PaymentSucceeded || stale.Status != domain.InvoicePaid {
@@ -240,7 +240,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		invID := seedFinalizedInvoice(t, db, store, ctx, tenantID)
 
 		// First failure for pi_a → one payment.failed enqueued in the same tx.
-		if _, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil); err != nil || !first {
+		if _, first, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_a", "card declined"), nil); err != nil || !first.FirstNotice {
 			t.Fatalf("first failure: first=%v err=%v", first, err)
 		}
 		if want := []string{domain.EventPaymentFailed}; !reflect.DeepEqual(rec.events, want) {
@@ -248,7 +248,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		}
 
 		// Same-PI redelivery → no second enqueue.
-		if _, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_a", "card declined", nil); err != nil || dup {
+		if _, dup, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_a", "card declined"), nil); err != nil || dup.FirstNotice {
 			t.Fatalf("duplicate failure: dup=%v err=%v", dup, err)
 		}
 		if len(rec.events) != 1 {
@@ -256,7 +256,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		}
 
 		// A retry's failure on a fresh PI is a genuinely new event → fires again.
-		if _, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_b", "declined again", nil); err != nil || !retry {
+		if _, retry, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, ownDecline(t, store, ctx, tenantID, invID, "pi_b", "declined again"), nil); err != nil || !retry.FirstNotice {
 			t.Fatalf("retry failure: retry=%v err=%v", retry, err)
 		}
 		if len(rec.events) != 2 {
@@ -269,7 +269,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 			t.Fatalf("mark paid: %v", err)
 		}
 		preStale := len(rec.events)
-		if _, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_stale", "late decline", nil); err != nil || staleFirst {
+		if _, staleFirst, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_stale", "late decline"), nil); err != nil || staleFirst.FirstNotice || staleFirst.Recorded {
 			t.Fatalf("stale failure: first=%v err=%v", staleFirst, err)
 		}
 		// preStale includes the invoice.paid enqueue from MarkPaid.
@@ -284,7 +284,7 @@ func TestMarkPaymentFailed_EnqueuesPaymentFailedInTx(t *testing.T) {
 		store.SetOutboxEnqueuer(&failingOutbox{failOn: domain.EventPaymentFailed})
 		invID := seedFinalizedInvoice(t, db, store, ctx, tenantID)
 
-		if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, "pi_x", "declined", nil); err == nil {
+		if _, _, err := store.MarkPaymentFailedReportingTransition(ctx, tenantID, invID, failureReport("pi_x", "declined"), nil); err == nil {
 			t.Fatal("a failed in-tx enqueue must surface an error")
 		}
 		after, err := store.Get(ctx, tenantID, invID)

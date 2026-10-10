@@ -48,7 +48,7 @@ Distinct primitives per lifecycle moment:
 | Moment | Email type | Trigger | Timeline label | Attention banner CTA |
 |---|---|---|---|---|
 | Invoice finalized, **no PM on file** | `payment_setup_request` (renamed from `payment_update_request`) | `noPaymentMethodNotifierAdapter` | "Customer notified — set up payment method" | (already correct) Resend payment link / Open customer page |
-| Invoice **charge attempted, declined** (auto-charge OR interactive Pay\*) | `payment_failed` (existing) | `Stripe.handlePaymentFailed` | "Payment-failed email sent to customer" | Update payment method / Retry payment |
+| Invoice **charge attempted, declined** (auto-charge OR interactive Pay\*) | `payment_failed` (existing) | `Stripe.SettleFailed`, from whichever reports the decline first: the charge response, the webhook or the reconciler (ADR-049 amendment 2026-10-11) | "Payment-failed email sent to customer" | Update payment method / Retry payment |
 | Dunning retries | `payment_failed` / `dunning_warning` / `dunning_escalation` | dunning notifier | (existing) | (existing) |
 
 \* With one suppression: when the PI's `velox_purpose` metadata is
@@ -90,6 +90,11 @@ sent. The customer is staring at the same failure inline.
     dunning regardless of suppression — only the customer email is
     suppressed (suppression is about avoiding duplicate notification,
     not about disabling the dunning state machine).
+  - *Amended 2026-10-11 (ADR-049 amendment):* a hosted-page decline no
+    longer fires `payment.failed`, marks the invoice failed or starts
+    dunning. Velox never waits on a hosted attempt, so its failure is
+    recorded on its own attempt row only. The suppression above now
+    applies to dunning-retry attempts.
 
 **API wiring layer** (`internal/api/`):
 - `noPaymentMethodNotifierAdapter` switched to a narrow consumer-side

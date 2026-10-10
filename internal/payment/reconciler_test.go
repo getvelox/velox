@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -38,19 +39,22 @@ func (m *mockReconcileStore) ListUnknownPayments(_ context.Context, _ time.Time,
 	return out, nil
 }
 
-func (m *mockReconcileStore) StampChargeOutcome(_ context.Context, _, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, piID, errMsg string) (domain.Invoice, bool, error) {
+func (m *mockReconcileStore) MarkPaymentFailedReportingTransition(_ context.Context, _, id string, report domain.PaymentFailureReport, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error) {
 	inv, ok := m.byID[id]
 	if !ok {
-		return domain.Invoice{}, false, errs.ErrNotFound
+		return domain.Invoice{}, domain.PaymentFailureResult{}, errs.ErrNotFound
 	}
-	if inv.ChargeAttemptSeq != attemptSeq {
-		return *inv, false, nil
+	if !report.MovesInvoice(inv.Status, inv.PaymentStatus, inv.StripePaymentIntentID, inv.ChargeAttemptSeq, domain.AttemptNotVelox) {
+		return *inv, domain.PaymentFailureResult{}, nil
 	}
-	inv.PaymentStatus = ps
-	inv.StripePaymentIntentID = piID
-	inv.LastPaymentError = errMsg
-	inv.ChargeAttemptSeq++
-	return *inv, true, nil
+	first := inv.PaymentStatus != domain.PaymentFailed || inv.StripePaymentIntentID != report.PaymentIntentID
+	inv.PaymentStatus = domain.PaymentFailed
+	inv.StripePaymentIntentID = report.PaymentIntentID
+	inv.LastPaymentError = report.Message
+	if first {
+		inv.ChargeAttemptSeq++
+	}
+	return *inv, domain.PaymentFailureResult{Recorded: true, FirstNotice: first}, nil
 }
 
 func (m *mockReconcileStore) MarkPaid(_ context.Context, _, id string, piID string, paidAt time.Time) (domain.Invoice, error) {

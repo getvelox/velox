@@ -426,12 +426,13 @@ func (a *paymentRetrierAdapter) RetryPayment(ctx context.Context, tenantID, invo
 	defer cancel()
 
 	// Dedicated retry-charge method tags the PI as velox_purpose=
-	// dunning_retry so the payment_intent.payment_failed webhook
-	// handler suppresses its generic payment-failed email — dunning
-	// fires its own warning / escalation email inline. Without the
-	// tag the customer receives two emails per failed retry: the
-	// webhook's "Payment failed for invoice X" plus dunning's
-	// "Action required — payment retry for invoice X (Attempt N of M)".
+	// dunning_retry so the decline's report — from this call's own
+	// response or from the payment_intent.payment_failed webhook —
+	// skips the generic payment-failed email; dunning fires its own
+	// warning / escalation email inline. Without the tag the customer
+	// receives two emails per failed retry: "Payment failed for invoice
+	// X" plus dunning's "Action required — payment retry for invoice X
+	// (Attempt N of M)".
 	_, err = a.charger.ChargeInvoiceForDunningRetry(chargeCtx, tenantID, inv, ps.StripeCustomerID, ps.StripePaymentMethodID)
 	if cerr := classifyDunningRetryError(err); cerr != nil {
 		// Counted declines carry their PI id across the boundary (typed
@@ -1262,7 +1263,7 @@ func (a *hostedInvoiceStripeAdapter) mintForClaim(
 		"velox_invoice_id":  inv.ID,
 		"velox_tenant_id":   claim.TenantID,
 		"velox_customer_id": inv.CustomerID,
-		"velox_purpose":     "hosted_invoice_pay",
+		"velox_purpose":     payment.PurposeHostedInvoicePay,
 	}
 	// `customer` + `setup_future_usage=off_session` is the canonical
 	// Stripe pattern for "charge now, save the card for auto-charge of

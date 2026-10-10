@@ -551,13 +551,21 @@ func (m *mockInvoiceUpdaterHandler) MarkPaidCardSettlementTransition(ctx context
 	return inv, transitioned, err
 }
 
-func (m *mockInvoiceUpdaterHandler) MarkPaymentFailedReportingTransition(_ context.Context, _, id, piID, errMsg string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
+func (m *mockInvoiceUpdaterHandler) MarkPaymentFailedReportingTransition(_ context.Context, _, id string, report domain.PaymentFailureReport, _ func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error) {
+	piID := report.PaymentIntentID
 	inv, ok := m.invoices[id]
 	if !ok {
-		return domain.Invoice{}, false, fmt.Errorf("not found")
+		return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("not found")
 	}
-	if inv.paymentStatus == "succeeded" {
-		return domain.Invoice{ID: id, TenantID: inv.tenantID}, false, nil
+	status := domain.InvoiceStatus(inv.status)
+	if status == "" {
+		status = domain.InvoiceFinalized
+	}
+	// This fake does not model the seq (see the mockInvoice comment): the
+	// webhook reports it handles never carry ChargedAtSeq.
+	if !report.MovesInvoice(status, domain.InvoicePaymentStatus(inv.paymentStatus), inv.stripePI, 0, domain.AttemptNotVelox) {
+		return domain.Invoice{ID: id, TenantID: inv.tenantID, Status: status,
+			PaymentStatus: domain.InvoicePaymentStatus(inv.paymentStatus), StripePaymentIntentID: inv.stripePI}, domain.PaymentFailureResult{}, nil
 	}
 	if m.failNotedPI == nil {
 		m.failNotedPI = make(map[string]string)
@@ -565,13 +573,14 @@ func (m *mockInvoiceUpdaterHandler) MarkPaymentFailedReportingTransition(_ conte
 	first := m.failNotedPI[id] != piID
 	inv.paymentStatus = "failed"
 	inv.stripePI = piID
-	inv.lastError = errMsg
+	inv.lastError = report.Message
 	m.invoices[id] = inv
 	m.failNotedPI[id] = piID
 	if piID != "" {
 		m.byPI[piID] = id
 	}
-	return domain.Invoice{ID: id, TenantID: inv.tenantID, PaymentStatus: domain.PaymentFailed}, first, nil
+	return domain.Invoice{ID: id, TenantID: inv.tenantID, Status: status, PaymentStatus: domain.PaymentFailed, StripePaymentIntentID: piID},
+		domain.PaymentFailureResult{Recorded: true, FirstNotice: first}, nil
 }
 
 func (m *mockInvoiceUpdaterHandler) SetPaymentCard(_ context.Context, _, _ string, _, _ string) error {

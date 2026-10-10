@@ -95,6 +95,11 @@ type mockInvoiceUpdater struct {
 	// store enqueuing payment.failed IN-TX, gated on firstForThisPI (same-PI
 	// redelivery no-ops; a new retry PI fires again).
 	failedEventEnqueues int
+	// attemptTrigger is each PaymentIntent's attempt-row trigger_source.
+	attemptTrigger map[string]domain.ChargeAttemptTrigger
+	// unrecordedFailures counts failure reports that did not move the
+	// invoice (another attempt's, a hosted attempt's, or a paid invoice's).
+	unrecordedFailures int
 }
 
 func newMockInvoiceUpdater() *mockInvoiceUpdater {
@@ -109,6 +114,10 @@ func newMockInvoiceUpdater() *mockInvoiceUpdater {
 // charge-path test exercises the same refusal production does. The SQL itself
 // is proven in internal/invoice/charge_outcome_guard_integration_test.go.
 func (m *mockInvoiceUpdater) StampChargeOutcome(_ context.Context, tenantID, id string, attemptSeq int64, ps domain.InvoicePaymentStatus, piID, errMsg string) (domain.Invoice, bool, error) {
+	if ps == domain.PaymentFailed && piID != "" {
+		// Mirror the store: a failure naming a PaymentIntent is a report, not a stamp.
+		return domain.Invoice{}, false, fmt.Errorf("stamp charge outcome: a failure naming a PaymentIntent goes through MarkPaymentFailedReportingTransition")
+	}
 	inv, ok := m.invoices[id]
 	if !ok {
 		return domain.Invoice{}, false, errs.ErrNotFound
@@ -147,7 +156,48 @@ func (m *mockInvoiceUpdater) GetByStripePaymentIntentID(_ context.Context, _, pi
 
 func (m *mockInvoiceUpdater) RecordChargeAttempt(_ context.Context, _ string, a domain.InvoiceChargeAttempt) error {
 	m.chargeAttempts = append(m.chargeAttempts, a)
+	m.noteAttemptTrigger(a.StripePaymentIntentID, a.Trigger)
 	return nil
+}
+
+// noteAttemptTrigger mirrors the attempt row's trigger_source: the first
+// writer of a PaymentIntent's row sets it and no later write changes it —
+// RecordChargeAttempt's ON CONFLICT leaves it alone, and the failure report's
+// in-tx upsert inserts 'external' when no row exists yet.
+func (m *mockInvoiceUpdater) noteAttemptTrigger(pi string, trigger domain.ChargeAttemptTrigger) {
+	if pi == "" {
+		return
+	}
+	if m.attemptTrigger == nil {
+		m.attemptTrigger = make(map[string]domain.ChargeAttemptTrigger)
+	}
+	if cur, ok := m.attemptTrigger[pi]; !ok || (cur == domain.ChargeTriggerExternal && trigger != domain.ChargeTriggerExternal) {
+		m.attemptTrigger[pi] = trigger
+	}
+}
+
+// attemptStanding mirrors veloxAttemptStandingTx: chargeAttempts holds the
+// Velox-made attempt rows in write order.
+func (m *mockInvoiceUpdater) attemptStanding(id, pi string) domain.AttemptStanding {
+	var newest string
+	mine := false
+	for _, a := range m.chargeAttempts {
+		if a.InvoiceID != id && a.InvoiceID != "" {
+			continue
+		}
+		newest = a.StripePaymentIntentID
+		if a.StripePaymentIntentID == pi {
+			mine = true
+		}
+	}
+	switch {
+	case !mine:
+		return domain.AttemptNotVelox
+	case newest == pi:
+		return domain.AttemptNewest
+	default:
+		return domain.AttemptSuperseded
+	}
 }
 
 func (m *mockInvoiceUpdater) ReleaseAutoChargeClaim(_ context.Context, _, id string) error {
@@ -211,47 +261,54 @@ func (m *mockInvoiceUpdater) MarkPaidCardSettlementTransition(ctx context.Contex
 	return inv, transitioned, err
 }
 
-func (m *mockInvoiceUpdater) MarkPaymentFailedReportingTransition(_ context.Context, _, id, piID, errMsg string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
+func (m *mockInvoiceUpdater) MarkPaymentFailedReportingTransition(_ context.Context, _, id string, report domain.PaymentFailureReport, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error) {
+	piID := report.PaymentIntentID
+	if piID == "" {
+		return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("mark payment failed: a failure report needs a PaymentIntent id")
+	}
 	inv, ok := m.invoices[id]
 	if !ok {
-		return domain.Invoice{}, false, errs.ErrNotFound
+		return domain.Invoice{}, domain.PaymentFailureResult{}, errs.ErrNotFound
 	}
-	// Out-of-order failure for an already-settled invoice: no-op, never a
-	// fresh notification (mirrors the FOR UPDATE store guard).
-	if inv.Status == domain.InvoicePaid || inv.PaymentStatus == domain.PaymentSucceeded {
-		return inv, false, nil
+	standing := domain.AttemptNotVelox
+	if inv.StripePaymentIntentID != piID && report.ChargedAtSeq == nil && !report.External {
+		standing = m.attemptStanding(id, piID)
+	}
+	// Every report upserts its attempt row in the store's transaction.
+	m.noteAttemptTrigger(piID, domain.ChargeTriggerExternal)
+	// The same rule the store applies under its row lock (domain-owned, so
+	// this fake cannot drift from it).
+	if !report.MovesInvoice(inv.Status, inv.PaymentStatus, inv.StripePaymentIntentID, inv.ChargeAttemptSeq, standing) {
+		m.unrecordedFailures++
+		return inv, domain.PaymentFailureResult{}, nil
 	}
 	if m.failNotedPI == nil {
 		m.failNotedPI = make(map[string]string)
 	}
-	// firstForThisPI: have we NOT yet fired failure notifications for this PI?
 	first := m.failNotedPI[id] != piID
 	// Mirror the store: a NEW outcome bumps charge_attempt_seq; re-recording
 	// the failure already on the row (same PI) does not.
-	alreadyRecorded := inv.PaymentStatus == domain.PaymentFailed && piID != "" && inv.StripePaymentIntentID == piID
+	alreadyRecorded := inv.PaymentStatus == domain.PaymentFailed && inv.StripePaymentIntentID == piID
 	if !alreadyRecorded {
 		inv.ChargeAttemptSeq++
 	}
 	inv.PaymentStatus = domain.PaymentFailed
 	inv.StripePaymentIntentID = piID
-	inv.LastPaymentError = errMsg
+	inv.LastPaymentError = report.Message
 	m.invoices[id] = inv
 	m.failNotedPI[id] = piID
-	if piID != "" {
-		m.byPI[piID] = id
-	}
-	// Mirror the real store: payment.failed is enqueued IN-TX, gated on
-	// firstForThisPI (crash-safe with the failed-stamp; SettleFailed no longer
-	// post-commit-fires it).
+	m.byPI[piID] = id
+	// Mirror the real store: payment.failed is enqueued IN-TX, gated on the
+	// first notice for this PaymentIntent.
 	if first {
 		m.failedEventEnqueues++
 	}
 	if first && then != nil {
-		// Mirror the store: the hook runs inside the transition when this call
-		// is the first report for this PaymentIntent.
+		// Mirror the store: the hook runs inside the transition on the first
+		// notice for this PaymentIntent.
 		_ = then(nil, inv)
 	}
-	return inv, first, nil
+	return inv, domain.PaymentFailureResult{Recorded: true, FirstNotice: first}, nil
 }
 
 func (m *mockInvoiceUpdater) SetPaymentCard(_ context.Context, _, id, brand, last4 string) error {

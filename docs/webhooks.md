@@ -158,7 +158,7 @@ Summary:
 | `invoice.marked_uncollectible` | Invoice written off as bad debt |
 | `invoice.voided` | Invoice voided |
 | `payment.succeeded` | Charge collected (carries the PaymentIntent id; transactional) |
-| `payment.failed` | Charge attempt failed (transactional) |
+| `payment.failed` | A charge attempt the invoice was waiting on failed — once per PaymentIntent, whether Velox learned it from Stripe's response, the webhook or the reconciler. A decline on the hosted payment page does not fire it: the customer saw it there and can retry (transactional) |
 | `payment_method.attached` | A payment method landed on a customer (Checkout setup completed) — queued invoices charge on the next sweep |
 | `payment_method.updated` | A customer's payment-method setup completed/refreshed (carries card brand + last4) |
 | `payment.duplicate_charge` | A second charge succeeded on an already-paid invoice — refund needed |

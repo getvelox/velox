@@ -796,8 +796,10 @@ func (s *PostgresStore) FinalizeWithDates(ctx context.Context, tenantID, id stri
 	return inv, nil
 }
 
-// StampChargeOutcome records a charge attempt's outcome (processing / unknown
-// / failed) on the invoice. The write lands AFTER a Stripe round-trip, and
+// StampChargeOutcome records a charge attempt's outcome (processing, unknown,
+// or a failure with no PaymentIntent) on the invoice. A failure that names a
+// PaymentIntent goes through MarkPaymentFailedReportingTransition, which
+// applies the same seq CAS for the charge call (ChargedAtSeq). The write lands AFTER a Stripe round-trip, and
 // another outcome can be recorded during it: the PaymentIntent's own webhook
 // (paid or declined), an offline payment, a hosted Checkout payment, a credit
 // cover. A late write over any of those undid it (P13) — a paid invoice lost
@@ -826,7 +828,16 @@ func (s *PostgresStore) FinalizeWithDates(ctx context.Context, tenantID, id stri
 // as it now stands with applied=false and a nil error.
 func (s *PostgresStore) StampChargeOutcome(ctx context.Context, tenantID, id string, attemptSeq int64, paymentStatus domain.InvoicePaymentStatus, stripePaymentIntentID, lastPaymentError string) (domain.Invoice, bool, error) {
 	switch paymentStatus {
-	case domain.PaymentProcessing, domain.PaymentUnknown, domain.PaymentFailed:
+	case domain.PaymentProcessing, domain.PaymentUnknown:
+	case domain.PaymentFailed:
+		// A failure that names a PaymentIntent is a report the webhook and
+		// reconciler may repeat; it goes through
+		// MarkPaymentFailedReportingTransition so the invoice is moved once
+		// and notified once between them. Only a failure with nothing to
+		// match (the create itself failed) is stamped here.
+		if stripePaymentIntentID != "" {
+			return domain.Invoice{}, false, fmt.Errorf("stamp charge outcome: a failure naming a PaymentIntent goes through MarkPaymentFailedReportingTransition")
+		}
 	default:
 		// succeeded goes through MarkPaid*, which also flips status and
 		// amounts and emits the paid events.
@@ -870,83 +881,99 @@ func (s *PostgresStore) StampChargeOutcome(ctx context.Context, tenantID, id str
 	return inv, applied, nil
 }
 
-// MarkPaymentFailedReportingTransition records a payment failure and reports
-// whether THIS call is the first to fire the failure-NOTIFICATION set for this
-// PaymentIntent — the payment.failed outbound event, the customer "payment
-// failed" email, and auto-started dunning. It is the failed-path analogue of
-// MarkPaidReportingTransition, but the dedup key is the PaymentIntent id, not
-// the status, because failure is non-terminal: an invoice legitimately re-fails
-// once per dunning retry, each with a distinct PI.
+// MarkPaymentFailedReportingTransition records one report that a
+// PaymentIntent failed, and says whether it moved the invoice and whether it
+// was the first notice for that PaymentIntent. It is the one writer of a
+// failure that carries a PaymentIntent: the charge call's own decline, the
+// payment_intent.payment_failed webhook and the reconciler all report here.
+// (A decline with no PaymentIntent is stamped by StampChargeOutcome — there
+// is nothing to notify about and nothing for a webhook to match.)
 //
-// SELECT … FOR UPDATE serializes concurrent callers. The inbound webhook dedup
-// is a non-atomic read pre-check (payment.HandleWebhook), so two at-least-once
-// deliveries of the SAME payment_intent.payment_failed — or a reconciler
-// recovery racing the original webhook — can both reach here. The first sets
-// failure_notified_pi to this PI and returns firstForThisPI=true; the duplicate
-// sees the marker already equals this PI and returns false, so SettleFailed
-// fires the notification set once, not twice.
+// The invoice records one attempt at a time: the one it is waiting on. A
+// report moves the invoice's payment fields only when it is about that
+// attempt — domain.PaymentFailureReport.MovesInvoice, evaluated here under
+// the row lock. Before, a webhook for any PaymentIntent of the invoice moved
+// it: a late decline for an older attempt relinked the stale PaymentIntent,
+// hid an in-flight one from the reconciler, and bumped the seq out from
+// under a charge in flight.
 //
-// The synchronous charge path stamps payment_status='failed' (same PI) WITHOUT
-// firing notifications, deferring them to the webhook — so the marker, which
-// that path never writes, is the only reliable discriminator (a status-keyed
-// gate would suppress the webhook's notifications entirely).
+// Every report lands on its own attempt row (ADR-102), in this transaction,
+// so a failure that does not move the invoice still shows on the timeline.
 //
-// An already-settled invoice (an out-of-order failure for a charge that already
-// succeeded) is left untouched and returns false — the authoritative form of
-// SettleFailed's stale-snapshot guard, so a stale failure can never flip a paid
-// invoice back to failed.
-// then (nil = none) runs INSIDE this transaction, after the failed-stamp and
-// its payment.failed enqueue, only when THIS call is the first report for this
-// PaymentIntent, under a SAVEPOINT (ADR-040 amendment — see the paid twin).
-func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id, paymentIntentID, lastPaymentError string, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, bool, error) {
+// Notification is keyed on the PaymentIntent, not the status: failure is
+// not terminal (each dunning retry is a new PaymentIntent and a real event),
+// and redeliveries plus the charge response report the same PaymentIntent
+// more than once. failure_notified_pi holds the last one notified;
+// FirstNotice is true for the first report that records a PaymentIntent the
+// marker does not hold. payment.failed is enqueued in this transaction on
+// FirstNotice; then (nil = none) runs on FirstNotice too, under a SAVEPOINT
+// (ADR-040 amendment — see the paid twin).
+//
+// The seq moves only when a new outcome is recorded. Re-recording the
+// PaymentIntent the invoice already holds as failed touches only the marker:
+// a charge already in flight for the next attempt reads the seq as its CAS,
+// and a bump here would refuse that charge's outcome.
+//
+// A paid invoice is never touched: a failure arriving after a success would
+// otherwise null paid_at, relink a stale PaymentIntent and dun a paid invoice.
+func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context, tenantID, id string, report domain.PaymentFailureReport, then func(tx *sql.Tx, fresh domain.Invoice) error) (domain.Invoice, domain.PaymentFailureResult, error) {
+	if report.PaymentIntentID == "" {
+		return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("mark payment failed: a failure report needs a PaymentIntent id")
+	}
+	pi := report.PaymentIntentID
+
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
-		return domain.Invoice{}, false, err
+		return domain.Invoice{}, domain.PaymentFailureResult{}, err
 	}
 	defer postgres.Rollback(tx)
 
 	var status, paymentStatus string
 	var notifiedPI, rowPI sql.NullString
+	var seq, amountDue int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT status, payment_status, failure_notified_pi, stripe_payment_intent_id FROM invoices WHERE id = $1 FOR UPDATE`, id,
-	).Scan(&status, &paymentStatus, &notifiedPI, &rowPI); err != nil {
+		`SELECT status, payment_status, failure_notified_pi, stripe_payment_intent_id, charge_attempt_seq, amount_due_cents
+		 FROM invoices WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&status, &paymentStatus, &notifiedPI, &rowPI, &seq, &amountDue); err != nil {
 		if err == sql.ErrNoRows {
-			return domain.Invoice{}, false, errs.ErrNotFound
+			return domain.Invoice{}, domain.PaymentFailureResult{}, errs.ErrNotFound
 		}
-		return domain.Invoice{}, false, fmt.Errorf("load invoice for mark-failed: %w", err)
+		return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("load invoice for mark-failed: %w", err)
 	}
 
-	// Out-of-order failure for an already-settled invoice: never flip paid back
-	// to failed (would null paid_at, relink a stale PI, and dun a paid invoice).
-	// Return the row unchanged; not a fresh notification.
-	if domain.InvoiceStatus(status) == domain.InvoicePaid || domain.InvoicePaymentStatus(paymentStatus) == domain.PaymentSucceeded {
+	holdsThisPI := rowPI.Valid && rowPI.String == pi
+	standing := domain.AttemptNotVelox
+	if !holdsThisPI && report.ChargedAtSeq == nil && !report.External {
+		if standing, err = veloxAttemptStandingTx(ctx, tx, id, pi); err != nil {
+			return domain.Invoice{}, domain.PaymentFailureResult{}, err
+		}
+	}
+	if !report.MovesInvoice(domain.InvoiceStatus(status), domain.InvoicePaymentStatus(paymentStatus), rowPI.String, seq, standing) {
+		// Not the attempt the invoice waits on: its own attempt row is the
+		// only write. A paid invoice's attempt row still records the failure —
+		// the attempt did fail.
+		if err := upsertChargeAttemptTx(ctx, tx, tenantID, id, pi,
+			domain.ChargeAttemptFailed, report.Message, amountDue); err != nil {
+			return domain.Invoice{}, domain.PaymentFailureResult{}, err
+		}
 		var inv domain.Invoice
 		if err := tx.QueryRowContext(ctx,
 			`SELECT `+invCols+` FROM invoices WHERE id = $1`, id,
 		).Scan(s.scanInvDest(&inv)...); err != nil {
-			return domain.Invoice{}, false, fmt.Errorf("reload settled invoice: %w", err)
+			return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("reload invoice after unrecorded failure: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return domain.Invoice{}, false, err
+			return domain.Invoice{}, domain.PaymentFailureResult{}, err
 		}
-		return inv, false, nil
+		return inv, domain.PaymentFailureResult{}, nil
 	}
 
-	firstForThisPI := !notifiedPI.Valid || notifiedPI.String != paymentIntentID
-
-	// This PaymentIntent's failure is already the recorded outcome (the
-	// synchronous decline stamped it, or this is a redelivery): record the
-	// notification marker, but do NOT re-stamp the PI or bump
-	// charge_attempt_seq. The seq moves only when a NEW outcome is recorded —
-	// a charge already in flight for the next attempt reads it as its CAS
-	// (StampChargeOutcome, P13), and a bump here would refuse that charge's
-	// outcome and leave its PaymentIntent recorded nowhere.
-	alreadyRecorded := domain.InvoicePaymentStatus(paymentStatus) == domain.PaymentFailed &&
-		paymentIntentID != "" && rowPI.Valid && rowPI.String == paymentIntentID
+	firstNotice := !notifiedPI.Valid || notifiedPI.String != pi
+	alreadyFailed := holdsThisPI && domain.InvoicePaymentStatus(paymentStatus) == domain.PaymentFailed
 
 	now := clock.Now(ctx)
 	var inv domain.Invoice
-	if alreadyRecorded {
+	if alreadyFailed {
 		err = tx.QueryRowContext(ctx, `
 			UPDATE invoices SET
 				last_payment_error = $1,
@@ -954,7 +981,7 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 				updated_at = $3
 			WHERE id = $4
 			RETURNING `+invCols,
-			postgres.NullableString(lastPaymentError), paymentIntentID, now, id,
+			postgres.NullableString(report.Message), pi, now, id,
 		).Scan(s.scanInvDest(&inv)...)
 	} else {
 		err = tx.QueryRowContext(ctx, `
@@ -967,63 +994,96 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 				updated_at = $3
 			WHERE id = $4
 			RETURNING `+invCols,
-			postgres.NullableString(paymentIntentID), postgres.NullableString(lastPaymentError), now, id,
+			pi, postgres.NullableString(report.Message), now, id,
 		).Scan(s.scanInvDest(&inv)...)
 	}
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return domain.Invoice{}, false, errs.ErrNotFound
+			return domain.Invoice{}, domain.PaymentFailureResult{}, errs.ErrNotFound
 		}
-		return domain.Invoice{}, false, err
+		return domain.Invoice{}, domain.PaymentFailureResult{}, err
 	}
 	// payment.failed — enqueued in the SAME tx as the failed-stamp, so the event
 	// is crash-safe with the transition instead of fire-and-forget post-commit
 	// (the mirror of payment.succeeded in markPaidReportingTransition; ADR-040
-	// transactional outbox). Gated on firstForThisPI: a same-PI redelivery must
-	// not double-notify, while a NEW retry PI is a genuinely distinct failure and
-	// fires again. The out-of-order paid guard above returns before reaching
-	// here, so a stale failure on a settled invoice never emits.
-	if firstForThisPI && s.outbox != nil {
+	// transactional outbox). Gated on firstNotice: a second report of the same
+	// PaymentIntent must not double-notify, while a NEW retry PaymentIntent is
+	// a genuinely distinct failure and fires again.
+	if firstNotice && s.outbox != nil {
 		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventPaymentFailed, map[string]any{
 			"invoice_id":        inv.ID,
 			"customer_id":       inv.CustomerID,
-			"payment_intent_id": paymentIntentID,
-			"failure_message":   lastPaymentError,
+			"payment_intent_id": pi,
+			"failure_message":   report.Message,
 			"amount_cents":      inv.TotalAmountCents,
 			"currency":          inv.Currency,
 		}); err != nil {
-			return domain.Invoice{}, false, fmt.Errorf("enqueue payment.failed: %w", err)
+			return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("enqueue payment.failed: %w", err)
 		}
 	}
 	// ADR-103: the attempt's outcome lands in THIS tx, so the timeline's
 	// single payment owner can never disagree with the invoice's state.
-	if err := upsertChargeAttemptTx(ctx, tx, tenantID, inv.ID, paymentIntentID,
-		domain.ChargeAttemptFailed, lastPaymentError, inv.AmountDueCents); err != nil {
-		return domain.Invoice{}, false, err
+	if err := upsertChargeAttemptTx(ctx, tx, tenantID, inv.ID, pi,
+		domain.ChargeAttemptFailed, report.Message, inv.AmountDueCents); err != nil {
+		return domain.Invoice{}, domain.PaymentFailureResult{}, err
 	}
 	// The money email rides THIS transaction (ADR-040 amendment): enqueued
 	// beside the events above, gated on the same transition, inside a
 	// SAVEPOINT so an email-side failure is logged and skipped while the
 	// settlement still commits. Never the reverse — a receipt must not be
 	// able to un-settle a payment.
-	if then != nil && firstForThisPI {
+	if then != nil && firstNotice {
 		if _, err := tx.ExecContext(ctx, "SAVEPOINT settle_email"); err != nil {
-			return domain.Invoice{}, false, err
+			return domain.Invoice{}, domain.PaymentFailureResult{}, err
 		}
 		if herr := then(tx, inv); herr != nil {
 			if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT settle_email"); rerr != nil {
-				return domain.Invoice{}, false, rerr
+				return domain.Invoice{}, domain.PaymentFailureResult{}, rerr
 			}
 			slog.ErrorContext(ctx, "settlement email enqueue failed inside the settle transaction — settlement committed, email skipped",
 				"invoice_id", id, "tenant_id", tenantID, "error", herr)
 		} else if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT settle_email"); err != nil {
-			return domain.Invoice{}, false, err
+			return domain.Invoice{}, domain.PaymentFailureResult{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.Invoice{}, false, err
+		return domain.Invoice{}, domain.PaymentFailureResult{}, err
 	}
-	return inv, firstForThisPI, nil
+	return inv, domain.PaymentFailureResult{Recorded: true, FirstNotice: firstNotice}, nil
+}
+
+// veloxAttemptStandingTx says where PaymentIntent pi stands among the
+// attempts Velox itself made on the invoice (domain.AttemptStanding). Velox's
+// charge call writes its attempt row when Stripe answers, before it reports
+// the outcome, and its charges are serialized by the charge lease, so the
+// newest Velox-made row is the attempt the invoice is waiting on. Rows for
+// attempts Velox did not make (hosted Checkout, inserted 'external' by a
+// report) do not count. Empty-PI rows (a create that failed, a parked
+// attempt) do: an older attempt's late decline is superseded by them.
+func veloxAttemptStandingTx(ctx context.Context, tx *sql.Tx, invoiceID, pi string) (domain.AttemptStanding, error) {
+	var mine bool
+	var newest sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT
+			EXISTS (SELECT 1 FROM invoice_charge_attempts
+				WHERE invoice_id = $1 AND stripe_payment_intent_id = $2
+				  AND trigger_source IN ('auto_charge', 'dunning_retry')),
+			(SELECT stripe_payment_intent_id FROM invoice_charge_attempts
+				WHERE invoice_id = $1 AND trigger_source IN ('auto_charge', 'dunning_retry')
+				ORDER BY created_at DESC, id DESC LIMIT 1)`,
+		invoiceID, pi,
+	).Scan(&mine, &newest)
+	if err != nil {
+		return domain.AttemptNotVelox, fmt.Errorf("read attempt standing: %w", err)
+	}
+	switch {
+	case !mine:
+		return domain.AttemptNotVelox, nil
+	case newest.String == pi:
+		return domain.AttemptNewest, nil
+	default:
+		return domain.AttemptSuperseded, nil
+	}
 }
 
 // MarkPaid settles an invoice (status→paid, amount_due→0) and is the
@@ -2325,10 +2385,11 @@ func (s *PostgresStore) ListAutoChargePending(ctx context.Context, after domain.
 
 // ListFailedWithoutDunningRun powers the dunning_backfill reconciler: finalized,
 // still-owed invoices in payment_status='failed' that have NO dunning run at all.
-// SettleFailed starts dunning POST-COMMIT (best-effort, behind the firstForThisPI
-// gate), so a crash — or an exhausted StartDunning retry — in that window leaves
-// the invoice failed-but-undunned, and a same-PI webhook redelivery skips the
-// restart (firstForThisPI=false). This sweep hands those invoices back to the
+// SettleFailed starts dunning POST-COMMIT (best-effort), so a crash — or an
+// exhausted StartDunning retry — in that window leaves the invoice
+// failed-but-undunned. A later report of the same decline re-drives the start,
+// but nothing guarantees one arrives (the charge call's response is the only
+// report when the webhook is lost). This sweep hands those invoices back to the
 // idempotent StartDunning so they still reach a terminal.
 //
 // The NOT EXISTS on invoice_dunning_runs is STATE-AGNOSTIC (no state filter):
@@ -3751,9 +3812,11 @@ func upsertChargeAttemptTx(ctx context.Context, tx *sql.Tx, tenantID, invoiceID,
 // place — one attempt, one row. Monotonicity: 'succeeded' is terminal
 // (a settle can never un-succeed an attempt); every other outcome may
 // advance, including failed → succeeded (3DS second try on one PI).
-// sim_effective_at and trigger_source are set at insert and never
-// overwritten — the settle path's wall-clock context must not strip an
-// attempt's billing-axis anchor. Empty-PI attempts (the PI create
+// sim_effective_at is set at insert and never overwritten — the settle
+// path's wall-clock context must not strip an attempt's billing-axis
+// anchor. trigger_source is likewise kept, except that this writer replaces
+// an 'external' left by a report that arrived first: the charge call made
+// the attempt, so its trigger is the truth. Empty-PI attempts (the PI create
 // itself failed) insert-only; there is no twin to dedup against.
 func (s *PostgresStore) RecordChargeAttempt(ctx context.Context, tenantID string, a domain.InvoiceChargeAttempt) error {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
@@ -3787,6 +3850,12 @@ func (s *PostgresStore) RecordChargeAttempt(ctx context.Context, tenantID string
 				amount_cents = CASE WHEN EXCLUDED.amount_cents > 0
 					THEN EXCLUDED.amount_cents ELSE invoice_charge_attempts.amount_cents END,
 				sim_effective_at = COALESCE(invoice_charge_attempts.sim_effective_at, EXCLUDED.sim_effective_at),
+				-- A report that beat this writer (its webhook arrived first)
+				-- inserted the row as 'external'. This writer made the attempt,
+				-- so its trigger is the truth: the timeline label and the
+				-- attempt order (veloxAttemptStandingTx) both read it.
+				trigger_source = CASE WHEN invoice_charge_attempts.trigger_source = 'external'
+					THEN EXCLUDED.trigger_source ELSE invoice_charge_attempts.trigger_source END,
 				updated_at = now()`,
 			tenantID, a.InvoiceID, a.StripePaymentIntentID, a.Trigger, a.Outcome,
 			a.ProviderReason, a.AmountCents, a.OccurredAt, postgres.NullableTime(a.SimEffectiveAt),

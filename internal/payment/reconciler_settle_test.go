@@ -30,8 +30,8 @@ func (r *recordingSettler) SettleSucceeded(_ context.Context, _ string, inv doma
 	return nil
 }
 
-func (r *recordingSettler) SettleFailed(_ context.Context, _ string, inv domain.Invoice, piID, failMsg string, suppress bool, _ SettlementSource) error {
-	r.failed = append(r.failed, settledCall{invoiceID: inv.ID, piID: piID, failMsg: failMsg, suppressEmail: suppress})
+func (r *recordingSettler) SettleFailed(_ context.Context, _ string, inv domain.Invoice, f PaymentFailure, _ SettlementSource) error {
+	r.failed = append(r.failed, settledCall{invoiceID: inv.ID, piID: f.PaymentIntentID, failMsg: f.Message, suppressEmail: failureEmailSuppressed(f.Purpose)})
 	return nil
 }
 
