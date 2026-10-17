@@ -70,6 +70,10 @@ export interface MarginTotals {
   by_model: unknown[]
 }
 
+// MARGIN_EMPTY_NOTE is shown when the window holds no usage. It states only
+// that, because whether provider rates exist is not known here (#1111).
+export const MARGIN_EMPTY_NOTE = 'No usage in this window yet.'
+
 // marginWindowIsEmpty is true when the window holds no usage: no revenue, no
 // provider cost, no uncosted events and no model rows.
 export function marginWindowIsEmpty(rep: MarginTotals): boolean {
