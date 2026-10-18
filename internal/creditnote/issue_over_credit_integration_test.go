@@ -321,9 +321,10 @@ func TestIssue_InvoicePaidWhileWaitingForItsRow_TakesThePaidPath(t *testing.T) {
 	}()
 	// Issue has read "unpaid" and is waiting on the row in LockForCreditNoteTx.
 	// That statement is longer than the 1 KiB pg_stat_activity keeps, so match
-	// its start, the invoice column list. A plain SELECT never waits on a row
-	// lock, so a blocked one is the locking read.
-	testutil.WaitForLockWaiter(t, r.ctx, testutil.AdminPool(t), "COALESCE(subscription_id,''), invoice_number")
+	// its start: SELECT and the invoice column list. A plain SELECT never waits
+	// on a row lock, so a blocked one is the locking read. The column list alone
+	// is not enough: the UPDATE that applies the note returns the same columns.
+	testutil.WaitForLockWaiter(t, r.ctx, testutil.AdminPool(t), "SELECT id, tenant_id, customer_id, COALESCE(subscription_id,'')")
 	if err := holder.Commit(); err != nil {
 		t.Fatalf("commit holder: %v", err)
 	}
