@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sagarsuperuser/velox/internal/creditnote"
 	"github.com/sagarsuperuser/velox/internal/domain"
@@ -49,8 +48,9 @@ func TestCreditNoteNumber_MultiInvoiceReliefDoesNotDeadlockWithCreate(t *testing
 		})
 		createErr <- cerr
 	}()
-	// Let the concurrent create reach its wait behind the relief transaction.
-	time.Sleep(500 * time.Millisecond)
+	// The concurrent create must be waiting for the second invoice's lock,
+	// which the relief took up front, and not for the number row.
+	testutil.WaitForLockWaiter(t, ctx, testutil.AdminPool(t), "pg_advisory_xact_lock")
 
 	_, reliefErr := svc.CreateAdjustmentDraftTx(ctx, relief, tenantID, invB.ID, 100, "cancel_relief", "unused time")
 	if reliefErr == nil {

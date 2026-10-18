@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/credit"
 	"github.com/sagarsuperuser/velox/internal/creditnote"
 	"github.com/sagarsuperuser/velox/internal/customer"
@@ -17,10 +16,8 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
-	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
-	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
 type swapLockPlanReader struct{ plans map[string]domain.Plan }
@@ -46,7 +43,6 @@ func TestCrossIntervalSwap_ReliefAndNewInvoiceNumberOnOneTx(t *testing.T) {
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	creditSvc := credit.NewService(credit.NewPostgresStore(db))
 	settingsStore := tenant.NewSettingsStore(db)
 
@@ -74,15 +70,7 @@ func TestCrossIntervalSwap_ReliefAndNewInvoiceNumberOnOneTx(t *testing.T) {
 	cnSvc := creditnote.NewService(creditnote.NewPostgresStore(db), invoiceStore, nil)
 	cnSvc.SetNumberGenerator(settingsStore)
 
-	e := billing.NewEngine(
-		&subStoreAdapter{subStore}, &usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore}, &invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
-	)
-	e.SetIntervalReader(subStore)
-	e.SetTaxProviderResolver(tax.NewResolver(nil))
-	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	e.SetDunningStarter(testDunningStarter{})
+	e := newRealEngine(db, clock.NewFake(periodStart.Add(time.Hour)))
 	e.SetCreditGranter(creditSvc)
 	e.SetCreditNoteAdjuster(cnSvc)
 	e.SetCreditHeadroomReader(cnSvc)

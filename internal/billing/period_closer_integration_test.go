@@ -438,25 +438,6 @@ func TestThresholdFire_vs_Close_ResetFalse_CloseFirst(t *testing.T) {
 // T5 — S3: immediate cancel holds the row while the fire arrives.
 // ---------------------------------------------------------------------------
 
-// waitForLockWaiter polls pg_stat_activity until one backend is waiting on a
-// row lock in a statement matching `like` — the fire's CAS blocked behind the
-// cancel's row lock.
-func waitForLockWaiter(t *testing.T, ctx context.Context, admin *sql.DB, like string) {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int
-		if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE $1`, "%"+like+"%").Scan(&n); err != nil {
-			t.Fatalf("pg_stat_activity: %v", err)
-		}
-		if n >= 1 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("no backend blocked on a row lock in %q within 15s — the fire never reached its CAS", like)
-}
-
 // TestImmediateCancel_vs_ThresholdFire_Concurrent: the cancel's transitionInTx
 // X-locks the row from its first statement; the fire's CAS blocks behind it,
 // then re-evaluates against the committed row (status=canceled) → 0 rows. The
@@ -483,7 +464,8 @@ func TestImmediateCancel_vs_ThresholdFire_Concurrent(t *testing.T) {
 					fired, errs := r.fire.engine.ScanThresholds(r.at(r.t1), 50)
 					done <- fireOut{fired, errs}
 				}()
-				waitForLockWaiter(t, r.base, admin, "UPDATE subscriptions")
+				// The fire's CAS blocked behind the cancel's row lock.
+				testutil.WaitForLockWaiter(t, r.base, admin, "UPDATE subscriptions")
 				_, _, err := r.closer.engine.BillFinalOnImmediateCancelTx(ctxCancel, tx, canceled)
 				return err
 			}); err != nil {

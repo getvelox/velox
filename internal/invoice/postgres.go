@@ -1477,7 +1477,7 @@ func (s *PostgresStore) ApplyCreditNote(ctx context.Context, tenantID, id string
 func (s *PostgresStore) LockForCreditNoteTx(ctx context.Context, tx *sql.Tx, tenantID, id string) (domain.Invoice, error) {
 	var inv domain.Invoice
 	err := tx.QueryRowContext(ctx,
-		`SELECT `+invCols+` FROM invoices WHERE id = $1 AND tenant_id = $2 FOR NO KEY UPDATE`,
+		`SELECT `+invCols+` FROM invoices WHERE id = $1 AND tenant_id = $2`, // MUTATION: lock dropped
 		id, tenantID).Scan(s.scanInvDest(&inv)...)
 	if err == sql.ErrNoRows {
 		return domain.Invoice{}, errs.ErrNotFound
@@ -2229,7 +2229,7 @@ var noLiveHostedPageSQL = "NOT " + domain.HostedCheckoutLiveSQL("invoices.id")
 // snapshot taken after any such commit. false = the row is not visible.
 func lockInvoiceForChargeClaim(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
 	var one int
-	err := tx.QueryRowContext(ctx, `SELECT 1 FROM invoices WHERE id = $1 FOR UPDATE`, id).Scan(&one)
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM invoices WHERE id = $1`, id).Scan(&one) // MUTATION: lock dropped
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

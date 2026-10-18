@@ -2,12 +2,12 @@ package billing_test
 
 import (
 	"context"
-	"github.com/sagarsuperuser/velox/internal/platform/leader"
-	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"testing"
 	"time"
 
-	"github.com/sagarsuperuser/velox/internal/billing"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
+
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/invoice"
@@ -16,10 +16,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
-	"github.com/sagarsuperuser/velox/internal/tax"
-	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
-	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
 // TestBilling_SamePeriodTwice_IdempotentSkip is FLOW B3 item #1, sequential: billing
@@ -36,7 +33,6 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
 
 	tenantID := testutil.CreateTestTenant(t, db, "Idempotency Test Corp")
@@ -71,17 +67,7 @@ func TestBilling_SamePeriodTwice_IdempotentSkip(t *testing.T) {
 	subscriptiontest.SetBillingCycle(t, ctx, db, tenantID, sub.ID, periodStart, periodEnd, periodEnd, 0)
 
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore},
-		&usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
-		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, fakeClk)
 
 	// Run 1: bills the period.
 	count1, errs1 := engine.RunCycle(ctx, 50, nil)

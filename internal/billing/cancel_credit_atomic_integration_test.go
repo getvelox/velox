@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/credit"
 	"github.com/sagarsuperuser/velox/internal/creditnote"
 	"github.com/sagarsuperuser/velox/internal/customer"
@@ -18,10 +17,8 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
-	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
-	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
 // cnGrantAdapter bridges credit.Service → creditnote.CreditGranter so Issue()
@@ -96,10 +93,8 @@ func TestCancelCredit_DraftFailure_RealTxRollsBackCancel(t *testing.T) {
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	creditStore := credit.NewPostgresStore(db)
 	creditSvc := credit.NewService(creditStore)
-	settingsStore := tenant.NewSettingsStore(db)
 
 	tenantID := testutil.CreateTestTenant(t, db, "Cancel Credit Rollback")
 	plan, err := pricingStore.CreatePlan(ctx, tenantID, domain.Plan{
@@ -114,15 +109,7 @@ func TestCancelCredit_DraftFailure_RealTxRollsBackCancel(t *testing.T) {
 	periodEnd := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	cancelAt := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
 
-	e := billing.NewEngine(
-		&subStoreAdapter{subStore}, &usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore}, &invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
-	)
-	e.SetIntervalReader(subStore)
-	e.SetTaxProviderResolver(tax.NewResolver(nil))
-	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	e.SetDunningStarter(testDunningStarter{})
+	e := newRealEngine(db, clock.NewFake(periodStart.Add(time.Hour)))
 	e.SetCreditGranter(creditSvc)
 	e.SetCreditNoteAdjuster(&failingDraftAdjuster{err: errInjectedDraftFail})
 	// Real headroom reader (required post-#442); no prior CNs exist, so the
@@ -196,7 +183,6 @@ func TestCancelCredit_PaidInAdvance_DraftAtomicAndReconcilerRecovers(t *testing.
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	creditStore := credit.NewPostgresStore(db)
 	creditSvc := credit.NewService(creditStore)
 	creditNoteStore := creditnote.NewPostgresStore(db)
@@ -220,15 +206,7 @@ func TestCancelCredit_PaidInAdvance_DraftAtomicAndReconcilerRecovers(t *testing.
 	creditNoteSvc := creditnote.NewService(creditNoteStore, invoiceStore, nil, &cnGrantAdapter{creditSvc})
 	creditNoteSvc.SetNumberGenerator(settingsStore)
 
-	e := billing.NewEngine(
-		&subStoreAdapter{subStore}, &usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore}, &invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
-	)
-	e.SetIntervalReader(subStore)
-	e.SetTaxProviderResolver(tax.NewResolver(nil))
-	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	e.SetDunningStarter(testDunningStarter{})
+	e := newRealEngine(db, clock.NewFake(periodStart.Add(time.Hour)))
 	e.SetCreditGranter(creditSvc)
 	e.SetInvoiceVoider(invoiceSvc)
 	e.SetCreditNoteAdjuster(creditNoteSvc)

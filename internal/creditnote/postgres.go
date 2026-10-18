@@ -182,7 +182,7 @@ func lockInvoiceTx(ctx context.Context, tx *sql.Tx, tenantID, invoiceID string) 
 func (s *PostgresStore) LockInvoicesTx(ctx context.Context, tx *sql.Tx, tenantID string, invoiceIDs []string) error {
 	ids := slices.Clone(invoiceIDs)
 	slices.Sort(ids)
-	for _, id := range slices.Compact(ids) {
+	for _, id := range slices.Compact(ids)[:0] { // MUTATION: up-front locks dropped
 		if err := lockInvoiceTx(ctx, tx, tenantID, id); err != nil {
 			return err
 		}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sagarsuperuser/velox/internal/credit"
 	"github.com/sagarsuperuser/velox/internal/creditnote"
@@ -320,7 +319,12 @@ func TestIssue_InvoicePaidWhileWaitingForItsRow_TakesThePaidPath(t *testing.T) {
 		cn, ierr := r.notes.Issue(r.ctx, r.tenantID, draft.ID)
 		done <- result{cn, ierr}
 	}()
-	time.Sleep(400 * time.Millisecond) // Issue has read "unpaid" and is waiting on the row
+	// Issue has read "unpaid" and is waiting on the row in LockForCreditNoteTx.
+	// That statement is longer than the 1 KiB pg_stat_activity keeps, so match
+	// its start: SELECT and the invoice column list. A plain SELECT never waits
+	// on a row lock, so a blocked one is the locking read. The column list alone
+	// is not enough: the UPDATE that applies the note returns the same columns.
+	testutil.WaitForLockWaiter(t, r.ctx, testutil.AdminPool(t), "SELECT id, tenant_id, customer_id, COALESCE(subscription_id,'')")
 	if err := holder.Commit(); err != nil {
 		t.Fatalf("commit holder: %v", err)
 	}
