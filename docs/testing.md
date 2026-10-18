@@ -79,6 +79,8 @@ the built dashboard (`vite preview`, which forwards `/v1` to the API).
 - **Journeys:** `journeys.spec.ts` signs in, creates a customer and a
   subscription, advances a test clock to the renewal and opens the new
   invoice, opens the public invoice page, and grants credits.
+  `invoices.spec.ts` issues, settles, corrects and closes invoices: draft to
+  finalized, credit notes, an offline payment, void and write-off.
 - **Data:** the tests make their data through the public API, with the
   test-mode secret key from `velox-bootstrap`. Each test uses its own unique
   names, so the suite can run many times against the same database. Use a
