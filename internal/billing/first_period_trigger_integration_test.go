@@ -2,13 +2,13 @@ package billing_test
 
 import (
 	"context"
-	"github.com/sagarsuperuser/velox/internal/platform/leader"
-	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sagarsuperuser/velox/internal/billing"
+	"github.com/sagarsuperuser/velox/internal/platform/leader"
+	"github.com/sagarsuperuser/velox/internal/platform/leader/leadertest"
+
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/invoice"
@@ -17,10 +17,7 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
-	"github.com/sagarsuperuser/velox/internal/tax"
-	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
-	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
 // TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E stages the REAL
@@ -44,7 +41,6 @@ func TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E(t *testing.T) {
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
 
 	tenantID := testutil.CreateTestTenant(t, db, "First Period Corp")
@@ -97,19 +93,8 @@ func TestFirstPeriod_TriggerAddRow_BillsFullBase_E2E(t *testing.T) {
 		t.Fatalf("expected the trigger's creation 'add' row inside the billing window, got %+v", rows)
 	}
 
-	settingsStore := tenant.NewSettingsStore(db)
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore},
-		&usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, fakeClk)
 
 	count, errs := engine.RunCycle(ctx, 50, nil)
 	if len(errs) > 0 {

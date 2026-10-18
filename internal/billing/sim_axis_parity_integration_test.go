@@ -8,19 +8,13 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/sagarsuperuser/velox/internal/audit"
-	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
-	"github.com/sagarsuperuser/velox/internal/invoice"
 	"github.com/sagarsuperuser/velox/internal/platform/clock"
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
-	"github.com/sagarsuperuser/velox/internal/subscription"
-	"github.com/sagarsuperuser/velox/internal/tax"
-	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testclock"
 	"github.com/sagarsuperuser/velox/internal/testutil"
-	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
 // TestSimAxis_ClockDrivenLifecycle_EveryAuditRowIsStamped is the PARITY proof
@@ -52,22 +46,8 @@ func TestSimAxis_ClockDrivenLifecycle_EveryAuditRowIsStamped(t *testing.T) {
 	customerSvc := customer.NewService(customer.NewPostgresStore(db))
 	pricingStore := pricing.NewPostgresStore(db)
 	pricingSvc := pricing.NewService(pricingStore)
-	subStore := subscription.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
-	invoiceStore := invoice.NewPostgresStore(db)
-	settingsStore := tenant.NewSettingsStore(db)
 
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore},
-		&usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, nil,
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, nil)
 	engine.SetAuditLogger(logger) // the finalize row now rides the invoice-create tx (LogInTx, ADR-090)
 
 	// A clock frozen well away from wall-clock: sim time and real time must be

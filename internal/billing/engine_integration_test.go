@@ -21,7 +21,6 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
-	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
 	"github.com/sagarsuperuser/velox/internal/usage"
@@ -330,27 +329,12 @@ func TestFullBillingCycle_E2E(t *testing.T) {
 
 	// 8. Run billing engine with a real settings store (exercises the
 	// UPSERT path in NextInvoiceNumber for a tenant with no prior settings row).
-	settingsStore := tenant.NewSettingsStore(db)
 	// Pin the engine clock just past period_end so only one period
 	// is due — the post-ADR-028 per-sub period loop would otherwise
 	// catch up multiple cycles using wall-clock time and the test's
 	// 2026-03/04 fixture period.
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore},
-		&usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
-	)
-	engine.SetIntervalReader(subStore)
-	// Production engine always has a tax resolver wired; the
-	// engine fails loudly without one (ApplyTaxToLineItems → error).
-	// Test harness wires NoneProvider explicitly so the integration
-	// path matches production shape.
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, fakeClk)
 
 	count, errs := engine.RunCycle(ctx, 50, nil)
 	if len(errs) > 0 {
@@ -460,7 +444,6 @@ func TestBillTiming_InAdvance_E2E(t *testing.T) {
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	creditStore := credit.NewPostgresStore(db)
 	creditSvc := credit.NewService(creditStore)
 
@@ -504,17 +487,7 @@ func TestBillTiming_InAdvance_E2E(t *testing.T) {
 
 	settingsStore := tenant.NewSettingsStore(db)
 	fakeClk := clock.NewFake(periodStart.Add(time.Hour))
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore},
-		&usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, fakeClk)
 	engine.SetCreditGranter(creditSvc)
 	// Issuers are REQUIRED post-#442: the paid-source cancel credit routes
 	// through the real creditnote.Service (Issue grants the balance via the
@@ -730,7 +703,6 @@ func TestBillOnCancel_UnpaidPrebillRelief_E2E(t *testing.T) {
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	creditStore := credit.NewPostgresStore(db)
 	creditSvc := credit.NewService(creditStore)
 	creditNoteStore := creditnote.NewPostgresStore(db)
@@ -757,17 +729,7 @@ func TestBillOnCancel_UnpaidPrebillRelief_E2E(t *testing.T) {
 	creditNoteSvc.SetNumberGenerator(settingsStore)
 
 	newEngine := func() *billing.Engine {
-		e := billing.NewEngine(
-			&subStoreAdapter{subStore},
-			&usageStoreAdapter{usageStore},
-			&pricingStoreAdapter{pricingStore},
-			&invoiceStoreAdapter{invoiceStore},
-			nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodStart.Add(time.Hour)),
-		)
-		e.SetIntervalReader(subStore)
-		e.SetTaxProviderResolver(tax.NewResolver(nil))
-		e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-		e.SetDunningStarter(testDunningStarter{})
+		e := newRealEngine(db, clock.NewFake(periodStart.Add(time.Hour)))
 		e.SetCreditGranter(creditSvc)
 		e.SetInvoiceVoider(invoiceSvc)
 		e.SetCreditNoteAdjuster(creditNoteSvc)

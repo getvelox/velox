@@ -235,7 +235,8 @@ func TestChargeClaim_SeesHostedClaimCommittedWhileItWaited(t *testing.T) {
 		ok, err := invoices.ClaimChargeForDunningRetry(ctx, tenantID, invID)
 		done <- result{ok, err}
 	}()
-	waitForLockWait(t, db, ctx)
+	// The claim queues on its lock-first read behind the hosted FOR SHARE.
+	testutil.WaitForLockWaiter(t, ctx, testutil.AdminPool(t), "SELECT 1 FROM invoices WHERE id = $1 FOR UPDATE")
 
 	if err := hosted.Commit(); err != nil {
 		t.Fatalf("commit hosted: %v", err)
@@ -251,33 +252,6 @@ func TestChargeClaim_SeesHostedClaimCommittedWhileItWaited(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("charge claim did not finish after the hosted claim committed")
 	}
-}
-
-// waitForLockWait blocks until some backend in this database is waiting on a
-// lock, so the interleaving test commits only once the claim is queued.
-func waitForLockWait(t *testing.T, db *postgres.DB, ctx context.Context) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		var n int
-		err = tx.QueryRowContext(ctx, `
-			SELECT count(*) FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock'
-		`).Scan(&n)
-		postgres.Rollback(tx)
-		if err != nil {
-			t.Fatalf("pg_stat_activity: %v", err)
-		}
-		if n > 0 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("charge claim never queued behind the hosted claim's lock")
 }
 
 // TestListHostedToReconcile_Selection: the sweep looks at sessions whose

@@ -45,7 +45,6 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 	customerStore := customer.NewPostgresStore(db)
 	pricingStore := pricing.NewPostgresStore(db)
 	subStore := subscription.NewPostgresStore(db)
-	usageStore := usage.NewPostgresStore(db)
 	invoiceStore := invoice.NewPostgresStore(db)
 
 	tenantID := testutil.CreateTestTenant(t, db, "Concurrency Test Corp")
@@ -84,17 +83,7 @@ func TestConcurrentBilling_ExactlyOneInvoice(t *testing.T) {
 
 	// Pin the clock just past period_end so only one period is due.
 	fakeClk := clock.NewFake(periodEnd.Add(time.Nanosecond))
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore},
-		&usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore},
-		&invoiceStoreAdapter{invoiceStore},
-		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, fakeClk,
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, fakeClk)
 
 	// Fire N billing runs at the same instant against the one due sub.
 	const N = 4
@@ -327,15 +316,7 @@ func TestRunCycleForTenant_BillsOnlyCallerLivemode(t *testing.T) {
 	mkSub(false, "test")
 	mkSub(true, "live")
 
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore}, &usageStoreAdapter{usage.NewPostgresStore(db)},
-		&pricingStoreAdapter{pricing.NewPostgresStore(db)}, &invoiceStoreAdapter{invoiceStore},
-		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodEnd.Add(time.Nanosecond)),
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, clock.NewFake(periodEnd.Add(time.Nanosecond)))
 
 	// Run in TEST mode — must bill only the test-mode sub.
 	testCtx := postgres.WithLivemode(context.Background(), false)

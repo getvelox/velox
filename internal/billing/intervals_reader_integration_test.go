@@ -16,10 +16,8 @@ import (
 	"github.com/sagarsuperuser/velox/internal/platform/postgres"
 	"github.com/sagarsuperuser/velox/internal/pricing"
 	"github.com/sagarsuperuser/velox/internal/subscription"
-	"github.com/sagarsuperuser/velox/internal/tax"
 	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
-	"github.com/sagarsuperuser/velox/internal/usage"
 )
 
 // ADR-101 Phase 4 corpus gate: billing_intervals is the ONLY segment
@@ -98,18 +96,7 @@ func (f *parityFixture) activeSub(t *testing.T, code string, at time.Time, items
 
 func (f *parityFixture) engine(t *testing.T, now time.Time) *billing.Engine {
 	t.Helper()
-	e := billing.NewEngine(
-		&subStoreAdapter{f.subs},
-		&usageStoreAdapter{usage.NewPostgresStore(f.db)},
-		&pricingStoreAdapter{f.pricing},
-		&invoiceStoreAdapter{f.invoices},
-		nil, tenant.NewSettingsStore(f.db), testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(now),
-	)
-	e.SetTaxProviderResolver(tax.NewResolver(nil))
-	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	e.SetDunningStarter(testDunningStarter{})
-	e.SetIntervalReader(f.subs)
-	return e
+	return newRealEngine(f.db, clock.NewFake(now))
 }
 
 // lineFingerprint is the golden unit: everything about a base-fee line

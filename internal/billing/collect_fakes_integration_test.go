@@ -2,12 +2,46 @@ package billing_test
 
 import (
 	"context"
+	"errors"
 	"time"
 
-	"errors"
-
+	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/domain"
+	"github.com/sagarsuperuser/velox/internal/invoice"
+	"github.com/sagarsuperuser/velox/internal/platform/clock"
+	"github.com/sagarsuperuser/velox/internal/platform/postgres"
+	"github.com/sagarsuperuser/velox/internal/pricing"
+	"github.com/sagarsuperuser/velox/internal/subscription"
+	"github.com/sagarsuperuser/velox/internal/tax"
+	"github.com/sagarsuperuser/velox/internal/tenant"
+	"github.com/sagarsuperuser/velox/internal/usage"
 )
+
+// newRealEngine is the engine most integration tests use: the real Postgres
+// stores for subscriptions, usage, pricing, invoices and tenant settings, no
+// credit applier, and the defaults every such engine needs:
+//   - the subscription store as interval reader (the only segment source);
+//   - the no-tax resolver (the engine fails without one, as production always
+//     wires one);
+//   - the collect fakes below: no payment method on file, a charger that
+//     fails if reached, a recording no-PM notifier, a no-op dunning starter.
+//
+// A test adds what its flow needs with the engine's setters. One that wraps a
+// store or wants other fakes calls billing.NewEngine itself. A nil clk means
+// the real clock.
+func newRealEngine(db *postgres.DB, clk clock.Clock) *billing.Engine {
+	subs := subscription.NewPostgresStore(db)
+	e := billing.NewEngine(
+		&subStoreAdapter{subs}, &usageStoreAdapter{usage.NewPostgresStore(db)},
+		&pricingStoreAdapter{pricing.NewPostgresStore(db)}, &invoiceStoreAdapter{invoice.NewPostgresStore(db)},
+		nil, tenant.NewSettingsStore(db), testPaymentSetupsNoPM{}, testChargerSentinel{}, clk,
+	)
+	e.SetIntervalReader(subs)
+	e.SetTaxProviderResolver(tax.NewResolver(nil))
+	e.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
+	e.SetDunningStarter(testDunningStarter{})
+	return e
+}
 
 // Collect-pipeline collaborators for integration engines. REQUIRED post-#442
 // (the charger/paymentSetups/noPMNotifier nil guards are deleted): every

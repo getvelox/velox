@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sagarsuperuser/velox/internal/auth"
-	"github.com/sagarsuperuser/velox/internal/billing"
 	"github.com/sagarsuperuser/velox/internal/customer"
 	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/dunning"
@@ -24,8 +23,6 @@ import (
 	"github.com/sagarsuperuser/velox/internal/recipe"
 	"github.com/sagarsuperuser/velox/internal/subscription"
 	"github.com/sagarsuperuser/velox/internal/subscription/subscriptiontest"
-	"github.com/sagarsuperuser/velox/internal/tax"
-	"github.com/sagarsuperuser/velox/internal/tenant"
 	"github.com/sagarsuperuser/velox/internal/testutil"
 	"github.com/sagarsuperuser/velox/internal/usage"
 	"github.com/sagarsuperuser/velox/internal/webhook"
@@ -58,7 +55,6 @@ func TestLiteLLM_WedgeE2E(t *testing.T) {
 	invoiceStore := invoice.NewPostgresStore(db)
 	usageStore := usage.NewPostgresStore(db)
 	usageSvc := usage.NewService(usageStore)
-	settingsStore := tenant.NewSettingsStore(db)
 
 	tenantID := testutil.CreateTestTenant(t, db, "LiteLLM Wedge Corp")
 	// Stores/engine take tenantID as a param (mirroring the other billing
@@ -153,15 +149,7 @@ func TestLiteLLM_WedgeE2E(t *testing.T) {
 	}
 
 	// 4. Run the cycle → invoice for the elapsed period.
-	engine := billing.NewEngine(
-		&subStoreAdapter{subStore}, &usageStoreAdapter{usageStore},
-		&pricingStoreAdapter{pricingStore}, &invoiceStoreAdapter{invoiceStore},
-		nil, settingsStore, testPaymentSetupsNoPM{}, testChargerSentinel{}, clock.NewFake(periodEnd.Add(time.Nanosecond)),
-	)
-	engine.SetIntervalReader(subStore)
-	engine.SetTaxProviderResolver(tax.NewResolver(nil))
-	engine.SetNoPaymentMethodNotifier(&testNoPMNotifier{})
-	engine.SetDunningStarter(testDunningStarter{})
+	engine := newRealEngine(db, clock.NewFake(periodEnd.Add(time.Nanosecond)))
 	if _, errs := engine.RunCycle(ctx, 50, nil); len(errs) > 0 {
 		t.Fatalf("RunCycle: %v", errs)
 	}
