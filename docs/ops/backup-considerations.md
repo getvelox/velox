@@ -71,7 +71,9 @@ The dump travels through standard output, so the container needs no mounted fold
 
 ## 4. Restore a backup
 
-`scripts/restore.sh` replaces the data in the target database with the backup, in one transaction: either all of it is restored, or nothing changes. It needs `pg_restore` and `psql` on the machine that runs it.
+`scripts/restore.sh` replaces the objects in the backup, in the target database, in one transaction: either all of it is restored, or nothing changes. It needs `pg_restore` and `psql` on the machine that runs it.
+
+**Restore into an empty database when you can.** The script leaves alone what the backup does not hold. Restored over a newer database, that includes its migration record and any table a newer migration created. A backup from v0.8.x must go into an empty database: over a database that v0.9.0 or newer has upgraded, Velox refuses to start (see [Two migration records](runbook/migration-failed-midway.md#two-migration-records)). A backup from before v0.8.0 goes into an empty database, then through v0.8.1's `velox migrate`, then the new release's.
 
 1. On a new Postgres server, create the limited user first. Users belong to the server, not to the database, so a dump cannot carry them. Without it the restore fails, and the script stops before it starts.
 
@@ -137,11 +139,17 @@ Run these before you let traffic back in.
 
 ### 1. The schema version matches
 
+Run the `velox migrate status` of the release you will start, against the restored database.
+
+**You see:** `state:        up to date, nothing to apply`. Another state lists what `velox migrate` will do, or, for `refused`, what to do first. A database restored from a v0.8.x backup says `ready to move`: `velox migrate` takes it over without changing a table.
+
+The record itself, if you want to look:
+
 ```sql
-SELECT version, dirty FROM schema_migrations ORDER BY version DESC LIMIT 1;
+SELECT max(version_id) FROM public.goose_db_version;
 ```
 
-The version must match the one the Velox release expects, and `dirty` must be `false`. `dirty=true` means a database upgrade stopped halfway, so the schema is in an unknown state. Fix that before you start Velox.
+A backup from v0.8.x has `schema_migrations` instead: `SELECT version, dirty FROM schema_migrations;` must show `180 | f`.
 
 ### 2. Row-Level Security is on
 
@@ -247,7 +255,8 @@ Some tables matter more than others when you decide what a restore must bring ba
 | `webhook_endpoints` | Where Velox sends webhooks, with their signing secrets |
 | `recipe_instances` | Installed pricing recipes |
 | `test_clocks`, `dashboard_sessions` | Not money, but losing them disrupts the people using the dashboard |
-| `schema_migrations` | The schema version. Velox does not start without it. |
+| `goose_db_version` | The schema version. Velox does not start without it. |
+| `schema_migrations` | On a database taken over from v0.8.x: v0.8's version record, frozen at 180. Keep it with `goose_db_version`; Velox checks that the two agree. |
 
 `usage_events` for billing periods that are still open belong here too: the next invoice needs every one of them.
 

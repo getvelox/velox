@@ -140,7 +140,7 @@ VELOX_BASE=http://localhost VELOX_DASHBOARD_URL=http://localhost ./scripts/demo.
 | Upgrade, published release image | See [Upgrade to a new release](../../docs/production-one-vm.md#upgrade-to-a-new-release) |
 | Stop, keeping data | `docker compose stop` |
 | Stop and delete all data | `docker compose down -v` |
-| See which database upgrades have run | `docker compose run --rm velox-api migrate status` |
+| See the database's version and the upgrades still to apply | `docker compose run --rm velox-api migrate status` |
 | Open a database shell | `docker compose exec postgres psql -U velox -d velox` |
 
 Read the upgrade notes in the [changelog](../../CHANGELOG.md) before upgrading.
@@ -182,8 +182,8 @@ If the user does not exist at all, create it with the SQL in [Self-host, "The tw
 **The API exits with `role can BYPASS row-level security`.**
 `APP_DATABASE_URL` points at the admin user, usually because `DATABASE_URL` was copied into it. Point it at `velox_app`.
 
-**The API exits with `schema_migrations is dirty`.**
-A database upgrade stopped midway. Check the schema, then repair it with `docker compose run --rm velox-api migrate force <version>`. The steps are in [A database upgrade failed midway](../../docs/ops/runbook/migration-failed-midway.md).
+**The API exits with `migration … failed`, or names `schema_migrations` or `goose_db_version`.**
+A database upgrade stopped. A failed migration leaves nothing to repair: fix the cause the error names, then start the API again. `docker compose run --rm velox-api migrate status` shows the plan. The cases are in [A database upgrade stopped](../../docs/ops/runbook/migration-failed-midway.md).
 
 **`/health/ready` shows `scheduler: degraded`.**
 The API is up and still answers 200 here, but its background jobs have stopped running. Check the API logs. To see which copy last ran each job, run `SELECT * FROM leader_status;` in the database shell.

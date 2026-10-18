@@ -10,7 +10,7 @@
 // away:
 //
 //   - stripe_invoice_id IS NULL       — importer rows dropped components
-//   - id NOT LIKE 'vlx_inv_safe%%'     — velox-migrate-safety seeder rows
+//   - id NOT LIKE 'vlx_inv_safe%%'     — old velox-migrate-safety seeder rows
 //   - created_at >= '2026-07-05'      — pre-#365/#347 grandfathered subs
 //   - grace intervals on sweeps       — post-commit stamps lag their tx
 package doctor

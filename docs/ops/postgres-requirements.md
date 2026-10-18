@@ -17,7 +17,7 @@ The Compose stack in [`deploy/compose`](../../deploy/compose/README.md) already 
 ## Versions
 
 - **Tested: Postgres 16.** CI runs every test against `postgres:16-alpine`, and both Compose files (local development and the one-VM install) run it too.
-- **Oldest that should work: Postgres 14.** Velox uses `gen_random_bytes` from the `pgcrypto` extension and standard SQL up to Postgres 14. Nothing tests 14 or 15, so prefer 16.
+- **Oldest that should work: Postgres 14.** Velox uses `gen_random_bytes` from the `pgcrypto` extension and standard SQL up to Postgres 14. CI applies the migrations on Postgres 14 for every PR, but the tests run only on 16, and nothing runs on 15, so prefer 16.
 - **Newer than 16:** Velox uses nothing specific to Postgres 17, so upgrading ahead is safe.
 
 ## Extensions
@@ -33,10 +33,12 @@ Velox needs three standard extensions. They ship with Postgres and with every co
 Velox creates them during its database upgrades (migrations), so the admin user needs permission to create extensions. If your provider forbids that, create them first, as a user that may:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS citext;
-CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;
 ```
+
+They must be in schema `public`, where Velox keeps its tables and looks for them. If one already exists in another schema (some providers put extensions in a schema named `extensions`), the first upgrade stops with an error such as `function public.gen_random_bytes(integer) does not exist`, and changes nothing. Move the extension with `ALTER EXTENSION pgcrypto SET SCHEMA public`, if nothing else in the database depends on where it is, or give Velox a database of its own.
 
 ## The two database users
 
@@ -145,7 +147,8 @@ Velox's migrations create the indexes its queries need. Check `pg_stat_user_inde
 |---|---|---|
 | Postgres 16 | ✅ Tested | CI, every PR (`postgres:16-alpine`) |
 | AWS RDS for Postgres 16 | ✅ Exercised | The AWS benchmark rig. Set `rds.force_ssl=1` and use `sslmode=require` in the database URLs. |
-| Postgres 14, 15, 17 | ⚠️ Expected | No migration uses syntax newer than 14; not run in CI |
+| Postgres 14 | ⚠️ Expected | CI applies the migrations on `postgres:14-alpine` for every PR; the tests run only on 16 |
+| Postgres 15, 17 | ⚠️ Expected | No migration uses syntax newer than 14; not run in CI |
 | Google Cloud SQL for Postgres | ⚠️ Expected | Standard Postgres; not tested |
 | Aurora Postgres | ⚠️ Expected | Its storage works differently, which may slow long billing runs; not tested |
 | TimescaleDB | ⚠️ Untested | Compatible with Postgres; turning `usage_events` into a hypertable is untested |

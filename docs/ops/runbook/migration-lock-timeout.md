@@ -10,7 +10,7 @@ upgrade stopped. Back to the [runbook index](index.md).
 fails with:
 
 ```
-migration 181 (0181_example.up.sql) waited 5s for a table lock and stopped: another database session, usually a long-running transaction, holds a lock on a table it changes. Postgres undid the whole migration and the database is still at version 180, so nothing needs repair ...
+migration 00181_example.sql waited 5s for a table lock and stopped: another database session, usually a long-running transaction, holds a lock on a table it changes. Postgres undid the whole migration and the database is still at version 180, so nothing needs repair ...
 ```
 
 ## Why
@@ -21,12 +21,12 @@ migration stuck behind one long transaction can stall that table for
 everyone.
 
 To keep that wait short, Velox gives each migration 5 seconds to get its
-locks. If it cannot, the migration stops. A migration that runs in one
-transaction (almost all of them) leaves nothing behind, and Velox records
-the database as still at the version before. Nothing needs repair.
+locks. If it cannot, the migration stops. It runs in one transaction, so
+it leaves nothing behind, and the database is still at the version before.
+Nothing needs repair.
 
-Index builds marked `CONCURRENTLY` have no time limit, because they do
-not block reads or writes while they wait.
+Index builds (`CREATE INDEX CONCURRENTLY`) have no time limit, because
+they do not block reads or writes while they wait.
 
 ## Check
 
@@ -63,11 +63,12 @@ Pick one, then run the upgrade again (`velox migrate`, or start Velox).
   While the migration waits, queries on that table wait too. `0` means no
   limit.
 
-If the error instead ends with `schema_migrations is dirty`, the
-migration runs outside a transaction and may be partly applied. Follow
-[A database upgrade failed midway](migration-failed-midway.md).
+If the upgrade instead says `another Velox process is migrating this
+database`, it waited 30 minutes for another process's migration, not for
+a table. `velox migrate status` shows that process under `running now`.
+See [A database upgrade stopped](migration-failed-midway.md).
 
 ## Verify
 
-- `velox migrate status` prints `dirty: false` and the latest version.
+- `velox migrate status` prints `state:        up to date, nothing to apply`.
 - Velox starts, and `/health/ready` answers 200.

@@ -108,7 +108,7 @@ standard Velox server issues none.
 
 The Compose stack ships Postgres 16 with default settings, which is enough for trying Velox. For your own Postgres:
 
-- **Version:** 16 is the version CI tests and the Compose stack runs. Postgres 14 is the oldest that should work, but it is not tested. See [Postgres requirements](ops/postgres-requirements.md#versions).
+- **Version:** 16 is the version CI tests and the Compose stack runs. Postgres 14 is the oldest that should work: CI applies the migrations on it, but the tests run only on 16. See [Postgres requirements](ops/postgres-requirements.md#versions).
 - **Extensions:** `pgcrypto`, `citext` and `btree_gist`. Velox creates them during database upgrades, so the role that runs upgrades needs permission to create extensions. If your managed Postgres forbids that, create them first: [Postgres requirements](ops/postgres-requirements.md).
 - **Backups:** point-in-time restore (most managed Postgres offer it) is best. A nightly `pg_dump`, which `scripts/backup.sh` takes, also works, but you lose what was written since the last dump. Back up `VELOX_ENCRYPTION_KEY` too, separately: without it, the encrypted data in a backup (customer details, Stripe keys, webhook secrets) cannot be read. See [backups](ops/backup-considerations.md).
 
@@ -145,19 +145,25 @@ With `APP_ENV=local` it builds `velox_app:velox_app` from `DATABASE_URL` and log
 
 ## Database upgrades (migrations)
 
-A migration is a versioned script that changes the database schema. Velox ships them in [`internal/platform/migrate/sql/`](../internal/platform/migrate/sql/).
+A migration is a versioned script that changes the database schema. Velox applies them with [goose](https://github.com/pressly/goose). A new database gets one baseline, the schema of Velox v0.8.1 (migration 180); later migrations are in [`internal/platform/migrate/sql/`](../internal/platform/migrate/sql/).
 
-- Set `RUN_MIGRATIONS_ON_BOOT=true` and Velox applies any new ones when it starts. The Compose stack and the local `.env.example` both set it. The default is `false`.
-- If several copies start at once, only one applies them and the others wait.
-- **Never roll back in production.** The "down" scripts exist for development. To undo a change in production, write a new migration.
+- **See the plan first.** `velox migrate status` shows the database's version, the migrations this release would apply, and whether a migration is running now. It changes nothing.
+- Set `RUN_MIGRATIONS_ON_BOOT=true` and Velox applies any new ones when it starts. The Compose stack and the local `.env.example` both set it. The default is `false`: then run `velox migrate` before you start a new release, because Velox refuses to start while a migration is missing.
+- If several copies start at once, they take turns: one applies the migrations and the others wait, then find nothing left to do.
+- **A failed migration leaves nothing to repair.** Each one runs in one transaction, so a failure undoes all of it. Fix the cause the error names and run the upgrade again. An index build runs without a transaction and may leave an INVALID index; running the upgrade again drops it and builds it again. See [A database upgrade stopped](ops/runbook/migration-failed-midway.md).
+- **Never roll back in production.** `velox migrate rollback` runs only with `APP_ENV=local`. To go back after an upgrade, restore the backup you took before it; see [Going back](production-one-vm.md#going-back).
 - **Each migration waits at most 5 seconds for a table lock.** While a migration waits for a lock, other queries on that table wait behind it, so Velox stops the upgrade instead of letting the table stall. The migration leaves nothing behind; run the upgrade again when the table is quieter. `MIGRATION_LOCK_TIMEOUT` changes the limit. See [An upgrade waited for a table lock](ops/runbook/migration-lock-timeout.md).
-- **If an upgrade stops midway,** Velox refuses to start and says `schema_migrations is dirty`. Check the schema, then repair with `velox migrate force <version>`. See [A database upgrade failed midway](ops/runbook/migration-failed-midway.md).
+- **From v0.8.x,** v0.9.0 takes over a database at version 180 (v0.8.0 or v0.8.1) without changing a table. Older databases upgrade to v0.8.1 first. The [changelog](../CHANGELOG.md) has the steps.
 
 ## Upgrading
 
 1. Read the upgrade notes in the [changelog](../CHANGELOG.md) for every version between yours and the new one.
 2. Take a backup. See [backups](ops/backup-considerations.md).
-3. Start the new version. With `RUN_MIGRATIONS_ON_BOOT=true`, it applies the database upgrades as it starts.
+3. See the plan: run the new version's `velox migrate status`.
+
+   **You see:** `state:` with the migrations it will apply, and `running now:  no`. A `refused` state names its next step; follow it before you go on.
+
+4. Start the new version. With `RUN_MIGRATIONS_ON_BOOT=true`, it applies the database upgrades as it starts. Otherwise run `velox migrate` first.
 
    **You see:** `/health/ready` answers 200 again.
 
@@ -192,7 +198,7 @@ Why `TRUST_PROXY` is required: without it, every request behind a load balancer 
 | Variable | Default | What it does |
 |---|---|---|
 | `APP_ENV` | `local` | `local`, `staging` or `production`. Outside `local`, cookies are marked secure and the start-up checks on this page apply. A value that starts with `prod` but is not exactly `production`, such as `prod`, stops start-up. Any other unrecognised value starts with a warning and is treated as not production. |
-| `RUN_MIGRATIONS_ON_BOOT` | `false` | Apply database upgrades at start-up. |
+| `RUN_MIGRATIONS_ON_BOOT` | `false` | Apply database upgrades at start-up. With `false`, run `velox migrate` before starting a new release. |
 | `MIGRATION_LOCK_TIMEOUT` | `5s` | How long a database upgrade waits for a table lock before it stops. A duration such as `30s`, or `0` for no limit. Any other value stops the upgrade. |
 | `DASHBOARD_BASE_URL` | unset | The dashboard's address, used in password-reset links. If unset, no password-reset emails are sent. For local development use `http://localhost:5173`. |
 | `CUSTOMER_PORTAL_URL` | unset | The dashboard's address, with no path. Stripe returns a customer here after they save a card. If unset, Stripe sends them to `http://localhost:5173`, which exists only in local development; the card is still saved. |

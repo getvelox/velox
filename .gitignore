@@ -41,7 +41,6 @@ velox-api
 /velox-cli
 /velox-doctor
 /velox-bench-seed
-/velox-migrate-safety
 #
 # ...and the enumeration failed anyway: a 54MB `velox-api-adr101` sat untracked
 # at the root because the list above names exact binaries and a

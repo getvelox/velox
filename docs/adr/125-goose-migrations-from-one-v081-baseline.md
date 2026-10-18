@@ -1,7 +1,7 @@
 # ADR-125: Run migrations with goose from one v0.8.1 baseline
 
 **Date:** 2026-10-18
-**Status:** Proposed. Approved 2026-10-18; becomes Accepted when the cut-over PR merges, and ships in v0.9.0. Until then the code runs the ADR-073 runner.
+**Status:** Accepted (2026-10-18). The cut-over is built; it ships in v0.9.0.
 **Supersedes:** [ADR-124](124-plain-golang-migrate-each-file-sets-its-lock-limit.md), which was never built
 **Amends:** [ADR-073](073-selfhost-boot-and-bootstrap-contract.md) (decision 3, the migration runner, is replaced) and [ADR-107](107-unknown-is-terminal-until-a-human.md) (migration 0009's rollback stops shipping)
 
@@ -144,6 +144,13 @@ An INVALID index is one Postgres keeps but never uses.
      `lock_timeout` on that connection. Closing the pool matters, because
      a failed index file leaves `lock_timeout = 0` on its session (E4,
      phase 3).
+   - The session goose migrates on has `search_path = public`. The
+     baseline names every object `public.x`, so a later file's
+     `CREATE TABLE x` must land in `public` too, not in a schema the admin
+     user's own `search_path` lists first. The state check reads before
+     that, with the operator's `search_path`, so it still finds a v0.8
+     install outside `public`. The three extensions must be in `public`
+     too.
 6. **Rules for new files**, checked by `-short` lints:
    - A normal file runs in one goose transaction. It has no transaction
      control and uses only `SET LOCAL`. A multi-line `$$` body goes
@@ -202,7 +209,8 @@ An INVALID index is one Postgres keeps but never uses.
     2. The cut-over: code, baseline, tests, the `migrations` job and the
        operator docs. No golang-migrate file may merge before it.
     3. The lints, a `make migration` scaffold and `docs/dev/migrations.md`.
-       It merges before the first `00181` file.
+       It merges before the first `00181` file: until then a `-short`
+       test fails on any file in `sql/`, and PR 3 deletes that test.
     4. Release v0.9.0, after an upgrade drill from v0.8.1 and a cold
        install.
 
@@ -235,9 +243,12 @@ An INVALID index is one Postgres keeps but never uses.
 - **The proof runs on every PR, not once.** The baseline's edits cannot
   drift, because the `migrations` job compares a new install with an
   upgraded one each time.
-- **No other module moves.** goose v3.27.0 raises none of the modules in
-  Velox's build. Its provider, lock and Postgres code is the same as in
-  v3.29.0.
+- **Almost no other module moves.** goose v3.27.0 raises one module in
+  Velox's Linux build: `prometheus/procfs`, 0.16.1 to 0.19.2, which the
+  Prometheus client uses to read process metrics from `/proc` (the first
+  count was taken on macOS, where that module is not built; corrected
+  2026-10-18 in the cut-over PR). Its provider, lock and Postgres code is
+  the same as in v3.29.0.
 
 ## Alternatives considered
 

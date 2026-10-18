@@ -3,8 +3,6 @@ package pricing_test
 import (
 	"context"
 	"errors"
-	"os"
-	"regexp"
 	"testing"
 	"time"
 
@@ -196,116 +194,5 @@ func TestOverrideEffectivityWindows(t *testing.T) {
 	// Second DELETE of the same row: clean 404.
 	if err := svc.DeleteOverride(ctx, tenantID, b.ID); !errors.Is(err, errs.ErrNotFound) {
 		t.Errorf("second delete: got %v, want ErrNotFound", err)
-	}
-}
-
-// TestMigration0128_CollapsesDuplicateOverrides seeds the exact
-// pre-migration duplicate shape (one customer holding ACTIVE overrides
-// against v1 AND v2 of one rule_key — the natural workaround for the
-// detach bug) and executes the REAL collapse statement extracted from
-// the shipped migration file: highest-version row wins, losers flip
-// active=false with their window closed.
-func TestMigration0128_CollapsesDuplicateOverrides(t *testing.T) {
-	db := testutil.SetupTestDB(t)
-	ctx := postgres.WithLivemode(context.Background(), false)
-	tenantID := testutil.CreateTestTenant(t, db, "Migration 0128")
-	store := pricing.NewPostgresStore(db)
-	svc := pricing.NewService(store)
-
-	cust, err := customer.NewPostgresStore(db).Create(ctx, tenantID, domain.Customer{
-		ExternalID: "cus_0128", DisplayName: "Collapse",
-	})
-	if err != nil {
-		t.Fatalf("create customer: %v", err)
-	}
-	v1, err := svc.CreateRatingRule(ctx, tenantID, pricing.CreateRatingRuleInput{
-		RuleKey: "dup_key", Name: "Dup v1",
-		Mode: domain.PricingFlat, Currency: "USD", FlatAmountCents: decimal.NewFromInt(1),
-	})
-	if err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-	v2, err := svc.CreateRatingRule(ctx, tenantID, pricing.CreateRatingRuleInput{
-		RuleKey: "dup_key", Name: "Dup v2",
-		Mode: domain.PricingFlat, Currency: "USD", FlatAmountCents: decimal.NewFromInt(2),
-	})
-	if err != nil {
-		t.Fatalf("create v2: %v", err)
-	}
-
-	migrationSQL, err := os.ReadFile("../platform/migrate/sql/0128_override_rule_key.up.sql")
-	if err != nil {
-		t.Fatalf("read migration file: %v", err)
-	}
-	collapse := regexp.MustCompile(`(?s)WITH ranked AS.*?r\.rn > 1;`).FindString(string(migrationSQL))
-	if collapse == "" {
-		t.Fatal("collapse statement not found in migration file")
-	}
-
-	// Seed the pre-migration shape. The partial unique index forbids two
-	// active rows per key post-migration, so it is dropped for the
-	// duration of this transaction (DDL is transactional) — exactly the
-	// state the migration ran against. DDL needs the owner role (the
-	// migration runner), not the RLS app role.
-	admin := testutil.AdminPool(t)
-	tx, err := admin.Begin()
-	if err != nil {
-		t.Fatalf("begin admin tx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`SET LOCAL app.livemode = 'off'`); err != nil {
-		t.Fatalf("set local livemode: %v", err)
-	}
-	if _, err := tx.Exec(`DROP INDEX idx_price_overrides_active_rule_key`); err != nil {
-		t.Fatalf("drop index: %v", err)
-	}
-	for i, v := range []domain.RatingRuleVersion{v1, v2} {
-		if _, err := tx.Exec(`
-			INSERT INTO customer_price_overrides (id, tenant_id, customer_id, rule_key, rating_rule_version_id,
-				mode, flat_amount_cents, graduated_tiers, reason, active, created_at, updated_at)
-			VALUES ($1, $2, $3, 'dup_key', $4, 'flat', $5, '[]', 'pre-0128 duplicate', true, now(), now())
-		`, postgres.NewID("vlx_cpo"), tenantID, cust.ID, v.ID, (i+1)*100); err != nil {
-			t.Fatalf("seed duplicate override %d: %v", i, err)
-		}
-	}
-	if _, err := tx.Exec(collapse); err != nil {
-		t.Fatalf("execute collapse statement: %v", err)
-	}
-	if _, err := tx.Exec(`
-		CREATE UNIQUE INDEX idx_price_overrides_active_rule_key
-		ON customer_price_overrides (tenant_id, customer_id, rule_key)
-		WHERE active
-	`); err != nil {
-		t.Fatalf("recreate index (collapse left duplicates?): %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	// The winner is the row bound to the HIGHEST version.
-	rows, err := db.BeginTx(ctx, postgres.TxBypass, "")
-	if err != nil {
-		t.Fatalf("begin verify: %v", err)
-	}
-	defer postgres.Rollback(rows)
-	var activeVersionID string
-	var inactiveCount int
-	if err := rows.QueryRow(`
-		SELECT rating_rule_version_id FROM customer_price_overrides
-		WHERE customer_id = $1 AND rule_key = 'dup_key' AND active = true
-	`, cust.ID).Scan(&activeVersionID); err != nil {
-		t.Fatalf("read winner: %v", err)
-	}
-	if activeVersionID != v2.ID {
-		t.Errorf("winner: got %s, want %s (highest version wins)", activeVersionID, v2.ID)
-	}
-	if err := rows.QueryRow(`
-		SELECT COUNT(*) FROM customer_price_overrides
-		WHERE customer_id = $1 AND rule_key = 'dup_key' AND active = false AND deactivated_at IS NOT NULL
-	`, cust.ID).Scan(&inactiveCount); err != nil {
-		t.Fatalf("count losers: %v", err)
-	}
-	if inactiveCount != 1 {
-		t.Errorf("demoted losers: got %d, want 1 (kept for audit, window closed)", inactiveCount)
 	}
 }

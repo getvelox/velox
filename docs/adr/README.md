@@ -164,7 +164,7 @@ Each row links to the full record. Browse by Topic, or search this page for a te
 | [122](122-hold-and-release-usage-for-unknown-customers.md) | 2026-10-17 | Accepted | Pricing & usage | LiteLLM usage for an unknown customer or meter is held until an operator releases it |
 | [123](123-new-accounts-start-with-a-default-dunning-policy.md) | 2026-10-17 | Accepted | Dunning | New accounts start with a default dunning policy that retries three times and changes nothing |
 | [124](124-plain-golang-migrate-each-file-sets-its-lock-limit.md) | 2026-10-17 | Superseded by ADR-125 | Platform & ops | Run migrations with plain golang-migrate and a 5-second lock limit per file; never built |
-| [125](125-goose-migrations-from-one-v081-baseline.md) | 2026-10-18 | Proposed | Platform & ops | From v0.9.0, run migrations with goose from one baseline; v0.8 databases need no change |
+| [125](125-goose-migrations-from-one-v081-baseline.md) | 2026-10-18 | Accepted | Platform & ops | From v0.9.0, run migrations with goose from one baseline; v0.8 databases need no change |
 
 > ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
 > across every ref). It is a skipped number, not a lost decision.

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,11 +63,11 @@ func main() {
 		case "rollback":
 			runMigrateRollback()
 		case "force":
-			runMigrateForce(os.Args[3:])
+			runMigrateForce()
 		case "":
 			runMigrate()
 		default:
-			fmt.Fprintf(os.Stderr, "unknown migrate subcommand: %s\navailable: status, rollback, force\n", subcmd)
+			fmt.Fprintf(os.Stderr, "unknown migrate subcommand: %s\navailable: status, rollback\n", subcmd)
 			os.Exit(1)
 		}
 	case "version":
@@ -424,68 +423,45 @@ func runMigrate() {
 	fmt.Println("migrations applied successfully")
 }
 
+// runMigrateStatus prints the upgrade plan: the database's version, this
+// release's, the state, the files still to apply and whether a migration
+// is running now. It reads only, takes no lock and creates nothing, so it
+// is safe to run with the new release before an upgrade. It exits 0 when
+// it could read the state, refused states included.
 func runMigrateStatus() {
-	v, dirty, err := migrate.Status(loadDSN())
+	p, err := migrate.ReadPlan(loadDSN())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "status failed: %v\n", err)
 		os.Exit(1)
 	}
-	if v == 0 {
-		fmt.Println("no migrations applied")
-		return
-	}
-	fmt.Printf("version: %d, dirty: %v\n", v, dirty)
-	if dirty {
-		fmt.Println()
-		fmt.Println((&migrate.DirtyError{Version: v}).Error())
-	}
+	fmt.Print(migrate.FormatPlan(p, version.Version))
 }
 
-const migrateForceUsage = `usage: velox migrate force <version>
+// migrateForceRemoved is what `velox migrate force` prints since v0.9.0.
+// The stub stays for one release, so a script or habit that still runs it
+// gets a pointer instead of "unknown subcommand".
+const migrateForceRemoved = `velox migrate force was removed in v0.9.0: goose leaves no half-applied state, so there is nothing to force.
+After a failed upgrade, fix the cause and run "velox migrate" again. Steps: ` + migrate.RunbookPath + `
+For a dirty v0.8.x database, repair it with Velox v0.8.1: https://github.com/getvelox/velox/blob/v0.8.1/docs/ops/runbook/migration-failed-midway.md`
 
-Clears the dirty mark a failed migration leaves in schema_migrations and
-records <version> as applied. It does not change the schema.
-
-Check the schema first. If none of the failed migration's changes are in
-the database, force the version before it, then run "velox migrate". If
-all of them are, force the failed version. If only some are, undo them by
-hand first. "velox migrate status" names the migration.
-
-Refuses while a migration is running, when nothing is dirty, and for a
-version that is not next to the dirty one.
-Steps: ` + migrate.RunbookPath
-
-// parseForceVersion reads the single <version> argument of `migrate force`.
-func parseForceVersion(args []string) (uint, error) {
-	if len(args) != 1 {
-		return 0, errors.New("expected exactly one <version>")
-	}
-	v, err := strconv.ParseUint(args[0], 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("version %q is not a non-negative number", args[0])
-	}
-	return uint(v), nil
+func runMigrateForce() {
+	fmt.Fprintln(os.Stderr, migrateForceRemoved)
+	os.Exit(2)
 }
 
-func runMigrateForce(args []string) {
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Println(migrateForceUsage)
-		return
-	}
-	v, err := parseForceVersion(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n\n%s\n", err, migrateForceUsage)
+// rollbackRefused is what `velox migrate rollback` prints outside local.
+const rollbackRefused = `velox migrate rollback runs only with APP_ENV=local.
+Rolling back in staging or production loses data the newer release wrote. To go back, restore the backup taken before the upgrade: docs/production-one-vm.md#going-back`
+
+// runMigrateRollback undoes the latest migration, one step, on a local
+// database: the loop for writing a new migration. Migration 180, the
+// v0.8.1 baseline, never rolls back.
+func runMigrateRollback() {
+	if config.AppEnv() != "local" {
+		fmt.Fprintln(os.Stderr, rollbackRefused)
 		os.Exit(2)
 	}
-	if err := migrate.Force(loadDSN(), v); err != nil {
-		fmt.Fprintf(os.Stderr, "force failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("recorded version %d as applied; the dirty mark is cleared\nnext: run \"velox migrate\" to apply any later migrations\n", v)
-}
-
-func runMigrateRollback() {
-	v, err := migrate.Rollback(loadDSN(), 1)
+	v, err := migrate.Down(loadDSN())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback failed: %v\n", err)
 		os.Exit(1)
@@ -499,11 +475,10 @@ func printUsage() {
 Commands:
   serve                Start the API server (default)
   migrate              Apply pending migrations
-  migrate status       Show current migration version
-  migrate rollback     Rollback the latest migration
-  migrate force N      Repair after a failed migration: clear the dirty mark and
-                       record version N. Check the schema first; see
-                       velox migrate force --help
+  migrate status       Show the upgrade plan: the database's version, the
+                       migrations still to apply, and whether one is running
+  migrate rollback     Undo the latest migration (APP_ENV=local only; never
+                       below 180, the v0.8.1 baseline)
   version              Print version
   help                 Show this help
 

@@ -285,6 +285,17 @@ func TestLoad_AppEnvIsCaseNormalised(t *testing.T) {
 	}
 }
 
+// AppEnv is the one normalisation Load and `velox migrate rollback` share:
+// the rollback check must call " Local " local, and an unset APP_ENV local.
+func TestAppEnv(t *testing.T) {
+	for raw, want := range map[string]string{"": "local", " Local ": "local", "staging": "staging", "PRODUCTION": "production"} {
+		t.Setenv("APP_ENV", raw)
+		if got := AppEnv(); got != want {
+			t.Errorf("APP_ENV=%q: got %q, want %q", raw, got, want)
+		}
+	}
+}
+
 // SHUTDOWN_DRAIN_DELAY: unset defaults by environment, values parse as Go
 // durations, junk is a load error rather than a silent default.
 func TestLoad_ShutdownDrainDelay(t *testing.T) {

@@ -197,7 +197,7 @@ CI on every pull request and every push to main:
   test must fail. The repo has about 138k lines of Go test code and about
   104k lines of hand-written production Go.
 
-Three drills cover failures that only happen in production. They are run by
+Two drills cover failures that only happen in production. They are run by
 hand:
 
 - [`scripts/partition-drill.sh`](../scripts/partition-drill.sh) cuts the
@@ -206,9 +206,6 @@ hand:
   ([failure-correctness.md](benchmarks/failure-correctness.md)).
 - [`scripts/restore-drill.sh`](../scripts/restore-drill.sh) runs backup,
   restore and a row-count check against a throwaway Postgres.
-- [`scripts/migration-safety-test.sh`](../scripts/migration-safety-test.sh)
-  replays the migrations against a database full of rows, to catch a lock
-  a migration would take at scale.
 
 ---
 

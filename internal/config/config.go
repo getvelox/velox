@@ -71,8 +71,15 @@ type DBConfig struct {
 	QueryTimeout    time.Duration
 }
 
+// AppEnv is APP_ENV, trimmed and lower-cased, and "local" when unset. Load
+// and the `velox migrate rollback` check read it through this one function,
+// so both see the same environment.
+func AppEnv() string {
+	return strings.ToLower(strings.TrimSpace(envOr("APP_ENV", "local")))
+}
+
 func Load() (Config, error) {
-	env := strings.ToLower(strings.TrimSpace(envOr("APP_ENV", "local")))
+	env := AppEnv()
 
 	dbURL, err := loadDatabaseURL()
 	if err != nil {

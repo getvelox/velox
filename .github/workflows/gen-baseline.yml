@@ -1,0 +1,46 @@
+name: Generate baseline
+
+# Runs scripts/gen-baseline.sh, which writes the v0.8.1 baseline
+# (internal/platform/migrate/baseline/00180_baseline.sql) from the pinned
+# v0.8.1 image, and uploads the file (ADR-125). It runs on a pull request
+# that changes the generator, and by hand. To change the baseline, push the
+# generator change, download the artifact, review it and commit it. The
+# migrations job in ci.yml proves on every PR that the committed file
+# builds the same database as the v0.8.1 history, so there is no gate here.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - scripts/gen-baseline.sh
+      - scripts/ci/pinned-images.sh
+      - .github/workflows/gen-baseline.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate the baseline
+        run: OUT="${{ runner.temp }}/baseline/00180_baseline.sql" scripts/gen-baseline.sh
+
+      - name: Compare with the committed file
+        run: |
+          if diff -u internal/platform/migrate/baseline/00180_baseline.sql "${{ runner.temp }}/baseline/00180_baseline.sql" > "${{ runner.temp }}/baseline/committed.diff"; then
+            echo "The generated baseline equals the committed file."
+          else
+            echo "::warning::The generated baseline differs from the committed file. Download the baseline artifact, review it and commit it."
+            head -80 "${{ runner.temp }}/baseline/committed.diff"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: baseline
+          path: ${{ runner.temp }}/baseline
+          retention-days: 14

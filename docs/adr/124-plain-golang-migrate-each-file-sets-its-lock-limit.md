@@ -1,7 +1,7 @@
 # ADR-124: Run migrations with plain golang-migrate; each file sets its own lock limit
 
 **Date:** 2026-10-17
-**Status:** Superseded by [ADR-125](125-goose-migrations-from-one-v081-baseline.md) on 2026-10-18, before it was built. The code still runs the ADR-073 runner until ADR-125's cut-over merges.
+**Status:** Superseded by [ADR-125](125-goose-migrations-from-one-v081-baseline.md) on 2026-10-18, before it was built. The ADR-073 runner it would have replaced ran up to v0.8.1; from v0.9.0 goose runs the migrations.
 **Amends:** ADR-073 (decision 3, the hybrid migration runner, is replaced; its deadlock claim is corrected)
 
 ## Summary

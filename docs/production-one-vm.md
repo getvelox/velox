@@ -368,10 +368,10 @@ Velox is down while the new version starts. Database changes (migrations) run by
 
    **You see:** `Verified:  yes`.
 
-3. Get the new release's files and point `.env` at its images. This example moves to `v0.8.1`.
+3. Get the new release's files and point `.env` at its images. This example moves to `v0.9.0`.
 
    ```bash
-   VELOX_VERSION=v0.8.1
+   VELOX_VERSION=v0.9.0
    cd /opt/velox
    git fetch --tags
    git checkout "$VELOX_VERSION"
@@ -381,21 +381,36 @@ Velox is down while the new version starts. Database changes (migrations) run by
 
    **You see:** `HEAD is now at …` from git.
 
-4. Pull and start the new images.
+4. Pull the new images and see what the upgrade will change. `migrate status` only reads.
 
    ```bash
    docker compose pull
+   docker compose run --rm velox-api migrate status
+   ```
+
+   **You see:** a few `Container … Running` lines, then the plan. From v0.8.x to v0.9.0 it says `state:        ready to move: the next "velox migrate" records 180 in goose_db_version and changes no table`. For a later release it lists the migrations to apply. If it says `refused`, stop here and follow the message.
+
+5. Start the new images.
+
+   ```bash
    docker compose up -d
    docker compose exec velox-api /usr/local/bin/velox version
    ```
 
-   **You see:** `velox v0.8.1`, and `curl -fsS http://localhost:8080/health/ready` answers `"status":"ok"` again.
+   **You see:** `velox v0.9.0`, and `curl -fsS http://localhost:8080/health/ready` answers `"status":"ok"` again.
 
-Never roll the database back. If a release goes wrong, restore the backup from step 2 and start the old release.
+If the upgrade stops with an error, nothing needs repair: a failed migration is undone. Follow [A database upgrade stopped](ops/runbook/migration-failed-midway.md) to find the cause, then start the API again.
 
-If the API will not start and its log says `schema_migrations is dirty`, a database change stopped midway. Follow [A database upgrade failed midway](ops/runbook/migration-failed-midway.md).
+If it says `waited 5s for a table lock`, something held a lock on a table the upgrade changes, often a long-running query. Start the API again, or see [An upgrade waited for a table lock](ops/runbook/migration-lock-timeout.md).
 
-If it says `waited 5s for a table lock`, something held a lock on a table the upgrade changes, often a long-running query. Nothing needs repair: start the API again, or see [An upgrade waited for a table lock](ops/runbook/migration-lock-timeout.md).
+### Going back
+
+Never roll the database back with `velox migrate rollback`: it runs only with `APP_ENV=local`, because it loses data the newer release wrote. To go back to the old release:
+
+- **Restore the backup from step 2 into an empty database**, then start the old release. See [Restore a backup](ops/backup-considerations.md#4-restore-a-backup).
+- **From v0.9.0 to v0.8.x only, when v0.9.0 applied no migration after 180,** you can also start the old images as they are: v0.8.x reads its own record, still at 180, and changes nothing. `velox migrate status` (with v0.9.0) shows `database:     180` when this applies.
+
+Do not run v0.8.x's `migrate rollback` or `migrate force` on a database v0.9.0 took over. If one runs, v0.9.0 refuses to start until the records agree again; see [Two migration records](ops/runbook/migration-failed-midway.md#two-migration-records).
 
 ## Related
 

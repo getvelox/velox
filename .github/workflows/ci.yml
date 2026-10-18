@@ -184,6 +184,40 @@ jobs:
         env:
           VELOX_LIVEMODE_STRICT: "true"
 
+  # The upgrade path (ADR-125): a new install of HEAD must equal an install
+  # upgraded from the published v0.8.1 image, schema with owners and access
+  # rights, data and applied versions, under three role setups (Compose,
+  # managed Postgres, the CI test database). Also a restore drill (a v0.8.1
+  # backup restored over a database HEAD took over must be refused) and an
+  # apply on Postgres 14. Each Postgres runs in its own container, so the
+  # job has no service.
+  migrations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build HEAD
+        run: go build -o "${{ runner.temp }}/velox" ./cmd/velox
+
+      - name: New install equals upgraded install
+        run: scripts/ci/migration-convergence.sh
+        env:
+          VELOX_BIN: ${{ runner.temp }}/velox
+          KEEP_OUT: ${{ runner.temp }}/migrations-out
+
+      - name: Upload dumps on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: migrations-out
+          path: ${{ runner.temp }}/migrations-out
+          retention-days: 7
+
   # Golden path: the README quickstart + scripts/demo.sh, executed for real.
   # This is the whole wedge chain in one run — recipe → test-clock customer →
   # LiteLLM-shaped token ingest → provider cost rates → simulated month →
@@ -563,7 +597,7 @@ jobs:
     timeout-minutes: 30
     # Keep this list the same as the required status checks on main: an
     # image must not be published past a check that would block a merge.
-    needs: [test, unit, test-pgbouncer, golden-path, codegen-drift, frontend, lint]
+    needs: [test, unit, test-pgbouncer, migrations, golden-path, codegen-drift, frontend, lint]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:

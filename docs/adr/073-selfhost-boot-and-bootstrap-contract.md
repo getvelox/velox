@@ -1,7 +1,7 @@
 # ADR-073: Self-host boot contract — one bootstrap writer, honored APP_DATABASE_URL, serialized hybrid migrations
 
 **Date:** 2026-07-03
-**Status:** Accepted (shipped in P7; design amended by a 2-lens adversarial panel — both SHIP-WITH-FIXES; amended 2026-08-30, 2026-10-17 and 2026-10-18). Decision 3, the migration runner, is being replaced by [ADR-125](125-goose-migrations-from-one-v081-baseline.md), which superseded ADR-124.
+**Status:** Accepted (shipped in P7; design amended by a 2-lens adversarial panel — both SHIP-WITH-FIXES; amended 2026-08-30, 2026-10-17 and 2026-10-18). Decision 3, the migration runner, is replaced by [ADR-125](125-goose-migrations-from-one-v081-baseline.md) (goose, from v0.9.0), which superseded ADR-124.
 
 ## Summary
 
@@ -19,9 +19,8 @@ detect the wait between a migrator blocked on the migration lock and a
 `CREATE INDEX CONCURRENTLY`. It can: it reports `deadlock detected`
 (SQLSTATE 40P01) after about one second and cancels one side. When it
 cancels the index build, the index is left INVALID and the version
-dirty. The polling lock in decision 3 still avoids that wait, and it is
-what the code runs until ADR-125's cut-over PR merges. ADR-125 then
-replaces the runner with goose, whose own lock also polls (amendment
+dirty. The polling lock in decision 3 avoided that wait. ADR-125
+replaced the runner with goose, whose own lock also polls (amendment
 2026-10-18).
 
 ## Context
@@ -230,6 +229,6 @@ lock does. So copies that start together still take turns, and a waiting
 copy cannot deadlock against a `CREATE INDEX CONCURRENTLY`. The library
 now keeps that guarantee, and Velox no longer needs the
 one-migrator rule that ADR-124 planned. The 2026-10-17 correction of the
-deadlock claim still stands. Until ADR-125's cut-over PR merges,
-decision 3 describes the code.
+deadlock claim still stands. Decision 3 describes the code up to v0.8.1;
+from v0.9.0 the runner and its lock key (76540007) are gone.
 

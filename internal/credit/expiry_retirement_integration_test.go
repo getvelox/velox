@@ -3,7 +3,6 @@ package credit_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -427,113 +426,6 @@ func TestAdjustAtomic_ClawbackRequiresEligibleBlocks(t *testing.T) {
 	sum, _, _ = customerLedgerFacts(t, db, ctx, cust.ID)
 	if sum != 2000 {
 		t.Errorf("ledger SUM: got %d, want 2000 (10000 expired + 8000 - 6000)", sum)
-	}
-}
-
-// TestMigration0127_RetiresLegacyExpiredGrants seeds the exact ledger
-// shape the pre-fix code left behind — expiry entry present, grant's
-// consumed_cents untouched — plus a partially-consumed variant, then
-// executes the REAL migration SQL (read from the migration file, so
-// the test can't drift from what ships) and asserts the grants are
-// retired: the backdated-apply vector is closed and the sweep does not
-// double-expire them once the description-LIKE dedup is gone.
-func TestMigration0127_RetiresLegacyExpiredGrants(t *testing.T) {
-	db, ctx, tenantID, cust, store, svc, invoiceStore := expirySetup(t, "Migration0127")
-	expiresAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-
-	// Legacy shape A: expired grant, expiry entry appended pre-fix,
-	// consumed_cents = 0.
-	legacyA := seedExpiredGrant(t, db, ctx, svc, tenantID, cust.ID, 10000, expiresAt)
-	// Legacy shape B: partially consumed (pre-fix expiry deducted only
-	// the remaining 4000 but never flipped consumed_cents past 6000).
-	legacyB := seedExpiredGrant(t, db, ctx, svc, tenantID, cust.ID, 10000, expiresAt)
-
-	tx, err := db.BeginTx(ctx, postgres.TxBypass, "")
-	if err != nil {
-		t.Fatalf("begin bypass: %v", err)
-	}
-	// The 0021 livemode trigger overwrites NEW.livemode from the session
-	// GUC on INSERT; a bypass tx must SET LOCAL to land test-mode rows
-	// next to the test-mode grants.
-	if _, err := tx.Exec(`SET LOCAL app.livemode = 'off'`); err != nil {
-		t.Fatalf("set local livemode: %v", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE customer_credit_ledger SET consumed_cents = 6000 WHERE id = $1`, legacyB,
-	); err != nil {
-		t.Fatalf("set partial consumption: %v", err)
-	}
-	// Pre-fix expiry entries: -remaining, description format verbatim.
-	for _, seed := range []struct {
-		grantID string
-		amount  int64
-	}{{legacyA, -10000}, {legacyB, -4000}} {
-		if _, err := tx.Exec(`
-			INSERT INTO customer_credit_ledger (id, tenant_id, customer_id, entry_type,
-				amount_cents, balance_after, description, metadata, created_at, livemode)
-			VALUES ($1, $2, $3, 'expiry', $4, 0, $5, '{}', $6, false)
-		`, postgres.NewID("vlx_ccl"), tenantID, cust.ID, seed.amount,
-			"Expired grant "+seed.grantID, expiresAt,
-		); err != nil {
-			t.Fatalf("seed legacy expiry entry: %v", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit legacy seed: %v", err)
-	}
-
-	// The bug, still open on legacy rows: a backdated apply re-drains
-	// grant A's phantom headroom. Prove the vector exists pre-migration
-	// by checking the candidate/drain eligibility predicate directly.
-	migrationSQL, err := os.ReadFile("../platform/migrate/sql/0127_retire_expired_credit_grants.up.sql")
-	if err != nil {
-		t.Fatalf("read migration file: %v", err)
-	}
-	tx2, err := db.BeginTx(ctx, postgres.TxBypass, "")
-	if err != nil {
-		t.Fatalf("begin bypass: %v", err)
-	}
-	if _, err := tx2.Exec(string(migrationSQL)); err != nil {
-		t.Fatalf("execute migration 0127: %v", err)
-	}
-	if err := tx2.Commit(); err != nil {
-		t.Fatalf("commit migration: %v", err)
-	}
-
-	if consumed := grantConsumed(t, db, ctx, legacyA); consumed != 10000 {
-		t.Errorf("legacy grant A consumed_cents post-migration: got %d, want 10000", consumed)
-	}
-	if consumed := grantConsumed(t, db, ctx, legacyB); consumed != 10000 {
-		t.Errorf("legacy grant B consumed_cents post-migration: got %d, want 10000", consumed)
-	}
-
-	// Backdated apply after the backfill drains $0 — vector closed.
-	inv := createOpenInvoice(t, ctx, invoiceStore, tenantID, cust.ID, 5000)
-	applied, err := svc.ApplyToInvoiceAt(ctx, tenantID, cust.ID, inv.ID, 5000, expiresAt.Add(-time.Minute))
-	if err != nil {
-		t.Fatalf("backdated apply post-migration: %v", err)
-	}
-	if applied != 0 {
-		t.Errorf("backdated apply drained %d from retired legacy grants, want 0", applied)
-	}
-
-	// The sweep must not double-expire retired legacy grants now that
-	// the description-LIKE dedup is gone: neither grant re-lists.
-	candidates, err := store.ListExpiredGrants(ctx, 0)
-	if err != nil {
-		t.Fatalf("list expired grants: %v", err)
-	}
-	for _, c := range candidates {
-		if c.ID == legacyA || c.ID == legacyB {
-			t.Errorf("retired legacy grant %s re-listed as expiry candidate", c.ID)
-		}
-	}
-	sum, expiryEntries, _ := customerLedgerFacts(t, db, ctx, cust.ID)
-	if expiryEntries != 2 {
-		t.Errorf("expiry entries: got %d, want exactly the 2 legacy ones", expiryEntries)
-	}
-	if sum != 6000 {
-		t.Errorf("ledger SUM: got %d, want 6000 (20000 granted - 14000 expired pre-fix; usage drained 0)", sum)
 	}
 }
 

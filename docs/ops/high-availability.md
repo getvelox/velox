@@ -74,9 +74,15 @@ A grace period shorter than 120 seconds can kill a copy (SIGKILL) halfway throug
 
 ## Upgrades
 
-Upgrade one copy at a time (a rolling upgrade). Read the upgrade notes in the [changelog](../../CHANGELOG.md) first.
+Read the upgrade notes in the [changelog](../../CHANGELOG.md) first. Whether you can upgrade one copy at a time (a rolling upgrade) depends on the release's migrations, below.
 
-**Database upgrades (migrations):** apply them before the new copies take traffic. The cleanest way is one separate step before the rollout, for example `velox migrate` run once. `RUN_MIGRATIONS_ON_BOOT=true` is also safe when several copies start at once: they take turns through a Postgres lock, and each one checks what is already applied. Never roll a migration back in production; see [Self-host](../self-host.md#database-upgrades-migrations).
+**Database upgrades (migrations):** `RUN_MIGRATIONS_ON_BOOT=true` is safe when several copies start at once: they take turns through a Postgres lock, and each one applies only what is still missing. A waiting copy gives up after 30 minutes and is restarted. What is not covered is old code running on a new schema, so the release notes decide the order:
+
+- **A release whose notes say it has migrations:** stop every old copy, run `velox migrate` once (or start one new copy with `RUN_MIGRATIONS_ON_BOOT=true`), then start the other new copies.
+- **A release with no migrations:** upgrade one copy at a time.
+- **From v0.8.x to v0.9.0:** run v0.9.0's `velox migrate` once first. It adds goose's record (`goose_db_version`, at version 180) and changes none of Velox's tables, so the v0.8.x copies keep serving while it runs. Then upgrade the copies one at a time. With `RUN_MIGRATIONS_ON_BOOT=false`, a v0.9.0 copy started before that step refuses to start, and its log says `1 migration to apply`.
+
+Run `velox migrate status` with the new release first to see the plan. Never roll a migration back in production; see [Self-host](../self-host.md#database-upgrades-migrations).
 
 ### Upgrading from v0.3.2 or older
 

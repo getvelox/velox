@@ -1,1 +1,0 @@
-DROP INDEX IF EXISTS subscriptions_one_live_per_customer_plan;

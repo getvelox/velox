@@ -18,13 +18,27 @@ original text.
 
 ## [Unreleased]
 
+**Before upgrading:**
+
+- **Upgrade from v0.8.0 or v0.8.1.** This release takes over a database at migration 180 and changes no table. Older databases upgrade to v0.8.1 first. A dirty v0.8 database is repaired with v0.8.1.
+- **With `RUN_MIGRATIONS_ON_BOOT=false`, run `velox migrate` once before you start this release.** It changes no table, so v0.8.x copies keep serving meanwhile. Until it has run, this release refuses to start.
+- **`velox migrate status` prints a plan now.** A script that reads its old `version: N, dirty: …` line must change.
+- **`velox migrate force` is removed, and `velox migrate rollback` runs only with `APP_ENV=local`.** To go back, restore the backup taken before the upgrade ([Going back](docs/production-one-vm.md#going-back)).
+- **A v0.8.x backup restores into an empty database only.** Restored over an upgraded database, Velox refuses to start and says why.
+- **Velox's three extensions (`pgcrypto`, `citext`, `btree_gist`) must be in schema `public`.** Migrations now run with `search_path = public`, so an extension kept in another schema is not found, and the migration stops without changing anything ([Postgres requirements](docs/ops/postgres-requirements.md#extensions)).
+
 ### Changed
 
 - **ADRs 001–061 all open with a short Summary (2026-10-18).** Forty-six records gained one, giving the current rule and status, including what later ADRs changed. The records below each Summary are unchanged. Fourteen status lines now name their dated amendment or partial supersession. See the [ADR index](docs/adr/README.md).
+- **Migrations run with goose, from one v0.8.1 baseline (2026-10-18).** A new database runs one generated file instead of 178. A failed migration is undone, so nothing needs repair: fix the cause and run again. Copies that start together take turns. [ADR-125](docs/adr/125-goose-migrations-from-one-v081-baseline.md) supersedes ADR-124. ([#1198](https://github.com/getvelox/velox/pull/1198))
+- **`velox migrate status` shows the upgrade plan (2026-10-18).** It prints the database's version, the migrations to apply, index builds marked, and whether a migration is running now. It only reads, so run it with the new release before upgrading. ([#1198](https://github.com/getvelox/velox/pull/1198))
 - **Go tests now walk five untested backend flows over HTTP on a real database (2026-10-18).** Contributors: `internal/api` has new journeys for API keys (create, use, revoke, rotate), offline payments and signed Stripe webhooks, the update-payment link, dunning-policy delete, and whoami, the mode switch and the reset-link check. ([#1204](https://github.com/getvelox/velox/pull/1204))
-- **Decision recorded: migrations move to goose in v0.9.0 (2026-10-18).** Nothing changes yet. v0.9.0 takes over a v0.8.0 or v0.8.1 database without changing a table; older ones upgrade to v0.8.1 first. A failed migration leaves nothing to repair, so `velox migrate force` goes. [ADR-125](docs/adr/125-goose-migrations-from-one-v081-baseline.md) supersedes ADR-124; ADR-073's deadlock correction stands.
 - **Dashboard lint now fails on unused code (2026-10-18).** For contributors: `npm run lint` in `web-v2` runs knip after eslint, so an unused file, export or dependency fails CI. Unused dashboard files, exports and three unused dependencies are deleted. `web-v2/knip.jsonc` says what is ignored and why. ([#1196](https://github.com/getvelox/velox/pull/1196))
 - **The README shows before it tells (2026-10-17).** The pictures come first, then a small diagram of how Velox works and one example usage event, then the quick start. The gaps table is shorter, and the volume line now uses the €6.49-a-month server test.
+
+### Removed
+
+- **`velox migrate force` and `velox-migrate-safety` (2026-10-18).** goose leaves no half-applied state, so there is nothing to force; the command now prints where to go instead. The safety tool replayed the old migration files, which no longer ship.
 
 ### Fixed
 

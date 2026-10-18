@@ -20,7 +20,10 @@ import (
 
 // runtimeRoleURL is the PRODUCTION runtime role (velox_app) — the role
 // cmd/velox connects as via APP_DATABASE_URL, and the role migration 0150
-// revokes the audit_log write grants from.
+// revokes the audit_log write grants from. Since v0.9.0, 0150 is part of
+// the v0.8.1 baseline: the baseline's GRANT lines carry the result, and
+// scripts/gen-baseline.sh appends 0150's REVOKE (rule R7) so installs whose
+// velox_app has default privileges end the same way (ADR-125).
 //
 // Note this is deliberately NOT testutil's TEST_DATABASE_URL (velox_test_app).
 // velox_test_app is test-only scaffolding (docker/init.sql + ci.yml) that picks

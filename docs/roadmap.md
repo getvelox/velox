@@ -6,7 +6,7 @@ What changed lately, and what is being worked on next. Every change, with its da
 
 October 2026 (v0.6.1, v0.7.0, v0.8.0 and v0.8.1):
 
-- **Safer upgrades.** `velox migrate force` repairs a database upgrade that stopped halfway, and by default a migration waits at most 5 seconds for a table lock (`MIGRATION_LOCK_TIMEOUT` changes it).
+- **Safer upgrades.** By default a migration waits at most 5 seconds for a table lock (`MIGRATION_LOCK_TIMEOUT` changes it). In v0.8.x, `velox migrate force` repairs an upgrade that stopped halfway; from v0.9.0 (not yet released) migrations run with goose, a failed one leaves nothing to repair, and `force` is gone.
 - **LiteLLM usage for a customer that does not exist yet is kept.** Velox holds it and shows it on the Usage page. Create the customer, then release it once.
 - **New accounts retry failed payments.** Each new account starts with a "Default retries" policy.
 - **Settings → Email** shows whether this server can send email, with a test send.

@@ -159,9 +159,8 @@ info "velox_app created with default privileges"
 # ---------------------------------------------------------------------------
 say "migrations"
 app_sh "DATABASE_URL='$ADMIN_DSN' velox migrate" >/dev/null
-ver=$(psql_admin "SELECT version || CASE WHEN dirty THEN ' DIRTY' ELSE '' END FROM schema_migrations")
-info "schema_migrations: $ver"
-case "$ver" in *DIRTY*) die "migrations are dirty — refusing to benchmark a half-migrated schema";; esac
+ver=$(psql_admin "SELECT max(version_id) FROM public.goose_db_version")
+info "goose_db_version: $ver"
 
 # The trap the doc calls out: the role exists and the migration succeeded, and
 # the app can still be unable to read most tables. Prove the grant took.

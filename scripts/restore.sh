@@ -9,7 +9,6 @@
 #
 # Optional environment variables:
 #   VELOX_RESTORE_CONFIRM=yes   Skip the interactive confirmation prompt (for automation).
-#   VELOX_MIGRATIONS_DIR        Path to migrations directory (default: auto-detected).
 #
 # Exit codes:
 #   0  Success
@@ -271,35 +270,31 @@ log "All critical tables present."
 
 log "Checking migration state..."
 
-# Look for a schema_migrations or goose_db_version table.
-MIGRATION_TABLE=$(psql "$DATABASE_URL" -t -A -c "
-  SELECT table_name FROM information_schema.tables
-  WHERE table_schema = 'public'
-    AND table_name IN ('schema_migrations', 'goose_db_version')
-  LIMIT 1;
-" 2>/dev/null || echo "")
+# Report both records as they are; `velox migrate status` decides whether
+# this release can upgrade the database (ADR-125). A v0.8.x backup restored
+# over a newer database leaves the newer goose_db_version in place, and
+# Velox refuses that state, so restore v0.8.x backups into an empty database.
+GOOSE_VERSION=$(psql "$DATABASE_URL" -t -A -c "
+  SELECT CASE WHEN to_regclass('public.goose_db_version') IS NULL THEN ''
+              ELSE (SELECT max(version_id)::text FROM public.goose_db_version) END;
+" 2>/dev/null || echo "unknown")
+V08_RECORD=$(psql "$DATABASE_URL" -t -A -c "
+  SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN ''
+              ELSE (SELECT string_agg(version || ', dirty=' || dirty, '; ') FROM public.schema_migrations) END;
+" 2>/dev/null || echo "unknown")
 
-if [ -n "$MIGRATION_TABLE" ]; then
-  log "Migration table found: ${MIGRATION_TABLE}"
-
-  if [ "$MIGRATION_TABLE" = "schema_migrations" ]; then
-    LATEST_MIGRATION=$(psql "$DATABASE_URL" -t -A -c "
-      SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;
-    " 2>/dev/null || echo "unknown")
-    log "Latest applied migration: ${LATEST_MIGRATION}"
-  elif [ "$MIGRATION_TABLE" = "goose_db_version" ]; then
-    LATEST_MIGRATION=$(psql "$DATABASE_URL" -t -A -c "
-      SELECT version_id FROM goose_db_version WHERE is_applied = true ORDER BY version_id DESC LIMIT 1;
-    " 2>/dev/null || echo "unknown")
-    log "Latest applied migration: ${LATEST_MIGRATION}"
-  fi
-
-  log "NOTE: If the application has newer migrations, run them after restore:"
-  log "  DATABASE_URL=\"$DATABASE_URL\" RUN_MIGRATIONS_ON_BOOT=true go run ./cmd/velox"
-  log "  Or start the application normally — it runs migrations on boot when RUN_MIGRATIONS_ON_BOOT=true."
-else
-  log "WARNING: No migration tracking table found. Migrations may need to be re-applied."
+if [ -n "$GOOSE_VERSION" ]; then
+  log "goose_db_version: ${GOOSE_VERSION}"
+  LATEST_MIGRATION="$GOOSE_VERSION"
 fi
+if [ -n "$V08_RECORD" ]; then
+  log "schema_migrations (Velox v0.8.x record): ${V08_RECORD}"
+  LATEST_MIGRATION="${LATEST_MIGRATION:-v0.8.x record ${V08_RECORD}}"
+fi
+if [ -z "$GOOSE_VERSION" ] && [ -z "$V08_RECORD" ]; then
+  log "WARNING: No migration record found."
+fi
+log "NOTE: Run \"velox migrate status\" with the Velox release you will start, to check it can upgrade this database."
 
 # ---------------------------------------------------------------------------
 # Summary

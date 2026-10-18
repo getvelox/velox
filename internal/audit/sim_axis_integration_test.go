@@ -19,18 +19,16 @@ import (
 // supplies — the same path every production emitter takes.
 // analyze refreshes the planner's stats — without it the planner has no idea
 // the clock's rows are a minority and cannot make the choice this test is about.
-func analyze(t *testing.T, db *postgres.DB, ctx context.Context, tenantID string) {
+// analyze gathers statistics on audit_log, as its owner. The app role
+// cannot: Postgres 16 skips ANALYZE on a table the role does not own, with
+// only a WARNING. Without statistics every candidate index costs the same
+// on these small fixtures, and the planner breaks the tie by index creation
+// order — which the v0.8.1 baseline (ADR-125) creates by name, not in
+// migration order. With statistics the plan follows the costs.
+func analyze(t *testing.T, _ *postgres.DB, ctx context.Context, _ string) {
 	t.Helper()
-	tx, err := db.BeginTx(ctx, postgres.TxBypass, tenantID)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer postgres.Rollback(tx)
-	if _, err := tx.ExecContext(ctx, `ANALYZE audit_log`); err != nil {
+	if _, err := testutil.AdminPool(t).ExecContext(ctx, `ANALYZE audit_log`); err != nil {
 		t.Fatalf("analyze: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit analyze: %v", err)
 	}
 }
 
