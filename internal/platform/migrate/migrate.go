@@ -261,26 +261,31 @@ func sourceName(s *goose.Source) string {
 }
 
 // isNoTxFile reports whether goose runs a migration file without a
-// transaction, the mark of an index build. It reads the NO TRANSACTION
-// annotation the way goose v3.27.0 does (internal/sqlparser, which is not
-// importable): a line that starts with "--" and contains "+goose" is an
-// annotation; with every "--" and the first "+goose" removed, the rest is
-// compared without case. goose refuses an indented annotation line, so it
-// never runs such a file at all.
+// transaction, the mark of an index build.
 func isNoTxFile(fsys fs.FS, path string) bool {
 	body, err := fs.ReadFile(fsys, path)
 	if err != nil {
 		return false
 	}
 	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if !strings.HasPrefix(line, "--") || !strings.Contains(line, "+goose") {
-			continue
-		}
-		cmd := strings.Replace(strings.ReplaceAll(line, "--", ""), "+goose", "", 1)
-		if strings.EqualFold(strings.TrimSpace(cmd), "NO TRANSACTION") {
+		if cmd, ok := gooseAnnotation(line); ok && strings.EqualFold(cmd, "NO TRANSACTION") {
 			return true
 		}
 	}
 	return false
+}
+
+// gooseAnnotation reads one line of a migration file the way goose v3.27.0
+// does (internal/sqlparser, which is not importable): a line that starts
+// with "--" and contains "+goose" is an annotation, and with every "--" and
+// the first "+goose" removed, the trimmed rest is its command, compared
+// without case. goose refuses an indented annotation line, so it never runs
+// such a file at all; ok is false for one. The migration lints use this
+// too, so they and the runtime read a file the same way.
+func gooseAnnotation(line string) (cmd string, ok bool) {
+	line = strings.TrimRight(line, "\r")
+	if !strings.HasPrefix(line, "--") || !strings.Contains(line, "+goose") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.Replace(strings.ReplaceAll(line, "--", ""), "+goose", "", 1)), true
 }

@@ -162,7 +162,8 @@ internal/{domain}/
 3. Create `internal/{domain}/service.go` with business logic.
 4. Create `internal/{domain}/handler.go` with HTTP handlers using the
    `respond` package.
-5. Add a SQL migration in `internal/platform/migrate/sql/`.
+5. Add a migration with `make migration name=...`, then follow
+   [Writing a database migration](docs/dev/migrations.md).
 6. Wire it into `internal/api/router.go`.
 7. Write tests at the layers [How we test](docs/testing.md#which-test-to-write)
    names for your change.

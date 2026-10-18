@@ -80,8 +80,10 @@ plain meanings first.
    [Stripe end-to-end test](dev/stripe-end-to-end-test.md) has the
    step-by-step Stripe commands.
 5. [OpenAPI workflow](dev/openapi-workflow.md): changing the API contract.
-6. [Writing style](dev/writing-style.md): how to write docs here.
-7. AI coding agents start at [CLAUDE.md](../CLAUDE.md).
+6. [Writing a database migration](dev/migrations.md): changing the
+   database schema.
+7. [Writing style](dev/writing-style.md): how to write docs here.
+8. AI coding agents start at [CLAUDE.md](../CLAUDE.md).
 
 ## Archive
 

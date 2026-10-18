@@ -1,4 +1,4 @@
-.PHONY: build run test lint migrate dev clean cli gen gen-go gen-ts
+.PHONY: build run test lint migrate migration dev clean cli gen gen-go gen-ts
 
 # Build the velox binary
 build:
@@ -62,6 +62,14 @@ migrate:
 
 migrate-status:
 	go run ./cmd/velox migrate status
+
+# Write the next migration file in internal/platform/migrate/sql/, numbered
+# after the highest one in any worktree or on any branch. Rules and steps:
+# docs/dev/migrations.md.
+#   make migration name=add_invoice_purchase_order
+#   make migration name=idx_invoices_purchase_order concurrent=1   (an index build)
+migration:
+	@scripts/new-migration.sh "$(name)" "$(concurrent)"
 
 # Clean build artifacts
 clean:
