@@ -13,6 +13,11 @@ the screen, and that the main things an operator does work end to end.
   public invoice page, and grants credits. Each journey checks that the screen
   shows what the API returned. The arithmetic behind the numbers is tested in
   Go, not here.
+- `invoices.spec.ts` takes invoices through their life on screen: a one-off
+  invoice from draft to finalized (and Save & send), a credit note before and
+  after an offline payment, void and write-off, and the credit notes page.
+  Each journey checks the dashboard and the customer's payment page against
+  the API.
 - `global.setup.ts` runs first. It seeds data through the API (code in
   `fixtures/`) and signs in once through the login page. The other tests reuse
   that session.
