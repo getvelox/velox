@@ -13,6 +13,11 @@ the screen, and that the main things an operator does work end to end.
   public invoice page, and grants credits. Each journey checks that the screen
   shows what the API returned. The arithmetic behind the numbers is tested in
   Go, not here.
+- `subscriptions.spec.ts` changes subscriptions on screen: a plan change now
+  (with its proration invoice) and at renewal, cancel at period end, undo and
+  cancel now, quantity and item changes against the upcoming invoice, and the
+  trial and collection controls. Each journey checks the page, the toast and
+  any invoice the change made against the API.
 - `global.setup.ts` runs first. It seeds data through the API (code in
   `fixtures/`) and signs in once through the login page. The other tests reuse
   that session.
