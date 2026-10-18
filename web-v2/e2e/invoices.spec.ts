@@ -307,11 +307,14 @@ test('closing an unpaid invoice: void gives back the credit it used, write-off c
   expect(sub.pause_collection?.behavior).toBe('keep_as_draft')
   await expect(statusPill(page, 'Uncollectible')).toBeVisible()
   await expect(page.getByText('Written off', { exact: true })).toBeVisible()
-  await expect(page.getByText('Collection on the subscription is paused.')).toBeVisible()
+  // Soft, so the rest of the journey still reports when the page is stale.
+  await expect.soft(page.getByText('Collection on the subscription is paused.')).toBeVisible()
 
-  await page.goto(`/subscriptions/${subscription.id}`)
-  await expect(page.getByText('New invoices are saved as drafts and not charged.')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Resume collection' })).toBeVisible()
+  // The subscription, opened from the invoice, offers to resume collection.
+  await page.getByRole('link', { name: subscription.display_name, exact: true }).click()
+  await expect(page.getByRole('heading', { name: subscription.display_name })).toBeVisible()
+  await expect.soft(page.getByText('New invoices are saved as drafts and not charged.')).toBeVisible()
+  await expect.soft(page.getByRole('button', { name: 'Resume collection' })).toBeVisible()
 
   await page.goto(`/invoice/${written.invoice.public_token}`)
   await expect(page.getByText('This invoice is closed')).toBeVisible()
