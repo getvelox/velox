@@ -142,7 +142,7 @@ Run these before you let traffic back in.
 
 Run the `velox migrate status` of the release you will start, against the restored database.
 
-**You see:** `state:        up to date, nothing to apply`. Another state lists what `velox migrate` will do, or, for `refused`, what to do first. A database restored from a v0.8.x backup says `ready to move`: `velox migrate` takes it over without changing a table.
+**You see:** `state:        up to date, nothing to apply`. Another state lists what `velox migrate` will do, or, for `refused`, what to do first. A database restored from a v0.8.x backup says `ready to move`: `velox migrate` records 180 in `goose_db_version`, then applies migrations 181 to 188.
 
 The record itself, if you want to look:
 

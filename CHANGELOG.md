@@ -18,11 +18,15 @@ original text.
 
 ## [Unreleased]
 
+## [0.9.0] - TBD
+
+Migrations run with goose from one v0.8.1 baseline, and eight new ones (181 to 188) follow it. A charge whose result was lost can no longer take a second payment, and a parked invoice ends without a person. Card disputes are recorded, repeated wrong passwords slow sign-in down, and activity rows use one wording. Upgrade from v0.8.0, v0.8.1 or v0.8.2.
+
 **Before upgrading:**
 
-- **Upgrade from v0.8.0, v0.8.1 or v0.8.2.** This release takes over a database at migration 180 and changes no table. Older databases upgrade to v0.8.1 first. A dirty v0.8 database is repaired with v0.8.1.
-- **With `RUN_MIGRATIONS_ON_BOOT=false`, run `velox migrate` once before you start this release.** It changes no table, so v0.8.x copies keep serving meanwhile. Until it has run, this release refuses to start.
-- **`velox migrate status` prints a plan now.** A script that reads its old `version: N, dirty: …` line must change.
+- **Upgrade from v0.8.0, v0.8.1 or v0.8.2.** `velox migrate` takes over a database at migration 180: it records 180 in a new table, `goose_db_version`, then applies migrations 181 to 188, described below. Older databases upgrade to v0.8.1 first. A dirty v0.8 database is repaired with v0.8.1.
+- **With `RUN_MIGRATIONS_ON_BOOT=false`, run `velox migrate` once before you start this release.** Each of its migrations is instant or does not block writes, so v0.8.x copies keep serving meanwhile. Until it has run, this release refuses to start.
+- **`velox migrate status` prints a plan now.** From v0.8.x it reads `ready to move`, then `8 migrations to apply`. A script that reads its old `version: N, dirty: …` line must change.
 - **`velox migrate force` is removed, and `velox migrate rollback` runs only with `APP_ENV=local`.** To go back, restore the backup taken before the upgrade. The restore loses everything written after the backup ([Going back](docs/production-one-vm.md#going-back)).
 - **A v0.8.x backup restores into an empty database only.** Restored over an upgraded database, the restore stops and changes nothing (from migration 185, whose new table refers to backed-up tables), or Velox refuses to start and says why.
 - **Velox's three extensions (`pgcrypto`, `citext`, `btree_gist`) must be in schema `public`.** Migrations now run with `search_path = public`, so an extension kept in another schema is not found, and the migration stops without changing anything ([Postgres requirements](docs/ops/postgres-requirements.md#extensions)).
@@ -36,6 +40,7 @@ original text.
 - **Migrations 187 and 188 record why an email was not sent ([#1310](https://github.com/getvelox/velox/pull/1310)).** 187 adds a column with no default to `email_outbox` and a check for new rows; both are instant. 188 checks the existing rows without blocking writes. Copies of the previous release keep serving while they run.
 - **API callers: payment-timeline rows are reworded, and a row's `status` is now `neutral`, `succeeded`, `warning` or `failed` ([#1297](https://github.com/getvelox/velox/pull/1297)).** Each row also carries `line`, the same row in the activity line standard's words, with its actor. Code that matches a `description` or switches on `status` needs the new values.
 - **API callers: subscription timeline rows are reworded, and a row's `status` is now `neutral`, `succeeded`, `warning` or `failed` ([#1300](https://github.com/getvelox/velox/pull/1300)).** Each row also carries `line`, the same row in the activity line standard's words, with its actor, and `error` when it has a problem. Code that matches a `description` or switches on `status` needs the new values.
+- **API callers: three new error codes, and `payment_in_flight` in more cases ([#1299](https://github.com/getvelox/velox/pull/1299), [#1313](https://github.com/getvelox/velox/pull/1313), [#1283](https://github.com/getvelox/velox/pull/1283), [#1254](https://github.com/getvelox/velox/pull/1254)).** 409 `payment_in_flight` now also covers a pending or failed invoice whose charge result was lost: void and record-payment are refused until Velox has asked Stripe, and mark-uncollectible only while the charge runs. Collect on such an invoice answers 409 `payment_in_flight`, not 422 `validation_error`. New: collect answers 502 `stripe_key_unusable` when Stripe refuses the API key; item changes can answer 409 `item_changed`; dashboard sign-in can answer 429 `login_throttled`.
 - **API callers: an invoice a credit note leaves with nothing due is now `paid`, so `POST /v1/invoices/{id}/void` refuses it ([#1306](https://github.com/getvelox/velox/pull/1306)).** `invoice.paid` is sent for it, with `amount_paid_cents` 0. A note issued while a charge is running leaves the invoice open at $0; if that charge fails, the next dunning retry marks it paid.
 - **A password on the built-in leaked-password list is refused when it is set ([#1222](https://github.com/getvelox/velox/pull/1222)).** Passwords already in use keep working. If a script bootstraps or resets with a fixed password, check that it still works; a refused password gets a 422.
 - **In staging and production, sign in over HTTPS ([#1226](https://github.com/getvelox/velox/pull/1226)).** The sign-in cookie is now always `Secure`. Over plain HTTP only Chrome and Firefox at `http://localhost` keep it; Safari does not. A quickstart `deploy/compose/.env` written before this has no `APP_ENV`, so it runs in production mode: add `APP_ENV=local` to it, or run `./quickstart.sh destroy` and start again.
@@ -84,6 +89,7 @@ original text.
 
 ### Fixed
 
+- **The Margin card no longer asks you to add provider rates when a window simply has no usage (2026-10-18).** It now says only "No usage in this window yet." Thanks to @jay23606. ([#1115](https://github.com/getvelox/velox/pull/1115), fixes #1111)
 - **A cancel, plan swap or item change on a partly credited invoice now gives back what fits (2026-10-20).** An operator credit note, or a partial waive (credits paid part, a note waived the rest), leaves an invoice less room. When the unused part was larger than that room, a cancel or swap gave nothing and an item change answered 500. Now it credits the room left and logs the rest. ([#1312](https://github.com/getvelox/velox/pull/1312))
 - **A charge Stripe refuses for the API key no longer counts as a decline (2026-10-20, [#1313](https://github.com/getvelox/velox/pull/1313)).** After a key is rolled, or a restricted key lacks a permission, charges pause instead: the invoice is not marked failed, no dunning retry is used, and the customer gets no email. Settings → Payments shows the refused key until a charge goes through again or you reconnect. Charges resume once the key works, including a restricted key you fix in Stripe by adding the permission.
 - **A restart during a tax retry no longer leaves the invoice an unbilled draft (2026-10-20).** With Stripe Tax, a deploy or a lost leader lease between saving the tax and finalizing left a draft that nothing retried, so the period was never billed. The finalize now completes. If the finalize itself fails, **Retry tax** shows an error, and the invoice stays a draft with its tax saved: finalize it. ([#1308](https://github.com/getvelox/velox/pull/1308))
@@ -124,6 +130,7 @@ original text.
 
 ### Security
 
+- **Setting a password now refuses common leaked passwords (2026-10-18).** Bootstrap, password reset and invite accept refuse about 30,000 passwords of 12 or more characters, such as `Password1234`, in any letter case. Passwords already set still work. ([#1222](https://github.com/getvelox/velox/pull/1222))
 - **`CORS_ALLOWED_ORIGINS=*` now allows any site without the sign-in cookie (2026-10-18).** The API answers `*` with no credentials, so another site's page can call it with an API key only. Listed addresses still may send the cookie. CORS now runs on `github.com/rs/cors` ([docs/self-host.md](docs/self-host.md), [#1262](https://github.com/getvelox/velox/pull/1262)).
 - **Every email address Velox accepts or sends to gets the same check (2026-10-18).** Customer emails and CC lists, the `email` of an invoice or credit-note send (before, only checked for being present), team invites, the company email and the bootstrap owner email must be one bare address. The sender checks To and Cc again before sending ([ADR-082](docs/adr/082-email-recipient-semantics.md#amendment-2026-10-18-every-address-must-be-one-bare-address), [#1259](https://github.com/getvelox/velox/pull/1259)).
 - **Sign-in stays rate-limited while Redis is down (2026-10-18).** The per-address limit on `/v1/auth` used to allow every request when a Redis call failed, so an outage made password guessing unlimited. Each copy now counts in memory with the same limit until Redis answers again ([ADR-095](docs/adr/095-login-security-roadmap-and-mfa.md#amendment-2026-10-18-the-sign-in-limiter-without-redis), [#1255](https://github.com/getvelox/velox/pull/1255)).
@@ -158,7 +165,6 @@ Fixes before the first partner installs. Long invoice PDFs go onto more pages, a
 
 ### Security
 
-- **Setting a password now refuses common leaked passwords (2026-10-18).** Bootstrap, password reset and invite accept refuse about 30,000 passwords of 12 or more characters, such as `Password1234`, in any letter case. Passwords already set still work. ([#1222](https://github.com/getvelox/velox/pull/1222))
 - **Dashboard sign-ins record the real client address (2026-10-18).** A login or invite accept stored the first `X-Forwarded-For` entry, which any client can write, in `dashboard_sessions.ip`. It now stores the address `TRUST_PROXY` resolves, the same one the audit log and rate limits use. Nothing reads this column yet. ([#1203](https://github.com/getvelox/velox/pull/1203))
 
 ## [0.8.1] - 2026-10-17
@@ -5099,7 +5105,8 @@ contents of `[Unreleased]` above will move under a new
 `## [0.X.0] - YYYY-MM-DD` heading here, and a matching entry will be
 curated into the public changelog page.
 
-[Unreleased]: https://github.com/getvelox/velox/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/getvelox/velox/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/getvelox/velox/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/getvelox/velox/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/getvelox/velox/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/getvelox/velox/compare/v0.7.0...v0.8.0

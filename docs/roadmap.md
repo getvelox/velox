@@ -4,10 +4,14 @@ What changed lately, and what is being worked on next. Every change, with its da
 
 ## Shipped recently
 
-October 2026 (v0.6.1, v0.7.0, v0.8.0, v0.8.1 and v0.8.2):
+October 2026 (v0.6.1, v0.7.0, v0.8.0, v0.8.1, v0.8.2 and v0.9.0):
 
+- **A charge whose result was lost can no longer take a second payment.** After a crash or a lost answer, Velox asks Stripe before anything charges, voids or records a payment on the invoice. A parked invoice ends on its own within a day.
+- **Card disputes are recorded on the invoice,** from Stripe's dispute events, and a lost dispute is flagged.
+- **Repeated wrong passwords slow sign-in down** instead of locking the account, and common leaked passwords are refused.
+- **Activity rows use one wording.** Invoice and subscription Activity cards name who did each thing, and each dot color has one meaning.
 - **Long invoices print in full, and emails look standard to mail servers.** Long invoice and credit-note PDFs go onto more pages, and every email has a `Date` and a `Message-ID`.
-- **Safer upgrades.** By default a migration waits at most 5 seconds for a table lock (`MIGRATION_LOCK_TIMEOUT` changes it). In v0.8.x, `velox migrate force` repairs an upgrade that stopped halfway; from v0.9.0 (not yet released) migrations run with goose, a failed one leaves nothing to repair, and `force` is gone.
+- **Safer upgrades.** From v0.9.0, migrations run with goose: a new install applies one baseline file, a failed migration leaves nothing to repair, and copies that start together take turns. `velox migrate status` shows the plan before you upgrade. By default a migration waits at most 5 seconds for a table lock (`MIGRATION_LOCK_TIMEOUT` changes it).
 - **LiteLLM usage for a customer that does not exist yet is kept.** Velox holds it and shows it on the Usage page. Create the customer, then release it once.
 - **New accounts retry failed payments.** Each new account starts with a "Default retries" policy.
 - **Settings → Email** shows whether this server can send email, with a test send.
@@ -19,7 +23,7 @@ October 2026 (v0.6.1, v0.7.0, v0.8.0, v0.8.1 and v0.8.2):
 - **LiteLLM works with a real proxy.** Usage from a LiteLLM proxy is recorded per model and token type, with the provider's own cost when the proxy sends it.
 - **Safer payments.** A void, write-off or bank payment waits for a card charge in progress, and a Stripe rate limit no longer stops an invoice.
 - **Login works in Safari when Velox runs on localhost.**
-- **Security fixes.** Endpoints refuse ids from another account, webhooks check the address they connect to, and `/metrics` needs a token in production.
+- **Security fixes.** Endpoints refuse ids from another account, webhooks check the address they connect to (private IPv6 addresses too), sign-ins record the real client address, and `/metrics` needs a token in production.
 - **Release images for ARM and Intel/AMD**, signed with cosign.
 - **API reference for every route you call** ([`api/openapi.yaml`](../api/openapi.yaml)).
 

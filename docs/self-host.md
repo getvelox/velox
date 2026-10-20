@@ -158,7 +158,7 @@ A migration is a versioned script that changes the database schema. Velox applie
 - **A failed migration leaves nothing to repair.** Each one runs in one transaction, so a failure undoes all of it. Fix the cause the error names and run the upgrade again. An index build runs without a transaction and may leave an INVALID index; running the upgrade again drops it and builds it again. See [A database upgrade stopped](ops/runbook/migration-failed-midway.md).
 - **Never roll back in production.** `velox migrate rollback` runs only with `APP_ENV=local`. To go back after an upgrade, restore the backup you took before it; see [Going back](production-one-vm.md#going-back).
 - **Each migration waits at most 5 seconds for a table lock.** While a migration waits for a lock, other queries on that table wait behind it, so Velox stops the upgrade instead of letting the table stall. The migration leaves nothing behind; run the upgrade again when the table is quieter. `MIGRATION_LOCK_TIMEOUT` changes the limit. See [An upgrade waited for a table lock](ops/runbook/migration-lock-timeout.md).
-- **From v0.8.x,** v0.9.0 takes over a database at version 180 (v0.8.0, v0.8.1 or v0.8.2) without changing a table. Older databases upgrade to v0.8.1 first. The [changelog](../CHANGELOG.md) has the steps.
+- **From v0.8.x,** v0.9.0 takes over a database at version 180 (v0.8.0, v0.8.1 or v0.8.2): it records 180 in `goose_db_version`, then applies migrations 181 to 188. Older databases upgrade to v0.8.1 first. The [changelog](../CHANGELOG.md) has the steps.
 
 ## Upgrading
 

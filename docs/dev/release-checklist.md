@@ -78,11 +78,11 @@ These prove that the images the quick start pulls work, and that an existing ins
 1. Run `./quickstart.sh destroy` to start from an empty install. Check out the previous release tag and run `./quickstart.sh`, then `./quickstart.sh demo`.
    **You see:** the demo's invoice link. Open it and note the invoice number, total and line amounts. Download its PDF.
 2. Check out the new release tag. In `deploy/compose/.env`, change the tag on the `VELOX_IMAGE` and `VELOX_DASHBOARD_IMAGE` lines to the new release. Run `docker compose pull`, then `docker compose run --rm velox-api migrate status`.
-   **You see:** the plan, with `running now:  no`. From v0.8.1 to v0.9.0: `ready to move`. For a later release: `behind`, listing the release's new migrations. Nothing is `refused`.
+   **You see:** the plan, with `running now:  no`. From v0.8.x to v0.9.0: `ready to move`, then `8 migrations to apply`. For a later release: `behind`, listing the release's new migrations. Nothing is `refused`.
 3. Run `docker compose up -d --no-build`.
    **You see:** `velox-api` is recreated, and `velox version` prints the new release.
 4. Check the migrations: `docker compose logs velox-api | grep migration`.
-   **You see:** one `migration applied` line per migration (`00180 v0.8.1 baseline` when moving from v0.8.1), then `migrations applied`, with `version` set to the new release's last migration number, and no error. `velox migrate status` now says `up to date`.
+   **You see:** one `migration applied` line per migration (`00180 v0.8.1 baseline` first when moving from v0.8.x), then `migrations applied`, with `version` set to the new release's last migration number, and no error. `velox migrate status` now says `up to date`.
 5. Open the invoice from step 1.
    **You see:** the same number, total and line amounts. Its PDF has the same lines and amounts as the one you downloaded. The "Generated on" time at the bottom differs, because each PDF is made when you open it. A release that changes what the PDF prints says so in its notes.
 6. Open the Dunning policies page.
