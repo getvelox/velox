@@ -38,6 +38,7 @@ alerting tier: what should page someone, and what is only informational.
 | `velox_email_outbox_failing_emails{mode="live"}` | > 0 | See [Emails not going out](email-outbox-backed-up.md) |
 | `velox_email_outbox_oldest_due_age_seconds{mode="live"}` | > 1800 | See [Emails not going out](email-outbox-backed-up.md) |
 | `velox_webhook_outbox_oldest_pending_age_seconds{mode="live"}` | > 1800 | A webhook event queued 30 minutes ago has no deliveries yet: the webhook outbox job is stopped, or writing the event fails. A failing endpoint does not show here. See [Webhook outbox backed up](webhook-outbox-backed-up.md) |
+| `velox_webhook_outbox_enqueue_failures_total{event_type}` | any new failure, including a newly appearing nonzero series | A webhook event could not be added to the outbox; an event may be missing. Split by `event_type` to identify the producer. See [Webhook outbox](webhook-outbox-backed-up.md) |
 
 ### Warn (Slack or email, not page)
 

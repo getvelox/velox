@@ -2,6 +2,8 @@ package webhook
 
 import (
 	"context"
+
+	mw "github.com/sagarsuperuser/velox/internal/api/middleware"
 )
 
 // OutboxDispatcher satisfies domain.EventDispatcher by persisting each event
@@ -26,5 +28,8 @@ func NewOutboxDispatcher(outbox *OutboxStore) *OutboxDispatcher {
 // tightening that is a follow-up once the outbox becomes the default.
 func (d *OutboxDispatcher) Dispatch(ctx context.Context, tenantID, eventType string, payload map[string]any) error {
 	_, err := d.outbox.EnqueueStandalone(ctx, tenantID, eventType, payload)
+	if err != nil {
+		mw.RecordWebhookOutboxEnqueueFailure(eventType)
+	}
 	return err
 }
