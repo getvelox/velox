@@ -13,7 +13,7 @@
 > 1. The examples' `operation` + boolean `cached` dimensions were replaced by ADR-044's single `token_type` enum (input, output, cache_read, cache_write_5m, cache_write_1h). The mechanism (one meter, N dimension-matched rules, priority+claim) is unchanged.
 > 2. A matched rule is not priced at a stored rating-rule version. Its `rule_key` is looked up as of the period start (ADR-070), so a newly published rate applies from the next period.
 > 3. Until ADR-045 (2026-06-01), only the preview and the threshold scan priced multi-dim meters; the cycle close billed them at $0. It now emits one line per claimed rule.
-> 4. A meter has one aggregation (`sum`, `count`, `max`, `last`) and every rule bills under it ([ADR-130](../../adr/130-usage-prices-belong-to-the-plan.md) §2, 2026-10-23). The per-rule `aggregation_mode`, `last_during_period` and `last_ever` are gone, `last` breaks a timestamp tie by id, and the meter's `key` is `event_name`. The aggregation is fixed once the meter has usage.
+> 4. A meter has one aggregation (`sum`, `count`, `max`, `last`) and every rule bills under it ([ADR-130](../../adr/130-usage-prices-belong-to-the-plan.md) §2, 2026-10-23). The per-rule `aggregation_mode`, `last_during_period` and `last_ever` are gone, `last` breaks a timestamp tie by id, and the meter's `key` is `event_name`. The aggregation is fixed once the meter has usage events (held rows do not count, amended 2026-10-24).
 
 This page is the technical design for multi-dimensional metering: one usage meter that carries many differently-priced slices of usage, distinguished by dimension labels such as model or operation. It is written for engineers building on or evaluating Velox's pricing engine.
 

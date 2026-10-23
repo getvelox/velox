@@ -777,8 +777,8 @@ function CreatePricingRuleDialog({
 }
 
 // EditMeterDialog changes the meter's name, unit and aggregation. The
-// aggregation is fixed once the meter has usage (ADR-130 §2): the select is
-// then read-only and the dialog says why before any edit. A refusal the
+// aggregation is fixed once the meter has usage events (ADR-130 §2): the
+// select is then read-only and the dialog says why before any edit. A refusal the
 // page did not foresee (the first event arrived while the dialog was open)
 // shows the server's sentence and reloads the meter.
 function EditMeterDialog({

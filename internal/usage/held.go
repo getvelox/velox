@@ -253,20 +253,33 @@ func (s *Service) Release(ctx context.Context, tenantID string, in ReleaseInput)
 	if strings.TrimSpace(in.CustomerID) == "" {
 		return ReleaseResult{}, errs.Required("customer_id")
 	}
-	// The open periods and the meters' buckets are read BEFORE the write, as
-	// ingest reads them (open_period.go). A failed read refuses the release
-	// with nothing released.
-	periods, buckets, err := s.releasePeriods(ctx, tenantID, in)
+	// The open periods are read BEFORE the write, as ingest reads them
+	// (open_period.go). The meters' buckets are read on the release's
+	// transaction, after its inserts: see releaseBuckets. A failed read
+	// refuses the release with nothing released.
+	periods, err := s.releasePeriods(ctx, tenantID, in)
 	if err != nil {
 		return ReleaseResult{}, err
 	}
 	sim := s.simNow(ctx, tenantID, in.CustomerID)
+	auditEmit := s.releaseEmission(clock.WithSim(ctx, sim), in)
+	var buckets map[string]MeterBuckets
 	res, err := s.held.ReleaseHeld(ctx, tenantID, ReleaseHeldInput{
 		ExternalCustomerID: in.ExternalCustomerID,
 		CustomerID:         in.CustomerID,
 		MeterIDs:           in.MeterIDs,
 		NotAfter:           sim.At,
-	}, s.releaseEmission(clock.WithSim(ctx, sim), in))
+	}, func(tx *sql.Tx, res ReleaseHeldResult) error {
+		b, err := s.releaseBuckets(ctx, tx, in, periods, res)
+		if err != nil {
+			return err
+		}
+		buckets = b
+		if auditEmit == nil {
+			return nil
+		}
+		return auditEmit(tx, res)
+	})
 	if err != nil {
 		return ReleaseResult{}, err
 	}
@@ -362,32 +375,46 @@ type ReleasedUsage struct {
 	MeterID string
 }
 
-// releasePeriods reads the customer's open periods and the buckets of
-// every meter in.MeterIDs. With no reader wired it reads nothing, and every
-// row counts as outside.
-func (s *Service) releasePeriods(ctx context.Context, tenantID string, in ReleaseInput) ([]OpenPeriod, map[string]MeterBuckets, error) {
+// releasePeriods reads the customer's open periods. With no reader wired it
+// reads nothing, and every row counts as outside.
+func (s *Service) releasePeriods(ctx context.Context, tenantID string, in ReleaseInput) ([]OpenPeriod, error) {
 	if s.periods == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	periods, err := s.periods.OpenPeriods(ctx, tenantID, in.CustomerID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open periods: %w", err)
+		return nil, fmt.Errorf("open periods: %w", err)
 	}
+	return periods, nil
+}
+
+// releaseBuckets reads the buckets of each meter the release wrote a row
+// for. It reads on the release's transaction, after its inserts: each insert
+// holds the meter row FOR KEY SHARE until commit, so the aggregation read
+// here is the one the events are counted under. An aggregation PATCH that
+// committed before the inserts is seen; one after them waits, then finds
+// the events and is refused (ADR-130 §2). Read before the write, a PATCH
+// committing in between would leave the counts under the old aggregation.
+// Read on another connection, the release would hold one connection while
+// it waits for a second. With no open period no row needs its meter, and
+// nothing is read.
+func (s *Service) releaseBuckets(ctx context.Context, tx *sql.Tx, in ReleaseInput, periods []OpenPeriod, res ReleaseHeldResult) (map[string]MeterBuckets, error) {
 	buckets := map[string]MeterBuckets{}
 	if len(periods) == 0 {
-		return periods, buckets, nil
+		return buckets, nil
 	}
-	for _, id := range in.MeterIDs {
-		if _, ok := buckets[id]; ok {
+	for _, r := range res.Rows {
+		id := in.MeterIDs[r.EventName]
+		if _, ok := buckets[id]; ok || r.Deduplicated {
 			continue
 		}
-		b, err := s.periods.MeterBuckets(ctx, tenantID, id)
+		b, err := s.periods.MeterBucketsTx(ctx, tx, id)
 		if err != nil {
-			return nil, nil, fmt.Errorf("meter buckets: %w", err)
+			return nil, fmt.Errorf("meter buckets: %w", err)
 		}
 		buckets[id] = b
 	}
-	return periods, buckets, nil
+	return buckets, nil
 }
 
 // countReleased splits released rows four ways by classify:

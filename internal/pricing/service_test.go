@@ -25,7 +25,7 @@ type memStore struct {
 	// meter-in-use guard, D05). The real count is pinned against Postgres in
 	// meter_edit_guard_integration_test.go.
 	subsUsing map[string]int
-	// hasUsage is what MeterUsageTx answers per meter id (as events). The real read
+	// hasUsage is what MeterHasUsageTx answers per meter id. The real read
 	// is pinned against Postgres in meter_aggregation_lock_integration_test.go.
 	hasUsage map[string]bool
 }
@@ -1407,9 +1407,9 @@ func (m *memStore) LockMeterTx(_ context.Context, _ *sql.Tx, meterID string) (do
 	return mt, nil
 }
 
-// MeterUsageTx reads the meters the test marked as having events.
-func (m *memStore) MeterUsageTx(_ context.Context, _ *sql.Tx, mt domain.Meter) (MeterUsage, error) {
-	return MeterUsage{Events: m.hasUsage[mt.ID]}, nil
+// MeterHasUsageTx reads the meters the test marked as having usage events.
+func (m *memStore) MeterHasUsageTx(_ context.Context, _ *sql.Tx, mt domain.Meter) (bool, error) {
+	return m.hasUsage[mt.ID], nil
 }
 
 func (m *memStore) MeterHasUsage(_ context.Context, _ string, mt domain.Meter) (bool, error) {

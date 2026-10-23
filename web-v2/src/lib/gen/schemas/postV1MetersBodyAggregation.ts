@@ -9,7 +9,7 @@
  */
 
 /**
- * How the meter rolls its events into one quantity per billing period. Fixed once the meter has usage.
+ * How the meter rolls its events into one quantity per billing period. Fixed once the meter has a usage event.
  */
 export type PostV1MetersBodyAggregation = typeof PostV1MetersBodyAggregation[keyof typeof PostV1MetersBodyAggregation];
 

@@ -249,8 +249,9 @@ func (h *Handler) createMeter(w http.ResponseWriter, r *http.Request) {
 }
 
 // meterResponse is one meter as POST, GET and PATCH /v1/meters answer it:
-// the meter and whether it has usage. Once it has, its aggregation is fixed
-// (ADR-130 §2), and the dashboard says so before an edit. The list leaves
+// the meter and whether it has usage events. Once it has, its aggregation is
+// fixed (ADR-130 §2), and the dashboard says so before an edit. Held rows do
+// not count. The list leaves
 // has_usage out: proving a meter has no events scans the account's events
 // (ADR-130 §18), once per meter. A create or update whose has_usage read
 // fails leaves it out too (respondMeter).
@@ -259,8 +260,7 @@ type meterResponse struct {
 	HasUsage *bool `json:"has_usage,omitempty"`
 }
 
-// respondMeter writes meter with has_usage. A new meter can have usage at
-// once: held rows that named its event name before it existed.
+// respondMeter writes meter with has_usage.
 //
 // After a create or update (wrote), the write has committed, so a failed
 // has_usage read must not turn it into a 500: a client that retried the

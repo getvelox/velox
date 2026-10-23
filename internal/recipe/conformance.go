@@ -97,12 +97,12 @@ func priceConflictMessage(priceKey string, diffs []fieldDiff) string {
 // meterConflictMessage is the refusal when a meter the recipe would create
 // already exists and adds up usage another way. Aggregation is the only
 // field compared (meterConformanceDiff). A meter's aggregation can change
-// (the meter page or PATCH /v1/meters/{id}) until the meter has usage; then
+// (the meter page or PATCH /v1/meters/{id}) until it has a usage event; then
 // it is fixed, 409 meter_has_usage (ADR-130 §2). So the message names that
 // condition instead of offering a step the operator can't take.
 func meterConflictMessage(eventName string, diffs []fieldDiff) string {
 	return fmt.Sprintf("Meter %q already exists and adds up usage another way (%s), so the recipe can't use it. "+
-		"Its aggregation can change only until the meter has usage; after that it is fixed.", eventName, formatDiffs(diffs))
+		"Its aggregation can change only until the meter has a usage event; after that it is fixed.", eventName, formatDiffs(diffs))
 }
 
 // meterCurrencyConflictMessage is the refusal when an existing meter's

@@ -192,8 +192,8 @@ while a draft, trialing or active subscription uses the meter, Velox refuses
 - pointing the default price at another price, or removing it.
 
 The meter's aggregation has its own rule: it can change until the meter has
-usage, then it is fixed (409 `meter_has_usage`). Every price on the meter
-bills under it.
+a usage event, then it is fixed (409 `meter_has_usage`). Held usage does not
+count until it is released. Every price on the meter bills under it.
 
 The message says how many subscriptions use the meter. To change a rate,
 publish a new version of the rating rule (`POST /v1/rating-rules` with the

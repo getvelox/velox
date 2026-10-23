@@ -162,8 +162,8 @@ func TestService_Instantiate_AggregationConflictOnAMeterInUse(t *testing.T) {
 	if !errors.Is(err, errs.ErrAlreadyExists) {
 		t.Fatalf("want ErrAlreadyExists (meter conflict), got %v", err)
 	}
-	if !strings.Contains(err.Error(), "Its aggregation can change only until the meter has usage") {
-		t.Errorf("the refusal must say the aggregation can change only until the meter has usage, got %q", err.Error())
+	if !strings.Contains(err.Error(), "Its aggregation can change only until the meter has a usage event") {
+		t.Errorf("the refusal must say the aggregation can change only until the meter has a usage event, got %q", err.Error())
 	}
 	sum := "sum"
 	if _, err := f.pricingSvc.UpdateMeter(ctx, tenantID, m.ID, pricing.UpdateMeterInput{Aggregation: &sum}); err != nil {

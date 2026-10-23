@@ -1,7 +1,7 @@
 # ADR-130: Usage prices belong to the plan, and a price edit applies from each subscriber's next period
 
 **Date:** 2026-10-23
-**Status:** Accepted (product owner, 2026-10-23). PR-0b (#1367) shipped the plan step of the lock order (section 8). PR-1 (#1373) shipped the one rater. PR-2 (#1376) shipped section 2, one aggregation per meter. The rest is not built yet: PR-3 to PR-8 build it before the v0.9.0 tag. Each rule below names the PR that brings it.
+**Status:** Accepted (product owner, 2026-10-23). PR-0b (#1367) shipped the plan step of the lock order (section 8). PR-1 (#1373) shipped the one rater. PR-2 (#1376) shipped section 2, one aggregation per meter; #1379 amended it on 2026-10-24 (held rows do not fix the aggregation). The rest is not built yet: PR-3 to PR-8 build it before the v0.9.0 tag. Each rule below names the PR that brings it.
 
 ## Summary
 
@@ -131,11 +131,29 @@ is a break. v0.9.0 is also a clean break: there is no upgrade from Velox
 - `last_ever` is dropped, and so is the per-rule aggregation mode.
 - `key` is renamed `event_name`, the name ingest already sends.
 - The aggregation cannot change once the meter has events: 409
-  `meter_has_usage`. Events are rows in `usage_events` for the meter, or
-  held events for its `event_name` (`usage_held_events` with status
-  `held`). A held event counts because it is billed under the meter's
-  aggregation when it is released. The meter gains `has_usage` so the
-  dashboard can show this before an edit. `name` and `unit` change at once.
+  `meter_has_usage`. Events are rows in `usage_events` for the meter. The
+  meter gains `has_usage` so the dashboard can show this before an edit.
+  `name` and `unit` change at once.
+
+**Amendment (2026-10-24, the D08 PR-2 follow-up):** held rows
+(`usage_held_events`) do not fix the aggregation; only rows in
+`usage_events` do. This replaces the earlier rule that a held row counts.
+
+- Why: a held row has never been billed. Under the earlier rule, a meter
+  made with the wrong aggregation after its event name was held could never
+  be fixed: there is no meter delete, and `event_name` cannot change. The
+  only way out was to discard the rows, which are then never billed.
+- Why no billed number changes: a release writes `usage_events`, and each
+  insert's foreign key takes the meter row `FOR KEY SHARE`, the lock an
+  ingest takes. The aggregation PATCH takes the meter `FOR UPDATE` before
+  it reads whether the meter has events. So a PATCH and a release run one
+  after the other: the PATCH sees the released events and refuses, or the
+  release waits and its events are counted under the new aggregation.
+- The release's counts (`in_open_period` and the rest) read the meter's
+  aggregation on the release's own transaction, after its inserts, so they
+  follow the aggregation its events are counted under.
+- A hold takes no meter lock any more, which also removes the race #1376
+  listed between a hold and a meter created during it.
 
 ### 3. Price shapes and units (PR-3)
 
@@ -496,13 +514,12 @@ over the existing billing fixtures and must give identical lines.
 ### 18. No index for the meter-has-events check
 
 The aggregation lock asks whether `usage_events` holds any row for the
-meter, or `usage_held_events` a held row for its event name (section 2).
+meter (section 2; held rows stopped counting on 2026-10-24).
 No index on `usage_events` starts with `(tenant_id, meter_id)`.
 The nearest are `(tenant_id, customer_id, meter_id, timestamp)` and
-`(tenant_id, timestamp)` (baseline `00180`, `:3048`, `:3062`). Held rows
-are found through `(tenant_id, livemode, status, external_customer_id)`
-(`:3139`). No index is added now: the edit is rare. Revisit if a large
-account reports a slow meter PATCH.
+`(tenant_id, timestamp)` (baseline `00180`, `:3048`, `:3062`). No index is
+added now: the edit is rare. Revisit if a large account reports a slow
+meter PATCH.
 
 ## Why this design
 

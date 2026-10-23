@@ -241,15 +241,15 @@ components:
             How the meter rolls its events into one quantity per billing
             period. Every pricing rule of the meter bills under it. `last`
             is the latest event by timestamp, then by id. Fixed once the
-            meter has usage (see `has_usage`).
+            meter has a usage event (see `has_usage`).
         has_usage:
           type: boolean
           description: |
-            Whether the meter has events: usage events, or held usage rows
-            for its `event_name` that are still held. Once it has, its
-            `aggregation` cannot change. Returned when you create, get or
-            update one meter; the meter list leaves it out. A create or
-            update that succeeded leaves it out if it could not be read.
+            Whether the meter has usage events. Once it has, its
+            `aggregation` cannot change. Held usage for its `event_name`
+            does not count until it is released. Returned when you create,
+            get or update one meter; the meter list leaves it out. A create
+            or update that succeeded leaves it out if it could not be read.
         rating_rule_version_id:
           type: string
         created_at:
@@ -6324,7 +6324,7 @@ paths:
                   type: string
                   enum: [sum, count, max, last]
                   default: sum
-                  description: How the meter rolls its events into one quantity per billing period. Fixed once the meter has usage.
+                  description: How the meter rolls its events into one quantity per billing period. Fixed once the meter has a usage event.
                 rating_rule_version_id:
                   type: string
       responses:
@@ -6362,14 +6362,12 @@ paths:
         unmatched usage); pass an empty string to clear it. The rule must
         exist on the tenant.
 
-        `aggregation` can change until the meter has usage, then it is
-        fixed: a change is refused with 409 `meter_has_usage`. Usage is a
-        usage event of the meter, or a held usage row for its `event_name`
-        that is still held. Usage events are counted under the aggregation
-        the meter has; to count differently, make a new meter with another
-        event name. Held rows bill under it when released, and only to the
-        meter of their event name; only discarding them frees the
-        aggregation.
+        `aggregation` can change until the meter has a usage event, then
+        it is fixed: a change is refused with 409 `meter_has_usage`. Usage
+        events are counted under the aggregation the meter has; to count
+        differently, make a new meter with another event name. Held usage
+        for its `event_name` does not fix it: it is counted under the
+        meter's aggregation once released.
 
         While a draft, trialing or active subscription uses the meter,
         pointing the default at another rating rule, or clearing it, is
@@ -6414,8 +6412,8 @@ paths:
           description: Meter not found
         "409":
           description: |
-            `meter_has_usage`: the meter has usage, so its `aggregation`
-            cannot change. `meter_in_use`: subscriptions use the meter and
+            `meter_has_usage`: the meter has usage events, so its
+            `aggregation` cannot change. `meter_in_use`: subscriptions use the meter and
             the change would reprice their current period. The message gives
             the number of subscriptions. `invalid_state`: the new default's
             currency conflicts with the meter's other prices or with a plan

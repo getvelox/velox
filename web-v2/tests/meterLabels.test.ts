@@ -2,7 +2,8 @@ import { test } from 'vitest'
 import assert from 'node:assert/strict'
 
 import {
-  METER_AGGREGATIONS, METER_HAS_USAGE_SENTENCE, meterAggregationHelp, meterAggregationLabel, meterHasUsageMessage,
+  METER_AGGREGATIONS, METER_HAS_USAGE_SENTENCE, METER_NO_USAGE_SENTENCE, meterAggregationHelp, meterAggregationLabel,
+  meterHasUsageMessage,
 } from '../src/lib/meterLabels'
 
 // A meter has one aggregation (ADR-130 §2): sum, count, max or last. The
@@ -16,8 +17,11 @@ test('the one aggregation list is the four meter aggregations', () => {
   for (const a of METER_AGGREGATIONS) assert.ok(a.help.endsWith('.'), a.value)
 })
 
-test('the lock sentence says the aggregation is fixed and what to do instead', () => {
-  assert.equal(METER_HAS_USAGE_SENTENCE, 'This meter has usage, so its aggregation is fixed. Make a new meter to count differently.')
+// Only usage events fix the aggregation; held usage does not (ADR-130 §2,
+// amended 2026-10-24).
+test('the lock sentences say what fixes the aggregation and what to do instead', () => {
+  assert.equal(METER_HAS_USAGE_SENTENCE, 'This meter has usage events, so its aggregation is fixed. Make a new meter to count differently.')
+  assert.equal(METER_NO_USAGE_SENTENCE, 'The aggregation can change until this meter has a usage event. Held usage does not fix it.')
 })
 
 test('a meter_has_usage refusal is shown as the server wrote it; other errors are not', () => {

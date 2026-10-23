@@ -20,15 +20,15 @@ export interface Meter {
      * How the meter rolls its events into one quantity per billing
      * period. Every pricing rule of the meter bills under it. `last`
      * is the latest event by timestamp, then by id. Fixed once the
-     * meter has usage (see `has_usage`).
+     * meter has a usage event (see `has_usage`).
      */
   aggregation?: MeterAggregation;
   /**
-     * Whether the meter has events: usage events, or held usage rows
-     * for its `event_name` that are still held. Once it has, its
-     * `aggregation` cannot change. Returned when you create, get or
-     * update one meter; the meter list leaves it out. A create or
-     * update that succeeded leaves it out if it could not be read.
+     * Whether the meter has usage events. Once it has, its
+     * `aggregation` cannot change. Held usage for its `event_name`
+     * does not count until it is released. Returned when you create,
+     * get or update one meter; the meter list leaves it out. A create
+     * or update that succeeded leaves it out if it could not be read.
      */
   has_usage?: boolean;
   rating_rule_version_id?: string;

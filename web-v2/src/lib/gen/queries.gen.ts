@@ -2753,14 +2753,12 @@ export const getPatchV1MetersIdUrl = (id: string,) => {
  * unmatched usage); pass an empty string to clear it. The rule must
  * exist on the tenant.
  *
- * `aggregation` can change until the meter has usage, then it is
- * fixed: a change is refused with 409 `meter_has_usage`. Usage is a
- * usage event of the meter, or a held usage row for its `event_name`
- * that is still held. Usage events are counted under the aggregation
- * the meter has; to count differently, make a new meter with another
- * event name. Held rows bill under it when released, and only to the
- * meter of their event name; only discarding them frees the
- * aggregation.
+ * `aggregation` can change until the meter has a usage event, then
+ * it is fixed: a change is refused with 409 `meter_has_usage`. Usage
+ * events are counted under the aggregation the meter has; to count
+ * differently, make a new meter with another event name. Held usage
+ * for its `event_name` does not fix it: it is counted under the
+ * meter's aggregation once released.
  *
  * While a draft, trialing or active subscription uses the meter,
  * pointing the default at another rating rule, or clearing it, is

@@ -206,6 +206,10 @@ func (r *orderReader) MeterBuckets(context.Context, string, string) (MeterBucket
 	return MeterBuckets{Additive: true}, nil
 }
 
+func (r *orderReader) MeterBucketsTx(context.Context, *sql.Tx, string) (MeterBuckets, error) {
+	return MeterBuckets{Additive: true}, nil
+}
+
 // orderStore logs its writes.
 type orderStore struct {
 	*memStore

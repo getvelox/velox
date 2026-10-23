@@ -12,7 +12,7 @@
  * How the meter rolls its events into one quantity per billing
  * period. Every pricing rule of the meter bills under it. `last`
  * is the latest event by timestamp, then by id. Fixed once the
- * meter has usage (see `has_usage`).
+ * meter has a usage event (see `has_usage`).
  */
 export type MeterAggregation = typeof MeterAggregation[keyof typeof MeterAggregation];
 

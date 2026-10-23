@@ -790,7 +790,7 @@ function CreateMeterDialog({ onClose, onCreated, rules }: { onClose: () => void;
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground mt-1">{meterAggregationHelp(form.aggregation)} Fixed once the meter has usage.</p>
+              <p className="text-xs text-muted-foreground mt-1">{meterAggregationHelp(form.aggregation)} Fixed once the meter has a usage event.</p>
             </div>
           </div>
           {rules.length === 0 ? (

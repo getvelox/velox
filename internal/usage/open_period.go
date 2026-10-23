@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"time"
@@ -236,6 +237,10 @@ type OpenPeriodReader interface {
 	OpenPeriods(ctx context.Context, tenantID, customerID string) ([]OpenPeriod, error)
 	// MeterBuckets returns the meter's MeterBuckets.
 	MeterBuckets(ctx context.Context, tenantID, meterID string) (MeterBuckets, error)
+	// MeterBucketsTx returns the meter's MeterBuckets, read on tx (which
+	// carries the tenant). A write that reads inside its open transaction
+	// uses it, so it never waits for a second connection.
+	MeterBucketsTx(ctx context.Context, tx *sql.Tx, meterID string) (MeterBuckets, error)
 }
 
 // periodCache holds one request's reads, so a batch reads each customer's

@@ -1,12 +1,12 @@
 package pricing_test
 
 // ADR-130 §2 on real Postgres: a meter's aggregation is fixed once the meter
-// has events. Events are rows in usage_events for the meter, or held rows
-// (usage_held_events, status held) for its event name, because a held row is
-// billed under the meter's aggregation when it is released. Before any event
-// the aggregation can change, whether or not a subscription uses the meter.
-// The PATCH locks the meter row, so it waits for an ingest that is still
-// writing the meter's first event (C5).
+// has usage events (rows in usage_events for the meter). Held rows
+// (usage_held_events) do not fix it: they have never been billed, and a
+// release writes usage_events under the meter lock like an ingest. Before
+// the first usage event the aggregation can change, whether or not a
+// subscription uses the meter. The PATCH locks the meter row, so it waits
+// for an ingest that is still writing the meter's first event (C5).
 
 import (
 	"encoding/json"
@@ -94,11 +94,18 @@ func TestMeterAggregation_FixedOnceTheMeterHasEvents(t *testing.T) {
 		}
 	})
 
-	t.Run("a held row for the meter's event name: refused", func(t *testing.T) {
+	// Mutation-verify: count held rows in meterHasUsageSQL again → refused,
+	// and this fails.
+	t.Run("held rows for the meter's event name do not count", func(t *testing.T) {
 		m := f.meter(t, "agg_held", "")
 		f.held(t, "agg_held", "held")
-		_, err := f.svc.UpdateMeter(f.ctx, f.tenantID, m.ID, pricing.UpdateMeterInput{Aggregation: ptr("last")})
-		wantHasUsage(t, "aggregation change with a held row", err)
+		got, err := f.svc.UpdateMeter(f.ctx, f.tenantID, m.ID, pricing.UpdateMeterInput{Aggregation: ptr("last")})
+		if err != nil {
+			t.Fatalf("aggregation change with only held rows: %v, want it changed: held rows have never been billed", err)
+		}
+		if got.Aggregation != "last" {
+			t.Errorf("aggregation = %q, want last", got.Aggregation)
+		}
 	})
 
 	t.Run("released or discarded held rows do not count", func(t *testing.T) {
@@ -237,6 +244,10 @@ func TestMeterAggregation_HTTP(t *testing.T) {
 	m := f.meter(t, "agg_http", "")
 	if code, body := do(http.MethodGet, "/v1/meters/"+m.ID, ""); code != http.StatusOK || body["has_usage"] != false {
 		t.Fatalf("GET before any event: %d %v, want 200 with has_usage false", code, body)
+	}
+	f.held(t, "agg_http", "held")
+	if code, body := do(http.MethodGet, "/v1/meters/"+m.ID, ""); code != http.StatusOK || body["has_usage"] != false {
+		t.Fatalf("GET with only a held row: %d %v, want 200 with has_usage false", code, body)
 	}
 	f.event(t, m.ID)
 	if code, body := do(http.MethodGet, "/v1/meters/"+m.ID, ""); code != http.StatusOK || body["has_usage"] != true || body["event_name"] != "agg_http" {

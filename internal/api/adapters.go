@@ -1693,6 +1693,7 @@ type usageLiveSubscriptions interface {
 
 type usageMeterReader interface {
 	GetMeter(ctx context.Context, tenantID, id string) (domain.Meter, error)
+	GetMeterTx(ctx context.Context, tx *sql.Tx, id string) (domain.Meter, error)
 }
 
 type usageThresholdReader interface {
@@ -1734,6 +1735,15 @@ func (a usageOpenPeriods) OpenPeriods(ctx context.Context, tenantID, customerID 
 // (ADR-130 §2).
 func (a usageOpenPeriods) MeterBuckets(ctx context.Context, tenantID, meterID string) (usage.MeterBuckets, error) {
 	m, err := a.pricing.GetMeter(ctx, tenantID, meterID)
+	if err != nil {
+		return usage.MeterBuckets{}, fmt.Errorf("get meter: %w", err)
+	}
+	return usage.BucketsOf(m), nil
+}
+
+// MeterBucketsTx reads the meter on tx, the caller's open transaction.
+func (a usageOpenPeriods) MeterBucketsTx(ctx context.Context, tx *sql.Tx, meterID string) (usage.MeterBuckets, error) {
+	m, err := a.pricing.GetMeterTx(ctx, tx, meterID)
 	if err != nil {
 		return usage.MeterBuckets{}, fmt.Errorf("get meter: %w", err)
 	}

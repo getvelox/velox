@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -130,9 +129,6 @@ func (s *PostgresStore) Hold(ctx context.Context, tenantID string, ev domain.Hel
 		return domain.HeldUsageEvent{}, err
 	}
 	defer postgres.Rollback(tx)
-	if err := lockHeldMeters(ctx, tx, tenantID, []domain.HeldUsageEvent{ev}); err != nil {
-		return domain.HeldUsageEvent{}, err
-	}
 
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO usage_held_events (id, tenant_id, source, external_customer_id,
@@ -256,8 +252,9 @@ func (s *PostgresStore) HeldFor(ctx context.Context, tenantID, externalCustomerI
 //     billed twice. A LiteLLM cache-write row is treated the same way when
 //     usage_events already bills its call the pre-split way, writes inside
 //     :input (writesBilledInInput).
-//  3. Record the written event id on the held row, run the audit emission,
-//     commit. A failure anywhere rolls all of it back: the rows stay held.
+//  3. Record the written event id on the held row, run emit (the service
+//     reads the meters' buckets and writes the audit row on tx), commit. A
+//     failure anywhere rolls all of it back: the rows stay held.
 func (s *PostgresStore) ReleaseHeld(ctx context.Context, tenantID string, in ReleaseHeldInput, emit func(tx *sql.Tx, res ReleaseHeldResult) error) (ReleaseHeldResult, error) {
 	keys := make([]string, 0, len(in.MeterIDs))
 	for k := range in.MeterIDs {
@@ -366,7 +363,7 @@ func (s *PostgresStore) ReleaseHeld(ctx context.Context, tenantID string, in Rel
 
 	if emit != nil && len(res.Rows) > 0 {
 		if err := emit(tx, res); err != nil {
-			return ReleaseHeldResult{}, fmt.Errorf("audit emission: %w", err)
+			return ReleaseHeldResult{}, fmt.Errorf("release emission: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -778,11 +775,9 @@ func writesBilledInInput(ctx context.Context, tx *sql.Tx, tenantID, inputKey str
 // code would; the CHANGELOG says not to release held LiteLLM usage while
 // copies of the previous release serve.
 //
-// HoldCall's only row lock is lockHeldMeters' KEY SHARE on the meter, which
-// waits only for an aggregation PATCH that locks nothing else this call
-// holds. Its inserts wait only on an uncommitted insert of the same key, and
-// every hold of a call inserts :input first. So unlike
-// IngestCallResolvingHeld it cannot deadlock and is not retried.
+// HoldCall takes no row locks (its inserts wait only on an uncommitted
+// insert of the same key, and every hold of a call inserts :input first),
+// so unlike IngestCallResolvingHeld it cannot deadlock and is not retried.
 func (s *PostgresStore) HoldCall(ctx context.Context, tenantID string, call HeldCall) (CallResult, error) {
 	heldKey := func(e domain.HeldUsageEvent) string { return e.IdempotencyKey }
 
@@ -791,9 +786,6 @@ func (s *PostgresStore) HoldCall(ctx context.Context, tenantID string, call Held
 		return CallResult{}, err
 	}
 	defer postgres.Rollback(tx)
-	if err := lockHeldMeters(ctx, tx, tenantID, append(slices.Clone(call.Events), call.Legacy...)); err != nil {
-		return CallResult{}, err
-	}
 
 	var res CallResult
 	events := call.Events
@@ -861,35 +853,6 @@ func firstWithKey[E any](events []E, key string, keyOf func(E) string) (E, bool)
 	}
 	var zero E
 	return zero, false
-}
-
-// lockHeldMeters takes KEY SHARE on the meter of each event name, when that
-// meter exists, before a hold inserts its rows. A held row fixes its meter's
-// aggregation (ADR-130 §2), but it has no foreign key to the meter, so
-// unlike an ingest it took no lock that an aggregation PATCH's FOR UPDATE
-// (LockMeterTx) waits for: a hold could commit after the PATCH read "no
-// usage", and the PATCH then changed the aggregation of a meter with a held
-// row. With the lock, a hold that locks first makes the PATCH wait and see
-// its rows, and a PATCH that locks first commits before the rows exist.
-// Meters lock in id order. A meter created after this read is not locked;
-// that meter's aggregation could change only if it is created and changed
-// while this one transaction runs.
-func lockHeldMeters(ctx context.Context, tx *sql.Tx, tenantID string, events []domain.HeldUsageEvent) error {
-	names := make([]string, 0, len(events))
-	for _, ev := range events {
-		if !slices.Contains(names, ev.EventName) {
-			names = append(names, ev.EventName)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `
-		SELECT id FROM meters
-		WHERE tenant_id = $1 AND event_name = ANY($2::text[])
-		ORDER BY id
-		FOR KEY SHARE
-	`, tenantID, postgres.StringArray(names)); err != nil {
-		return fmt.Errorf("lock the meters of held usage: %w", err)
-	}
-	return nil
 }
 
 // insertHeldTx inserts one held row, ON CONFLICT DO NOTHING on the

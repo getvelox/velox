@@ -145,7 +145,7 @@ test('create a price, a meter that bills at it, and a plan with both; a meter wi
   await field(meterDialog, 'Name').getByRole('textbox').fill(meterName)
   await field(meterDialog, 'Event name').getByRole('textbox').fill(meterKey)
   await field(meterDialog, 'Unit Label').getByRole('textbox').fill('call')
-  await expect(meterDialog.getByText('Adds up the event values in the billing period. Fixed once the meter has usage.', { exact: true })).toBeVisible()
+  await expect(meterDialog.getByText('Adds up the event values in the billing period. Fixed once the meter has a usage event.', { exact: true })).toBeVisible()
   await meterDialog.getByRole('button', { name: 'None (assign later)' }).click()
   await pick(page, priceName, `${priceName} — $0.002 / call`)
   const creatingMeter = apiCall(page, 'POST', /\/meters$/)
@@ -236,9 +236,9 @@ async function advancePastFirstPeriod(clock: TestClock) {
   await waitForClockReady(clock.id)
 }
 
-// A meter's aggregation is fixed once the meter has usage (ADR-130 §2). The
-// meter page says so before any edit, and the edit dialog then offers the
-// aggregation read-only; before the first event it can change.
+// A meter's aggregation is fixed once the meter has usage events (ADR-130
+// §2). The meter page says so before any edit, and the edit dialog then
+// offers the aggregation read-only; before the first event it can change.
 test('the meter page shows the aggregation lock before an edit: free with no usage, fixed once usage arrives', async ({ page }) => {
   const id = uniq()
   const rule = await api<RatingRule>('POST', '/rating-rules', {
@@ -251,7 +251,7 @@ test('the meter page shows the aggregation lock before an edit: free with no usa
 
   await page.goto(`/meters/${meter.id}`)
   const lock = page.getByTestId('meter-aggregation-lock')
-  await expect(lock).toHaveText('Adds up the event values in the billing period. The aggregation can change until this meter has usage.')
+  await expect(lock).toHaveText('Adds up the event values in the billing period. The aggregation can change until this meter has a usage event. Held usage does not fix it.')
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   let dialog = page.getByRole('dialog', { name: 'Edit meter' })
   await expect(dialog.getByRole('combobox', { name: 'Aggregation' })).toBeEnabled()
@@ -262,11 +262,11 @@ test('the meter page shows the aggregation lock before an edit: free with no usa
   expect((await api<Meter>('GET', `/meters/${meter.id}`)).has_usage).toBe(true)
 
   await page.reload()
-  await expect(lock).toHaveText('Adds up the event values in the billing period. This meter has usage, so its aggregation is fixed. Make a new meter to count differently.')
+  await expect(lock).toHaveText('Adds up the event values in the billing period. This meter has usage events, so its aggregation is fixed. Make a new meter to count differently.')
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   dialog = page.getByRole('dialog', { name: 'Edit meter' })
   await expect(dialog.getByRole('combobox', { name: 'Aggregation' })).toBeDisabled()
-  await expect(dialog.getByText('This meter has usage, so its aggregation is fixed. Make a new meter to count differently.', { exact: true })).toBeVisible()
+  await expect(dialog.getByText('This meter has usage events, so its aggregation is fixed. Make a new meter to count differently.', { exact: true })).toBeVisible()
 })
 
 test('a price override for one customer: the upcoming invoice bills the negotiated rate while it lasts, and the list rate once it ends', async ({ page }) => {

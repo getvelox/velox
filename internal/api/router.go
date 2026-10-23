@@ -894,7 +894,7 @@ func NewServer(db *postgres.DB, clk clock.Clock, rdb *redis.Client, opts ...Serv
 	// "after_close", ADR-120), and the held-usage release reads them to say
 	// which released rows an invoice counts. The invoice store supplies the
 	// threshold watermarks.
-	usageSvc.SetOpenPeriodReader(usageOpenPeriods{subs: subStore, pricing: pricingSvc, thresholds: invoiceStore})
+	usageSvc.SetOpenPeriodReader(usageOpenPeriods{subs: subStore, pricing: pricingStore, thresholds: invoiceStore})
 	// subscription.Service uses the resolver at Create / Activate /
 	// ChangeItem / ScheduleCancel / PauseCollection / EndTrial /
 	// ExtendTrial so every per-sub timestamp the operator writes

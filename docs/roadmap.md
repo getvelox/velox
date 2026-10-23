@@ -26,7 +26,8 @@ first. Every shipped change, with its date, is in the
 
   Per-plan usage prices (below) replace this check before the release.
 - **Done:** a meter has one aggregation, which every price of it bills
-  under. It is fixed once the meter has usage. A meter's `key` is now
+  under. It is fixed once the meter has a usage event; held usage does
+  not count. A meter's `key` is now
   `event_name`, the name usage events send it by
   ([ADR-130](adr/130-usage-prices-belong-to-the-plan.md) §2).
 - **Done:** eight API operations that another operation already did are

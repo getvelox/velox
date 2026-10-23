@@ -18,49 +18,25 @@ import (
 	"github.com/sagarsuperuser/velox/internal/pricing"
 )
 
-// The 409 meter_has_usage message says what holds the aggregation. Held
-// rows have never been counted under any aggregation, and a new meter with
-// another event name cannot take them, so the message for a meter whose only
-// usage is held rows must not say its usage "was counted", and must not offer
-// a new meter as the way out: only a discard frees it, and a discarded row is
-// never billed.
-//
-// Mutation-verify: put back the one message for both causes → the held-only
-// case says "was counted" and offers a new meter, and this fails.
+// The 409 meter_has_usage message says what holds the aggregation: the
+// meter's usage events, counted under it. Held rows do not hold it (ADR-130
+// §2, amended 2026-10-24), so there is one message.
 func TestMeterAggregation_RefusalSaysWhatHoldsIt(t *testing.T) {
 	f := newMeterEditFixture(t)
-
-	t.Run("only held rows", func(t *testing.T) {
-		m := f.meter(t, "agg_msg_held", "")
-		f.held(t, "agg_msg_held", "held")
-		_, err := f.svc.UpdateMeter(f.ctx, f.tenantID, m.ID, pricing.UpdateMeterInput{Aggregation: ptr("max")})
-		wantHasUsage(t, "held rows only", err)
-		msg := err.Error()
-		for _, want := range []string{"held usage", "sum", "discard", "never billed"} {
-			if !strings.Contains(msg, want) {
-				t.Errorf("message does not say %q: %s", want, msg)
-			}
+	m := f.meter(t, "agg_msg_events", "")
+	f.event(t, m.ID)
+	f.held(t, "agg_msg_events", "held")
+	_, err := f.svc.UpdateMeter(f.ctx, f.tenantID, m.ID, pricing.UpdateMeterInput{Aggregation: ptr("max")})
+	wantHasUsage(t, "usage events", err)
+	msg := err.Error()
+	for _, want := range []string{"usage events", "sum", "new meter"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message does not say %q: %s", want, msg)
 		}
-		for _, lie := range []string{"counted", "new meter"} {
-			if strings.Contains(msg, lie) {
-				t.Errorf("message says %q, which is not true of held rows: %s", lie, msg)
-			}
-		}
-	})
-
-	t.Run("usage events", func(t *testing.T) {
-		m := f.meter(t, "agg_msg_events", "")
-		f.event(t, m.ID)
-		f.held(t, "agg_msg_events", "held")
-		_, err := f.svc.UpdateMeter(f.ctx, f.tenantID, m.ID, pricing.UpdateMeterInput{Aggregation: ptr("max")})
-		wantHasUsage(t, "usage events", err)
-		msg := err.Error()
-		for _, want := range []string{"usage events", "sum", "new meter"} {
-			if !strings.Contains(msg, want) {
-				t.Errorf("message does not say %q: %s", want, msg)
-			}
-		}
-	})
+	}
+	if strings.Contains(msg, "held") {
+		t.Errorf("message names held rows, which do not fix the aggregation: %s", msg)
+	}
 }
 
 // hasUsageFails is the real store, except that the has_usage read fails.

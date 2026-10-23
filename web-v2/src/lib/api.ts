@@ -181,7 +181,7 @@ export const api = {
   createMeter: (data: { event_name: string; name: string; unit?: string; aggregation?: string; rating_rule_version_id?: string }) =>
     apiRequest<Meter>('POST', '/meters', data),
   // "" clears the default binding; unmatched-dimension usage goes unbilled again.
-  // aggregation is refused (409 meter_has_usage) once the meter has usage.
+  // aggregation is refused (409 meter_has_usage) once the meter has usage events.
   updateMeter: (id: string, data: { rating_rule_version_id?: string; aggregation?: string; name?: string; unit?: string }) =>
     apiRequest<Meter>('PATCH', `/meters/${id}`, data),
   listAllMeterPricingRules: () =>
@@ -1189,7 +1189,8 @@ export interface Meter {
   rating_rule_version_id: string
   created_at: string
   // Set when one meter is created, fetched or updated (not on the list):
-  // once the meter has usage, its aggregation is fixed.
+  // whether the meter has usage events. Once it has, its aggregation is
+  // fixed. Held usage does not count.
   has_usage?: boolean
 }
 

@@ -268,9 +268,14 @@ func (s *PostgresStore) GetMeter(ctx context.Context, tenantID, id string) (doma
 		return domain.Meter{}, err
 	}
 	defer postgres.Rollback(tx)
+	return s.GetMeterTx(ctx, tx, id)
+}
 
+// GetMeterTx reads one meter on the caller's transaction, which carries the
+// tenant. It takes no lock (LockMeterTx locks).
+func (s *PostgresStore) GetMeterTx(ctx context.Context, tx *sql.Tx, id string) (domain.Meter, error) {
 	var m domain.Meter
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, event_name, name, unit, aggregation, COALESCE(rating_rule_version_id,''), created_at, updated_at
 		FROM meters WHERE id = $1
 	`, id).Scan(&m.ID, &m.TenantID, &m.EventName, &m.Name, &m.Unit, &m.Aggregation,
@@ -979,39 +984,38 @@ func (s *PostgresStore) LockMeterTx(ctx context.Context, tx *sql.Tx, meterID str
 	return m, nil
 }
 
-// meterHasUsageSQL reports which events the meter has: rows in
-// usage_events for the meter, and held rows (usage_held_events, status held)
-// for its event name, which are billed under the meter's aggregation when
-// they are released (ADR-130 §2). Row-level security scopes both reads to
-// the tenant and the mode; tenant_id leads each table's indexes. No index
-// leads with (tenant_id, meter_id), so proving a meter has no events scans
-// the tenant's events (ADR-130 §18).
-const meterHasUsageSQL = `
-	SELECT EXISTS (SELECT 1 FROM usage_events WHERE tenant_id = $1 AND meter_id = $2),
-	       EXISTS (SELECT 1 FROM usage_held_events WHERE tenant_id = $1 AND event_name = $3 AND status = 'held')`
+// meterHasUsageSQL reports whether the meter has usage events (rows in
+// usage_events), which fix its aggregation (ADR-130 §2). Held rows
+// (usage_held_events) do not: they have never been billed, and a release
+// writes usage_events, whose foreign key takes the meter lock an ingest
+// takes. Row-level security scopes the read to the tenant and the mode;
+// tenant_id leads the table's indexes. No index leads with (tenant_id,
+// meter_id), so proving a meter has no events scans the tenant's events
+// (ADR-130 §18).
+const meterHasUsageSQL = `SELECT EXISTS (SELECT 1 FROM usage_events WHERE tenant_id = $1 AND meter_id = $2)`
 
-// MeterUsageTx reads meterHasUsageSQL on the caller's transaction. After
+// MeterHasUsageTx reads meterHasUsageSQL on the caller's transaction. After
 // LockMeterTx it sees every event whose insert the lock waited for.
-func (s *PostgresStore) MeterUsageTx(ctx context.Context, tx *sql.Tx, m domain.Meter) (MeterUsage, error) {
-	var u MeterUsage
-	if err := tx.QueryRowContext(ctx, meterHasUsageSQL, m.TenantID, m.ID, m.EventName).Scan(&u.Events, &u.Held); err != nil {
-		return MeterUsage{}, fmt.Errorf("read whether meter %s has usage: %w", m.ID, err)
+func (s *PostgresStore) MeterHasUsageTx(ctx context.Context, tx *sql.Tx, m domain.Meter) (bool, error) {
+	var has bool
+	if err := tx.QueryRowContext(ctx, meterHasUsageSQL, m.TenantID, m.ID).Scan(&has); err != nil {
+		return false, fmt.Errorf("read whether meter %s has usage: %w", m.ID, err)
 	}
-	return u, nil
+	return has, nil
 }
 
-// MeterHasUsage reports whether the meter has events (meterHasUsageSQL).
+// MeterHasUsage reports whether the meter has usage events (meterHasUsageSQL).
 func (s *PostgresStore) MeterHasUsage(ctx context.Context, tenantID string, m domain.Meter) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
 		return false, err
 	}
 	defer postgres.Rollback(tx)
-	var u MeterUsage
-	if err := tx.QueryRowContext(ctx, meterHasUsageSQL, tenantID, m.ID, m.EventName).Scan(&u.Events, &u.Held); err != nil {
+	var has bool
+	if err := tx.QueryRowContext(ctx, meterHasUsageSQL, tenantID, m.ID).Scan(&has); err != nil {
 		return false, fmt.Errorf("read whether meter %s has usage: %w", m.ID, err)
 	}
-	return u.Any(), nil
+	return has, nil
 }
 
 // CountSubsUsingMeterTx locks the plans wiring the meter, in id order so two

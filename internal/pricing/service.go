@@ -456,24 +456,18 @@ func (s *Service) UpdateMeter(ctx context.Context, tenantID, id string, input Up
 }
 
 // refuseAggregationChange refuses to change the locked meter's aggregation
-// once it has events (ADR-130 §2). It runs after LockMeterTx, whose FOR
-// UPDATE waits for an ingest still writing an event of the meter (the
+// once it has usage events (ADR-130 §2). Held rows do not count: they have
+// never been billed. It runs after LockMeterTx, whose FOR UPDATE waits for
+// any write of an event of the meter, an ingest or a held-usage release (the
 // event's foreign key holds KEY SHARE on the meter row), so an event that
-// commits first is seen here.
-//
-// The message says what holds it. Held rows have not been counted yet, and
-// they release only to the meter of their event name, so a new meter is no
-// way out for them.
+// commits first is seen here, and one written later waits for this commit.
 func (s *Service) refuseAggregationChange(ctx context.Context, tx *sql.Tx, locked domain.Meter) error {
-	u, err := s.store.MeterUsageTx(ctx, tx, locked)
+	has, err := s.store.MeterHasUsageTx(ctx, tx, locked)
 	if err != nil {
 		return err
 	}
-	switch {
-	case u.Events:
+	if has {
 		return errs.InvalidState(fmt.Sprintf("Meter %q has usage events, so its aggregation stays %s: its events are counted under it. To count differently, make a new meter with another event name.", locked.EventName, locked.Aggregation)).WithCode(errs.CodeMeterHasUsage)
-	case u.Held:
-		return errs.InvalidState(fmt.Sprintf("Meter %q has held usage for its event name, so its aggregation stays %s: the held rows bill under it when released. Only discarding them frees the aggregation, and discarded rows are never billed.", locked.EventName, locked.Aggregation)).WithCode(errs.CodeMeterHasUsage)
 	}
 	return nil
 }
@@ -529,8 +523,8 @@ func (s *Service) GetMeterByEventName(ctx context.Context, tenantID, eventName s
 	return s.store.GetMeterByEventName(ctx, tenantID, eventName)
 }
 
-// MeterHasUsage reports whether the meter has events, which fixes its
-// aggregation (ADR-130 §2).
+// MeterHasUsage reports whether the meter has usage events, which fix its
+// aggregation (ADR-130 §2). Held rows do not count.
 func (s *Service) MeterHasUsage(ctx context.Context, tenantID string, m domain.Meter) (bool, error) {
 	return s.store.MeterHasUsage(ctx, tenantID, m)
 }
