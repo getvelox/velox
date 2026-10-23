@@ -10,6 +10,7 @@
 
 export interface PaymentMethod {
   id: string;
+  customer_id: string;
   type: string;
   card_brand?: string;
   card_last4?: string;

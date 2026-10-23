@@ -14,6 +14,7 @@ import (
 
 	"github.com/sagarsuperuser/velox/internal/api/respond"
 	"github.com/sagarsuperuser/velox/internal/auth"
+	"github.com/sagarsuperuser/velox/internal/domain"
 	"github.com/sagarsuperuser/velox/internal/errs"
 )
 
@@ -114,25 +115,9 @@ func (h *Handler) OperatorRoutes() chi.Router {
 	return r
 }
 
-type pmResponse struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	CardBrand string    `json:"card_brand,omitempty"`
-	CardLast4 string    `json:"card_last4,omitempty"`
-	CardExpMo int       `json:"card_exp_month,omitempty"`
-	CardExpYr int       `json:"card_exp_year,omitempty"`
-	IsDefault bool      `json:"is_default"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-func toResp(pm PaymentMethod) pmResponse {
-	return pmResponse{
-		ID: pm.ID, Type: pm.Type,
-		CardBrand: pm.CardBrand, CardLast4: pm.CardLast4,
-		CardExpMo: pm.CardExpMonth, CardExpYr: pm.CardExpYear,
-		IsDefault: pm.IsDefault, CreatedAt: pm.CreatedAt,
-	}
-}
+// toResp is a payment method as the API returns it, the same shape the
+// payment_method.* webhooks carry (domain.PaymentMethodView).
+func toResp(pm PaymentMethod) domain.PaymentMethodView { return pm.View() }
 
 type SetupSessionRequest struct {
 	ReturnURL string `json:"return_url,omitempty"`
@@ -180,7 +165,7 @@ func (h *Handler) operatorList(w http.ResponseWriter, r *http.Request) {
 		respond.InternalError(w, r)
 		return
 	}
-	out := make([]pmResponse, 0, len(pms))
+	out := make([]domain.PaymentMethodView, 0, len(pms))
 	for _, pm := range pms {
 		out = append(out, toResp(pm))
 	}

@@ -111,7 +111,7 @@ func TestServiceResolveRun_Idempotent_AfterAutomatedResolve(t *testing.T) {
 // dunning.resolved was advertised in the event catalog but never dispatched,
 // silently dropping the payment-recovery signal that integrators subscribe to.
 // Both operator-facing resolution paths (ResolveRun, ResolveByInvoice) must
-// fire it with the run/invoice/customer/resolution payload.
+// fire it, carrying the resolved run (ADR-131).
 func TestDunningResolved_EventFires(t *testing.T) {
 	t.Run("ResolveRun", func(t *testing.T) {
 		store := newMemStore()
@@ -156,16 +156,18 @@ func TestDunningResolved_EventFires(t *testing.T) {
 
 func assertResolvedPayload(t *testing.T, payload map[string]any, invoiceID, customerID, resolution string) {
 	t.Helper()
-	if payload["invoice_id"] != invoiceID {
-		t.Errorf("invoice_id: got %v, want %s", payload["invoice_id"], invoiceID)
+	if err := domain.CheckWebhookData(domain.EventDunningResolved, payload); err != nil {
+		t.Fatal(err)
 	}
-	if payload["customer_id"] != customerID {
-		t.Errorf("customer_id: got %v, want %s", payload["customer_id"], customerID)
+	run := payload[domain.WebhookResourceDunningRun].(map[string]any)
+	for k, want := range map[string]string{
+		"invoice_id": invoiceID, "customer_id": customerID, "resolution": resolution, "state": string(domain.DunningResolved),
+	} {
+		if run[k] != want {
+			t.Errorf("dunning_run.%s: got %v, want %s", k, run[k], want)
+		}
 	}
-	if payload["resolution"] != resolution {
-		t.Errorf("resolution: got %v, want %s", payload["resolution"], resolution)
-	}
-	if payload["run_id"] == nil || payload["run_id"] == "" {
-		t.Errorf("run_id missing from payload: %+v", payload)
+	if run["id"] == nil || run["id"] == "" {
+		t.Errorf("dunning_run.id missing from payload: %+v", payload)
 	}
 }

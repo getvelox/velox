@@ -79,7 +79,7 @@ func TestStartRun_RunEventAndWebhookAreAllOrNone(t *testing.T) {
 		return count(t, `SELECT count(*) FROM invoice_dunning_events WHERE invoice_id = $1 AND event_type = 'dunning_started'`, id)
 	}
 	hooks := func(t *testing.T, id string) int {
-		return count(t, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'dunning.started' AND payload->>'invoice_id' = $1`, id)
+		return count(t, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'dunning.started' AND payload->'dunning_run'->>'invoice_id' = $1`, id)
 	}
 
 	t.Run("enqueue fails → nothing persisted", func(t *testing.T) {
@@ -133,8 +133,8 @@ func TestStartRun_RunEventAndWebhookAreAllOrNone(t *testing.T) {
 				reason, state, createdAt, domain.DunningCauseNoPaymentMethod, failureAt)
 		}
 		var runID, customerID string
-		if err := tx.QueryRow(`SELECT payload->>'run_id', payload->>'customer_id' FROM webhook_outbox
-			WHERE event_type = 'dunning.started' AND payload->>'invoice_id' = $1`, inv.ID).Scan(&runID, &customerID); err != nil {
+		if err := tx.QueryRow(`SELECT payload->'dunning_run'->>'id', payload->'dunning_run'->>'customer_id' FROM webhook_outbox
+			WHERE event_type = 'dunning.started' AND payload->'dunning_run'->>'invoice_id' = $1`, inv.ID).Scan(&runID, &customerID); err != nil {
 			t.Fatalf("read outbox payload: %v", err)
 		}
 		if runID != run.ID || customerID != cust.ID {

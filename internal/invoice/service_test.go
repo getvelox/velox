@@ -3,6 +3,7 @@ package invoice
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -1580,9 +1581,20 @@ func TestRecordOfflinePayment(t *testing.T) {
 			t.Errorf("audit amount_cents: got %v, want 4200 (booked amount, not the zeroed amount_due)",
 				audit.entries[0].metadata["amount_cents"])
 		}
-		if len(events.events) != 1 || events.events[0].payload["amount_cents"] != int64(4200) {
-			t.Errorf("event amount_cents: got %v, want 4200 (integrators must see the real payment value)",
-				events.events[0].payload["amount_cents"])
+		if len(events.events) != 1 {
+			t.Fatalf("events: got %+v, want one invoice.payment_recorded", events.events)
+		}
+		data := events.events[0].payload
+		if err := domain.CheckWebhookData(domain.EventInvoicePaymentRecorded, data); err != nil {
+			t.Fatal(err)
+		}
+		got := data[domain.WebhookResourceInvoice].(map[string]any)
+		if got["amount_paid_cents"] != json.Number("4200") || got["amount_due_cents"] != json.Number("0") {
+			t.Errorf("event invoice: amount_paid_cents %v amount_due_cents %v, want 4200 and 0 (integrators must see the real payment value)",
+				got["amount_paid_cents"], got["amount_due_cents"])
+		}
+		if data["recovered_from"] != string(domain.InvoiceFinalized) {
+			t.Errorf("event recovered_from: got %v, want finalized", data["recovered_from"])
 		}
 	})
 }

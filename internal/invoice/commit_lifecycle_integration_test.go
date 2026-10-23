@@ -122,7 +122,7 @@ func (h *commitHarness) countEvents(t *testing.T, ctx context.Context, custID, e
 	var n int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM webhook_outbox
-		WHERE tenant_id = $1 AND event_type = $2 AND payload->>'customer_id' = $3
+		WHERE tenant_id = $1 AND event_type = $2 AND payload->'credit_balance'->>'customer_id' = $3
 	`, h.tenantID, eventType, custID).Scan(&n); err != nil {
 		t.Fatalf("count events: %v", err)
 	}

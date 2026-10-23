@@ -295,7 +295,7 @@ func (r *shRig) get(invoiceID string) domain.Invoice {
 
 func (r *shRig) events(eventType, invoiceID string) int {
 	r.t.Helper()
-	return r.count(`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->>'invoice_id' = $3`,
+	return r.count(`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->'invoice'->>'id' = $3`,
 		r.tenantID, eventType, invoiceID)
 }
 

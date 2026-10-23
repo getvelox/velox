@@ -67,8 +67,8 @@ func TestSettleSucceeded_DuplicatePI_FastPath(t *testing.T) {
 
 // TestSettleSucceeded_DuplicateCharge_PayloadNamesTheOriginalPayment: the
 // payment.duplicate_charge payload says how the first payment was made. A
-// card payment names its PaymentIntent; an offline one has none, so the
-// payload carries paid_out_of_band. Before #1370 the offline case was told
+// card payment names its PaymentIntent on the invoice; an offline one has
+// none, so the invoice's paid_out_of_band tells it apart. Before #1370 the offline case was told
 // apart by an "out_of_band:" prefix in recorded_payment_intent_id; without
 // the flag it would read the same as a credits-paid invoice ("").
 func TestSettleSucceeded_DuplicateCharge_PayloadNamesTheOriginalPayment(t *testing.T) {
@@ -95,11 +95,20 @@ func TestSettleSucceeded_DuplicateCharge_PayloadNamesTheOriginalPayment(t *testi
 			if got == nil {
 				t.Fatal("no payment.duplicate_charge payload")
 			}
-			if got["recorded_payment_intent_id"] != c.pi {
-				t.Errorf("recorded_payment_intent_id = %v, want %q", got["recorded_payment_intent_id"], c.pi)
+			if err := domain.CheckWebhookData(domain.EventPaymentDuplicateCharge, got); err != nil {
+				t.Fatal(err)
 			}
-			if v, ok := got["paid_out_of_band"]; !ok || v != c.offline {
-				t.Errorf("paid_out_of_band = %v (present %v), want %v", v, ok, c.offline)
+			if got["incoming_payment_intent_id"] != "pi_B" {
+				t.Errorf("incoming_payment_intent_id = %v, want pi_B", got["incoming_payment_intent_id"])
+			}
+			// The invoice names the first payment: its PaymentIntent (left
+			// out when it has none), and paid_out_of_band.
+			inv := got[domain.WebhookResourceInvoice].(map[string]any)
+			if pi, _ := inv["stripe_payment_intent_id"].(string); pi != c.pi {
+				t.Errorf("invoice.stripe_payment_intent_id = %q, want %q", pi, c.pi)
+			}
+			if v, ok := inv["paid_out_of_band"]; !ok || v != c.offline {
+				t.Errorf("invoice.paid_out_of_band = %v (present %v), want %v", v, ok, c.offline)
 			}
 		})
 	}

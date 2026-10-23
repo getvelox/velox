@@ -3289,12 +3289,10 @@ func (s *Service) ProcessExpiredPauseCollectionsForClock(ctx context.Context, te
 			})
 		}
 		if s.events != nil {
-			s.dispatchEvent(bound, tenantID, domain.EventSubscriptionCollectionResumed, map[string]any{
-				"subscription_id": cleared.ID,
-				"customer_id":     cleared.CustomerID,
-				"resumed_at":      resumeAt.UTC(),
-				"triggered_by":    triggeredBy,
-			})
+			s.dispatchEvent(bound, tenantID, domain.EventSubscriptionCollectionResumed, domain.SubscriptionWebhookData(cleared, map[string]any{
+				"resumed_at":   resumeAt.UTC(),
+				"triggered_by": triggeredBy,
+			}))
 		}
 		processed++
 	}
@@ -3359,12 +3357,10 @@ func (s *Service) ProcessExpiredPauseCollections(ctx context.Context, batch int)
 			})
 		}
 		if s.events != nil {
-			s.dispatchEvent(ctx, sub.TenantID, domain.EventSubscriptionCollectionResumed, map[string]any{
-				"subscription_id": cleared.ID,
-				"customer_id":     cleared.CustomerID,
-				"resumed_at":      resumeAt.UTC(),
-				"triggered_by":    triggeredBy,
-			})
+			s.dispatchEvent(ctx, sub.TenantID, domain.EventSubscriptionCollectionResumed, domain.SubscriptionWebhookData(cleared, map[string]any{
+				"resumed_at":   resumeAt.UTC(),
+				"triggered_by": triggeredBy,
+			}))
 		}
 		processed++
 	}

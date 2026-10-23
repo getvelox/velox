@@ -257,7 +257,7 @@ func (r *settleRaceRig) assertRecordedOnce(t *testing.T, round int, tenantID, in
 	}
 
 	events := func(eventType string) int {
-		return r.count(t, `SELECT count(*) FROM webhook_outbox WHERE tenant_id=$1 AND event_type=$2 AND payload->>'invoice_id'=$3`,
+		return r.count(t, `SELECT count(*) FROM webhook_outbox WHERE tenant_id=$1 AND event_type=$2 AND payload->'invoice'->>'id'=$3`,
 			tenantID, eventType, invID)
 	}
 	for _, want := range []struct {

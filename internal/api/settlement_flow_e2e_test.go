@@ -233,7 +233,7 @@ func TestE2E_InvoiceSettlement_OfflineAndStripeWebhook(t *testing.T) {
 	if n := flowCount(t, db, `SELECT count(*) FROM stripe_webhook_events WHERE stripe_event_id = $1`, "evt_settlement_flow_b"); n != 1 {
 		t.Errorf("stripe_webhook_events rows for the event: %d, want 1", n)
 	}
-	if n := flowCount(t, db, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'invoice.paid' AND payload->>'invoice_id' = $1`, idB); n != 1 {
+	if n := flowCount(t, db, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'invoice.paid' AND payload->'invoice'->>'id' = $1`, idB); n != 1 {
 		t.Errorf("invoice.paid events for invoice B: %d, want 1", n)
 	}
 	// A late decline for the paid invoice does not undo the payment.
@@ -261,7 +261,7 @@ func TestE2E_InvoiceSettlement_OfflineAndStripeWebhook(t *testing.T) {
 	if got := getInvoice(idC); settled(got) != settled(failedC) {
 		t.Errorf("invoice C changed on redelivery: %s, was %s", settled(got), settled(failedC))
 	}
-	if n := flowCount(t, db, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'payment.failed' AND payload->>'invoice_id' = $1`, idC); n != 1 {
+	if n := flowCount(t, db, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'payment.failed' AND payload->'invoice'->>'id' = $1`, idC); n != 1 {
 		t.Errorf("payment.failed events for invoice C: %d, want 1", n)
 	}
 

@@ -1,0 +1,21 @@
+{
+  "applied": "canceled_and_written_off",
+  "dunning_run": {
+    "attempt_count": 4,
+    "created_at": "2026-09-17T12:00:00Z",
+    "customer_id": "vlx_cus_golden",
+    "id": "vlx_dr_golden",
+    "invoice_id": "vlx_inv_golden",
+    "last_attempt_at": "2026-10-01T11:00:00Z",
+    "paused": false,
+    "policy_id": "vlx_dpol_golden",
+    "reason": "payment_failed",
+    "resolution": "retries_exhausted",
+    "resolved_at": "2026-10-01T12:00:00Z",
+    "state": "escalated",
+    "tenant_id": "vlx_ten_golden",
+    "updated_at": "2026-10-01T12:00:00Z"
+  },
+  "final_invoice_action": "mark_uncollectible",
+  "final_subscription_action": "cancel"
+}

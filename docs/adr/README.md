@@ -170,6 +170,7 @@ Each row links to the full record. Browse by Topic, or search this page for a te
 | [128](128-activity-line-standard.md) | 2026-10-19 | Accepted | Test clocks & simulated time | Every activity line has one wording, names who acted and follows one clock rule; the backend builds the words |
 | [129](129-credit-carries-its-own-currency.md) | 2026-10-23 | Accepted | Credits | Each credit ledger row stores its currency; credit pays only invoices in it, never converted; a manual invoice uses the customer's currency |
 | [130](130-usage-prices-belong-to-the-plan.md) | 2026-10-23 | Accepted (lock order shipped; the rest not built yet) | Pricing & usage | Usage prices are rows on the plan; the most specific price wins; an edit on a used plan applies from each subscriber's next period |
+| [131](131-webhook-events-carry-their-resource.md) | 2026-10-24 | Accepted | Integrations | A webhook event's data is the resource it is about, as the API returns it, plus the few facts the resource lacks; one resource per family |
 
 > ℹ️ **ADR-084 was never used.** No file has ever carried that number (verified
 > across every ref). It is a skipped number, not a lost decision.

@@ -423,11 +423,7 @@ func (s *PostgresStore) StartRun(ctx context.Context, tenantID string, run domai
 		return domain.InvoiceDunningRun{}, fmt.Errorf("started event: %w", err)
 	}
 	if s.outbox != nil {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventDunningStarted, map[string]any{
-			"run_id":      run.ID,
-			"invoice_id":  run.InvoiceID,
-			"customer_id": run.CustomerID,
-		}); err != nil {
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventDunningStarted, domain.DunningRunWebhookData(run, nil)); err != nil {
 			return domain.InvoiceDunningRun{}, fmt.Errorf("enqueue %s: %w", domain.EventDunningStarted, err)
 		}
 	}

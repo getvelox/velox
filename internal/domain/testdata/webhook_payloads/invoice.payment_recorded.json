@@ -1,0 +1,43 @@
+{
+  "invoice": {
+    "amount_due_cents": 0,
+    "amount_paid_cents": 10825,
+    "billing_period_end": "2026-10-01T12:00:00Z",
+    "billing_period_start": "2026-09-01T12:00:00Z",
+    "billing_reason": "subscription_cycle",
+    "billing_timezone": "UTC",
+    "created_at": "2026-10-01T12:00:00Z",
+    "credits_applied_cents": 0,
+    "currency": "USD",
+    "customer_id": "vlx_cus_golden",
+    "discount_cents": 0,
+    "due_at": "2026-10-01T12:00:00Z",
+    "id": "vlx_inv_golden",
+    "invoice_number": "VLX-000042",
+    "is_simulated": false,
+    "issued_at": "2026-10-01T12:00:00Z",
+    "metadata": {
+      "order": "A-1"
+    },
+    "net_payment_term_days": 0,
+    "paid_at": "2026-10-01T12:01:00Z",
+    "paid_out_of_band": false,
+    "payment_card_brand": "visa",
+    "payment_card_last4": "4242",
+    "payment_status": "succeeded",
+    "status": "paid",
+    "stripe_payment_intent_id": "pi_golden",
+    "subscription_id": "vlx_sub_golden",
+    "subtotal_cents": 10000,
+    "tax_amount_cents": 825,
+    "tax_country": "US",
+    "tax_name": "Sales tax",
+    "tax_provider": "manual",
+    "tax_rate": 8.25,
+    "tax_status": "ok",
+    "tenant_id": "vlx_ten_golden",
+    "total_amount_cents": 10825,
+    "updated_at": "2026-10-01T12:01:00Z"
+  },
+  "recovered_from": "uncollectible"
+}

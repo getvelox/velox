@@ -254,7 +254,7 @@ func canceledByOnOutboundEvent(t *testing.T, ctx context.Context, db *postgres.D
 		SELECT payload->>'canceled_by'
 		FROM webhook_outbox
 		WHERE event_type = $1
-		  AND payload->>'subscription_id' = $2
+		  AND payload->'subscription'->>'id' = $2
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, string(domain.EventSubscriptionCanceled), subID).Scan(&canceledBy)

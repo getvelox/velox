@@ -61,7 +61,7 @@ func TestCommitRelief_RetireCarriesTheGrantCurrency(t *testing.T) {
 		WHERE metadata->>'reason' = 'commit_refund_retire' AND metadata->>'funding_invoice_id' = $1`, inv.ID).Scan(&rowCcy); err != nil {
 		t.Fatalf("read relief retire row: %v", err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(payload->>'currency', '') FROM webhook_outbox
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(payload->'credit_balance'->>'currency', '') FROM webhook_outbox
 		WHERE tenant_id = $1 AND event_type = $2`, h.tenantID, domain.EventCreditCommitRetired).Scan(&eventCcy); err != nil {
 		t.Fatalf("read commit_retired event: %v", err)
 	}

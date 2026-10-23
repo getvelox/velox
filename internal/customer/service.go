@@ -232,20 +232,29 @@ func (s *Service) MarkEmailBounced(ctx context.Context, tenantID, customerID, re
 	if err := s.store.MarkEmailBounced(ctx, tenantID, customerID, reason); err != nil {
 		return err
 	}
-	if s.events != nil {
-		payload := map[string]any{
-			"customer_id": customerID,
-			"reason":      reason,
-		}
-		// Non-fatal on dispatch error — the state transition already
-		// landed; losing a webhook event isn't worth reversing the
-		// status.
-		if err := s.events.Dispatch(ctx, tenantID, domain.EventCustomerEmailBounced, payload); err != nil {
-			slog.WarnContext(ctx, "dispatch customer.email_bounced",
-				"tenant_id", tenantID, "customer_id", customerID, "error", err)
-		}
-	}
+	s.dispatchSuppression(ctx, tenantID, domain.EventCustomerEmailBounced, customerID, reason)
 	return nil
+}
+
+// dispatchSuppression sends customer.email_bounced or .email_complained
+// with the customer as the API now returns it, and the provider's reason
+// beside it (ADR-131): a complaint on a customer that already complained
+// leaves the row's reason as it was. Non-fatal: the state transition
+// already landed, and losing a webhook event isn't worth reversing it.
+func (s *Service) dispatchSuppression(ctx context.Context, tenantID, eventType, customerID, reason string) {
+	if s.events == nil {
+		return
+	}
+	c, err := s.store.Get(ctx, tenantID, customerID)
+	if err != nil {
+		slog.ErrorContext(ctx, "webhook event not sent: the customer could not be read after the suppression",
+			"event_type", eventType, "tenant_id", tenantID, "customer_id", customerID, "error", err)
+		return
+	}
+	if err := s.events.Dispatch(ctx, tenantID, eventType, domain.CustomerWebhookData(c, map[string]any{"reason": reason})); err != nil {
+		slog.WarnContext(ctx, "dispatch "+eventType,
+			"tenant_id", tenantID, "customer_id", customerID, "error", err)
+	}
 }
 
 // MarkEmailComplained records a spam complaint against the customer's
@@ -258,19 +267,7 @@ func (s *Service) MarkEmailComplained(ctx context.Context, tenantID, customerID,
 	if err := s.store.MarkEmailComplained(ctx, tenantID, customerID, reason); err != nil {
 		return err
 	}
-	if s.events != nil {
-		payload := map[string]any{
-			"customer_id": customerID,
-			"reason":      reason,
-		}
-		// Non-fatal on dispatch error — the state transition already
-		// landed; losing a webhook event isn't worth reversing the
-		// status.
-		if err := s.events.Dispatch(ctx, tenantID, domain.EventCustomerEmailComplained, payload); err != nil {
-			slog.WarnContext(ctx, "dispatch customer.email_complained",
-				"tenant_id", tenantID, "customer_id", customerID, "error", err)
-		}
-	}
+	s.dispatchSuppression(ctx, tenantID, domain.EventCustomerEmailComplained, customerID, reason)
 	return nil
 }
 

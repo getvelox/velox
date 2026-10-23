@@ -374,7 +374,7 @@ func TestApply_CurrencyCollisions(t *testing.T) {
 
 func eventsWithCurrency(r *ccyRig, eventType, currency string) int64 {
 	r.t.Helper()
-	return r.scanInt(`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->>'currency' = $3`,
+	return r.scanInt(`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->'credit_balance'->>'currency' = $3`,
 		r.tenantID, eventType, currency)
 }
 
@@ -420,7 +420,7 @@ func TestBalanceCrossings_PerCurrency(t *testing.T) {
 		if n := eventsWithCurrency(r, domain.EventCreditBalanceLow, "EUR"); n != 1 {
 			t.Errorf("EUR low events = %d, want 1 (900 → 700 crosses 800)", n)
 		}
-		if n := r.scanInt(`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND (payload->>'balance_cents')::bigint = 700`,
+		if n := r.scanInt(`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND (payload->'credit_balance'->>'balance_cents')::bigint = 700`,
 			r.tenantID, domain.EventCreditBalanceLow); n != 1 {
 			t.Errorf("low events with balance_cents 700 = %d, want 1 (the EUR balance, not the total)", n)
 		}

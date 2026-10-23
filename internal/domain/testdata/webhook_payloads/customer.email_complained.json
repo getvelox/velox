@@ -1,0 +1,17 @@
+{
+  "customer": {
+    "created_at": "2026-08-02T12:00:00Z",
+    "display_name": "Acme Inc",
+    "email": "billing@acme.example",
+    "email_bounce_reason": "mailbox does not exist",
+    "email_last_bounced_at": "2026-10-01T12:00:00Z",
+    "email_status": "bounced",
+    "external_id": "acme-1",
+    "id": "vlx_cus_golden",
+    "status": "active",
+    "stripe_customer_id": "cus_golden",
+    "tenant_id": "vlx_ten_golden",
+    "updated_at": "2026-10-01T12:00:00Z"
+  },
+  "reason": "mailbox does not exist"
+}

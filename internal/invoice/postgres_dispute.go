@@ -63,10 +63,11 @@ func (s *PostgresStore) RecordStripeDispute(ctx context.Context, tenantID string
 	if err != nil {
 		return domain.DisputeRecordResult{}, err
 	}
-	var invoiceNumber, customerID string
+	// The whole row: the events below carry the invoice (ADR-131).
+	var inv domain.Invoice
 	if err := tx.QueryRowContext(ctx,
-		`SELECT invoice_number, customer_id FROM invoices WHERE id = $1 FOR UPDATE`, invoiceID,
-	).Scan(&invoiceNumber, &customerID); err != nil {
+		`SELECT `+invCols+` FROM invoices WHERE id = $1 FOR UPDATE`, invoiceID,
+	).Scan(s.scanInvDest(&inv)...); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.DisputeRecordResult{}, errs.ErrNotFound
 		}
@@ -142,7 +143,7 @@ func (s *PostgresStore) RecordStripeDispute(ctx context.Context, tenantID string
 	}
 
 	if s.outbox != nil {
-		payload := disputeEventPayload(res.Dispute, invoiceNumber, customerID)
+		payload := domain.InvoiceWebhookData(inv, map[string]any{"dispute": res.Dispute})
 		if res.Opened {
 			if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventPaymentDisputeOpened, payload); err != nil {
 				return domain.DisputeRecordResult{}, fmt.Errorf("enqueue %s: %w", domain.EventPaymentDisputeOpened, err)
@@ -199,33 +200,6 @@ func disputedInvoiceTx(ctx context.Context, tx *sql.Tx, stripeDisputeID, payment
 		return "", fmt.Errorf("find invoice for payment intent %s: %w", paymentIntentID, err)
 	}
 	return id, nil
-}
-
-// disputeEventPayload is the data of payment.dispute_opened and
-// payment.dispute_closed (docs/webhooks.md): the dispute as recorded, and the
-// invoice and customer it belongs to.
-func disputeEventPayload(d domain.InvoiceDispute, invoiceNumber, customerID string) map[string]any {
-	p := map[string]any{
-		"invoice_id":        d.InvoiceID,
-		"invoice_number":    invoiceNumber,
-		"customer_id":       customerID,
-		"dispute_id":        d.ID,
-		"stripe_dispute_id": d.StripeDisputeID,
-		"stripe_charge_id":  d.StripeChargeID,
-		"payment_intent_id": d.StripePaymentIntentID,
-		"status":            string(d.Status),
-		"reason":            d.Reason,
-		"amount_cents":      d.AmountCents,
-		"currency":          d.Currency,
-		"opened_at":         d.OpenedAt.UTC(),
-	}
-	if d.EvidenceDueBy != nil {
-		p["evidence_due_by"] = d.EvidenceDueBy.UTC()
-	}
-	if d.ClosedAt != nil {
-		p["closed_at"] = d.ClosedAt.UTC()
-	}
-	return p
 }
 
 // ListDisputesByInvoice returns the invoice's disputes, oldest first.

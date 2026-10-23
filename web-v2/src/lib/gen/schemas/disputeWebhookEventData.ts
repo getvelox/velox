@@ -7,41 +7,24 @@
  *
  * OpenAPI spec version: 2026-04-07
  */
+import type { Invoice } from './invoice';
+import type { InvoiceDispute } from './invoiceDispute';
 
 /**
  * The `data` of the outbound webhook events `payment.dispute_opened`
- * and `payment.dispute_closed` (docs/webhooks.md). Both are saved in the
- * same transaction that records the dispute, so a crash cannot drop
- * them. `payment.dispute_opened` is sent once per dispute, when Velox
- * first records it; if the first event Velox receives is already the
- * close, both are sent, and both carry the closed status and
- * `closed_at`. Their delivery order is not guaranteed.
- * `payment.dispute_closed` is sent when the dispute reaches a closed
- * status it did not have: `won`, `lost`, `warning_closed` or
- * `prevented`. A lost dispute that Stripe later marks won sends it
- * again.
+ * and `payment.dispute_closed` (docs/webhooks.md): the invoice the
+ * disputed payment paid and the dispute, each as the API returns it.
+ * Both are saved in the same transaction that records the dispute, so
+ * a crash cannot drop them. `payment.dispute_opened` is sent once per
+ * dispute, when Velox first records it; if the first event Velox
+ * receives is already the close, both are sent, and both carry the
+ * closed status and `closed_at`. Their delivery order is not
+ * guaranteed. `payment.dispute_closed` is sent when the dispute
+ * reaches a closed status it did not have: `won`, `lost`,
+ * `warning_closed` or `prevented`. A lost dispute that Stripe later
+ * marks won sends it again.
  */
 export interface DisputeWebhookEventData {
-  invoice_id: string;
-  invoice_number: string;
-  customer_id: string;
-  /** The Velox dispute record (`InvoiceDispute.id`). */
-  dispute_id: string;
-  stripe_dispute_id: string;
-  stripe_charge_id?: string;
-  /** The disputed Stripe PaymentIntent. */
-  payment_intent_id: string;
-  /** The dispute's status when the event was saved (see `InvoiceDispute.status`). */
-  status: string;
-  reason?: string;
-  amount_cents: number;
-  currency: string;
-  evidence_due_by?: string;
-  opened_at: string;
-  /**
-     * Set when the dispute is closed: always on `payment.dispute_closed`,
-     * and on `payment.dispute_opened` when the first event Velox received
-     * was already the close.
-     */
-  closed_at?: string;
+  invoice: Invoice;
+  dispute: InvoiceDispute;
 }

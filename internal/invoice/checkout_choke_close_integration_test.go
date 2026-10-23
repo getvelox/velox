@@ -194,7 +194,7 @@ func TestChokePointCloses(t *testing.T) {
 					t.Errorf("%d collection_resumed rows triggered_by=payment, want 1", n)
 				}
 				if n := countRows(t, db, ctx, tenantID, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'subscription.collection_resumed'
-					AND payload->>'subscription_id' = $1 AND payload->>'triggered_by' = 'payment'`, subID); n != 1 {
+					AND payload->'subscription'->>'id' = $1 AND payload->>'triggered_by' = 'payment'`, subID); n != 1 {
 					t.Errorf("%d subscription.collection_resumed events, want 1", n)
 				}
 			})

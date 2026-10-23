@@ -193,7 +193,8 @@ func signedStripeEvent(t *testing.T, secret string, event map[string]any) ([]byt
 
 // stripeStub replaces api.stripe.com for the rest of the test. It answers
 // the calls these journeys make (create a customer, create a Checkout
-// session, read a PaymentIntent with its card) and records every call.
+// session, read a PaymentIntent with its card, read or list a saved card,
+// set a customer's default card) and records every call.
 // Anything else gets a 404 and is listed by unexpected().
 type stripeStub struct {
 	mu    sync.Mutex
@@ -237,6 +238,12 @@ func (s *stripeStub) answer(req *http.Request) *http.Response {
 		body = `{"id":"cus_flow","object":"customer"}`
 	case call == "POST /v1/checkout/sessions":
 		body = `{"id":"cs_flow","object":"checkout.session","mode":"setup","url":"https://checkout.stripe.test/c/cs_flow"}`
+	case req.Method == "POST" && strings.HasPrefix(req.URL.Path, "/v1/customers/"):
+		body = fmt.Sprintf(`{"id":%q,"object":"customer"}`, strings.TrimPrefix(req.URL.Path, "/v1/customers/"))
+	case call == "GET /v1/payment_methods":
+		body = `{"object":"list","url":"/v1/payment_methods","has_more":false,"data":[` + stubCard + `]}`
+	case req.Method == "GET" && strings.HasPrefix(req.URL.Path, "/v1/payment_methods/"):
+		body = stubCard
 	case req.Method == "GET" && strings.HasPrefix(req.URL.Path, "/v1/payment_intents/"):
 		id := strings.TrimPrefix(req.URL.Path, "/v1/payment_intents/")
 		body = fmt.Sprintf(`{"id":%q,"object":"payment_intent","status":"succeeded","payment_method":{"id":"pm_flow","object":"payment_method","type":"card","card":{"brand":"visa","display_brand":"visa","last4":"4242","exp_month":12,"exp_year":2030}}}`, id)
@@ -251,6 +258,9 @@ func (s *stripeStub) answer(req *http.Request) *http.Response {
 		Request:    req,
 	}
 }
+
+// stubCard is the saved card the stub answers payment-method reads with.
+const stubCard = `{"id":"pm_flow","object":"payment_method","type":"card","created":1767225600,"card":{"brand":"visa","display_brand":"visa","last4":"4242","exp_month":12,"exp_year":2030,"fingerprint":"fp_flow"}}`
 
 func (s *stripeStub) count(call string) int {
 	s.mu.Lock()
@@ -275,7 +285,8 @@ func (s *stripeStub) unexpected() []string {
 	defer s.mu.Unlock()
 	var out []string
 	for _, c := range s.calls {
-		if c != "POST /v1/customers" && c != "POST /v1/checkout/sessions" && !strings.HasPrefix(c, "GET /v1/payment_intents/") {
+		if c != "POST /v1/customers" && c != "POST /v1/checkout/sessions" && !strings.HasPrefix(c, "GET /v1/payment_intents/") &&
+			!strings.HasPrefix(c, "GET /v1/payment_methods") && !strings.HasPrefix(c, "POST /v1/customers/") {
 			out = append(out, c)
 		}
 	}

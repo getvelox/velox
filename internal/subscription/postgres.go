@@ -45,40 +45,35 @@ type OutboxEnqueuer interface {
 // reconcile). Optional — when unset (narrow tests), no events are enqueued.
 func (s *PostgresStore) SetOutboxEnqueuer(o OutboxEnqueuer) { s.outbox = o }
 
-// lifecyclePayload is the shared event payload base — mirrors the shape the
-// handler's fireEvent historically emitted so consumers see no contract
-// change: subscription_id, customer_id, status, item_count, period bounds.
-func lifecyclePayload(sub domain.Subscription, extra map[string]any) map[string]any {
-	payload := map[string]any{
-		"subscription_id": sub.ID,
-		"customer_id":     sub.CustomerID,
-		"status":          string(sub.Status),
-		"item_count":      len(sub.Items),
-	}
-	if sub.CurrentBillingPeriodStart != nil {
-		payload["current_period_start"] = sub.CurrentBillingPeriodStart.UTC()
-	}
-	if sub.CurrentBillingPeriodEnd != nil {
-		payload["current_period_end"] = sub.CurrentBillingPeriodEnd.UTC()
-	}
-	for k, v := range extra {
-		payload[k] = v
-	}
-	return payload
-}
-
-// enqueueLifecycle enqueues one lifecycle event on the caller's tx. An
-// enqueue failure fails the transition — atomicity with the state change is
-// the entire point of the seam (the pre-fix post-commit dispatch could drop
-// the event with no trace). No-op when the enqueuer isn't wired.
+// enqueueLifecycle enqueues one lifecycle event on the caller's tx, carrying
+// sub (ADR-131): the caller passes the row with its items as the
+// transaction has written it. An enqueue failure fails the transition —
+// atomicity with the state change is the entire point of the seam (the
+// pre-fix post-commit dispatch could drop the event with no trace). No-op
+// when the enqueuer isn't wired.
 func (s *PostgresStore) enqueueLifecycle(ctx context.Context, tx *sql.Tx, eventType string, sub domain.Subscription, extra map[string]any) error {
 	if s.outbox == nil {
 		return nil
 	}
-	if _, err := s.outbox.Enqueue(ctx, tx, sub.TenantID, eventType, lifecyclePayload(sub, extra)); err != nil {
+	if _, err := s.outbox.Enqueue(ctx, tx, sub.TenantID, eventType, domain.SubscriptionWebhookData(sub, extra)); err != nil {
 		return fmt.Errorf("enqueue %s: %w", eventType, err)
 	}
 	return nil
+}
+
+// finishCancelTx is the last write of every cancel writer: it retires the
+// row's live-only state (retireLiveOnlyStateTx), then queues
+// subscription.canceled with the row as the transaction leaves it, so the
+// event shows what the API shows after the commit.
+func (s *PostgresStore) finishCancelTx(ctx context.Context, tx *sql.Tx, id string, extra map[string]any) (domain.Subscription, error) {
+	sub, err := retireLiveOnlyStateTx(ctx, tx, id)
+	if err != nil {
+		return domain.Subscription{}, err
+	}
+	if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCanceled, sub, extra); err != nil {
+		return domain.Subscription{}, err
+	}
+	return sub, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -502,8 +497,8 @@ func (s *PostgresStore) CancelAtomic(ctx context.Context, tenantID, id string) (
 // reconciler). ADR-056 coordinator pattern. The external finalize (tax commit +
 // auto-charge) and the proration relief's legs run post-commit via the caller
 // (FinalizeOnCreateInvoice / FinishRelief). billFn may be nil. billFn gets
-// the row as the flip left it; the row returned is the retired one
-// (retireLiveOnlyStateTx).
+// the row as the flip left it; the row returned, and the one
+// subscription.canceled carries, is the retired one (finishCancelTx).
 func (s *PostgresStore) CancelAtomicWithBill(ctx context.Context, tenantID, id string, billFn func(tx *sql.Tx, canceled domain.Subscription) error) (domain.Subscription, error) {
 	tx, err := s.db.BeginTx(ctx, postgres.TxTenant, tenantID)
 	if err != nil {
@@ -520,7 +515,10 @@ func (s *PostgresStore) CancelAtomicWithBill(ctx context.Context, tenantID, id s
 			return domain.Subscription{}, err
 		}
 	}
-	if canceled, err = retireLiveOnlyStateTx(ctx, tx, id); err != nil {
+	// canceled_by comes from cancelActorLabel — the SAME rule the ADR-090
+	// audit row in this transaction uses, so the webhook and the audit
+	// evidence can never disagree about who canceled.
+	if canceled, err = s.finishCancelTx(ctx, tx, id, map[string]any{"canceled_by": cancelActorLabel(ctx)}); err != nil {
 		return domain.Subscription{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -735,17 +733,10 @@ func (s *PostgresStore) FireScheduledCancellationTx(ctx context.Context, tx *sql
 		return domain.Subscription{}, err
 	}
 
-	// Schedule-driven cancel — enqueue in-tx with the schedule provenance
-	// the engine's post-commit dispatch historically stamped.
-	if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCanceled, sub, map[string]any{
-		"canceled_at": at.UTC(),
-		"canceled_by": "schedule",
-	}); err != nil {
-		return domain.Subscription{}, err
-	}
 	// The engine built this close's invoice from its snapshot before the tx,
-	// so the retire can run before that insert.
-	return retireLiveOnlyStateTx(ctx, tx, id)
+	// so the retire can run before that insert. Schedule-driven cancel:
+	// subscription.canceled is queued in-tx with the schedule provenance.
+	return s.finishCancelTx(ctx, tx, id, map[string]any{"canceled_by": "schedule"})
 }
 
 // WithTenantTx runs fn inside one tenant-scoped transaction: commit when fn
@@ -837,13 +828,7 @@ func (s *PostgresStore) FireScheduledCancellationWithBill(ctx context.Context, t
 		}
 	}
 
-	if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCanceled, sub, map[string]any{
-		"canceled_at": at.UTC(),
-		"canceled_by": "schedule",
-	}); err != nil {
-		return domain.Subscription{}, err
-	}
-	if sub, err = retireLiveOnlyStateTx(ctx, tx, id); err != nil {
+	if sub, err = s.finishCancelTx(ctx, tx, id, map[string]any{"canceled_by": "schedule"}); err != nil {
 		return domain.Subscription{}, err
 	}
 
@@ -1483,23 +1468,13 @@ func (s *PostgresStore) transitionInTx(ctx context.Context, tx *sql.Tx, id strin
 	}
 
 	// Cancel via CancelAtomic / CancelAtomicWithBill (cancelSpec is the only
-	// canceled-target spec). Enqueue in-tx. canceled_by comes from
-	// cancelActorLabel — the SAME rule the ADR-090 audit row in this very
-	// transaction uses, so the outbound webhook and the audit evidence can
-	// never disagree about who canceled. Pre-fix this hardcoded "operator"
-	// while the audit row could say "dunning" for the same event.
+	// canceled-target spec). CancelAtomicWithBill queues subscription.canceled
+	// in this transaction once the row is final (finishCancelTx).
 	if spec.targetStatus == "canceled" {
 		// ADR-101: an immediate cancel seals every open interval — at the
 		// cancel instant for the common mid-period case, capped at the
 		// period end the final invoice covers.
 		if err := intervalCloseAllForCancel(ctx, tx, sub, now); err != nil {
-			return domain.Subscription{}, err
-		}
-		extra := map[string]any{"canceled_by": cancelActorLabel(ctx)}
-		if sub.CanceledAt != nil {
-			extra["canceled_at"] = sub.CanceledAt.UTC()
-		}
-		if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCanceled, sub, extra); err != nil {
 			return domain.Subscription{}, err
 		}
 	}
@@ -3564,14 +3539,7 @@ func (s *PostgresStore) CancelAtTrialEnd(ctx context.Context, tenantID, id strin
 	// would have been the first). Nothing to seal on a free cancel.
 	// Free trialing→canceled (ADR-069) — enqueue in-tx with the provenance
 	// both prior dispatch sites (service + engine) stamped.
-	extra := map[string]any{"canceled_by": "schedule", "reason": "trial_end_cancel"}
-	if sub.CanceledAt != nil {
-		extra["canceled_at"] = sub.CanceledAt.UTC()
-	}
-	if err := s.enqueueLifecycle(ctx, tx, domain.EventSubscriptionCanceled, sub, extra); err != nil {
-		return domain.Subscription{}, err
-	}
-	if sub, err = retireLiveOnlyStateTx(ctx, tx, id); err != nil {
+	if sub, err = s.finishCancelTx(ctx, tx, id, map[string]any{"canceled_by": "schedule", "reason": "trial_end_cancel"}); err != nil {
 		return domain.Subscription{}, err
 	}
 	if err := tx.Commit(); err != nil {

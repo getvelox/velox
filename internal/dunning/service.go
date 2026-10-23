@@ -341,6 +341,23 @@ func (s *Service) fireEvent(ctx context.Context, tenantID, eventType string, pay
 	}
 }
 
+// fireRunEvent sends a dunning.* event carrying the run as
+// GET /v1/dunning/runs/{id} returns it, read after the change committed
+// (ADR-131). When the read fails there is no true resource to send, so the
+// event is left out, loudly.
+func (s *Service) fireRunEvent(ctx context.Context, tenantID, eventType, runID string, extra map[string]any) {
+	if s.events == nil {
+		return
+	}
+	run, err := s.store.GetRun(ctx, tenantID, runID)
+	if err != nil {
+		slog.ErrorContext(ctx, "dunning webhook event not sent: the run could not be read after the change",
+			"event_type", eventType, "tenant_id", tenantID, "run_id", runID, "error", err)
+		return
+	}
+	s.fireEvent(ctx, tenantID, eventType, domain.DunningRunWebhookData(run, extra))
+}
+
 // StartDunning initiates a dunning run for a failed invoice payment.
 //
 // One run per invoice, lifetime — Stripe-parity. The previous behaviour
@@ -1392,10 +1409,7 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		"applied", outcome.Reason(),
 	)
 
-	s.fireEvent(ctx, tenantID, domain.EventDunningEscalated, map[string]any{
-		"run_id":      run.ID,
-		"invoice_id":  run.InvoiceID,
-		"customer_id": run.CustomerID,
+	s.fireRunEvent(ctx, tenantID, domain.EventDunningEscalated, run.ID, map[string]any{
 		// The policy's two configured actions, and separately what actually
 		// landed. Subscribers reconciling their own records need the second:
 		// a one-off invoice under a cancel policy escalates with nothing
@@ -1403,8 +1417,6 @@ func (s *Service) exhaustRun(ctx context.Context, tenantID string, run domain.In
 		"final_subscription_action": string(policy.FinalSubscriptionAction),
 		"final_invoice_action":      string(policy.FinalInvoiceAction),
 		"applied":                   outcome.Reason(),
-		"resolution":                string(run.Resolution),
-		"attempts":                  run.AttemptCount,
 	})
 
 	return nil
@@ -1737,12 +1749,7 @@ func (s *Service) resolveRunAt(ctx context.Context, tenantID string, run domain.
 		CreatedAt:    now,
 	})
 
-	s.fireEvent(ctx, tenantID, domain.EventDunningResolved, map[string]any{
-		"run_id":      run.ID,
-		"invoice_id":  run.InvoiceID,
-		"customer_id": run.CustomerID,
-		"resolution":  string(run.Resolution),
-	})
+	s.fireRunEvent(ctx, tenantID, domain.EventDunningResolved, run.ID, nil)
 	return run, nil
 }
 

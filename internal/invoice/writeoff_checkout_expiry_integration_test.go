@@ -144,7 +144,7 @@ func TestMarkUncollectible_CallerContextEnds_EveryLegStillRuns(t *testing.T) {
 				t.Fatalf("status = %s, want uncollectible", got.Status)
 			}
 			if n := countRows(t, db, base, tenantID, `SELECT count(*) FROM webhook_outbox
-				WHERE event_type = 'invoice.marked_uncollectible' AND payload->>'invoice_id' = $1`, inv.ID); n != 1 {
+				WHERE event_type = 'invoice.marked_uncollectible' AND payload->'invoice'->>'id' = $1`, inv.ID); n != 1 {
 				t.Errorf("%d invoice.marked_uncollectible outbox rows, want 1: the write-off committed, so integrators must hear of it", n)
 			}
 			if n := countRows(t, db, base, tenantID, `SELECT count(*) FROM audit_log

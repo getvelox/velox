@@ -4202,41 +4202,29 @@ type CustomerUsageMeter struct {
 }
 
 // DisputeWebhookEventData The `data` of the outbound webhook events `payment.dispute_opened`
-// and `payment.dispute_closed` (docs/webhooks.md). Both are saved in the
-// same transaction that records the dispute, so a crash cannot drop
-// them. `payment.dispute_opened` is sent once per dispute, when Velox
-// first records it; if the first event Velox receives is already the
-// close, both are sent, and both carry the closed status and
-// `closed_at`. Their delivery order is not guaranteed.
-// `payment.dispute_closed` is sent when the dispute reaches a closed
-// status it did not have: `won`, `lost`, `warning_closed` or
-// `prevented`. A lost dispute that Stripe later marks won sends it
-// again.
+// and `payment.dispute_closed` (docs/webhooks.md): the invoice the
+// disputed payment paid and the dispute, each as the API returns it.
+// Both are saved in the same transaction that records the dispute, so
+// a crash cannot drop them. `payment.dispute_opened` is sent once per
+// dispute, when Velox first records it; if the first event Velox
+// receives is already the close, both are sent, and both carry the
+// closed status and `closed_at`. Their delivery order is not
+// guaranteed. `payment.dispute_closed` is sent when the dispute
+// reaches a closed status it did not have: `won`, `lost`,
+// `warning_closed` or `prevented`. A lost dispute that Stripe later
+// marks won sends it again.
 type DisputeWebhookEventData struct {
-	AmountCents int64 `json:"amount_cents"`
+	// Dispute A card dispute (chargeback) Stripe reported against one of the
+	// invoice's payments, recorded from Stripe's `charge.dispute.created`,
+	// `.updated` and `.closed` webhook events. It holds the dispute as the
+	// newest of those events showed it, whatever order they arrived in.
+	// Velox records and reports a dispute, and nothing else: the invoice
+	// stays paid and no money moves.
+	Dispute InvoiceDispute `json:"dispute"`
 
-	// ClosedAt Set when the dispute is closed: always on `payment.dispute_closed`,
-	// and on `payment.dispute_opened` when the first event Velox received
-	// was already the close.
-	ClosedAt   time.Time `json:"closed_at,omitempty"`
-	Currency   string    `json:"currency"`
-	CustomerId string    `json:"customer_id"`
-
-	// DisputeId The Velox dispute record (`InvoiceDispute.id`).
-	DisputeId     string    `json:"dispute_id"`
-	EvidenceDueBy time.Time `json:"evidence_due_by,omitempty"`
-	InvoiceId     string    `json:"invoice_id"`
-	InvoiceNumber string    `json:"invoice_number"`
-	OpenedAt      time.Time `json:"opened_at"`
-
-	// PaymentIntentId The disputed Stripe PaymentIntent.
-	PaymentIntentId string `json:"payment_intent_id"`
-	Reason          string `json:"reason,omitempty"`
-
-	// Status The dispute's status when the event was saved (see `InvoiceDispute.status`).
-	Status          string `json:"status"`
-	StripeChargeId  string `json:"stripe_charge_id,omitempty"`
-	StripeDisputeId string `json:"stripe_dispute_id"`
+	// Invoice A Velox invoice. Returned from create, finalize, void, list, get,
+	// rotate-public-token, and collect-payment endpoints.
+	Invoice Invoice `json:"invoice"`
 }
 
 // DocumentBillTo What an issued invoice or credit note prints about its buyer, copied
@@ -5509,6 +5497,7 @@ type PaymentMethod struct {
 	CardExpYear  int       `json:"card_exp_year,omitempty"`
 	CardLast4    string    `json:"card_last4,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+	CustomerId   string    `json:"customer_id"`
 	Id           string    `json:"id"`
 	IsDefault    bool      `json:"is_default"`
 	Type         string    `json:"type"`
@@ -6651,7 +6640,11 @@ type WebhookEvent struct {
 	Id        string    `json:"id"`
 	Livemode  bool      `json:"livemode"`
 
-	// Payload The event's data. docs/webhooks.md lists what each event carries;
+	// Payload The event's data: the resource the event is about, under the
+	// resource's name (`invoice`, `subscription`, `customer`,
+	// `payment_method`, `dunning_run` or `credit_balance`), as the
+	// API returns it, and the few keys the event adds beside it.
+	// docs/webhooks.md lists what each event carries;
 	// `payment.dispute_opened` and `payment.dispute_closed` carry a
 	// `DisputeWebhookEventData`.
 	Payload map[string]interface{} `json:"payload"`

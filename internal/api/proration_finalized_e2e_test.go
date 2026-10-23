@@ -134,7 +134,7 @@ func (r *lagRig) prorationInvoice() lagInvoice {
 
 func (r *lagRig) finalizedEvents(invoiceID string) int {
 	r.t.Helper()
-	return flowCount(r.t, r.db, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'invoice.finalized' AND payload->>'invoice_id' = $1`, invoiceID)
+	return flowCount(r.t, r.db, `SELECT count(*) FROM webhook_outbox WHERE event_type = 'invoice.finalized' AND payload->'invoice'->>'id' = $1`, invoiceID)
 }
 
 func (r *lagRig) finalizeRows(invoiceID string) int {
@@ -170,25 +170,27 @@ func (r *lagRig) wantFinalizedOnce(invoiceID string, reason domain.InvoiceBillin
 
 	var raw []byte
 	err = tx.QueryRowContext(ctx, `SELECT payload FROM webhook_outbox
-		WHERE event_type = 'invoice.finalized' AND payload->>'invoice_id' = $1 ORDER BY created_at LIMIT 1`, invoiceID).Scan(&raw)
+		WHERE event_type = 'invoice.finalized' AND payload->'invoice'->>'id' = $1 ORDER BY created_at LIMIT 1`, invoiceID).Scan(&raw)
 	if err == nil {
 		var p map[string]any
 		if err := json.Unmarshal(raw, &p); err != nil {
 			r.t.Fatalf("decode payload: %v", err)
 		}
+		// The event carries the invoice and nothing beside it (ADR-131).
+		if err := domain.CheckWebhookData(domain.EventInvoiceFinalized, p); err != nil {
+			r.t.Errorf("%s invoice.finalized payload: %v (payload %s)", reason, err, raw)
+		}
+		got, _ := p[domain.WebhookResourceInvoice].(map[string]any)
 		want := map[string]any{
-			"invoice_id": invoiceID, "invoice_number": number, "customer_id": customerID,
+			"id": invoiceID, "invoice_number": number, "customer_id": customerID,
 			"status": "finalized", "payment_status": "pending",
 			"total_amount_cents": float64(total), "amount_due_cents": float64(due),
 			"credits_applied_cents": float64(credited), "currency": currency,
 		}
 		for k, v := range want {
-			if p[k] != v {
-				r.t.Errorf("%s invoice.finalized payload %s = %v, want %v (payload %s)", reason, k, p[k], v, raw)
+			if got[k] != v {
+				r.t.Errorf("%s invoice.finalized invoice %s = %v, want %v (payload %s)", reason, k, got[k], v, raw)
 			}
-		}
-		if len(p) != len(want) {
-			r.t.Errorf("%s invoice.finalized payload has %d keys, want the engine's %d: %s", reason, len(p), len(want), raw)
 		}
 	}
 

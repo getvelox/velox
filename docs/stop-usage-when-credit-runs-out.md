@@ -206,4 +206,4 @@ The public cost dashboard, `GET /v1/public/cost-dashboard/{token}`, returns
 the same three numbers for each currency in its `credits` array. Your
 customer sees the figure your backend gates on.
 
-**Next:** remind customers to top up with the [credit webhooks](webhooks.md#customers-dunning-and-credit).
+**Next:** remind customers to top up with the [credit webhooks](webhooks.md#credit-datacredit_balance).

@@ -1149,14 +1149,9 @@ func (s *PostgresStore) MarkPaymentFailedReportingTransition(ctx context.Context
 	// PaymentIntent must not double-notify, while a NEW retry PaymentIntent is
 	// a genuinely distinct failure and fires again.
 	if firstNotice && s.outbox != nil {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventPaymentFailed, map[string]any{
-			"invoice_id":        inv.ID,
-			"customer_id":       inv.CustomerID,
-			"payment_intent_id": pi,
-			"failure_message":   report.Message,
-			"amount_cents":      inv.TotalAmountCents,
-			"currency":          inv.Currency,
-		}); err != nil {
+		// The invoice row this transaction wrote holds the charge
+		// (stripe_payment_intent_id) and its failure (last_payment_error).
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventPaymentFailed, domain.InvoiceWebhookData(inv, nil)); err != nil {
 			return domain.Invoice{}, domain.PaymentFailureResult{}, fmt.Errorf("enqueue payment.failed: %w", err)
 		}
 	}
@@ -1515,15 +1510,7 @@ func (s *PostgresStore) markPaidLockedTx(ctx context.Context, tx *sql.Tx, tenant
 	// without each needing its own dispatch. ADR-040 transactional outbox: if the tx rolls
 	// back, no event; if it commits, the dispatcher delivers.
 	if s.outbox != nil {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventInvoicePaid, map[string]any{
-			"invoice_id":        inv.ID,
-			"invoice_number":    inv.InvoiceNumber,
-			"customer_id":       inv.CustomerID,
-			"subscription_id":   inv.SubscriptionID,
-			"amount_paid_cents": inv.AmountPaidCents,
-			"currency":          inv.Currency,
-			"paid_at":           paidAt.UTC(),
-		}); err != nil {
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventInvoicePaid, domain.InvoiceWebhookData(inv, nil)); err != nil {
 			return domain.Invoice{}, fmt.Errorf("enqueue invoice.paid: %w", err)
 		}
 	}
@@ -1535,13 +1522,7 @@ func (s *PostgresStore) markPaidLockedTx(ctx context.Context, tx *sql.Tx, tenant
 	// finalized/uncollectible→paid transition, so it fires exactly once, same
 	// as invoice.paid.
 	if kind == settleCard && s.outbox != nil {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventPaymentSucceeded, map[string]any{
-			"invoice_id":        inv.ID,
-			"customer_id":       inv.CustomerID,
-			"payment_intent_id": stripePaymentIntentID,
-			"amount_cents":      inv.TotalAmountCents,
-			"currency":          inv.Currency,
-		}); err != nil {
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventPaymentSucceeded, domain.InvoiceWebhookData(inv, nil)); err != nil {
 			return domain.Invoice{}, fmt.Errorf("enqueue payment.succeeded: %w", err)
 		}
 	}

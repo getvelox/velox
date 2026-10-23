@@ -1,0 +1,18 @@
+{
+  "credit_balance": {
+    "balance_cents": 900,
+    "currency": "USD",
+    "customer_id": "vlx_cus_golden",
+    "total_deducted": 500,
+    "total_expired": 100,
+    "total_granted": 10000,
+    "total_retired": 500,
+    "total_used": 8000
+  },
+  "credit_note_id": "vlx_cn_golden",
+  "funding_invoice_id": "vlx_inv_commit",
+  "grant_id": "vlx_ccl_golden",
+  "refunded_gross_cents": 500,
+  "remaining_after_cents": 0,
+  "retired_cents": 500
+}

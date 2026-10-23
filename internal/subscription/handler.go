@@ -377,26 +377,15 @@ func (h *Handler) SetCreditNoteIssuer(i CreditNoteIssuer) {
 // must persist-before-return so a crash between the handler's respond.JSON and
 // event emission can't silently lose the event. Logging an error beats
 // dropping.
+//
+// The event carries sub (ADR-131), which the caller read after the change,
+// with its items. sub must be that read: an event built from a guess would
+// tell receivers something the API does not show.
 func (h *Handler) fireEvent(ctx context.Context, tenantID, eventType string, sub domain.Subscription, extra map[string]any) {
 	if h.events == nil {
 		return
 	}
-	payload := map[string]any{
-		"subscription_id": sub.ID,
-		"customer_id":     sub.CustomerID,
-		"status":          string(sub.Status),
-		"item_count":      len(sub.Items),
-	}
-	if sub.CurrentBillingPeriodStart != nil {
-		payload["current_period_start"] = sub.CurrentBillingPeriodStart.UTC()
-	}
-	if sub.CurrentBillingPeriodEnd != nil {
-		payload["current_period_end"] = sub.CurrentBillingPeriodEnd.UTC()
-	}
-	for k, v := range extra {
-		payload[k] = v
-	}
-	if err := h.events.Dispatch(ctx, tenantID, eventType, payload); err != nil {
+	if err := h.events.Dispatch(ctx, tenantID, eventType, domain.SubscriptionWebhookData(sub, extra)); err != nil {
 		slog.ErrorContext(ctx, "dispatch subscription event",
 			"event_type", eventType,
 			"subscription_id", sub.ID,
@@ -406,21 +395,17 @@ func (h *Handler) fireEvent(ctx context.Context, tenantID, eventType string, sub
 	}
 }
 
-// itemPayload projects a SubscriptionItem into an event payload. Stable keys
-// — consumers depend on the shape, so we don't echo the full domain struct.
-func itemPayload(item domain.SubscriptionItem) map[string]any {
-	p := map[string]any{
-		"item_id":  item.ID,
-		"plan_id":  item.PlanID,
-		"quantity": item.Quantity,
+// fireItemEvent sends an item event: the subscription read after the change,
+// and item_id naming the item (gone from items on a removal). When the read
+// fails there is no true resource to send, so the event is left out, loudly.
+func (h *Handler) fireItemEvent(ctx context.Context, tenantID, eventType, subID, itemID string) {
+	sub, err := h.svc.Get(ctx, tenantID, subID)
+	if err != nil {
+		slog.ErrorContext(ctx, "subscription item event not sent: the subscription could not be read after the change",
+			"event_type", eventType, "subscription_id", subID, "item_id", itemID, "error", err)
+		return
 	}
-	if item.PendingPlanID != "" {
-		p["pending_plan_id"] = item.PendingPlanID
-	}
-	if item.PendingPlanEffectiveAt != nil {
-		p["pending_plan_effective_at"] = item.PendingPlanEffectiveAt.UTC()
-	}
-	return p
+	h.fireEvent(ctx, tenantID, eventType, sub, map[string]any{"item_id": itemID})
 }
 
 func (h *Handler) Routes() chi.Router {
@@ -688,16 +673,9 @@ func (h *Handler) scheduleCancel(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(h.auditCtx(r.Context(), tenantID, sub.ID), tenantID, domain.AuditActionUpdate, "subscription", sub.ID, sub.Code, meta)
 	}
 
-	extra := map[string]any{"cancel_at_period_end": sub.CancelAtPeriodEnd}
-	if sub.CancelAt != nil {
-		extra["cancel_at"] = sub.CancelAt.UTC()
-	}
-	// ADR-069: the authoritative "when does it actually cancel" — consumers
-	// must not re-derive it from the status-polymorphic flag.
-	if sub.CancelEffectiveAt != nil {
-		extra["cancel_effective_at"] = sub.CancelEffectiveAt.UTC()
-	}
-	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionCancelScheduled, sub, extra)
+	// The subscription carries cancel_at, cancel_at_period_end and
+	// cancel_effective_at (ADR-069: when it actually cancels).
+	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionCancelScheduled, sub, nil)
 
 	h.respondSub(w, r, http.StatusOK, sub)
 }
@@ -722,11 +700,8 @@ func (h *Handler) pauseCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	extra := map[string]any{"behavior": string(input.Behavior)}
-	if sub.PauseCollection != nil && sub.PauseCollection.ResumesAt != nil {
-		extra["resumes_at"] = sub.PauseCollection.ResumesAt.UTC()
-	}
-	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionCollectionPaused, sub, extra)
+	// The subscription's pause_collection holds behavior and resumes_at.
+	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionCollectionPaused, sub, nil)
 
 	h.respondSub(w, r, http.StatusOK, sub)
 }
@@ -825,9 +800,9 @@ func (h *Handler) extendTrial(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// The new trial end is the subscription's trial_end_at.
 	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionTrialExtended, sub, map[string]any{
 		"triggered_by": "operator",
-		"trial_end":    body.TrialEnd.UTC(),
 	})
 
 	h.respondSub(w, r, http.StatusOK, sub)
@@ -853,7 +828,9 @@ func (h *Handler) resumeCollection(w http.ResponseWriter, r *http.Request) {
 	// handler; engine's cycle-scan auto-resume writes its own audit row
 	// with triggered_by="schedule" directly via Engine.SetAuditLogger.
 
-	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionCollectionResumed, sub, nil)
+	h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionCollectionResumed, sub, map[string]any{
+		"triggered_by": "operator",
+	})
 
 	h.respondSub(w, r, http.StatusOK, sub)
 }
@@ -1085,10 +1062,10 @@ func (h *Handler) addItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch the subscription so downstream payload/proration paths see the
-	// full post-add Items slice. Silent fallback: if the read fails we use a
-	// minimal struct for events — item.added is still useful without the
-	// enclosing snapshot.
+	// full post-add Items slice. If the read fails the proration path falls
+	// back to the snapshot from before the add; item.added is not sent.
 	var subAfter domain.Subscription
+	subAfterRead := false
 	if h.events != nil || (wantProration && !atomic) {
 		s, getErr := h.svc.Get(r.Context(), tenantID, id)
 		if getErr != nil {
@@ -1097,7 +1074,7 @@ func (h *Handler) addItem(w http.ResponseWriter, r *http.Request) {
 				subAfter = domain.Subscription{ID: id}
 			}
 		} else {
-			subAfter = s
+			subAfter, subAfterRead = s, true
 		}
 	}
 
@@ -1157,10 +1134,18 @@ func (h *Handler) addItem(w http.ResponseWriter, r *http.Request) {
 		_ = prorationResult
 	}
 
+	// The re-read above is the subscription with the new item. When it
+	// failed there is no true resource to send, so the event is left out,
+	// loudly.
 	if h.events != nil {
-		h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionItemAdded, subAfter, map[string]any{
-			"item": itemPayload(item),
-		})
+		if subAfterRead {
+			h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionItemAdded, subAfter, map[string]any{
+				"item_id": item.ID,
+			})
+		} else {
+			slog.ErrorContext(r.Context(), "subscription.item.added not sent: the subscription could not be read after the add",
+				"subscription_id", id, "item_id", item.ID)
+		}
 	}
 
 	respond.JSON(w, r, http.StatusCreated, item)
@@ -1456,21 +1441,14 @@ func (h *Handler) updateItem(w http.ResponseWriter, r *http.Request) {
 	// (Immediate=false, NewPlanID set) is an intent, not a mutation of the
 	// current cycle → subscription.pending_change.scheduled; the applied
 	// event fires at the cycle boundary from billing.Engine.
+	// The item in the subscription's items holds the new quantity or plan,
+	// or the scheduled one (pending_plan_id, pending_plan_effective_at).
 	if h.events != nil {
-		sub, getErr := h.svc.Get(r.Context(), tenantID, subID)
-		if getErr != nil {
-			sub = domain.Subscription{ID: subID}
-		}
-		extra := map[string]any{"item": itemPayload(result.Item)}
 		eventType := domain.EventSubscriptionItemUpdated
 		if input.NewPlanID != "" && !input.Immediate {
 			eventType = domain.EventSubscriptionPendingChangeScheduled
-			extra["new_plan_id"] = input.NewPlanID
-			if result.Item.PendingPlanEffectiveAt != nil {
-				extra["effective_at"] = result.Item.PendingPlanEffectiveAt.UTC()
-			}
 		}
-		h.fireEvent(r.Context(), tenantID, eventType, sub, extra)
+		h.fireItemEvent(r.Context(), tenantID, eventType, subID, result.Item.ID)
 	}
 
 	respond.JSON(w, r, http.StatusOK, result)
@@ -1495,13 +1473,7 @@ func (h *Handler) cancelPendingItemChange(w http.ResponseWriter, r *http.Request
 	}
 
 	if h.events != nil {
-		sub, getErr := h.svc.Get(r.Context(), tenantID, subID)
-		if getErr != nil {
-			sub = domain.Subscription{ID: subID}
-		}
-		h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionPendingChangeCanceled, sub, map[string]any{
-			"item": itemPayload(item),
-		})
+		h.fireItemEvent(r.Context(), tenantID, domain.EventSubscriptionPendingChangeCanceled, subID, item.ID)
 	}
 
 	respond.JSON(w, r, http.StatusOK, item)
@@ -1639,13 +1611,7 @@ func (h *Handler) removeItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.events != nil {
-		sub, getErr := h.svc.Get(r.Context(), tenantID, subID)
-		if getErr != nil {
-			sub = domain.Subscription{ID: subID}
-		}
-		h.fireEvent(r.Context(), tenantID, domain.EventSubscriptionItemRemoved, sub, map[string]any{
-			"item_id": itemID,
-		})
+		h.fireItemEvent(r.Context(), tenantID, domain.EventSubscriptionItemRemoved, subID, itemID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

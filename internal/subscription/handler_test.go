@@ -729,13 +729,7 @@ func TestHandler_UpdateItem_ImmediatePlanChangeFiresItemUpdated(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected %s, got types=%v", domain.EventSubscriptionItemUpdated, eventTypes(dispatcher.events))
 	}
-	item, _ := ev.payload["item"].(map[string]any)
-	if item == nil {
-		t.Fatalf("payload.item missing: %v", ev.payload)
-	}
-	if item["item_id"] != itemID {
-		t.Errorf("item_id: got %v, want %q", item["item_id"], itemID)
-	}
+	item := eventItem(t, ev.eventType, ev.payload, itemID)
 	if item["plan_id"] != "plan_new" {
 		t.Errorf("plan_id: got %v, want plan_new (post-change plan expected)", item["plan_id"])
 	}
@@ -776,8 +770,8 @@ func TestHandler_UpdateItem_ScheduledPlanChangeFiresPendingChangeScheduled(t *te
 	if !ok {
 		t.Fatalf("expected %s, got types=%v", domain.EventSubscriptionPendingChangeScheduled, eventTypes(dispatcher.events))
 	}
-	if ev.payload["new_plan_id"] != "plan_new" {
-		t.Errorf("new_plan_id: got %v, want plan_new", ev.payload["new_plan_id"])
+	if item := eventItem(t, ev.eventType, ev.payload, itemID); item["pending_plan_id"] != "plan_new" {
+		t.Errorf("pending_plan_id: got %v, want plan_new", item["pending_plan_id"])
 	}
 	// item.updated must NOT also fire for a scheduled change — the intent is
 	// observable but the item hasn't mutated yet.
@@ -1284,8 +1278,11 @@ func TestHandler_ScheduleCancel_FiresEvent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected %s, got types=%v", domain.EventSubscriptionCancelScheduled, eventTypes(dispatcher.events))
 	}
-	if ev.payload["cancel_at_period_end"] != true {
-		t.Errorf("payload cancel_at_period_end: got %v, want true", ev.payload["cancel_at_period_end"])
+	if err := domain.CheckWebhookData(ev.eventType, ev.payload); err != nil {
+		t.Fatal(err)
+	}
+	if sub := ev.payload[domain.WebhookResourceSubscription].(map[string]any); sub["cancel_at_period_end"] != true {
+		t.Errorf("subscription.cancel_at_period_end: got %v, want true", sub["cancel_at_period_end"])
 	}
 }
 
@@ -1375,8 +1372,12 @@ func TestHandler_PauseCollection_FiresEvent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected %s, got types=%v", domain.EventSubscriptionCollectionPaused, eventTypes(dispatcher.events))
 	}
-	if ev.payload["behavior"] != "keep_as_draft" {
-		t.Errorf("payload behavior: got %v, want keep_as_draft", ev.payload["behavior"])
+	if err := domain.CheckWebhookData(ev.eventType, ev.payload); err != nil {
+		t.Fatal(err)
+	}
+	sub := ev.payload[domain.WebhookResourceSubscription].(map[string]any)
+	if pc, _ := sub["pause_collection"].(map[string]any); pc["behavior"] != "keep_as_draft" {
+		t.Errorf("subscription.pause_collection: got %v, want behavior keep_as_draft", sub["pause_collection"])
 	}
 }
 
@@ -1749,4 +1750,25 @@ func TestHandler_Create_RefusesEmptyOrNullStatus(t *testing.T) {
 	if sub.Status != domain.SubscriptionActive {
 		t.Fatalf("status left out: got %q, want active", sub.Status)
 	}
+}
+
+// eventItem checks an item event against the payload rule (ADR-131) and
+// returns the item it names from the subscription it carries.
+func eventItem(t *testing.T, eventType string, data map[string]any, itemID string) map[string]any {
+	t.Helper()
+	if err := domain.CheckWebhookData(eventType, data); err != nil {
+		t.Fatal(err)
+	}
+	if data["item_id"] != itemID {
+		t.Fatalf("item_id: got %v, want %q", data["item_id"], itemID)
+	}
+	sub := data[domain.WebhookResourceSubscription].(map[string]any)
+	items, _ := sub["items"].([]any)
+	for _, it := range items {
+		if m := it.(map[string]any); m["id"] == itemID {
+			return m
+		}
+	}
+	t.Fatalf("item %s is not in the subscription's items: %v", itemID, items)
+	return nil
 }

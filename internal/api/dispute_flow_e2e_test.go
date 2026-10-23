@@ -156,7 +156,7 @@ func TestE2E_CardDispute_RecordedNeverActedOn(t *testing.T) {
 
 	// One event each way, and one audit row per Stripe event, naming the payment.
 	for eventType, want := range map[string]int{"payment.dispute_opened": 1, "payment.dispute_closed": 1} {
-		if n := flowCount(t, db, `SELECT count(*) FROM webhook_outbox WHERE event_type = $1 AND payload->>'invoice_id' = $2`, eventType, invID); n != want {
+		if n := flowCount(t, db, `SELECT count(*) FROM webhook_outbox WHERE event_type = $1 AND payload->'invoice'->>'id' = $2`, eventType, invID); n != want {
 			t.Errorf("%s events: %d, want %d", eventType, n, want)
 		}
 	}

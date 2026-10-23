@@ -275,7 +275,7 @@ func (d *dunningRetryRig) paidEvents(invID string) int {
 	}
 	defer postgres.Rollback(tx)
 	var n int
-	if err := tx.QueryRowContext(d.ctx, `SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->>'invoice_id' = $3`,
+	if err := tx.QueryRowContext(d.ctx, `SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->'invoice'->>'id' = $3`,
 		d.tenantID, domain.EventInvoicePaid, invID).Scan(&n); err != nil {
 		d.t.Fatalf("count invoice.paid: %v", err)
 	}

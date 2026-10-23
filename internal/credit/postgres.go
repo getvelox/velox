@@ -55,20 +55,26 @@ func (s *PostgresStore) emitBalanceCrossings(ctx context.Context, tx *sql.Tx, te
 	if s.outbox == nil || before == after {
 		return nil
 	}
-	base := func() map[string]any {
-		return map[string]any{
-			"customer_id":   customerID,
-			"currency":      currency,
-			"balance_cents": after,
-		}
+	// Each event carries the balance as the API returns it, read on tx
+	// after the write (its balance_cents is after).
+	data := func(extra map[string]any) (map[string]any, error) {
+		return balanceEventDataTx(ctx, tx, tenantID, customerID, currency, extra)
 	}
 	if before > 0 && after <= 0 {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditBalanceDepleted, base()); err != nil {
+		d, err := data(nil)
+		if err != nil {
+			return err
+		}
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditBalanceDepleted, d); err != nil {
 			return fmt.Errorf("enqueue credit.balance_depleted: %w", err)
 		}
 	}
 	if before <= 0 && after > 0 {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditBalanceRecovered, base()); err != nil {
+		d, err := data(nil)
+		if err != nil {
+			return err
+		}
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditBalanceRecovered, d); err != nil {
 			return fmt.Errorf("enqueue credit.balance_recovered: %w", err)
 		}
 	}
@@ -84,8 +90,10 @@ func (s *PostgresStore) emitBalanceCrossings(ctx context.Context, tx *sql.Tx, te
 		return fmt.Errorf("read balance-low threshold: %w", err)
 	}
 	if threshold.Valid && threshold.Int64 > 0 && before >= threshold.Int64 && after < threshold.Int64 {
-		p := base()
-		p["threshold_cents"] = threshold.Int64
+		p, err := data(map[string]any{"threshold_cents": threshold.Int64})
+		if err != nil {
+			return err
+		}
 		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditBalanceLow, p); err != nil {
 			return fmt.Errorf("enqueue credit.balance_low: %w", err)
 		}
@@ -1162,16 +1170,20 @@ func (s *PostgresStore) RetireCommitSliceForReliefTx(ctx context.Context, tx *sq
 	// entitlement consumer that tracks commit burndown must see every
 	// relief exactly-once with the state change.
 	if s.outbox != nil {
-		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditCommitRetired, map[string]any{
-			"customer_id":           g.CustomerID,
+		// The balance in the grant's currency after the retire, and the
+		// retire's own figures beside it (ADR-131).
+		data, err := balanceEventDataTx(ctx, tx, tenantID, g.CustomerID, g.Currency, map[string]any{
 			"grant_id":              g.GrantID,
-			"currency":              g.Currency,
 			"funding_invoice_id":    invoiceID,
 			"credit_note_id":        creditNoteID,
 			"retired_cents":         slice,
 			"refunded_gross_cents":  refundedGrossCents,
 			"remaining_after_cents": g.Remaining(),
-		}); err != nil {
+		})
+		if err != nil {
+			return commitGrantState{}, err
+		}
+		if _, err := s.outbox.Enqueue(ctx, tx, tenantID, domain.EventCreditCommitRetired, data); err != nil {
 			return commitGrantState{}, fmt.Errorf("enqueue credit.commit_retired: %w", err)
 		}
 	}
@@ -1209,6 +1221,14 @@ func (s *PostgresStore) GetBalance(ctx context.Context, tenantID, customerID str
 	}
 	defer postgres.Rollback(tx)
 
+	return balancesTx(ctx, tx, tenantID, customerID, "")
+}
+
+// balancesTx reads the customer's balances on tx, one per currency, or only
+// the one in currency when it is set. GET /v1/credits/balance and the
+// credit.* webhooks (ADR-131) read through it, so the two show the same
+// figures.
+func balancesTx(ctx context.Context, tx *sql.Tx, tenantID, customerID, currency string) ([]domain.CreditBalance, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT
 			currency,
@@ -1217,9 +1237,10 @@ func (s *PostgresStore) GetBalance(ctx context.Context, tenantID, customerID str
 			COALESCE(SUM(CASE WHEN entry_type = 'usage' THEN ABS(amount_cents) ELSE 0 END), 0),
 			`+balanceWriteOffColumns+`
 		FROM customer_credit_ledger WHERE tenant_id = $1 AND customer_id = $2
+			AND ($3 = '' OR currency = $3)
 		GROUP BY currency
 		ORDER BY currency
-	`, tenantID, customerID)
+	`, tenantID, customerID, currency)
 	if err != nil {
 		return nil, err
 	}
@@ -1234,6 +1255,20 @@ func (s *PostgresStore) GetBalance(ctx context.Context, tenantID, customerID str
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// balanceEventDataTx is the data of a credit.* event (ADR-131): the
+// customer's balance in currency as this transaction leaves it, plus the
+// event's extras.
+func balanceEventDataTx(ctx context.Context, tx *sql.Tx, tenantID, customerID, currency string, extra map[string]any) (map[string]any, error) {
+	bs, err := balancesTx(ctx, tx, tenantID, customerID, currency)
+	if err != nil {
+		return nil, fmt.Errorf("read the %s balance for the webhook: %w", currency, err)
+	}
+	if len(bs) != 1 {
+		return nil, fmt.Errorf("read the %s balance for the webhook: %d rows, want 1", currency, len(bs))
+	}
+	return domain.CreditBalanceWebhookData(bs[0], extra), nil
 }
 
 // GetSpendableBalance is the credit a draw at `at` could use, per currency:

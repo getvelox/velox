@@ -119,15 +119,23 @@ Every message is an HTTP `POST` to your URL with
   "id": "vlx_whevt_…",
   "event_type": "invoice.paid",
   "created_at": "2026-07-05T14:03:22Z",
-  "data": { "invoice_id": "vlx_inv_…", "customer_id": "vlx_cus_…", "…": "…" }
+  "data": {
+    "invoice": { "id": "vlx_inv_…", "customer_id": "vlx_cus_…", "status": "paid", "amount_paid_cents": 4900, "…": "…" }
+  }
 }
 ```
 
 - `id` is the event's ID and `created_at` is when Velox created the event.
   Both stay the same on every retry and replay, so use `id` to skip repeats
   (rule 1).
-- `data` holds the event's details. The [catalog](#event-catalog) says what
-  each event carries.
+- `data` holds the resource the event is about, under the resource's name:
+  `data.invoice`, `data.subscription` and so on. It is the same object the
+  API returns for that resource, as it was when Velox created the event.
+  Every event of a family carries the same resource. To act on the newest
+  state, read the resource from the API.
+- A few events also carry facts the resource does not hold, such as who
+  canceled a subscription. They sit beside the resource in `data`. The
+  [catalog](#event-catalog) lists them for each event.
 
 Headers:
 
@@ -253,51 +261,36 @@ lists the newest 50 events; it has no filters.
 
 ## Event catalog
 
+Each family of events carries one resource in `data`, named in the family's
+heading below. The **Also in `data`** column lists the other keys an event
+carries, and `—` means none. A key with nothing to say is left out, such as
+`reason` on most cancels. A full example of each event's `data` is in
+[internal/domain/testdata/webhook_payloads](../internal/domain/testdata/webhook_payloads/).
+
 *(always sent)*: see [rule 3](#three-rules-for-your-receiver). Terms:
 [glossary](glossary.md).
 
-### Invoices and payments
+### Invoices: `data.invoice`
 
-| Event | Sent when |
-|---|---|
-| `invoice.finalized` | An invoice is final and ready to pay. Sent once per invoice, including the invoice for a mid-period upgrade, seat increase or added item. A draft sends it when it is finalized. `amount_due_cents` is before credit ([more](#invoicefinalized-shows-the-amount-before-credit)) |
-| `invoice.paid` | An invoice is fully paid, by card, credit or an offline payment, or a credit note left nothing due. `amount_paid_cents` is what was paid at that moment, 0 when credit or a credit note covered the rest *(always sent)* |
-| `invoice.payment_recorded` | Someone recorded a payment made outside Velox, such as a bank transfer or cheque |
-| `invoice.marked_uncollectible` | An invoice was written off as bad debt |
-| `invoice.voided` | An invoice was voided |
-| `payment.succeeded` | A charge was collected. Carries the Stripe PaymentIntent ID. *(always sent)* |
-| `payment.failed` | A charge the invoice was waiting on failed. Sent once per charge attempt (PaymentIntent). A decline on the hosted payment page does not send it, because the customer saw it there and can try again. *(always sent)* |
-| `payment_method.attached` | A customer saved a payment method. Invoices waiting for one are charged on the next run. |
-| `payment_method.updated` | A customer's payment method was set up or replaced. Carries the card brand and last 4 digits. |
-| `payment.duplicate_charge` | A second charge succeeded on an invoice that was already paid. Refund it. |
-| `payment.amount_mismatch` | A charge settled for a different amount than the invoice owed |
-| `payment.currency_mismatch` | A charge settled in a different currency than the invoice's. The payment is recorded as usual and nothing is converted. Review it in Stripe. |
-| `payment.received_on_voided_invoice` | Money arrived for a voided invoice. Refund it. |
-| `payment.dispute_opened` | A customer disputed a card payment with their bank (a chargeback), and Velox recorded it against the invoice. Sent once per dispute. Carries `stripe_dispute_id`, `status`, `reason`, `amount_cents` and `evidence_due_by`, the deadline to respond in Stripe. *(always sent)* |
-| `payment.dispute_closed` | A recorded dispute closed. `status` is `won`, `lost`, `warning_closed` (an inquiry that never became a chargeback) or `prevented`. Sent again if Stripe turns a loss into a win. *(always sent)* |
+`data.invoice` is the invoice as `GET /v1/invoices/{id}` returns it under
+`invoice`. Four fields the API works out when you read it are left out:
+`attention`, `recovery_warning`, `billing_period_display` and
+`test_clock_id`. Line items are not included; `GET /v1/invoices/{id}`
+returns them.
 
-Both dispute events carry `invoice_id`, `invoice_number`, `customer_id`,
-`dispute_id`, `payment_intent_id`, `stripe_charge_id`, `currency` and
-`opened_at`, and `closed_at` once the dispute is closed. When the first
-Stripe event Velox receives is already the close, both events are sent with
-the closed status, in either order. What a dispute does and how to turn on
-Stripe's dispute events: [Card disputes](ops/runbook/card-disputes.md).
-
-`payment.duplicate_charge`, `payment.amount_mismatch`,
-`payment.currency_mismatch` and `payment.received_on_voided_invoice` carry
-`invoice_id`, `invoice_number`, `customer_id`, `currency` and
-`amount_paid_cents`. The charge that raised the event is
-`incoming_payment_intent_id`, with `captured_cents`. The PaymentIntent the
-invoice already holds is `recorded_payment_intent_id`, empty when it has
-none. `paid_out_of_band` is true when the invoice was recorded as paid
-outside Velox, such as by bank transfer; such an invoice has no
-PaymentIntent, like one paid by credits.
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `invoice.finalized` | An invoice is final and ready to pay. Sent once per invoice, including the invoice for a mid-period upgrade, seat increase or added item. A draft sends it when it is finalized. Its `amount_due_cents` is before credit ([more](#invoicefinalized-shows-the-amount-before-credit)) | — |
+| `invoice.paid` | An invoice is fully paid, by card, credit or an offline payment, or a credit note left nothing due. Its `amount_paid_cents` is what was paid at that moment, 0 when credit or a credit note covered the rest *(always sent)* | — |
+| `invoice.payment_recorded` | Someone recorded a payment made outside Velox, such as a bank transfer or cheque. `recovered_from` is the status it was paid from: `finalized` or `uncollectible` | `recovered_from` |
+| `invoice.marked_uncollectible` | An invoice was written off as bad debt | — |
+| `invoice.voided` | An invoice was voided. Under Stripe Tax, Velox reverses the invoice's tax after it sends this event; `GET /v1/invoices/{id}` shows `tax_reversed_at` once that is done. | — |
 
 ### `invoice.finalized` shows the amount before credit
 
 Velox uses the customer's credit when it collects the invoice. That is
 after it sends `invoice.finalized`, usually within seconds. Then it charges
-the card for what is left. So in this event:
+the card for what is left. So in this event's invoice:
 
 - `amount_due_cents` is the amount before credit.
 - `credits_applied_cents` is 0: credit is used after this event.
@@ -311,33 +304,134 @@ credit pays all of it, `invoice.paid` is sent. To know what is still owed,
 read the invoice with `GET /v1/invoices/{id}`: its `amount_due_cents` and
 `credits_applied_cents` are current.
 
-### Subscriptions
+### Payments: `data.invoice`
 
-| Event | Sent when |
-|---|---|
-| `subscription.created` | A subscription was created *(always sent)* |
-| `subscription.activated` | A draft subscription was activated *(always sent)* |
-| `subscription.canceled` | A subscription was canceled. `canceled_by` is `operator` or `schedule`; a cancel at trial end carries `reason: trial_end_cancel`. *(always sent)* |
-| `subscription.trial_ended` | A trial ended. `triggered_by` is `operator` or `schedule`. *(always sent)* |
-| `subscription.trial_extended` | A trial's end date moved later |
-| `subscription.cancel_scheduled` / `.cancel_cleared` | A cancel at period end was scheduled, or the schedule was removed |
-| `subscription.collection_paused` / `.collection_resumed` | Collection was paused (invoices stay drafts), or resumed |
-| `subscription.item.added` / `.updated` / `.removed` | A plan or quantity on the subscription was added, changed or removed |
-| `subscription.pending_change.scheduled` / `.applied` / `.canceled` | A change set for the next billing period was scheduled, applied or canceled |
-| `subscription.threshold_crossed` | Usage crossed a billing threshold, so an invoice was made early |
+`data.invoice` is the invoice the payment was for, in the same shape as for
+the invoice events. Velox has no separate payment object. The invoice holds
+the charge's Stripe PaymentIntent (`stripe_payment_intent_id`), its error
+(`last_payment_error`) and whether it was paid outside Velox
+(`paid_out_of_band`).
 
-### Customers, dunning and credit
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `payment.succeeded` | A charge was collected. The invoice names its PaymentIntent. *(always sent)* | — |
+| `payment.failed` | A charge the invoice was waiting on failed. Sent once per charge attempt (PaymentIntent). A decline on the hosted payment page does not send it, because the customer saw it there and can try again. *(always sent)* | — |
+| `payment.duplicate_charge` | A second charge succeeded on an invoice that was already paid. Refund it. | `incoming_payment_intent_id`, `captured_cents` |
+| `payment.amount_mismatch` | A charge settled for a different amount than the invoice owed | `incoming_payment_intent_id`, `captured_cents` |
+| `payment.currency_mismatch` | A charge settled in a different currency than the invoice's. The payment is recorded as usual and nothing is converted. Review it in Stripe. | `incoming_payment_intent_id`, `captured_cents` |
+| `payment.received_on_voided_invoice` | Money arrived for a voided invoice. Refund it. | `incoming_payment_intent_id`, `captured_cents` |
+| `payment.dispute_opened` | A customer disputed a card payment with their bank (a chargeback), and Velox recorded it against the invoice. Sent once per dispute. *(always sent)* | `dispute` |
+| `payment.dispute_closed` | A recorded dispute closed. Sent again if Stripe turns a loss into a win. *(always sent)* | `dispute` |
 
-| Event | Sent when |
-|---|---|
-| `customer.email_bounced` | An email to a customer bounced, and Velox stopped emailing that address |
-| `customer.email_complained` | A customer marked an email from Velox as spam, and Velox stopped emailing that address |
-| `dunning.started` | Payment retries started for an invoice *(always sent)* |
-| `dunning.escalated` / `.resolved` | Payment retries ran out (the final action from your policy was taken), or ended early, for example because the invoice was paid or someone resolved it by hand |
-| `credit.balance_low` | The settled credit balance in one currency fell below your account's threshold. Carries `currency`, `balance_cents` and `threshold_cents`. *(always sent)* |
-| `credit.balance_depleted` | The settled credit balance in one currency reached zero or less. Carries `currency` and `balance_cents`. *(always sent)* |
-| `credit.balance_recovered` | The settled credit balance in one currency went above zero again. Carries `currency` and `balance_cents`. *(always sent)* |
-| `credit.commit_retired` | A credit note took back prepaid credit. Carries `grant_id`, `currency`, `credit_note_id`, `retired_cents`, `refunded_gross_cents` and `remaining_after_cents`. *(always sent)* |
+For the four anomaly events, `incoming_payment_intent_id` is the charge that
+raised the event and `captured_cents` is what it took. Match the charge by
+`incoming_payment_intent_id`, not by the invoice's `stripe_payment_intent_id`:
+
+- `payment.duplicate_charge`: the invoice's `stripe_payment_intent_id` is
+  the other charge, the one Velox recorded on the paid invoice. It is left
+  out when Velox recorded none, such as when credit paid the invoice or it
+  was paid outside Velox (`paid_out_of_band` is true).
+- `payment.amount_mismatch`: the invoice was just paid by this charge, so
+  its `stripe_payment_intent_id` is this charge and `amount_paid_cents` is
+  what Velox booked.
+- `payment.currency_mismatch` and `payment.received_on_voided_invoice`: the
+  invoice is as it was when the charge arrived. Its
+  `stripe_payment_intent_id` may be this charge, an earlier one, or none.
+
+`dispute` is the dispute as `GET /v1/invoices/{id}/disputes` lists it, with
+`stripe_dispute_id`, `status`, `reason`, `amount_cents`, `currency`,
+`evidence_due_by` (the deadline to respond in Stripe), `opened_at`, and
+`closed_at` once it is closed. On `payment.dispute_closed`, `status` is
+`won`, `lost`, `warning_closed` (an inquiry that never became a chargeback)
+or `prevented`. When the first Stripe event Velox receives is already the
+close, both events are sent with the closed status, in either order. What a
+dispute does and how to turn on Stripe's dispute events:
+[Card disputes](ops/runbook/card-disputes.md).
+
+### Payment methods: `data.payment_method`
+
+`data.payment_method` is the saved card as
+`GET /v1/customers/{id}/payment-methods` lists it: its brand, last 4 digits,
+expiry and whether it is the default. A Stripe event that arrives after the
+card was removed in Velox leaves it removed and sends neither event.
+
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `payment_method.attached` | A customer saved a payment method. Invoices waiting for one are charged on the next run. `stripe_payment_method_id` is the card's Stripe ID | `stripe_payment_method_id` |
+| `payment_method.updated` | A customer's payment method was set up or replaced through Stripe Checkout. `stripe_customer_id` is the Stripe customer it was saved to | `stripe_customer_id` |
+
+### Subscriptions: `data.subscription`
+
+`data.subscription` is the subscription with its items, as
+`GET /v1/subscriptions/{id}` returns it, without
+`current_billing_period_display` (a date range the API writes out when you
+read it). A cancel's time is the subscription's `canceled_at`, and a
+schedule's is its `cancel_at` and `cancel_effective_at`.
+
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `subscription.created` | A subscription was created *(always sent)* | — |
+| `subscription.activated` | A draft subscription was activated *(always sent)* | — |
+| `subscription.canceled` | A subscription was canceled. `canceled_by` is `operator`, `customer`, `schedule`, `dunning` or `system`. A cancel at trial end carries `reason: trial_end_cancel`. *(always sent)* | `canceled_by`, `reason` |
+| `subscription.trial_ended` | A trial ended. `triggered_by` is `operator` or `schedule`, and `ended_at` is when it ended. *(always sent)* | `ended_at`, `triggered_by` |
+| `subscription.trial_extended` | A trial's end date moved later. The new end is the subscription's `trial_end_at`. `triggered_by` is `operator` | `triggered_by` |
+| `subscription.cancel_scheduled` / `.cancel_cleared` | A cancel at period end was scheduled, or the schedule was removed | — |
+| `subscription.collection_paused` | Collection was paused: invoices stay drafts. The subscription's `pause_collection` says how and until when | — |
+| `subscription.collection_resumed` | Collection resumed. `triggered_by` is `operator`, `schedule` (its resume date came) or `payment` (a payment ended a pause that dunning set). A resume by date carries `resumed_at` | `triggered_by`, `resumed_at` |
+| `subscription.item.added` / `.updated` / `.removed` | A plan or quantity on the subscription was added, changed or removed. `item_id` names the item; a removed item is no longer in `items` | `item_id` |
+| `subscription.pending_change.scheduled` / `.canceled` | A plan change for the next billing period was scheduled or canceled. The item's `pending_plan_id` and `pending_plan_effective_at` show it | `item_id` |
+| `subscription.pending_change.applied` | A scheduled plan change was applied at the period end. The item's `plan_id` is the new plan, `old_plan_id` the one it left, and `applied_at` when. The subscription is as it was before the close that starts the next period | `item_id`, `old_plan_id`, `applied_at` |
+| `subscription.threshold_crossed` | Usage crossed a billing threshold, so an invoice was made early ([fields](#what-subscriptionthreshold_crossed-carries)) | `invoice_id`, `running_subtotal`, `crossed_amount`, `crossed_item_id` |
+
+#### What `subscription.threshold_crossed` carries
+
+- `invoice_id`: the invoice made early.
+- `running_subtotal`: the spend compared with the threshold, in cents.
+- `crossed_amount`: whether the amount threshold was crossed.
+- `crossed_item_id`: the item whose usage threshold was crossed, empty if none.
+
+### Customers: `data.customer`
+
+`data.customer` is the customer as `GET /v1/customers/{id}` returns it.
+
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `customer.email_bounced` | An email to a customer bounced, and Velox stopped emailing that address. `reason` is the email provider's | `reason` |
+| `customer.email_complained` | A customer marked an email from Velox as spam, and Velox stopped emailing that address. `reason` is the email provider's | `reason` |
+
+### Dunning: `data.dunning_run`
+
+Dunning is Velox retrying a failed payment on a schedule. `data.dunning_run`
+is the run as `GET /v1/dunning/runs/{id}` returns it under `run`: its
+invoice, state, attempts and how it was resolved.
+
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `dunning.started` | Payment retries started for an invoice *(always sent)* | — |
+| `dunning.escalated` | Payment retries ran out, and the final action from your policy was taken. `final_subscription_action` and `final_invoice_action` are your policy's; `applied` is what was done to this invoice, such as `subscription_canceled+invoice_marked_uncollectible`, empty when nothing applied | `final_subscription_action`, `final_invoice_action`, `applied` |
+| `dunning.resolved` | Payment retries ended early, for example because the invoice was paid or someone resolved it by hand. The run's `resolution` says why | — |
+
+### Credit: `data.credit_balance`
+
+`data.credit_balance` is the customer's credit balance in one currency, as
+`GET /v1/credits/balance/{customer_id}` lists it, after the change that sent
+the event.
+
+| Event | Sent when | Also in `data` |
+|---|---|---|
+| `credit.balance_low` | The settled credit balance in one currency fell below your account's threshold, `threshold_cents` *(always sent)* | `threshold_cents` |
+| `credit.balance_depleted` | The settled credit balance in one currency reached zero or less *(always sent)* | — |
+| `credit.balance_recovered` | The settled credit balance in one currency went above zero again *(always sent)* | — |
+| `credit.commit_retired` | A credit note took back prepaid credit ([fields](#what-creditcommit_retired-carries)) *(always sent)* | `grant_id`, `funding_invoice_id`, `credit_note_id`, `retired_cents`, `refunded_gross_cents`, `remaining_after_cents` |
+
+#### What `credit.commit_retired` carries
+
+- `grant_id`: the prepaid credit grant.
+- `funding_invoice_id`: the invoice that bought it.
+- `credit_note_id`: the credit note that took the credit back.
+- `retired_cents`: the credit taken back.
+- `refunded_gross_cents`: the money the credit note returns.
+- `remaining_after_cents`: what is left on the grant.
 
 ### The credit events follow the settled balance
 

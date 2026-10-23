@@ -361,11 +361,15 @@ func TestBalanceCrossingEvents(t *testing.T) {
 	if len(lows) != 1 {
 		t.Fatalf("low events = %d, want 1", len(lows))
 	}
-	if lows[0]["balance_cents"] != float64(3000) || lows[0]["threshold_cents"] != float64(5000) {
+	if err := domain.CheckWebhookData(domain.EventCreditBalanceLow, lows[0]); err != nil {
+		t.Fatal(err)
+	}
+	lowBalance := lows[0][domain.WebhookResourceCreditBalance].(map[string]any)
+	if lowBalance["balance_cents"] != float64(3000) || lows[0]["threshold_cents"] != float64(5000) {
 		t.Errorf("low payload = %v, want balance_cents=3000 threshold_cents=5000", lows[0])
 	}
-	if lows[0]["customer_id"] != custID {
-		t.Errorf("low payload customer_id = %v, want %s", lows[0]["customer_id"], custID)
+	if lowBalance["customer_id"] != custID || lowBalance["currency"] != "USD" {
+		t.Errorf("low payload balance = %v, want %s in USD", lowBalance, custID)
 	}
 
 	// 3000 → 0 via clawback: depleted fires; low does NOT re-fire (already
@@ -395,8 +399,8 @@ func TestBalanceCrossingEvents(t *testing.T) {
 	if len(recovered) != 2 {
 		t.Fatalf("recovered events = %d, want 2", len(recovered))
 	}
-	if recovered[1]["balance_cents"] != float64(2000) {
-		t.Errorf("recovered payload balance = %v, want 2000", recovered[1]["balance_cents"])
+	if b := recovered[1][domain.WebhookResourceCreditBalance].(map[string]any); b["balance_cents"] != float64(2000) {
+		t.Errorf("recovered payload balance = %v, want 2000", b["balance_cents"])
 	}
 }
 

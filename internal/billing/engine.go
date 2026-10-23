@@ -238,26 +238,15 @@ func (e *Engine) dispatchInvoiceFinalized(ctx context.Context, sub domain.Subscr
 // engine sends for its own invoices (#1279). Drafts send nothing: they send
 // it from invoice.Service.Finalize when they finalize.
 //
-// It is sent before the collector applies the customer's credit (ADR-116), so
-// amount_due_cents is the amount before that credit. credits_applied_cents is
-// the credit on the invoice when the event is built, read from the invoice,
-// so the two add up as they do on the invoice itself (#1281).
+// It carries the invoice as the create returned it (ADR-131). It is sent
+// before the collector applies the customer's credit (ADR-116), so the
+// invoice's amount_due_cents is the amount before that credit.
 func (e *Engine) DispatchInvoiceFinalized(ctx context.Context, tenantID string, inv domain.Invoice) {
 	if inv.Status != domain.InvoiceFinalized {
 		return
 	}
 	if e.events != nil {
-		e.dispatchEvent(ctx, tenantID, domain.EventInvoiceFinalized, map[string]any{
-			"invoice_id":            inv.ID,
-			"invoice_number":        inv.InvoiceNumber,
-			"customer_id":           inv.CustomerID,
-			"status":                string(inv.Status),
-			"payment_status":        string(inv.PaymentStatus),
-			"total_amount_cents":    inv.TotalAmountCents,
-			"amount_due_cents":      inv.AmountDueCents,
-			"credits_applied_cents": inv.CreditsAppliedCents,
-			"currency":              inv.Currency,
-		})
+		e.dispatchEvent(ctx, tenantID, domain.EventInvoiceFinalized, domain.InvoiceWebhookData(inv, nil))
 	}
 }
 
@@ -2503,23 +2492,29 @@ func (e *Engine) applyDueScheduledPlanChanges(ctx context.Context, sub domain.Su
 
 			// NOTIFICATION: one event per transitioned item, only on a successful
 			// swap so a half-applied state doesn't lie to webhook consumers.
+			// Each carries the subscription read right after the swap
+			// (ADR-131): the new plan is the item's plan_id; the plan it left
+			// is gone from it, so it rides beside it.
 			if e.events != nil {
-				for _, was := range dueItems {
-					payload := map[string]any{
-						"subscription_id": sub.ID,
-						"customer_id":     sub.CustomerID,
-						"item_id":         was.ID,
-						"old_plan_id":     was.PlanID,
-						"new_plan_id":     newPlanByItem[was.ID],
-						"applied_at":      now.UTC(),
-					}
-					if err := e.events.Dispatch(ctx, sub.TenantID, domain.EventSubscriptionPendingChangeApplied, payload); err != nil {
-						slog.Error("dispatch subscription.pending_change.applied",
-							"subscription_id", sub.ID,
-							"item_id", was.ID,
-							"tenant_id", sub.TenantID,
-							"error", err,
-						)
+				swapped, err := e.subs.Get(ctx, sub.TenantID, sub.ID)
+				if err != nil {
+					slog.Error("subscription.pending_change.applied not sent: the subscription could not be read after the swap",
+						"subscription_id", sub.ID, "tenant_id", sub.TenantID, "error", err)
+				} else {
+					for _, was := range dueItems {
+						payload := domain.SubscriptionWebhookData(swapped, map[string]any{
+							"item_id":     was.ID,
+							"old_plan_id": was.PlanID,
+							"applied_at":  now.UTC(),
+						})
+						if err := e.events.Dispatch(ctx, sub.TenantID, domain.EventSubscriptionPendingChangeApplied, payload); err != nil {
+							slog.Error("dispatch subscription.pending_change.applied",
+								"subscription_id", sub.ID,
+								"item_id", was.ID,
+								"tenant_id", sub.TenantID,
+								"error", err,
+							)
+						}
 					}
 				}
 			}

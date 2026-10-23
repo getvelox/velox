@@ -18,7 +18,11 @@ export interface WebhookEvent {
   livemode: boolean;
   event_type: string;
   /**
-     * The event's data. docs/webhooks.md lists what each event carries;
+     * The event's data: the resource the event is about, under the
+     * resource's name (`invoice`, `subscription`, `customer`,
+     * `payment_method`, `dunning_run` or `credit_balance`), as the
+     * API returns it, and the few keys the event adds beside it.
+     * docs/webhooks.md lists what each event carries;
      * `payment.dispute_opened` and `payment.dispute_closed` carry a
      * `DisputeWebhookEventData`.
      */

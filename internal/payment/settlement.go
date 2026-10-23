@@ -509,19 +509,16 @@ func (s *Stripe) escalatePaymentAnomaly(ctx context.Context, tenantID string, in
 		"amount_paid_cents", inv.AmountPaidCents,
 	)
 	if s.events != nil {
-		if err := s.events.Dispatch(ctx, tenantID, eventType, map[string]any{
-			"invoice_id":                 inv.ID,
-			"invoice_number":             inv.InvoiceNumber,
-			"customer_id":                inv.CustomerID,
-			"recorded_payment_intent_id": inv.StripePaymentIntentID,
-			// An invoice paid outside Velox has no PaymentIntent, the same
-			// as one paid by credits; this tells the two apart.
-			"paid_out_of_band":           inv.PaidOutOfBand,
+		// The charge that raised the anomaly rides beside the invoice. The
+		// invoice is the row the caller passed: on duplicate_charge its
+		// stripe_payment_intent_id is the other charge it recorded; on
+		// amount_mismatch it is this charge (the settle just recorded it);
+		// on currency_mismatch and received_on_voided_invoice it is whatever
+		// the invoice held when the charge arrived (docs/webhooks.md).
+		if err := s.events.Dispatch(ctx, tenantID, eventType, domain.InvoiceWebhookData(inv, map[string]any{
 			"incoming_payment_intent_id": incomingPI,
 			"captured_cents":             capturedCents,
-			"amount_paid_cents":          inv.AmountPaidCents,
-			"currency":                   inv.Currency,
-		}); err != nil {
+		})); err != nil {
 			slog.ErrorContext(ctx, "payment anomaly: event dispatch failed", "event", eventType, "invoice_id", inv.ID, "error", err)
 		}
 	}

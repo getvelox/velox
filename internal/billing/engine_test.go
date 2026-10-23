@@ -2737,8 +2737,14 @@ func TestRunCycle_FiresPendingChangeAppliedEvent(t *testing.T) {
 	if applied["old_plan_id"] != "pln_old" {
 		t.Errorf("old_plan_id: got %v, want pln_old", applied["old_plan_id"])
 	}
-	if applied["new_plan_id"] != "pln_new" {
-		t.Errorf("new_plan_id: got %v, want pln_new", applied["new_plan_id"])
+	if err := domain.CheckWebhookData(domain.EventSubscriptionPendingChangeApplied, applied); err != nil {
+		t.Error(err)
+	}
+	// The new plan is the item's plan in the subscription the event carries.
+	sub, _ := applied[domain.WebhookResourceSubscription].(map[string]any)
+	items, _ := sub["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["plan_id"] != "pln_new" {
+		t.Errorf("subscription items: got %v, want si_1 on pln_new", items)
 	}
 }
 

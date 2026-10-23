@@ -160,7 +160,7 @@ func (r *zeroDueRig) invoiceNow(t *testing.T) domain.Invoice {
 func (r *zeroDueRig) paidEvents(t *testing.T) int {
 	t.Helper()
 	return bypassCount(t, r.ctx, r.db,
-		`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->>'invoice_id' = $3`,
+		`SELECT count(*) FROM webhook_outbox WHERE tenant_id = $1 AND event_type = $2 AND payload->'invoice'->>'id' = $3`,
 		r.tenantID, domain.EventInvoicePaid, r.inv.ID)
 }
 

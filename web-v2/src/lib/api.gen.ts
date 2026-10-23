@@ -8323,6 +8323,7 @@ export interface components {
         };
         PaymentMethod: {
             id: string;
+            customer_id: string;
             /** @example card */
             type: string;
             card_brand?: string;
@@ -9061,44 +9062,21 @@ export interface components {
         };
         /**
          * @description The `data` of the outbound webhook events `payment.dispute_opened`
-         *     and `payment.dispute_closed` (docs/webhooks.md). Both are saved in the
-         *     same transaction that records the dispute, so a crash cannot drop
-         *     them. `payment.dispute_opened` is sent once per dispute, when Velox
-         *     first records it; if the first event Velox receives is already the
-         *     close, both are sent, and both carry the closed status and
-         *     `closed_at`. Their delivery order is not guaranteed.
-         *     `payment.dispute_closed` is sent when the dispute reaches a closed
-         *     status it did not have: `won`, `lost`, `warning_closed` or
-         *     `prevented`. A lost dispute that Stripe later marks won sends it
-         *     again.
+         *     and `payment.dispute_closed` (docs/webhooks.md): the invoice the
+         *     disputed payment paid and the dispute, each as the API returns it.
+         *     Both are saved in the same transaction that records the dispute, so
+         *     a crash cannot drop them. `payment.dispute_opened` is sent once per
+         *     dispute, when Velox first records it; if the first event Velox
+         *     receives is already the close, both are sent, and both carry the
+         *     closed status and `closed_at`. Their delivery order is not
+         *     guaranteed. `payment.dispute_closed` is sent when the dispute
+         *     reaches a closed status it did not have: `won`, `lost`,
+         *     `warning_closed` or `prevented`. A lost dispute that Stripe later
+         *     marks won sends it again.
          */
         DisputeWebhookEventData: {
-            invoice_id: string;
-            invoice_number: string;
-            customer_id: string;
-            /** @description The Velox dispute record (`InvoiceDispute.id`). */
-            dispute_id: string;
-            stripe_dispute_id: string;
-            stripe_charge_id?: string;
-            /** @description The disputed Stripe PaymentIntent. */
-            payment_intent_id: string;
-            /** @description The dispute's status when the event was saved (see `InvoiceDispute.status`). */
-            status: string;
-            reason?: string;
-            /** Format: int64 */
-            amount_cents: number;
-            currency: string;
-            /** Format: date-time */
-            evidence_due_by?: string;
-            /** Format: date-time */
-            opened_at: string;
-            /**
-             * Format: date-time
-             * @description Set when the dispute is closed: always on `payment.dispute_closed`,
-             *     and on `payment.dispute_opened` when the first event Velox received
-             *     was already the close.
-             */
-            closed_at?: string;
+            invoice: components["schemas"]["Invoice"];
+            dispute: components["schemas"]["InvoiceDispute"];
         };
         InvoicePaymentTimeline: {
             events: components["schemas"]["InvoiceTimelineEvent"][];
@@ -10243,7 +10221,11 @@ export interface components {
             /** @example invoice.finalized */
             event_type: string;
             /**
-             * @description The event's data. docs/webhooks.md lists what each event carries;
+             * @description The event's data: the resource the event is about, under the
+             *     resource's name (`invoice`, `subscription`, `customer`,
+             *     `payment_method`, `dunning_run` or `credit_balance`), as the
+             *     API returns it, and the few keys the event adds beside it.
+             *     docs/webhooks.md lists what each event carries;
              *     `payment.dispute_opened` and `payment.dispute_closed` carry a
              *     `DisputeWebhookEventData`.
              */

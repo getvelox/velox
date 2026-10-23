@@ -86,7 +86,7 @@ func (h *disputeHarness) events(t *testing.T, eventType, disputeID string) int {
 	var n int
 	if err := tx.QueryRowContext(h.ctx, `
 		SELECT COUNT(*) FROM webhook_outbox
-		WHERE event_type = $1 AND payload->>'stripe_dispute_id' = $2`, eventType, disputeID).Scan(&n); err != nil {
+		WHERE event_type = $1 AND payload->'dispute'->>'stripe_dispute_id' = $2`, eventType, disputeID).Scan(&n); err != nil {
 		t.Fatalf("count %s events: %v", eventType, err)
 	}
 	return n

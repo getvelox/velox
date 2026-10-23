@@ -2,7 +2,7 @@
 
 > - **Decided:** a subscription can carry a spend cap (`amount_gte`) or per-item usage caps (`usage_gte`). When the period's usage reaches one, Velox invoices that usage early and sends `subscription.threshold_crossed`. The period keeps its dates, and the base fee is billed as it would be with no threshold.
 > - **Shipped:** v0.1.0, in [#29](https://github.com/getvelox/velox/pull/29) (migration `0056_subscription_billing_thresholds`).
-> - **Current docs:** [Billing thresholds](../../features.md#subscriptions-and-invoices) in the feature list and the [threshold event](../../webhooks.md#subscriptions). The decisions made since are listed below. Where this page and the code disagree, the code wins.
+> - **Current docs:** [Billing thresholds](../../features.md#subscriptions-and-invoices) in the feature list and the [threshold event](../../webhooks.md#what-subscriptionthreshold_crossed-carries). The decisions made since are listed below. Where this page and the code disagree, the code wins.
 
 > **Design document, last revised 2026-04-26** (the pre-build RFC). The body below is kept as written and is not the current design.
 >

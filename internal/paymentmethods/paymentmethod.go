@@ -9,7 +9,11 @@
 // ctx and customerID from the URL path; both are pushed into BeginTx.
 package paymentmethods
 
-import "time"
+import (
+	"time"
+
+	"github.com/sagarsuperuser/velox/internal/domain"
+)
 
 // PaymentMethod mirrors one row in payment_methods.
 type PaymentMethod struct {
@@ -36,6 +40,17 @@ type PaymentMethod struct {
 	DetachedAt      *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+// View is the payment method as the API returns it and as the
+// payment_method.* webhooks carry it.
+func (p PaymentMethod) View() domain.PaymentMethodView {
+	return domain.PaymentMethodView{
+		ID: p.ID, CustomerID: p.CustomerID, Type: p.Type,
+		CardBrand: p.CardBrand, CardLast4: p.CardLast4,
+		CardExpMo: p.CardExpMonth, CardExpYr: p.CardExpYear,
+		IsDefault: p.IsDefault, CreatedAt: p.CreatedAt,
+	}
 }
 
 // IsActive — convenience for "attached and usable".

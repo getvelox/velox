@@ -105,9 +105,15 @@ func TestLifecycleEvents_EnqueuedInTransitionTx(t *testing.T) {
 		return created
 	}
 
+	// resource is the subscription an event carries (ADR-131).
+	resource := func(p map[string]any) map[string]any {
+		sub, _ := p[domain.WebhookResourceSubscription].(map[string]any)
+		return sub
+	}
+
 	// (1) created — rides the create tx.
 	sub := newSub("lc-created", domain.SubscriptionDraft, nil)
-	if n, p := events(domain.EventSubscriptionCreated); n != 1 || p["subscription_id"] != sub.ID {
+	if n, p := events(domain.EventSubscriptionCreated); n != 1 || resource(p)["id"] != sub.ID {
 		t.Fatalf("created: got n=%d payload=%v", n, p)
 	}
 
@@ -119,7 +125,7 @@ func TestLifecycleEvents_EnqueuedInTransitionTx(t *testing.T) {
 	if _, err := store.ActivateDraftWithBill(ctx, tenantID, sub.ID, actAt, actAt, actAt.AddDate(0, 1, 0), 1, nil); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
-	if n, p := events(domain.EventSubscriptionActivated); n != 1 || p["status"] != "active" {
+	if n, p := events(domain.EventSubscriptionActivated); n != 1 || resource(p)["status"] != "active" {
 		t.Fatalf("activated: got n=%d payload=%v", n, p)
 	}
 

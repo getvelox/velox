@@ -36,21 +36,11 @@ type StreamFrame struct {
 
 // FrameFromEvent builds a StreamFrame from a domain.WebhookEvent.
 // status defaults to "pending" if not yet observed by the dispatcher.
-// The frame inspects payload.customer_id (the convention all Velox
-// internal Dispatchers honor) so the dashboard can group by customer
-// without a JOIN.
+// The frame names the event's customer, read from the resource the event
+// carries (domain.WebhookEventCustomerID), so the dashboard can group by
+// customer without a JOIN. An event with no customer renders "—".
 func FrameFromEvent(e domain.WebhookEvent, status string, lastAttemptAt *time.Time) StreamFrame {
-	customerID := ""
-	if e.Payload != nil {
-		// Most Velox event payloads carry the affected customer's ID
-		// at top-level under "customer_id" — see internal/billing,
-		// internal/subscription, internal/invoice. The few that don't
-		// (some system/scheduled events with no customer
-		// scope) drop through to "" and the dashboard renders "—".
-		if v, ok := e.Payload["customer_id"].(string); ok {
-			customerID = v
-		}
-	}
+	customerID := domain.WebhookEventCustomerID(e.EventType, e.Payload)
 	if status == "" {
 		status = "pending"
 	}

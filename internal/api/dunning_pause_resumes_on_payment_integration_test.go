@@ -212,7 +212,7 @@ func (r *pauseRig) outboxCount(subID, eventType string) int {
 	r.t.Helper()
 	var n int
 	if err := r.admin.QueryRow(`SELECT count(*) FROM webhook_outbox
-		WHERE tenant_id = $1 AND event_type = $2 AND payload->>'subscription_id' = $3`, r.tenantID, eventType, subID).Scan(&n); err != nil {
+		WHERE tenant_id = $1 AND event_type = $2 AND payload->'subscription'->>'id' = $3`, r.tenantID, eventType, subID).Scan(&n); err != nil {
 		r.t.Fatalf("count %s: %v", eventType, err)
 	}
 	return n
